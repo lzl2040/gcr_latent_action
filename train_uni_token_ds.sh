@@ -7,7 +7,7 @@ python lerobot/scripts/dps_train_uni_token.py \
     --dataset.wrist_image_transforms.is_primary=false \
     --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-1B-HF" \
     --dataset.parent_dir="/mnt/wangxiaofa/robot_dataset/lerobot-format/" \
-    --data_mix="oxe_plus" \
+    --data_mix="oxe_magic_soup_plus" \
     --dataset.sample_ratio=5 \
     --policy.max_frame=30 \
     --wandb.enable=false \
