@@ -1,0 +1,30 @@
+torchrun --nnodes=1 \
+    --nproc_per_node=1 \
+    --master_port=9911 \
+    lerobot/scripts/fsdp_train.py \
+    --policy.type="qwen" \
+    --save_freq=2000 \
+    --dataset.repo_id="whatever" \
+    --dataset.image_transforms.enable=true \
+    --dataset.wrist_image_transforms.enable=true \
+    --dataset.wrist_image_transforms.is_primary=false \
+    --dataset.processor="/home/v-zuoleili/Pretrain/Qwen2.5-VL-7B-Instruct" \
+    --dataset.parent_dir="/home/v-zuoleili/Data/lerobot_data" \
+    --data_mix="simpler_bridge" \
+    --dataset.sample_ratio=5 \
+    --output_dir="qwen_flow" \
+    --batch_size=2 \
+    --steps=60_0000 \
+    --policy.scheduler_warmup_steps=10000 \
+    --policy.scheduler_decay_steps=25000 \
+    --policy.scheduler_platform_steps=20000 \
+    --policy.optimizer_lr=1e-4 \
+    --policy.train_main_layers=0 \
+    --policy.freeze_vision_encoder=false \
+    --policy.train_expert_only=false \
+    --policy.train_from_scratch=true \
+    --wandb.project="fsdp_qwen_pi0_ft" \
+    --job_name="debug_simpler_bridge" \
+    # --policy.pretrained_path="/Data/lzl/qwen-pi0-ft-simulated/0604-pt-85k-3-frame-libero-w-img-aug/step60000.pt" \
+    # --wandb.enable=true \
+    

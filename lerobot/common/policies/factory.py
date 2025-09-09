@@ -1,0 +1,217 @@
+#!/usr/bin/env python
+
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import logging
+
+import torch
+from torch import nn
+
+from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
+from lerobot.common.datasets.utils import dataset_to_policy_features
+from lerobot.common.envs.configs import EnvConfig
+from lerobot.common.envs.utils import env_to_policy_features
+from lerobot.common.policies.act.configuration_act import ACTConfig
+from lerobot.common.policies.diffusion.configuration_diffusion import DiffusionConfig
+from lerobot.common.policies.pi0.configuration_pi0 import PI0Config
+from lerobot.common.policies.pretrained import PreTrainedPolicy
+from lerobot.common.policies.tdmpc.configuration_tdmpc import TDMPCConfig
+from lerobot.common.policies.vqbet.configuration_vqbet import VQBeTConfig
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.configs.types import FeatureType
+
+
+def get_policy_class(name: str) -> PreTrainedPolicy:
+    """Get the policy's class and config class given a name (matching the policy class' `name` attribute)."""
+    if name == "tdmpc":
+        from lerobot.common.policies.tdmpc.modeling_tdmpc import TDMPCPolicy
+
+        return TDMPCPolicy
+    elif name == "diffusion":
+        from lerobot.common.policies.diffusion.modeling_diffusion import DiffusionPolicy
+
+        return DiffusionPolicy
+    elif name == "act":
+        from lerobot.common.policies.act.modeling_act import ACTPolicy
+
+        return ACTPolicy
+    elif name == "vqbet":
+        from lerobot.common.policies.vqbet.modeling_vqbet import VQBeTPolicy
+
+        return VQBeTPolicy
+    elif name == "pi0":
+        from lerobot.common.policies.pi0.modeling_pi0 import PI0Policy
+
+        return PI0Policy
+    elif name == "qwen":
+        from lerobot.common.policies.pi0.modeling_qwen import QwenPolicy
+        
+        return QwenPolicy
+    elif name == "uni_token":
+        from lerobot.common.policies.uni_tk.modeling_uni_tk import UniTokenizer
+        return UniTokenizer
+    else:
+        raise NotImplementedError(f"Policy with name {name} is not implemented.")
+
+
+def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
+    if policy_type == "tdmpc":
+        return TDMPCConfig(**kwargs)
+    elif policy_type == "diffusion":
+        return DiffusionConfig(**kwargs)
+    elif policy_type == "act":
+        return ACTConfig(**kwargs)
+    elif policy_type == "vqbet":
+        return VQBeTConfig(**kwargs)
+    elif policy_type == "pi0":
+        return PI0Config(**kwargs)
+    else:
+        raise ValueError(f"Policy type '{policy_type}' is not available.")
+
+
+def pad_state_dict_with_mask(state_dict, model, k_mask_shape=(4096,), prefix='paligemma_with_expert'):
+    # 补全 k_mask
+    for i in range(model.model.paligemma_with_expert.num_layers):
+        k_key = f'{prefix}.kv_mask.{i}.k_mask'
+        v_key = f'{prefix}.kv_mask.{i}.v_mask'
+        
+        if k_key not in state_dict:
+            state_dict[k_key] = torch.ones(k_mask_shape, dtype=torch.float32)
+        if v_key not in state_dict:
+            state_dict[v_key] = torch.ones(k_mask_shape, dtype=torch.float32)
+    
+    return state_dict
+
+def make_policy(
+    cfg: PreTrainedConfig,
+    device: str | torch.device,
+    ds_meta: LeRobotDatasetMetadata | None = None,
+    env_cfg: EnvConfig | None = None,
+    weight_pt_path: str | None = None
+) -> PreTrainedPolicy:
+    """Make an instance of a policy class.
+
+    This function exists because (for now) we need to parse features from either a dataset or an environment
+    in order to properly dimension and instantiate a policy for that dataset or environment.
+
+    Args:
+        cfg (PreTrainedConfig): The config of the policy to make. If `pretrained_path` is set, the policy will
+            be loaded with the weights from that path.
+        device (str): the device to load the policy onto.
+        ds_meta (LeRobotDatasetMetadata | None, optional): Dataset metadata to take input/output shapes and
+            statistics to use for (un)normalization of inputs/outputs in the policy. Defaults to None.
+        env_cfg (EnvConfig | None, optional): The config of a gym environment to parse features from. Must be
+            provided if ds_meta is not. Defaults to None.
+
+    Raises:
+        ValueError: Either ds_meta or env and env_cfg must be provided.
+        NotImplementedError: if the policy.type is 'vqbet' and the device 'mps' (due to an incompatibility)
+
+    Returns:
+        PreTrainedPolicy: _description_
+    """
+    if bool(ds_meta) == bool(env_cfg):
+        raise ValueError("Either one of a dataset metadata or a sim env must be provided.")
+
+    # NOTE: Currently, if you try to run vqbet with mps backend, you'll get this error.
+    # TODO(aliberts, rcadene): Implement a check_backend_compatibility in policies?
+    # NotImplementedError: The operator 'aten::unique_dim' is not currently implemented for the MPS device. If
+    # you want this op to be added in priority during the prototype phase of this feature, please comment on
+    # https://github.com/pytorch/pytorch/issues/77764. As a temporary fix, you can set the environment
+    # variable `PYTORCH_ENABLE_MPS_FALLBACK=1` to use the CPU as a fallback for this op. WARNING: this will be
+    # slower than running natively on MPS.
+    if cfg.type == "vqbet" and str(device) == "mps":
+        raise NotImplementedError(
+            "Current implementation of VQBeT does not support `mps` backend. "
+            "Please use `cpu` or `cuda` backend."
+        )
+
+    policy_cls = get_policy_class(cfg.type)
+
+    kwargs = {}
+    if ds_meta is not None:
+        features = dataset_to_policy_features(ds_meta.features)
+        kwargs["dataset_stats"] = ds_meta.stats
+    else:
+        if not cfg.pretrained_path:
+            logging.warning(
+                "You are instantiating a policy from scratch and its features are parsed from an environment "
+                "rather than a dataset. Normalization modules inside the policy will have infinite values "
+                "by default without stats from a dataset."
+            )
+        features = env_to_policy_features(env_cfg)
+
+    cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
+    cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
+    kwargs["config"] = cfg
+    
+    # kwargs["pretrained_name_or_path"] = "/mnt/wangxiaofa/pi0_pretrain"
+    # policy = policy_cls.from_pretrained(**kwargs)
+    # print(f"Load from:{cfg.pretrained_path}")
+    # if cfg.pretrained_path:
+    #     # Load a pretrained policy and override the config if needed (for example, if there are inference-time
+    #     # hyperparameters that we want to vary).
+    #     cfg.train_from_scratch = False
+    #     kwargs["pretrained_name_or_path"] = cfg.pretrained_path
+    #     policy = policy_cls.from_pretrained(**kwargs)
+    #     print(f"Load from:{cfg.pretrained_path}")
+    # else:
+    #     # Make a fresh policy.
+    policy = policy_cls(**kwargs)
+    print("training from scratch")
+
+    if weight_pt_path:
+        weights = torch.load(weight_pt_path, map_location="cpu")
+        # 过滤掉包含 "gemma_expert" 的权重
+        # unfit_weight_key = [
+        #     "model.state_proj", "model.action_in_proj",
+        #     "model.action_out_proj", "model.action_time_mlp_in",
+        #     "model.action_time_mlp_out"
+        # ]
+        key_to_remove = []
+        for k, v in weights.items():
+            if "awa_model.lm_head" in k or "qwen_expert.lm_head" in k:
+                key_to_remove.append(k)
+        for k in key_to_remove:
+            del weights[k]
+            
+        new_state_dict = {}
+
+        for key, value in weights.items():
+            # 判断是否包含目标字段，并进行替换
+            if "compress_to_tgtdim_v2" in key:
+                new_key = key.replace("compress_to_tgtdim_v2", "compress_to_tgtdim")
+            else:
+                new_key = key
+            new_state_dict[new_key] = value
+        policy.load_state_dict(new_state_dict, strict=True)
+        
+        # weights = pad_state_dict_with_mask(weights, policy, prefix="model.paligemma_with_expert")
+        # keys_to_ignore = ['model.paligemma_with_expert.kv_repre']
+        # filtered_state_dict = {k: v for k, v in weights.items() if k not in keys_to_ignore}
+        policy.load_state_dict(new_state_dict, strict=True)
+        print(f"Load pt weights from:{weight_pt_path}")
+        del weights
+        del key_to_remove
+    
+    
+    if cfg.use_lora:
+        policy.model.paligemma_with_expert.add_lora()
+    # policy.to(device)
+    assert isinstance(policy, nn.Module)
+
+    # policy = torch.compile(policy, mode="reduce-overhead")
+
+    return policy
