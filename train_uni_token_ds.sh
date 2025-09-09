@@ -5,7 +5,7 @@ python lerobot/scripts/dps_train_uni_token.py \
     --dataset.image_transforms.enable=true \
     --dataset.wrist_image_transforms.enable=true \
     --dataset.wrist_image_transforms.is_primary=false \
-    --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-1B-HF" \
+    --dataset.processor="OpenGVLab/InternVL3_5-1B-HF" \
     --dataset.parent_dir="/mnt/wangxiaofa/robot_dataset/lerobot-format/" \
     --data_mix="simpler_bridge" \
     --dataset.sample_ratio=5 \
@@ -18,3 +18,4 @@ python lerobot/scripts/dps_train_uni_token.py \
     --output_dir="/mnt/wangxiaofa/latent-action-exp" \
     --steps=3000_000 \
     # --dataset.image_transforms.enable=true
+    # --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-1B-HF" \
