@@ -129,8 +129,14 @@ class UniTokenizer(PreTrainedPolicy):
     def generate_token_mask(self, input_ids):
         sc_token_ids = torch.tensor(self.sc_token_idx, device=input_ids.device)
         act_token_ids = torch.tensor(self.action_token_idx, device=input_ids.device)
-        sc_token_mask = torch.isin(input_ids, sc_token_ids)
-        act_token_mask = torch.isin(input_ids, act_token_ids)
+        # next-token prediction, so skip the first token
+        sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
+        act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
+        bs = sc_token_mask.shape[0]
+        pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
+        # print(act_token_mask.shape, pad.shape)
+        act_token_mask = torch.cat([act_token_mask, pad], dim=1)
+        sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
         # print(sc_token_mask.sum().item(), act_token_mask.sum().item())
         return sc_token_mask, act_token_mask
     
@@ -146,7 +152,6 @@ class UniTokenizer(PreTrainedPolicy):
         actions = self.prepare_action(batch)
         actions = self.convert_to_dtype(actions)
         bsize = input_ids.shape[0]
-        h, w = pixel_values.shape[-2:]
         # torch.Size([B*T, 3, 224, 224]) torch.Size([1, 3266]) torch.Size([1, 3266])
         # print(pixel_values.shape, input_ids.shape, attention_mask.shape)
         output = self.vlm.model(
