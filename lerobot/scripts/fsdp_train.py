@@ -231,315 +231,315 @@ def train(cfg: TrainPipelineConfig):
     # world_size = dist.get_world_size()
     # local_rank = rank
     
-    torch.cuda.set_device(local_rank)
+    # torch.cuda.set_device(local_rank)
     
-    # 初始化配置
-    cfg.validate()
-    logger = init_logger(cfg, rank)
-    logger.info(f"DIST INFO: world_size={world_size}, local_rank={local_rank}, world_rank={world_rank}, node_rank={node_rank}, master_uri={master_uri}")
-    
-    if rank == 0:
-        logger.info(pformat(cfg.to_dict()))
-        if cfg.wandb.enable and cfg.wandb.project:
-            wandb_logger = WandBLogger(cfg)
-        else:
-            wandb_logger = None
-            logger.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
-    else:
-        wandb_logger = None
-    
-    # 设置随机种子
-    if cfg.seed is not None:
-        set_seed(cfg.seed)
-    
-    # 数据集初始化
-    
-    step = 1
-    seed = cfg.seed + rank
-    if cfg.resume:
-        logger.info("Resume is set, will model from checkpoint...")
-        os.makedirs(cfg.output_dir, exist_ok=True)
-        pts = sorted(glob.glob(os.path.join(cfg.output_dir, "*.pt")))
-        logger.info(f"Found {len(pts)} checkpoints, names are {pts}")
-        if pts:
-            steps = [int(os.path.basename(pt).split(".")[0].split("step")[1]) for pt in pts]
-            step = sorted(steps)[-1] + 1
-            seed += (step-1)
-            
-    image_transforms = ImageTransforms(cfg.dataset.image_transforms)
-    wrist_image_transforms = ImageTransforms(cfg.dataset.wrist_image_transforms)
-    print(f"image transforms:{image_transforms}")
-    print(f"wrist image transforms:{wrist_image_transforms}")
-    dataset = MultiDatasetforDistTraining(
-        cfg=cfg, 
-        image_transforms=image_transforms,
-        wrist_image_transforms=wrist_image_transforms,
-        seed=seed,
-        data_mix=cfg.data_mix,
-        vla2root_json="vla2root.json",
-        is_ft=True
-        # vla2root_json="vla2root_bak_single.json"
-    )
-    
-    # Policy setup
-    if rank ==0:
-        logger.info("Creating policy...")
-    if hasattr(cfg.policy, "tokenizer_max_length"):
-        if rank ==0:
-            logger.info("Setting model's tokenizer_max_length to 100")
-        cfg.policy.tokenizer_max_length=100
-    if rank ==0:
-        logger.info("Still creating policy...")
-    
-    # 模型初始化
-    policy = make_policy(
-        cfg=cfg.policy,
-        device="cpu",
-        ds_meta=dataset.meta,
-        weight_pt_path=cfg.policy.pretrained_path
-    )
-    
-    # 统计模型参数量
-    if rank == 0:
-        logger.info(f"Model parameters: {sum(p.numel() for p in policy.parameters())}")
-        logger.info(f"Qwen VL visual parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.visual.parameters())}")
-        logger.info(f"Qwen VL parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.parameters())}")
-        logger.info(f"kv repre model parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.kv_repre.parameters())}")
-        logger.info(f"AWA Expert parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.awa_model.parameters())}")
-        logger.info(f"Action Expert parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen_expert.parameters())}")
-        lora_params = sum(
-            p.numel()
-            for name, p in policy.model.named_parameters()
-            if "lora" in name.lower()
-        )
-
-        logger.info(f"LoRA parameters: {lora_params:,} ({lora_params / 1e6:.2f}M)")
-        
-        trainable_params = sum(
-            p.numel() for p in policy.parameters() if p.requires_grad
-        )
-        logger.info(f"Trainable parameters: {trainable_params:,} ({trainable_params / 1e6:.2f}M)")
-       
-    # 训练状态初始化
-    if cfg.resume:
-        if pts:
-            cfg.resume = os.path.join(cfg.output_dir, f"step{step-1}.pt")
-            logger.info(f"Resuming from checkpoint {cfg.resume} at step {step}")
-            model_state_dict = torch.load(cfg.resume, map_location="cpu")
-            key_to_remove = []
-            for k, v in model_state_dict.items():
-                if "awa_model.lm_head" in k or "qwen_expert.lm_head" in k:
-                    key_to_remove.append(k)
-            for k in key_to_remove:
-                del model_state_dict[k]
-            
-            policy.load_state_dict(model_state_dict, strict=True)
-            del model_state_dict
-            del key_to_remove
-        else:
-            cfg.resume = False
-            logger.info("No checkpoint found, starting from scratch.")
-            
-    # 设置模型全部参数为BF16
-    logger.info("Setting model parameters to BF16...")
-    for params in policy.parameters():
-        params.data = params.data.bfloat16()
-        # params.data = params.data.to(dtype=torch.float16)
-    
-    # FSDP包装配置
-    # auto_wrap_policy = functools.partial(
-    #     transformer_auto_wrap_policy,
-    #     transformer_layer_cls={
-    #                     Qwen2DecoderLayer,
-    #                     Qwen2_5_VLDecoderLayer,
-    #                     # Qwen2RMSNorm
-    #                     },  
-    # )
-    # auto_wrap_policy = functools.partial(
-    #     size_based_auto_wrap_policy,
-    #     min_num_params=10000000,
-    #     exclude_wrap_modules={
-    #         Qwen2RMSNorm
-    #     }
-    # )
-    auto_wrap_policy = functools.partial(
-        always_wrap_policy,
-    )
-    
-    mixed_precision = MixedPrecision(
-        param_dtype=torch.bfloat16,
-        # reduce_dtype=torch.float32,
-        reduce_dtype=torch.bfloat16,
-        buffer_dtype=torch.bfloat16,
-        keep_low_precision_grads=True
-    )
-    
-    # mixed_precision = MixedPrecision(
-    #     param_dtype=torch.float16,
-    #     # reduce_dtype=torch.float32,
-    #     reduce_dtype=torch.float16,
-    #     buffer_dtype=torch.float16,
-    #     keep_low_precision_grads=True,
-    #     cast_forward_inputs=True
-    # )
-    
-    # mixed_precision = None
-    
-    # sharding_strategy = ShardingStrategy.HYBRID_SHARD
-    sharding_strategy = ShardingStrategy.NO_SHARD
-    
-    model = FSDP(
-        policy,
-        auto_wrap_policy=auto_wrap_policy,
-        mixed_precision=mixed_precision,
-        sharding_strategy=sharding_strategy,
-        device_id=local_rank,
-        use_orig_params=True
-    )
-    
-    # 优化器和学习率调度器
-    optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, model)
+    # # 初始化配置
+    # cfg.validate()
+    # logger = init_logger(cfg, rank)
+    # logger.info(f"DIST INFO: world_size={world_size}, local_rank={local_rank}, world_rank={world_rank}, node_rank={node_rank}, master_uri={master_uri}")
     
     # if rank == 0:
-    #     logger.info(model)
+    #     logger.info(pformat(cfg.to_dict()))
+    #     if cfg.wandb.enable and cfg.wandb.project:
+    #         wandb_logger = WandBLogger(cfg)
+    #     else:
+    #         wandb_logger = None
+    #         logger.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+    # else:
+    #     wandb_logger = None
     
-    # 数据加载器
-    sampler = DistributedSampler(
-        dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=True,
-        seed=cfg.seed+rank,
-    )
+    # # 设置随机种子
+    # if cfg.seed is not None:
+    #     set_seed(cfg.seed)
     
-    dataloader = DataLoader(
-        dataset,
-        batch_size=cfg.batch_size,
-        sampler=sampler,
-        num_workers=2,
-        collate_fn=extra_collate_fn,
-        pin_memory=False,
-    )
+    # # 数据集初始化
     
-    # 混合精度scaler
-    scaler = None
-    # scaler = ShardedGradScaler()
-    
-    # Metrics setup
-    train_metrics = {
-        "loss": AverageMeter("loss", ":.4f"),
-        "grad_norm": AverageMeter("grdn", ":.4f"),
-        "lr": AverageMeter("lr", ":0.01e"),
-        "update_s": AverageMeter("updt_s", ":.3f"),
-        "dataloading_s": AverageMeter("data_s", ":.3f"),
-        "optim_s": AverageMeter("optim_s", ":.3f"),
-    }
-    train_tracker = MetricsTracker(
-        cfg.batch_size*world_size*cfg.gradient_accumulation_steps,
-        dataset.num_frames,
-        dataset.num_episodes,
-        train_metrics,
-        initial_step=int(step/4)
-    )
-    
-    # 主训练循环
-    if rank == 0:
-        logger.info(f"Starting FSDP training on {world_size} devices")
-        logger.info(pformat(cfg.to_dict()))
-    
-    model.train()
-    dataloader_iter = cycle(dataloader)
-    
-    fwd_bwd_time = 0.0
-    dataloading_s = 0.0
-    grad_norm_value = 0.0
-    loss_value = 0.0
-    
-    if cfg.resume:
-        logger.info("Setting up learning rate scheduler...")
-        # for _ in range(int((step-1)/cfg.gradient_accumulation_steps)):
-        for _ in range(int((step-1)/4)):
-            lr_scheduler.step()
-    
-    if rank == 0:
-        logger.info("Starting training loop...")
-        
-    
-    while step < cfg.steps:
-        sync_flag = (step % cfg.gradient_accumulation_steps == 0)
-        batch_start = time.perf_counter()
-        batch = next(dataloader_iter)
-        data_time = time.perf_counter() - batch_start
-        dataloading_s += data_time
-        
-        step_start = time.perf_counter()
-        
-        loss, grad_norm, outputs = train_step(model, batch, scaler, cfg, sync_flag)
-        del batch
-        grad_to_record = grad_norm.item() if grad_norm is not None else 0.0
-        grad_norm_value += grad_to_record
-        loss_value += loss.detach().mean().item()
+    # step = 1
+    # seed = cfg.seed + rank
+    # if cfg.resume:
+    #     logger.info("Resume is set, will model from checkpoint...")
+    #     os.makedirs(cfg.output_dir, exist_ok=True)
+    #     pts = sorted(glob.glob(os.path.join(cfg.output_dir, "*.pt")))
+    #     logger.info(f"Found {len(pts)} checkpoints, names are {pts}")
+    #     if pts:
+    #         steps = [int(os.path.basename(pt).split(".")[0].split("step")[1]) for pt in pts]
+    #         step = sorted(steps)[-1] + 1
+    #         seed += (step-1)
             
-        step_time = time.perf_counter() - step_start
-        fwd_bwd_time += step_time
+    # image_transforms = ImageTransforms(cfg.dataset.image_transforms)
+    # wrist_image_transforms = ImageTransforms(cfg.dataset.wrist_image_transforms)
+    # print(f"image transforms:{image_transforms}")
+    # print(f"wrist image transforms:{wrist_image_transforms}")
+    # dataset = MultiDatasetforDistTraining(
+    #     cfg=cfg, 
+    #     image_transforms=image_transforms,
+    #     wrist_image_transforms=wrist_image_transforms,
+    #     seed=seed,
+    #     data_mix=cfg.data_mix,
+    #     vla2root_json="vla2root.json",
+    #     is_ft=True
+    #     # vla2root_json="vla2root_bak_single.json"
+    # )
+    
+    # # Policy setup
+    # if rank ==0:
+    #     logger.info("Creating policy...")
+    # if hasattr(cfg.policy, "tokenizer_max_length"):
+    #     if rank ==0:
+    #         logger.info("Setting model's tokenizer_max_length to 100")
+    #     cfg.policy.tokenizer_max_length=100
+    # if rank ==0:
+    #     logger.info("Still creating policy...")
+    
+    # # 模型初始化
+    # policy = make_policy(
+    #     cfg=cfg.policy,
+    #     device="cpu",
+    #     ds_meta=dataset.meta,
+    #     weight_pt_path=cfg.policy.pretrained_path
+    # )
+    
+    # # 统计模型参数量
+    # if rank == 0:
+    #     logger.info(f"Model parameters: {sum(p.numel() for p in policy.parameters())}")
+    #     logger.info(f"Qwen VL visual parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.visual.parameters())}")
+    #     logger.info(f"Qwen VL parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.parameters())}")
+    #     logger.info(f"kv repre model parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.kv_repre.parameters())}")
+    #     logger.info(f"AWA Expert parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.awa_model.parameters())}")
+    #     logger.info(f"Action Expert parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen_expert.parameters())}")
+    #     lora_params = sum(
+    #         p.numel()
+    #         for name, p in policy.model.named_parameters()
+    #         if "lora" in name.lower()
+    #     )
+
+    #     logger.info(f"LoRA parameters: {lora_params:,} ({lora_params / 1e6:.2f}M)")
         
-        # 参数更新
-        if sync_flag:
-            # logger.info(f"Step {step}/{cfg.steps}")
-            torch.cuda.empty_cache()
-            optim_start = time.perf_counter()
-            if scaler is not None:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            optim_time = time.perf_counter() - optim_start
-        
-            # 更新指标
-            train_tracker.optim_s = optim_time
-            train_tracker.dataloading_s = dataloading_s
-            train_tracker.update_s = fwd_bwd_time
-            train_tracker.loss = loss_value
-            train_tracker.grad_norm = grad_norm_value
-            train_tracker.lr = optimizer.param_groups[0]["lr"]
-            train_tracker.step()
+    #     trainable_params = sum(
+    #         p.numel() for p in policy.parameters() if p.requires_grad
+    #     )
+    #     logger.info(f"Trainable parameters: {trainable_params:,} ({trainable_params / 1e6:.2f}M)")
+       
+    # # 训练状态初始化
+    # if cfg.resume:
+    #     if pts:
+    #         cfg.resume = os.path.join(cfg.output_dir, f"step{step-1}.pt")
+    #         logger.info(f"Resuming from checkpoint {cfg.resume} at step {step}")
+    #         model_state_dict = torch.load(cfg.resume, map_location="cpu")
+    #         key_to_remove = []
+    #         for k, v in model_state_dict.items():
+    #             if "awa_model.lm_head" in k or "qwen_expert.lm_head" in k:
+    #                 key_to_remove.append(k)
+    #         for k in key_to_remove:
+    #             del model_state_dict[k]
             
-            fwd_bwd_time = 0.0
-            dataloading_s = 0.0
-            loss_value = 0.0
-            grad_norm_value = 0.0
+    #         policy.load_state_dict(model_state_dict, strict=True)
+    #         del model_state_dict
+    #         del key_to_remove
+    #     else:
+    #         cfg.resume = False
+    #         logger.info("No checkpoint found, starting from scratch.")
             
-            # 学习率调度
-            if lr_scheduler is not None:
-                lr_scheduler.step()
+    # # 设置模型全部参数为BF16
+    # logger.info("Setting model parameters to BF16...")
+    # for params in policy.parameters():
+    #     params.data = params.data.bfloat16()
+    #     # params.data = params.data.to(dtype=torch.float16)
+    
+    # # FSDP包装配置
+    # # auto_wrap_policy = functools.partial(
+    # #     transformer_auto_wrap_policy,
+    # #     transformer_layer_cls={
+    # #                     Qwen2DecoderLayer,
+    # #                     Qwen2_5_VLDecoderLayer,
+    # #                     # Qwen2RMSNorm
+    # #                     },  
+    # # )
+    # # auto_wrap_policy = functools.partial(
+    # #     size_based_auto_wrap_policy,
+    # #     min_num_params=10000000,
+    # #     exclude_wrap_modules={
+    # #         Qwen2RMSNorm
+    # #     }
+    # # )
+    # auto_wrap_policy = functools.partial(
+    #     always_wrap_policy,
+    # )
+    
+    # mixed_precision = MixedPrecision(
+    #     param_dtype=torch.bfloat16,
+    #     # reduce_dtype=torch.float32,
+    #     reduce_dtype=torch.bfloat16,
+    #     buffer_dtype=torch.bfloat16,
+    #     keep_low_precision_grads=True
+    # )
+    
+    # # mixed_precision = MixedPrecision(
+    # #     param_dtype=torch.float16,
+    # #     # reduce_dtype=torch.float32,
+    # #     reduce_dtype=torch.float16,
+    # #     buffer_dtype=torch.float16,
+    # #     keep_low_precision_grads=True,
+    # #     cast_forward_inputs=True
+    # # )
+    
+    # # mixed_precision = None
+    
+    # # sharding_strategy = ShardingStrategy.HYBRID_SHARD
+    # sharding_strategy = ShardingStrategy.NO_SHARD
+    
+    # model = FSDP(
+    #     policy,
+    #     auto_wrap_policy=auto_wrap_policy,
+    #     mixed_precision=mixed_precision,
+    #     sharding_strategy=sharding_strategy,
+    #     device_id=local_rank,
+    #     use_orig_params=True
+    # )
+    
+    # # 优化器和学习率调度器
+    # optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, model)
+    
+    # # if rank == 0:
+    # #     logger.info(model)
+    
+    # # 数据加载器
+    # sampler = DistributedSampler(
+    #     dataset,
+    #     num_replicas=world_size,
+    #     rank=rank,
+    #     shuffle=True,
+    #     seed=cfg.seed+rank,
+    # )
+    
+    # dataloader = DataLoader(
+    #     dataset,
+    #     batch_size=cfg.batch_size,
+    #     sampler=sampler,
+    #     num_workers=2,
+    #     collate_fn=extra_collate_fn,
+    #     pin_memory=False,
+    # )
+    
+    # # 混合精度scaler
+    # scaler = None
+    # # scaler = ShardedGradScaler()
+    
+    # # Metrics setup
+    # train_metrics = {
+    #     "loss": AverageMeter("loss", ":.4f"),
+    #     "grad_norm": AverageMeter("grdn", ":.4f"),
+    #     "lr": AverageMeter("lr", ":0.01e"),
+    #     "update_s": AverageMeter("updt_s", ":.3f"),
+    #     "dataloading_s": AverageMeter("data_s", ":.3f"),
+    #     "optim_s": AverageMeter("optim_s", ":.3f"),
+    # }
+    # train_tracker = MetricsTracker(
+    #     cfg.batch_size*world_size*cfg.gradient_accumulation_steps,
+    #     dataset.num_frames,
+    #     dataset.num_episodes,
+    #     train_metrics,
+    #     initial_step=int(step/4)
+    # )
+    
+    # # 主训练循环
+    # if rank == 0:
+    #     logger.info(f"Starting FSDP training on {world_size} devices")
+    #     logger.info(pformat(cfg.to_dict()))
+    
+    # model.train()
+    # dataloader_iter = cycle(dataloader)
+    
+    # fwd_bwd_time = 0.0
+    # dataloading_s = 0.0
+    # grad_norm_value = 0.0
+    # loss_value = 0.0
+    
+    # if cfg.resume:
+    #     logger.info("Setting up learning rate scheduler...")
+    #     # for _ in range(int((step-1)/cfg.gradient_accumulation_steps)):
+    #     for _ in range(int((step-1)/4)):
+    #         lr_scheduler.step()
+    
+    # if rank == 0:
+    #     logger.info("Starting training loop...")
         
-        # 日志记录
-        if step % cfg.log_freq == 0:
-            dist.barrier(device_ids=[local_rank])
-            if rank == 0:
+    
+    # while step < cfg.steps:
+    #     sync_flag = (step % cfg.gradient_accumulation_steps == 0)
+    #     batch_start = time.perf_counter()
+    #     batch = next(dataloader_iter)
+    #     data_time = time.perf_counter() - batch_start
+    #     dataloading_s += data_time
+        
+    #     step_start = time.perf_counter()
+        
+    #     loss, grad_norm, outputs = train_step(model, batch, scaler, cfg, sync_flag)
+    #     del batch
+    #     grad_to_record = grad_norm.item() if grad_norm is not None else 0.0
+    #     grad_norm_value += grad_to_record
+    #     loss_value += loss.detach().mean().item()
+            
+    #     step_time = time.perf_counter() - step_start
+    #     fwd_bwd_time += step_time
+        
+    #     # 参数更新
+    #     if sync_flag:
+    #         # logger.info(f"Step {step}/{cfg.steps}")
+    #         torch.cuda.empty_cache()
+    #         optim_start = time.perf_counter()
+    #         if scaler is not None:
+    #             scaler.step(optimizer)
+    #             scaler.update()
+    #         else:
+    #             optimizer.step()
+    #         optimizer.zero_grad(set_to_none=True)
+    #         optim_time = time.perf_counter() - optim_start
+        
+    #         # 更新指标
+    #         train_tracker.optim_s = optim_time
+    #         train_tracker.dataloading_s = dataloading_s
+    #         train_tracker.update_s = fwd_bwd_time
+    #         train_tracker.loss = loss_value
+    #         train_tracker.grad_norm = grad_norm_value
+    #         train_tracker.lr = optimizer.param_groups[0]["lr"]
+    #         train_tracker.step()
+            
+    #         fwd_bwd_time = 0.0
+    #         dataloading_s = 0.0
+    #         loss_value = 0.0
+    #         grad_norm_value = 0.0
+            
+    #         # 学习率调度
+    #         if lr_scheduler is not None:
+    #             lr_scheduler.step()
+        
+    #     # 日志记录
+    #     if step % cfg.log_freq == 0:
+    #         dist.barrier(device_ids=[local_rank])
+    #         if rank == 0:
                 
-                logger.info(train_tracker)
-                if wandb_logger:
-                    wandb_log_dict = train_tracker.to_dict()
-                    if outputs:
-                        wandb_log_dict.update(outputs)
-                    wandb_logger.log_dict(wandb_log_dict, step)
-                train_tracker.reset_averages()
+    #             logger.info(train_tracker)
+    #             if wandb_logger:
+    #                 wandb_log_dict = train_tracker.to_dict()
+    #                 if outputs:
+    #                     wandb_log_dict.update(outputs)
+    #                 wandb_logger.log_dict(wandb_log_dict, step)
+    #             train_tracker.reset_averages()
         
-        # 保存检查点
-        if step % cfg.save_freq == 0:
-        # if step % 5 == 0:
-            print("save")
-            # cfg.output_dir
-            save_fsdp_checkpoint(model, optimizer, cfg.output_dir, step)
+    #     # 保存检查点
+    #     if step % cfg.save_freq == 0:
+    #     # if step % 5 == 0:
+    #         print("save")
+    #         # cfg.output_dir
+    #         save_fsdp_checkpoint(model, optimizer, cfg.output_dir, step)
         
-        step += 1
+    #     step += 1
     
-    # 最终保存
-    if rank == 0:
-        save_fsdp_checkpoint(model, optimizer, cfg.output_dir, "final")
-        logger.info("Training completed successfully")
+    # # 最终保存
+    # if rank == 0:
+    #     save_fsdp_checkpoint(model, optimizer, cfg.output_dir, "final")
+    #     logger.info("Training completed successfully")
 
 if __name__ == "__main__":
     # 设置环境变量
