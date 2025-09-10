@@ -163,7 +163,7 @@ torchrun \
     --policy.freeze_vision_encoder=false \
     --policy.train_expert_only=false \
     --policy.pretrained_path=$PRETRAINED_PATH \
-    --wandb.enable=true \
+    --wandb.enable=false \
     --wandb.project="fsdq_qwen_pi0_ft" \
     --job_name="$JOB_NAME" \
     --log_dir="/mnt/wangxiaofa/latent_act_logs" \
