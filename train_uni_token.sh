@@ -157,7 +157,7 @@ torchrun \
     --data_mix=$DATA_MIX \
     --save_freq=$SAVE_FREQ \
     --is_ft=$IS_FT \
-    --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-4B-HF/" \
+    --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-1B-HF/" \
     --dataset.parent_dir="/mnt/wangxiaofa/robot_dataset/lerobot-format/" \
     --policy.scheduler_warmup_steps=$SCHEDULER_WARMUP_STEPS \
     --policy.scheduler_decay_steps=$SCHEDULER_DECAY_STEPS \
