@@ -42,8 +42,8 @@ class UniTKConfig(PreTrainedConfig):
     num_sc_token: int = 64
     action_token_idx: list = field(default_factory=list)
     sc_token_idx: list = field(default_factory=list)
-    # vlm_token_dim: int = 1024 # 4B
-    vlm_token_dim: int = 2560 # 1B
+    vlm_token_dim: int = 1024 # 1B
+    # vlm_token_dim: int = 2560 # 4B
     img_dim: int = 2048
 
 
