@@ -95,7 +95,8 @@ class UniTokenizer(PreTrainedPolicy):
         config.validate_features()
         self.config = config
         self.vlm = InternVLForConditionalGeneration.from_pretrained(self.config.vlm_path,
-                                                                    local_files_only=True)
+                                                                    local_files_only=True,
+                                                                    trust_remote_code=True)
         self.sc_token_idx = config.sc_token_idx
         self.action_token_idx = config.action_token_idx
         self.uni_decoder = UniTokenFlowMatching(config)
