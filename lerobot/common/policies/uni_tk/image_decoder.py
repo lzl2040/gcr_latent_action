@@ -35,13 +35,17 @@ class ImagePredictionModel(nn.Module):
         self.vae = AutoencoderKL.from_pretrained(
             self.img_pred_model,
             subfolder="vae",
+            local_files_only=True
         )
         self.transformer = SD3Transformer2DModel.from_pretrained(
             self.img_pred_model, 
             subfolder="transformer", 
+            local_files_only=True
         )
         noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            self.img_pred_model, subfolder="scheduler"
+            self.img_pred_model, 
+            subfolder="scheduler",
+            local_files_only=True
         )
         self.noise_scheduler_copy = copy.deepcopy(noise_scheduler)
 
