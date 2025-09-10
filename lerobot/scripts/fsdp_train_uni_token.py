@@ -387,7 +387,7 @@ def train(cfg: TrainPipelineConfig):
     # mixed_precision = None
     
     # sharding_strategy = ShardingStrategy.NO_SHARD # same as ddp
-    sharding_strategy = ShardingStrategy.FULL_SHARD
+    sharding_strategy = ShardingStrategy.HYBRID_SHARD
     
     model = FSDP(
         policy,
