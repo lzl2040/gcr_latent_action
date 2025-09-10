@@ -5,7 +5,7 @@ python lerobot/scripts/dps_train_uni_token.py \
     --dataset.image_transforms.enable=true \
     --dataset.wrist_image_transforms.enable=true \
     --dataset.wrist_image_transforms.is_primary=false \
-    --dataset.processor="OpenGVLab/InternVL3_5-1B-HF" \
+    --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-1B-HF" \
     --dataset.parent_dir="/mnt/wangxiaofa/robot_dataset/lerobot-format/" \
     --data_mix="simpler_bridge" \
     --dataset.sample_ratio=5 \

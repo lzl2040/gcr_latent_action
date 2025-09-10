@@ -1,5 +1,5 @@
 torchrun --nnodes=1 \
-    --nproc_per_node=1 \
+    --nproc_per_node=2 \
     --master_port=9911 \
     lerobot/scripts/fsdp_train_uni_token.py \
     --policy.type="uni_token" \
@@ -9,7 +9,7 @@ torchrun --nnodes=1 \
     --dataset.image_transforms.enable=true \
     --dataset.wrist_image_transforms.enable=true \
     --dataset.wrist_image_transforms.is_primary=false \
-    --dataset.processor="OpenGVLab/InternVL3_5-1B-HF" \
+    --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-1B-HF" \
     --dataset.parent_dir="/mnt/wangxiaofa/robot_dataset/lerobot-format/" \
     --data_mix="simpler_bridge" \
     --dataset.sample_ratio=5 \

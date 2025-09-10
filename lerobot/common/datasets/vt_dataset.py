@@ -1489,12 +1489,17 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             # internvl video processor config's image size = 448
             self.processor.image_seq_length = 256 // (448 // cfg.dataset.default_image_size) ** 2
             # add token
-            new_action_tokens = [f"[{COMPRESS_ACTION_TOKEN}{i}]" for i in range(cfg.policy.num_action_token)]
-            new_scene_tokens = [f"[{COMPRESS_SC_TOKEN}{i}]" for i in range(cfg.policy.num_sc_token)]
+            # new_action_tokens = [f"[{COMPRESS_ACTION_TOKEN}{i}]" for i in range(cfg.policy.num_action_token)]
+            # new_scene_tokens = [f"[{COMPRESS_SC_TOKEN}{i}]" for i in range(cfg.policy.num_sc_token)]
+            new_action_tokens = [f"[{COMPRESS_ACTION_TOKEN}]"]
+            new_scene_tokens = [f"[{COMPRESS_SC_TOKEN}]"]
             self.processor.tokenizer.add_tokens(new_action_tokens)
-            self.cp_act_token_idx =  [self.processor.tokenizer(f"[{COMPRESS_ACTION_TOKEN}{i}]", add_special_tokens=False).input_ids[0] for i in range(cfg.policy.num_action_token)]
             self.processor.tokenizer.add_tokens(new_scene_tokens)
-            self.cp_sc_token_idx = [self.processor.tokenizer(f"[{COMPRESS_SC_TOKEN}{i}]", add_special_tokens=False).input_ids[0] for i in range(cfg.policy.num_sc_token)]
+            # self.cp_act_token_idx =  [self.processor.tokenizer(f"[{COMPRESS_ACTION_TOKEN}{i}]", add_special_tokens=False).input_ids[0] for i in range(cfg.policy.num_action_token)]
+            # self.cp_sc_token_idx = [self.processor.tokenizer(f"[{COMPRESS_SC_TOKEN}{i}]", add_special_tokens=False).input_ids[0] for i in range(cfg.policy.num_sc_token)]
+            self.cp_act_token_idx =  [self.processor.tokenizer(f"[{COMPRESS_ACTION_TOKEN}]", add_special_tokens=False).input_ids[0]]
+            self.cp_sc_token_idx = [self.processor.tokenizer(f"[{COMPRESS_SC_TOKEN}]", add_special_tokens=False).input_ids[0]]
+            
             print(f"CP_IMG token idx: {self.cp_sc_token_idx}, CP_ACT token idx: {self.cp_act_token_idx}")
         else:
             self.processor = None
@@ -1854,8 +1859,11 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         message[0]["content"].append({"type": "text", "text": question})
 
         # add answer
-        compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}{i}]" for i in range(self.cfg.policy.num_sc_token)])
-        compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}{i}]" for i in range(self.cfg.policy.num_action_token)])
+        # compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}{i}]" for i in range(self.cfg.policy.num_sc_token)])
+        # compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}{i}]" for i in range(self.cfg.policy.num_action_token)])
+        compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}]" for i in range(self.cfg.policy.num_sc_token)])
+        compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}]" for i in range(self.cfg.policy.num_action_token)])
+        
         answer_text = random.choice(ANSWER_LIST).replace(f"[{COMPRESS_ACTION_TOKEN}]", compress_act_replace)
         answer_text = answer_text.replace(f"[{COMPRESS_SC_TOKEN}]", compress_sc_replace)
 

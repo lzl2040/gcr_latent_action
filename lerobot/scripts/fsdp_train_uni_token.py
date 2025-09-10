@@ -35,7 +35,7 @@ from torch.distributed.fsdp import (
     ShardingStrategy,
 )
 
-# FSDP.__repr__ = lambda self: "FSDP(...)"
+FSDP.__repr__ = lambda self: "FSDP(...)"
 from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
     size_based_auto_wrap_policy,
