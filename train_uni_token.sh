@@ -20,6 +20,7 @@ MAX_FRAME=3
 CALVIN_SUB_TASK=0
 USE_STATE=true
 LOSS_TYPE="raw"
+IS_FT=true
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -108,6 +109,10 @@ while [[ $# -gt 0 ]]; do
             GRADIENT_ACCUMULATION_STEPS="$2"
             shift 2
             ;;
+        --is_ft)
+            IS_FT="$2"
+            shift 2
+            ;;
         --pre_path)
             PRETRAINED_PATH="$2"
             shift 2
@@ -151,7 +156,8 @@ torchrun \
     --gradient_accumulation_steps=$GRADIENT_ACCUMULATION_STEPS \
     --data_mix=$DATA_MIX \
     --save_freq=$SAVE_FREQ \
-    --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-1B-HF/" \
+    --is_ft=$IS_FT \
+    --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-4B-HF/" \
     --dataset.parent_dir="/mnt/wangxiaofa/robot_dataset/lerobot-format/" \
     --policy.scheduler_warmup_steps=$SCHEDULER_WARMUP_STEPS \
     --policy.scheduler_decay_steps=$SCHEDULER_DECAY_STEPS \

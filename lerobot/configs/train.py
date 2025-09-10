@@ -63,6 +63,8 @@ class TrainPipelineConfig(HubMixin):
     wandb: WandBConfig = field(default_factory=WandBConfig)
     deepspeed: str | None = None
 
+    is_ft: bool = True
+
     def __post_init__(self):
         self.checkpoint_path = None
 

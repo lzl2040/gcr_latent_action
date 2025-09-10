@@ -15,10 +15,10 @@ class UniTKConfig(PreTrainedConfig):
     # qwen_path: str = "/mnt/wangxiaofa/qwen_params/Qwen2.5-VL-7B-Instruct/"
     # qwen_path = "/datassd_1T/qwen25vl/Qwen2.5-VL-7B-Instruct/"
     # qwen_path: str = "/Data/lzl/qwen2.5_vl_7b/Qwen2.5-VL-7B-Instruct"
-    # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-1B-HF"
     img_pred_model: str = "/mnt/wangxiaofa/pt_weights/stable-diffusion-3.5-medium/"
-    vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-1B-HF/"
+    vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-4B-HF/"
     # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
+    # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-4B-HF"
     # img_pred_model: str = "stabilityai/stable-diffusion-3.5-medium"
     
     # Input / output structure.
@@ -42,7 +42,8 @@ class UniTKConfig(PreTrainedConfig):
     num_sc_token: int = 64
     action_token_idx: list = field(default_factory=list)
     sc_token_idx: list = field(default_factory=list)
-    vlm_token_dim: int = 1024
+    # vlm_token_dim: int = 1024 # 4B
+    vlm_token_dim: int = 2560 # 1B
     img_dim: int = 2048
 
 
