@@ -141,7 +141,7 @@ torchrun \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
     lerobot/scripts/fsdp_train_uni_token.py \
-    --policy.type="uni_token" \
+    --policy.type="latent_act" \
     --policy.use_state=$USE_STATE \
     --policy.use_lora=$USE_LORA \
     --policy.max_frame=$MAX_FRAME \

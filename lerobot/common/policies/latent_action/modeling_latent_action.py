@@ -10,9 +10,9 @@ from lerobot.common.constants import ACTION, OBS_ROBOT
 
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.utils.utils import get_safe_dtype
-from lerobot.common.policies.uni_tk.configuration_uni_tk import UniTKConfig
-from lerobot.common.policies.uni_tk.action_decoder import PaliGemmaWithExpertConfig, DecoderModel
-from lerobot.common.policies.uni_tk.image_decoder import ImagePredictionModel
+from lerobot.common.policies.latent_action.configuration_latent_action import LatentActionConfig
+from lerobot.common.policies.latent_action.action_decoder import PaliGemmaWithExpertConfig, ActionDecoderModel
+from lerobot.common.policies.latent_action.image_decoder import ImagePredictionModel
 
 
 def pad_vector(vector, new_dim):
@@ -80,15 +80,15 @@ def make_att_2d_masks(pad_masks, att_masks):
     att_2d_masks = att_2d_masks & pad_2d_masks
     return att_2d_masks
 
-class UniTokenizer(PreTrainedPolicy):
+class LatentActionModel(PreTrainedPolicy):
     """Wrapper class around PI0FlowMatching model to train and run inference within LeRobot."""
 
-    config_class = UniTKConfig
-    name = "uni_token"
+    config_class = LatentActionConfig
+    name = "latent_act"
 
     def __init__(
         self,
-        config: UniTKConfig,
+        config: LatentActionConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         super().__init__(config)
@@ -97,9 +97,15 @@ class UniTokenizer(PreTrainedPolicy):
         self.vlm = InternVLForConditionalGeneration.from_pretrained(self.config.vlm_path,
                                                                     local_files_only=True,
                                                                     trust_remote_code=True)
+        # gradient_checkpointing: add it, bs=1, max gpu=44G
+        # wo it, bs=1, max_gpu=64G
+        # self.vlm.model.language_model._set_gradient_checkpointing()
+        # self.vlm.model.vision_tower.gradient_checkpointing = True
+        # self.vlm.model.vision_tower.encoder.gradient_checkpointing = True
+
         self.sc_token_idx = config.sc_token_idx
         self.action_token_idx = config.action_token_idx
-        self.uni_decoder = UniTokenFlowMatching(config)
+        self.uni_decoder = UniDecoder(config)
 
         self.dtype = torch.bfloat16
 
@@ -208,7 +214,7 @@ def sample_beta(alpha, beta, bsize, device):
     gamma2 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / beta)
     return gamma1 / (gamma1 + gamma2)
 
-class UniTokenFlowMatching(nn.Module):
+class UniDecoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -220,7 +226,7 @@ class UniTokenFlowMatching(nn.Module):
             train_expert_only=self.config.train_expert_only,
             attention_implementation=self.config.attention_implementation,
         )
-        self.paligemma_with_expert = DecoderModel(paligemma_with_export_config)
+        self.paligemma_with_expert = ActionDecoderModel(paligemma_with_export_config, config.action_expert_path)
 
         # Projections are float32
         self.con_proj = nn.Linear(self.config.vlm_token_dim, self.config.img_dim)
@@ -229,7 +235,6 @@ class UniTokenFlowMatching(nn.Module):
 
         self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
         self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
-
 
         # image decoder
         self.image_decoder = ImagePredictionModel(config)

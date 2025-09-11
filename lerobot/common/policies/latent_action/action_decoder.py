@@ -187,21 +187,27 @@ class LatentActionProjection(nn.Module):
         return q, k, v
 
 
-class DecoderModel(PreTrainedModel):
+class ActionDecoderModel(PreTrainedModel):
     config_class = PaliGemmaWithExpertConfig
 
-    def __init__(self, config: PaliGemmaWithExpertConfig):
+    def __init__(self, config: PaliGemmaWithExpertConfig, action_expert_path: str = None):
         super().__init__(config=config)
         self.config = config
         # self.paligemma = PaliGemmaForConditionalGeneration(config=config.paligemma_config)
         self.gemma_expert = GemmaForCausalLM(config=config.gemma_expert_config)
+        # Remove unused embed_tokens
+        self.gemma_expert.model.embed_tokens = None
+        # load pi0 weights
+        if action_expert_path is not None:
+            print(f"Load expert weights from {action_expert_path}")
+            weights = torch.load(action_expert_path, map_location="cpu")
+            self.gemma_expert.load_state_dict(weights, strict=True)    
+
         self.latent_action_layers = nn.ModuleList([
             LatentActionProjection(config) 
                                    for i in range(config.gemma_expert_config.num_hidden_layers)])
         
         # self.gemma_expert_for_image = GemmaForCausalLM(config=config.gemma_expert_config)
-        # Remove unused embed_tokens
-        self.gemma_expert.model.embed_tokens = None
         # self.gemma_expert_for_image.model.embed_tokens = None
 
         # self.to_bfloat16_like_physical_intelligence()

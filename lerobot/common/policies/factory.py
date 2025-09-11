@@ -59,9 +59,9 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.pi0.modeling_qwen import QwenPolicy
         
         return QwenPolicy
-    elif name == "uni_token":
-        from lerobot.common.policies.uni_tk.modeling_uni_tk import UniTokenizer
-        return UniTokenizer
+    elif name == "latent_act":
+        from lerobot.common.policies.latent_action.modeling_latent_action import LatentActionModel
+        return LatentActionModel
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
