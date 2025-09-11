@@ -17,7 +17,7 @@ class LatentActionConfig(PreTrainedConfig):
     # qwen_path: str = "/Data/lzl/qwen2.5_vl_7b/Qwen2.5-VL-7B-Instruct"
     img_pred_model: str = "/mnt/wangxiaofa/pt_weights/stable-diffusion-3.5-medium/"
     vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/"
-    action_expert_path: str = "/mnt/wangxiaofa/pi0_pretrain/model.pt"
+    action_expert_path: str = "/mnt/wangxiaofa/pi0_pretrain/pi0_gemma_expert_only.pt"
     # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
     # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF"
     # img_pred_model: str = "stabilityai/stable-diffusion-3.5-medium"
