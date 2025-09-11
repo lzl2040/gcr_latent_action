@@ -43,7 +43,7 @@ class ImagePredictionModel(nn.Module):
             local_files_only=True
         )
 
-        # self.transformer.enable_gradient_checkpointing()
+        self.transformer.enable_gradient_checkpointing()
         noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             self.img_pred_model, 
             subfolder="scheduler",

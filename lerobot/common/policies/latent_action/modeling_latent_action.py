@@ -99,9 +99,9 @@ class LatentActionModel(PreTrainedPolicy):
                                                                     trust_remote_code=True)
         # gradient_checkpointing: add it, bs=1, max gpu=44G
         # wo it, bs=1, max_gpu=64G
-        # self.vlm.model.language_model._set_gradient_checkpointing()
-        # self.vlm.model.vision_tower.gradient_checkpointing = True
-        # self.vlm.model.vision_tower.encoder.gradient_checkpointing = True
+        self.vlm.model.language_model._set_gradient_checkpointing()
+        self.vlm.model.vision_tower.gradient_checkpointing = True
+        self.vlm.model.vision_tower.encoder.gradient_checkpointing = True
 
         self.sc_token_idx = config.sc_token_idx
         self.action_token_idx = config.action_token_idx
