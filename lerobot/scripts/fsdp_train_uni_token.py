@@ -302,7 +302,14 @@ def train(cfg: TrainPipelineConfig):
     
     # 统计模型参数量
     if rank == 0:
-        logger.info(f"Model parameters: {sum(p.numel() for p in policy.parameters())}")
+        model_params = sum(p.numel() for p in policy.parameters()) / 1e9
+        logger.info(f"Model parameters: {model_params} B")
+        action_decoder_params = sum(p.numel() for p in policy.uni_decoder.action_decoder.parameters()) / 1e9
+        image_decoder_params = sum(p.numel() for p in policy.uni_decoder.image_decoder.parameters()) / 1e9
+        vlm_params = sum(p.numel() for p in policy.vlm.parameters()) / 1e9
+        logger.info(f"Action decoder params:{action_decoder_params} B")
+        logger.info(f"Image decoder params:{image_decoder_params} B")
+        logger.info(f"VLM params:{vlm_params} B")
         # logger.info(f"Qwen VL visual parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.visual.parameters())}")
         # logger.info(f"Qwen VL parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.parameters())}")
         # logger.info(f"kv repre model parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.kv_repre.parameters())}")

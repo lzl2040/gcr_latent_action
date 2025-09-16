@@ -15,12 +15,15 @@ class LatentActionConfig(PreTrainedConfig):
     # qwen_path: str = "/mnt/wangxiaofa/qwen_params/Qwen2.5-VL-7B-Instruct/"
     # qwen_path = "/datassd_1T/qwen25vl/Qwen2.5-VL-7B-Instruct/"
     # qwen_path: str = "/Data/lzl/qwen2.5_vl_7b/Qwen2.5-VL-7B-Instruct"
-    img_pred_model: str = "/mnt/wangxiaofa/pt_weights/stable-diffusion-3.5-medium/"
+    img_pred_model: str = "/mnt/wangxiaofa/pt_weights/Sana_1600M_512px_diffusers/"
+    # img_pred_model: str = "/mnt/wangxiaofa/pt_weights/stable-diffusion-3.5-medium/"
     vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/"
     action_expert_path: str = "/mnt/wangxiaofa/pi0_pretrain/pi0_gemma_expert_only.pt"
+    # action_expert_path = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
     # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
     # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF"
     # img_pred_model: str = "stabilityai/stable-diffusion-3.5-medium"
+    # img_pred_model: str = "/home/v-zuoleili/Pretrain/Sana_1600M_512px_diffusers"
     # action_expert_path: str = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
     
     # Input / output structure.
@@ -47,7 +50,7 @@ class LatentActionConfig(PreTrainedConfig):
     # vlm_token_dim: int = 1024 # 1B
     vlm_token_dim: int = 2048 # 2B
     # vlm_token_dim: int = 2560 # 4B
-    img_dim: int = 2048
+    img_dim: int = 2048 
 
 
     normalization_mapping: dict[str, NormalizationMode] = field(

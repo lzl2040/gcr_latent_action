@@ -12,7 +12,8 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.utils.utils import get_safe_dtype
 from lerobot.common.policies.latent_action.configuration_latent_action import LatentActionConfig
 from lerobot.common.policies.latent_action.action_decoder import PaliGemmaWithExpertConfig, ActionDecoderModel
-from lerobot.common.policies.latent_action.image_decoder import ImagePredictionModel
+from lerobot.common.policies.latent_action.image_decoder import ImagePredictionModel as SDModel
+from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
 
 
 def pad_vector(vector, new_dim):
@@ -226,7 +227,7 @@ class UniDecoder(nn.Module):
             train_expert_only=self.config.train_expert_only,
             attention_implementation=self.config.attention_implementation,
         )
-        self.paligemma_with_expert = ActionDecoderModel(paligemma_with_export_config, config.action_expert_path)
+        self.action_decoder = ActionDecoderModel(paligemma_with_export_config, config.action_expert_path)
 
         # Projections are float32
         self.con_proj = nn.Linear(self.config.vlm_token_dim, self.config.img_dim)
@@ -237,7 +238,8 @@ class UniDecoder(nn.Module):
         self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
 
         # image decoder
-        self.image_decoder = ImagePredictionModel(config)
+        # self.image_decoder = ImagePredictionModel(config)
+        self.image_decoder = SANAModel(config)
 
         self.dtype = torch.bfloat16
     
@@ -363,7 +365,7 @@ class UniDecoder(nn.Module):
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
 
-        (_, suffix_out), _ = self.paligemma_with_expert.forward(
+        (_, suffix_out), _ = self.action_decoder.forward(
             attention_mask=att_2d_masks,
             position_ids=position_ids,
             past_key_values=None,
