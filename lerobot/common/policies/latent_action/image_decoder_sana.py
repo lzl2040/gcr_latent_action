@@ -55,6 +55,8 @@ class ImagePredictionModel(nn.Module):
 
         self.con_proj = nn.Linear(self.config.vlm_token_dim, 2304)
         
+        # 梯度检查点
+        self.transformer.enable_gradient_checkpointing()
         self.vae.requires_grad_(False)
         self.vae_config_scaling_factor = self.vae.config.scaling_factor
         self.transform = transforms.Compose(
