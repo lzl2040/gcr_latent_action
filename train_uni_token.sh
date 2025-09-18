@@ -134,7 +134,7 @@ fi
 FIXED_OUTPUT_DIR="/mnt/wangxiaofa/latent_action_exp"
 
 # 执行训练命令
-torchrun \
+CUDA_LAUNCH_BLOCKING=1 torchrun \
     --nnodes=$NNODES \
     --nproc_per_node=$NPROC_PER_NODE \
     --node_rank=$NODE_RANK \
