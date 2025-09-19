@@ -4,7 +4,7 @@ from collections import deque
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
-from transformers import AutoTokenizer, AutoModel, InternVLForConditionalGeneration
+from transformers import AutoTokenizer, AutoModel, InternVLForConditionalGeneration, AutoConfig
 
 from lerobot.common.constants import ACTION, OBS_ROBOT
 
@@ -14,7 +14,7 @@ from lerobot.common.policies.latent_action.configuration_latent_action import La
 from lerobot.common.policies.latent_action.action_decoder import PaliGemmaWithExpertConfig, ActionDecoderModel
 from lerobot.common.policies.latent_action.image_decoder import ImagePredictionModel as SDModel
 from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
-
+from lerobot.common.policies.latent_action.vlm_wrapper import InternVLModelWrapper
 
 def pad_vector(vector, new_dim):
     """Can be (batch_size x sequence_length x features_dimension)
@@ -95,14 +95,24 @@ class LatentActionModel(PreTrainedPolicy):
         super().__init__(config)
         config.validate_features()
         self.config = config
+        # vlm_config = AutoConfig.from_pretrained(
+        #     self.config.vlm_path,
+        #     trust_remote_code=True
+        # )
+        # vlm_config.attn_implementation = "flash_attention_2"
+        # self.vlm = InternVLModelWrapper(config)
         self.vlm = InternVLForConditionalGeneration.from_pretrained(self.config.vlm_path,
+                                                                    # config=vlm_config,
                                                                     local_files_only=True,
                                                                     trust_remote_code=True)
-        # gradient_checkpointing: add it, bs=1, max gpu=44G
-        # wo it, bs=1, max_gpu=64G
+        # 有效果这个: 39G (wo)-> 31G (w), for bs=1, max_frame=30
         self.vlm.model.language_model._set_gradient_checkpointing()
         self.vlm.model.vision_tower.gradient_checkpointing = True
         self.vlm.model.vision_tower.encoder.gradient_checkpointing = True
+        # add it: 31G -> 24G
+        if self.config.freeze_vision_encoder:
+            print(f"Freeze VLM image encoder")
+            self.vlm.model.vision_tower.requires_grad_(False)
 
         self.sc_token_idx = config.sc_token_idx
         self.action_token_idx = config.action_token_idx
@@ -152,24 +162,27 @@ class LatentActionModel(PreTrainedPolicy):
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, Tensor]]:
         # print(batch["video_len"])
         pixel_values = batch["pixel_values"]
-        input_ids = batch["input_ids"]
+        input_ids = batch["input_ids"] # 对于224分辨率图像，每个image占64个token
         attention_mask = batch["attention_mask"]
         video_len = batch["video_len"]
         first_image = batch["first_image"]
         last_image = batch["last_image"]
+        # print(input_ids.shape, pixel_values.shape)
+        # print(input_ids.shape) # min: 2000, max: 4100
         # print(first_image.shape, torch.max(first_image)) # 0-255
         actions = self.prepare_action(batch)
         actions = self.convert_to_dtype(actions)
         bsize = input_ids.shape[0]
         # torch.Size([B*T, 3, 224, 224]) torch.Size([1, 3266]) torch.Size([1, 3266])
         # print(pixel_values.shape, input_ids.shape, attention_mask.shape)
-        output = self.vlm.model(
+        output = self.vlm(
             input_ids=input_ids,
             pixel_values=pixel_values,
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
-        output_hidden_states = output.hidden_states
+        # output_hidden_states = output
+        output_hidden_states = output.hidden_states # num_layers + 1
         sc_token_mask, act_token_mask = self.generate_token_mask(input_ids)
         # get token embeddings
         # torch.Size([128, 1024]) torch.Size([4, 1024])
@@ -221,8 +234,6 @@ class UniDecoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        
-        self.dtype = torch.bfloat16
 
         paligemma_with_export_config = PaliGemmaWithExpertConfig(
             freeze_vision_encoder=self.config.freeze_vision_encoder,

@@ -178,6 +178,42 @@ def aggregate_stats(stats_list: list[dict[str, dict]]) -> dict[str, dict[str, np
 
     return aggregated_stats
 
+def cal_stats(stats, datasets, start_dim, end_dim, data_key):
+    for stat_key in ["min", "max"]:
+        # compute `max(dataset_0["max"], dataset_1["max"], ...)`
+        # print(stats[data_key].keys())
+        stats[data_key][stat_key][start_dim:end_dim] = einops.reduce(
+            torch.stack(
+                [ds.meta.stats[data_key][stat_key][start_dim:end_dim] for ds in datasets if data_key in ds.meta.stats],
+                dim=0,
+            ),
+            "n ... -> ...",
+            stat_key,
+        )
+
+    total_samples = sum(d.num_frames for d in datasets if data_key in d.meta.stats)
+    stats[data_key]["mean"][start_dim:end_dim] = sum(
+        d.meta.stats[data_key]["mean"][start_dim:end_dim] * (d.num_frames / total_samples)
+        for d in datasets
+        if data_key in d.meta.stats)
+    
+    # for d in datasets:
+    #     print(d.meta.stats[data_key]["std"].shape, d.meta.stats[data_key]["mean"].shape)
+
+    stats[data_key]["std"][start_dim:end_dim] = torch.sqrt(
+        sum(
+            (
+                d.meta.stats[data_key]["std"][start_dim:end_dim] ** 2
+                + (d.meta.stats[data_key]["mean"][start_dim:end_dim] - stats[data_key]["mean"][start_dim:end_dim]) ** 2
+            )
+            * (d.num_frames / total_samples)
+            for d in datasets
+            if data_key in d.meta.stats
+                    )
+    )
+    return stats
+
+
 def aggregate_multi_stats(ls_datasets: list, data_names: list, max_dim: int) -> dict[str, torch.Tensor]:
     """Aggregate stats of multiple LeRobot datasets into one set of stats without recomputing from scratch.
 
@@ -193,6 +229,9 @@ def aggregate_multi_stats(ls_datasets: list, data_names: list, max_dim: int) -> 
     for i in range(len(data_names)):
         dataset = ls_datasets[i]
         d_name = data_names[i]
+        # if d_name == "ego_dex":
+        #     dataset.num_frames = dataset.num_frames // 100
+        #     print(f"Because {d_name} wo gripper, so all the gripper is zero. We reduce the num frames to decrease the influence.")
         data_config = OXE_DATASET_CONFIGS[d_name]
         image_obs_keys = data_config["image_obs_keys"]
         # print(d_name, image_obs_keys)
@@ -259,24 +298,58 @@ def aggregate_multi_stats(ls_datasets: list, data_names: list, max_dim: int) -> 
                 if data_key in d.meta.stats
                         )
         )
-        stats[data_key]["mean"] = stats[data_key]["mean"]
+        # stats[data_key]["mean"] = stats[data_key]["mean"]
+
+        # special dataset, including agibot, egodex
+        right_action_d_names = ["agibot_alpha", "ego_dex"]
+        if data_key == "action":
+            right_start = 7
+        else:
+            right_start = 8
+
+        selected_right_act_dataset = []
+        for i in range(len(ls_datasets)):
+            d_name = data_names[i]
+            if d_name in right_action_d_names:
+                print(f"Special right hand dataset:{d_name}")
+                selected_right_act_dataset.append(ls_datasets[i])
         
-        # calculate for agibot
-        if "action" in data_key or "state" in data_key:
-            if "action" in data_key:
-                start_dim = 7
-                d_len = 14 - start_dim
-            if "state" in data_key:
-                start_dim = 8
-                d_len = 16 - start_dim
-            agi_d = None
-            for i in range(len(ls_datasets)):
-                if "agi" in data_names[i]:
-                    agi_d = ls_datasets[i]
-            if agi_d:
-                print("use agibot dataset")
-                stats[data_key]["mean"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["mean"][start_dim:start_dim+d_len]
-                stats[data_key]["std"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["std"][start_dim:start_dim+d_len]
-                stats[data_key]["max"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["max"][start_dim:start_dim+d_len]
-                stats[data_key]["min"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["min"][start_dim:start_dim+d_len]
+        stats = cal_stats(stats, selected_right_act_dataset, 
+                          start_dim=right_start, end_dim=2 * right_start,
+                          data_key=data_key)
+        
+        finger_d_names = ["ego_dex"]
+        selected_finger_act_dataset = []
+        for i in range(len(ls_datasets)):
+            d_name = data_names[i]
+            if d_name in finger_d_names:
+                print(f"Special finger dataset:{d_name}")
+                selected_finger_act_dataset.append(ls_datasets[i])
+        
+        if data_key == "action":
+            finger_start = 2 * 7
+        else:
+            finger_start = 2 * 8
+        stats = cal_stats(stats, selected_right_act_dataset, 
+                          start_dim=finger_start, end_dim= finger_start + 30,
+                          data_key=data_key)
+        
+        # # calculate for agibot
+        # if "action" in data_key or "state" in data_key:
+        #     if "action" in data_key:
+        #         start_dim = 7
+        #         d_len = 14 - start_dim
+        #     if "state" in data_key:
+        #         start_dim = 8
+        #         d_len = 16 - start_dim
+        #     agi_d = None
+        #     for i in range(len(ls_datasets)):
+        #         if "agi" in data_names[i]:
+        #             agi_d = ls_datasets[i]
+        #     if agi_d:
+        #         print("use agibot dataset")
+        #         stats[data_key]["mean"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["mean"][start_dim:start_dim+d_len]
+        #         stats[data_key]["std"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["std"][start_dim:start_dim+d_len]
+        #         stats[data_key]["max"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["max"][start_dim:start_dim+d_len]
+        #         stats[data_key]["min"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["min"][start_dim:start_dim+d_len]
     return stats

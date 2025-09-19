@@ -67,6 +67,9 @@ class ImagePredictionModel(nn.Module):
         )
         self.replace_module()
 
+        # for param in self.transformer.parameters():
+        #     param.requires_grad = False
+
 
     def replace_module(self):
         print("Initializing the new channel of DIT from the pretrained DIT.")
@@ -157,6 +160,7 @@ class ImagePredictionModel(nn.Module):
             weighting = torch.ones_like(sigmas)
 
         # flow matching loss
+        # print(noise.shape, target_latents.shape)
         target = noise - target_latents
         # Compute regular loss.
         loss = torch.mean(

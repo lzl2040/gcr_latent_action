@@ -58,11 +58,15 @@ COMPRESS_SC_TOKEN = 'CP_SC'
 COMPRESS_ACTION_TOKEN = 'CP_ACT'
 
 ANSWER_LIST = [
-    "Scene representations: [CP_SC]. Action representations: [CP_ACT].",
-    "The results for the scene are [CP_SC], while the motion is represented as [CP_ACT].",
+    "Furture scene representations: [CP_SC]. Action representations: [CP_ACT].",
+    "The results for the furture scene are [CP_SC], while the motion is represented as [CP_ACT].",
 ]
 
+# QUESTION_LIST = [
+#     "According to the instruction '{sent}', compress the video into scene-level and action-level representations.",
+#     "Observe the video frames under the task '{sent}', and summarize them into scene-level representations and action-level representations.",
+# ]
 QUESTION_LIST = [
-    "According to the instruction '{sent}', compress the video into scene-level and action-level representations.",
-    "Observe the video frames under the task '{sent}', and summarize them into scene-level representations and action-level representations.",
+    "Given the instruction '{sent}', predict the next-frame scene-level representation from the historical video, and compress the historical video into an action-level representation.",
+    "Based on the task '{sent}', use the historical video to forecast the next-frame scene-level representation, and condense the historical video into an action-level representation.",
 ]

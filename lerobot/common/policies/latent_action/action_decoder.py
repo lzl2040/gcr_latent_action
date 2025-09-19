@@ -227,11 +227,11 @@ class ActionDecoderModel(PreTrainedModel):
     def train(self, mode: bool = True):
         super().train(mode)
 
-        if self.config.freeze_vision_encoder:
-            self.paligemma.vision_tower.eval()
+        # if self.config.freeze_vision_encoder:
+        #     self.paligemma.vision_tower.eval()
 
-        if self.config.train_expert_only:
-            self.paligemma.eval()
+        # if self.config.train_expert_only:
+        #     self.paligemma.eval()
 
     def to_bfloat16_like_physical_intelligence(self):
         self.paligemma = self.paligemma.to(dtype=torch.bfloat16)

@@ -1574,39 +1574,45 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                     if dataset in vla2data_root.keys()
                 ]
                 sample_weights = np.array(new_sample_weights) * np.array(self.dataset_sizes)
-                print(f"Banlanced:{sample_weights}")
+                # print(f"Banlanced:{sample_weights}")
             self.sample_weights = np.array(sample_weights) / np.sum(sample_weights)
-            print(f"Final weights:{sample_weights}")
-            self.dataset_len = sum(self.dataset_sizes)
-            dataset_sample_counts = (self.sample_weights * self.dataset_len).astype(int)  # 计算子集大小
-            
-            print(f"Dataset len:{self.dataset_len}")
-            print("Final sampling info:")
-            table_data = [
-                [self.dataset_names[i], len(self.datasets[i]), f"{self.sample_weights[i]:.4f}"]
-                for i in range(len(self.datasets))
-            ]
-            print(tabulate(table_data, headers=["Dataset", "Samples", "Ratio"], tablefmt="grid"))
-            # sample and use NamedSubset to contain dataset_name
-            self.selected_indices = []
-            episode_count = 0
-            for dataset, num_samples, dataset_name in zip(self.datasets, dataset_sample_counts, self.dataset_names):
-                indices = list(range(len(dataset)))
-                # 这个不允许重复采样
-                # sampled_indices = random.sample(indices, min(num_samples, len(dataset)))  # 采样
-                # episode_this_dataset = int(dataset.num_episodes * (min(num_samples, len(dataset))/len(dataset)))
-                # 允许重复采样，当num_samples>len(dataset)时
-                # 部分采样
-                # sampled_indices = random.choices(indices, k=num_samples)
-                # 全采样
-                sampled_indices = random.choices(indices, k=len(indices))
+            print(f"Final weights = (dataset_size * sample_weights)/ Sum(dataset_size * sample_weights):{sample_weights}")
+            total_dataset_len = sum(self.dataset_sizes)
+        sample_dataset_len = int(total_dataset_len * cfg.dataset.sample_ratio)
+        dataset_sample_counts = []  # 计算子集大小
+        for s_w in self.sample_weights:
+            num_samples = int(s_w * sample_dataset_len)
+            dataset_sample_counts.append(num_samples)
+        # print(f"Dataset len:{self.dataset_len}")
+        print("Final sampling info:")
+        table_data = [
+            [self.dataset_names[i], len(self.datasets[i]), dataset_sample_counts[i], f"{self.sample_weights[i]:.4f}"]
+            for i in range(len(self.datasets))
+        ]
+        print(tabulate(table_data, headers=["Dataset", "Frames", "Sample Frames", "Ratio"], tablefmt="grid"))
+        # sample and use NamedSubset to contain dataset_name
+        self.id2data = {}
+        self.num_episodes = 0
+        self.dataset_len = 0
+        temp_data_num = 0
+        for ds_id in range(len(self.datasets)):
+            dataset = self.datasets[ds_id]
+            num_samples = dataset_sample_counts[ds_id]
+            dataset_name = self.dataset_names[ds_id]
+            data_indices = list(range(len(dataset)))
+            if num_samples >= len(dataset):
+                sampled_indices = data_indices
+                self.num_episodes += dataset.num_episodes
+            else:
+                sampled_indices = random.sample(data_indices, k=num_samples) # 不重复
                 episode_this_dataset = int(dataset.num_episodes * (len(sampled_indices) / len(dataset)))
-                episode_count += episode_this_dataset
-                self.selected_indices.append(sampled_indices)
-                # selected_subsets.append(NamedSubset(dataset, sampled_indices, dataset_name))
-            
-            self.num_episodes = episode_count
-            self.dataset = None
+                self.num_episodes += episode_this_dataset
+            for idx in sampled_indices:
+                self.id2data[temp_data_num] = (ds_id, idx)
+                temp_data_num += 1
+        
+        self.dataset_len = temp_data_num
+        print(f"Dataset length: {self.dataset_len}, Total episodes: {self.num_episodes}")
 
         # concat the selected dataset
         # self.dataset = ConcatDataset(selected_subsets)
@@ -1618,8 +1624,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                                   "observation.images.secondary", 
                                   "observation.images.wrist"] # follow https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/rlds/oxe/configs.py
         self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
-        save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
-        # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/original_qw", f"{cfg.data_mix}_stats.json"))
+        # save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
+        save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
         # remove state
         self.use_state = cfg.policy.use_state
         if self.use_state == False:
@@ -1656,7 +1662,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # finally create the meta class
         self.meta = LeRobotDatasetMetadata.create_with_stats_feats(stats=self.stats, features=meta_features) # Note: I added a class function
         self.meta.repo_id = "Prometheus"
-        # self.dataset = None
+        self.dataset = None
     
     def pad_vector(self, vector, new_dim):
         """Can be (batch_size x sequence_length x features_dimension)
@@ -1692,17 +1698,13 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 data_config = OXE_DATASET_CONFIGS[dataset_name]
                 image_obs_keys = data_config["image_obs_keys"]
             else:
-                selected_dataset = random.choices(self.datasets, weights=self.sample_weights, k=1)[0]
-                dataset_index = self.datasets.index(selected_dataset)
-                dataset_name = self.dataset_names[dataset_index]
+                ds_id, data_id = self.id2data[index]
+                selected_dataset = self.datasets[ds_id]
+                item = selected_dataset[data_id]
+                dataset_name = self.dataset_names[ds_id]
+                item["dataset_name"] = dataset_name
                 data_config = OXE_DATASET_CONFIGS[dataset_name]
-                indices = self.selected_indices[dataset_index] # the selected indices of this dataset
-                selected_id = random.choice(indices) # equal prob
-                
                 image_obs_keys = data_config["image_obs_keys"]
-            
-                item = selected_dataset[selected_id]
-                item['dataset_name'] = dataset_name
             
             if self.use_state == False:
                 item["observation.state"][:] = 1
@@ -1795,6 +1797,23 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         
         # Normlize the action and observation vectors
         if "agi" in item['dataset_name']:
+            action_end_dim = 14
+            state_end_dim = 16
+            state_mean = torch.zeros(self.max_state_dim)
+            state_mean[:state_end_dim] = self.stats["observation.state"]["mean"][:state_end_dim]
+            state_std = torch.ones(self.max_state_dim)
+            state_std[:state_end_dim] = self.stats["observation.state"]["std"][:state_end_dim]
+
+            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
+
+            action_mean = torch.zeros(self.max_action_dim)
+            action_mean[:action_end_dim] = self.stats["action"]["mean"][:action_end_dim]
+            action_std = torch.ones(self.max_action_dim)
+            action_std[:action_end_dim] = self.stats["action"]["std"][:action_end_dim]
+            item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
+            # item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
+            # item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
+        elif "ego_dex" in item['dataset_name']:
             item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
             item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
         else:
@@ -1815,7 +1834,6 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # print(f"secondary:", np.array(item["observation.images.secondary"]))
         # print(f"wrist:", np.array(item["observation.images.wrist"]))
         vl_item = self._prepare_intern_vl_data(item)
-        
         
         data_dict = {
             "source": item["source"],
@@ -1878,9 +1896,13 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                                                     return_dict=True, 
                                                     return_tensors="pt")
         
+        
         input_ids = getattr(inputs, "input_ids", None)
         attention_mask = getattr(inputs, "attention_mask", None)
         pixel_values = getattr(inputs, "pixel_values", None)
+
+        # image_token_num = (input_ids == 151671).sum()
+        # print(input_ids.shape[1], image_token_num, input_ids.shape[1] - image_token_num)
         
         return_dict = {
             "input_ids": input_ids,
@@ -1935,8 +1957,11 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # print("Video", vision["video"])
         select_key = present_img_keys[0]
         # 3 H W
-        first_image = np.array(item[select_key][0].resize((512, 512))).transpose(2, 0, 1)
-        last_image = np.array(item[select_key][-1].resize((512, 512))).transpose(2, 0, 1)
+        img_pred_size = 512
+        first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        last_image = np.array(item[select_key][-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        # let the model not see the last frame
+        vision["video"] = vision["video"][:-1]
         return vision, first_image, last_image
 
     def _prepare_language(self, vision, item):

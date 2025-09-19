@@ -53,6 +53,10 @@ class LatentActionConfig(PreTrainedConfig):
     img_dim: int = 2048 
 
 
+    # model weights
+    freeze_vision_encoder: bool = True
+
+
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.IDENTITY,
@@ -62,8 +66,8 @@ class LatentActionConfig(PreTrainedConfig):
     )
 
     # Shorter state and action vectors will be padded
-    max_state_dim: int = 32
-    max_action_dim: int = 32
+    max_state_dim: int = 64
+    max_action_dim: int = 64
 
     # Image preprocessing
     resize_imgs_with_padding: tuple[int, int] = (224, 224)
