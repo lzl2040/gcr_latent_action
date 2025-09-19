@@ -301,39 +301,40 @@ def aggregate_multi_stats(ls_datasets: list, data_names: list, max_dim: int) -> 
         # stats[data_key]["mean"] = stats[data_key]["mean"]
 
         # special dataset, including agibot, egodex
-        right_action_d_names = ["agibot_alpha", "ego_dex"]
-        if data_key == "action":
-            right_start = 7
-        else:
-            right_start = 8
+        if "action" in data_key or "state" in data_key:
+            right_action_d_names = ["agibot_alpha", "ego_dex"]
+            if data_key == "action":
+                right_start = 7
+            else:
+                right_start = 8
 
-        selected_right_act_dataset = []
-        for i in range(len(ls_datasets)):
-            d_name = data_names[i]
-            if d_name in right_action_d_names:
-                print(f"Special right hand dataset:{d_name}")
-                selected_right_act_dataset.append(ls_datasets[i])
-        
-        stats = cal_stats(stats, selected_right_act_dataset, 
-                          start_dim=right_start, end_dim=2 * right_start,
-                          data_key=data_key)
-        
-        finger_d_names = ["ego_dex"]
-        selected_finger_act_dataset = []
-        for i in range(len(ls_datasets)):
-            d_name = data_names[i]
-            if d_name in finger_d_names:
-                print(f"Special finger dataset:{d_name}")
-                selected_finger_act_dataset.append(ls_datasets[i])
-        
-        if data_key == "action":
-            finger_start = 2 * 7
-        else:
-            finger_start = 2 * 8
-        print(selected_finger_act_dataset)
-        stats = cal_stats(stats, selected_finger_act_dataset, 
-                          start_dim=finger_start, end_dim= finger_start + 30,
-                          data_key=data_key)
+            selected_right_act_dataset = []
+            for i in range(len(ls_datasets)):
+                d_name = data_names[i]
+                if d_name in right_action_d_names:
+                    print(f"Special right hand dataset:{d_name}")
+                    selected_right_act_dataset.append(ls_datasets[i])
+            
+            stats = cal_stats(stats, selected_right_act_dataset, 
+                            start_dim=right_start, end_dim=2 * right_start,
+                            data_key=data_key)
+            
+            finger_d_names = ["ego_dex"]
+            selected_finger_act_dataset = []
+            for i in range(len(ls_datasets)):
+                d_name = data_names[i]
+                if d_name in finger_d_names:
+                    print(f"Special finger dataset:{d_name}")
+                    selected_finger_act_dataset.append(ls_datasets[i])
+            
+            if data_key == "action":
+                finger_start = 2 * 7
+            else:
+                finger_start = 2 * 8
+            print(selected_finger_act_dataset)
+            stats = cal_stats(stats, selected_finger_act_dataset, 
+                            start_dim=finger_start, end_dim= finger_start + 30,
+                            data_key=data_key)
         
         # # calculate for agibot
         # if "action" in data_key or "state" in data_key:
