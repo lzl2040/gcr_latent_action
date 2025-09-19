@@ -330,7 +330,7 @@ def aggregate_multi_stats(ls_datasets: list, data_names: list, max_dim: int) -> 
             finger_start = 2 * 7
         else:
             finger_start = 2 * 8
-        stats = cal_stats(stats, selected_right_act_dataset, 
+        stats = cal_stats(stats, selected_finger_act_dataset, 
                           start_dim=finger_start, end_dim= finger_start + 30,
                           data_key=data_key)
         
