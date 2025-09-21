@@ -217,7 +217,7 @@ class LatentActionModel(PreTrainedPolicy):
         loss_dict["action_losses_after_rm_padding"] = action_loss.clone()
 
         # For backward pass
-        loss = action_loss.mean() + image_loss.mean()
+        loss = action_loss.mean() + self.config.img_loss_weight * image_loss.mean()
         # For logging
         loss_dict["total_loss"] = loss.item()
         loss_dict["action_loss"] = action_loss.mean().item()

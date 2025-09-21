@@ -436,6 +436,8 @@ def train(cfg: TrainPipelineConfig):
     # Metrics setup
     train_metrics = {
         "loss": AverageMeter("loss", ":.4f"),
+        "img_loss": AverageMeter("img_loss", ":.4f"),
+        "action_loss": AverageMeter("action_loss", ":.4f"),
         "grad_norm": AverageMeter("grdn", ":.4f"),
         "lr": AverageMeter("lr", ":0.01e"),
         "update_s": AverageMeter("updt_s", ":.3f"),
@@ -462,6 +464,8 @@ def train(cfg: TrainPipelineConfig):
     dataloading_s = 0.0
     grad_norm_value = 0.0
     loss_value = 0.0
+    img_loss_value = 0.0
+    action_loss_value = 0.0
     
     if cfg.resume:
         logger.info("Setting up learning rate scheduler...")
@@ -487,6 +491,8 @@ def train(cfg: TrainPipelineConfig):
         grad_to_record = grad_norm.item() if grad_norm is not None else 0.0
         grad_norm_value += grad_to_record
         loss_value += loss.detach().mean().item()
+        img_loss_value += outputs["image_loss"]
+        action_loss_value += outputs["action_loss"]
             
         step_time = time.perf_counter() - step_start
         fwd_bwd_time += step_time
@@ -505,10 +511,13 @@ def train(cfg: TrainPipelineConfig):
             optim_time = time.perf_counter() - optim_start
         
             # 更新指标
+            # print(train_tracker.metrics.keys())
             train_tracker.optim_s = optim_time
             train_tracker.dataloading_s = dataloading_s
             train_tracker.update_s = fwd_bwd_time
             train_tracker.loss = loss_value
+            train_tracker.img_loss = img_loss_value
+            train_tracker.action_loss = action_loss_value
             train_tracker.grad_norm = grad_norm_value
             train_tracker.lr = optimizer.param_groups[0]["lr"]
             train_tracker.step()
@@ -516,6 +525,8 @@ def train(cfg: TrainPipelineConfig):
             fwd_bwd_time = 0.0
             dataloading_s = 0.0
             loss_value = 0.0
+            img_loss_value = 0.0
+            action_loss_value = 0.0
             grad_norm_value = 0.0
             
             # 学习率调度

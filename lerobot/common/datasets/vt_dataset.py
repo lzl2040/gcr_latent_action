@@ -1578,42 +1578,41 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             self.sample_weights = np.array(sample_weights) / np.sum(sample_weights)
             print(f"Final weights = (dataset_size * sample_weights)/ Sum(dataset_size * sample_weights):{sample_weights}")
             total_dataset_len = sum(self.dataset_sizes)
-        sample_dataset_len = int(total_dataset_len * cfg.dataset.sample_ratio)
-        dataset_sample_counts = []  # 计算子集大小
-        for s_w in self.sample_weights:
-            num_samples = int(s_w * sample_dataset_len)
-            dataset_sample_counts.append(num_samples)
-        # print(f"Dataset len:{self.dataset_len}")
-        print("Final sampling info:")
-        table_data = [
-            [self.dataset_names[i], len(self.datasets[i]), dataset_sample_counts[i], f"{self.sample_weights[i]:.4f}"]
-            for i in range(len(self.datasets))
-        ]
-        print(tabulate(table_data, headers=["Dataset", "Frames", "Sample Frames", "Ratio"], tablefmt="grid"))
-        # sample and use NamedSubset to contain dataset_name
-        self.id2data = {}
-        self.num_episodes = 0
-        self.dataset_len = 0
-        temp_data_num = 0
-        for ds_id in range(len(self.datasets)):
-            dataset = self.datasets[ds_id]
-            num_samples = dataset_sample_counts[ds_id]
-            dataset_name = self.dataset_names[ds_id]
-            data_indices = list(range(len(dataset)))
-            if num_samples >= len(dataset):
-                sampled_indices = data_indices
-                self.num_episodes += dataset.num_episodes
-            else:
-                sampled_indices = random.sample(data_indices, k=num_samples) # 不重复
-                episode_this_dataset = int(dataset.num_episodes * (len(sampled_indices) / len(dataset)))
-                self.num_episodes += episode_this_dataset
-            for idx in sampled_indices:
-                self.id2data[temp_data_num] = (ds_id, idx)
-                temp_data_num += 1
+            sample_dataset_len = int(total_dataset_len * cfg.dataset.sample_ratio)
+            dataset_sample_counts = []  # 计算子集大小
+            for s_w in self.sample_weights:
+                num_samples = int(s_w * sample_dataset_len)
+                dataset_sample_counts.append(num_samples)
+            # print(f"Dataset len:{self.dataset_len}")
+            print("Final sampling info:")
+            table_data = [
+                [self.dataset_names[i], len(self.datasets[i]), dataset_sample_counts[i], f"{self.sample_weights[i]:.4f}"]
+                for i in range(len(self.datasets))
+            ]
+            print(tabulate(table_data, headers=["Dataset", "Frames", "Sample Frames", "Ratio"], tablefmt="grid"))
+            # sample and use NamedSubset to contain dataset_name
+            self.id2data = {}
+            self.num_episodes = 0
+            self.dataset_len = 0
+            temp_data_num = 0
+            for ds_id in range(len(self.datasets)):
+                dataset = self.datasets[ds_id]
+                num_samples = dataset_sample_counts[ds_id]
+                dataset_name = self.dataset_names[ds_id]
+                data_indices = list(range(len(dataset)))
+                if num_samples >= len(dataset):
+                    sampled_indices = data_indices
+                    self.num_episodes += dataset.num_episodes
+                else:
+                    sampled_indices = random.sample(data_indices, k=num_samples) # 不重复
+                    episode_this_dataset = int(dataset.num_episodes * (len(sampled_indices) / len(dataset)))
+                    self.num_episodes += episode_this_dataset
+                for idx in sampled_indices:
+                    self.id2data[temp_data_num] = (ds_id, idx)
+                    temp_data_num += 1
         
-        self.dataset_len = temp_data_num
-        print(f"Dataset length: {self.dataset_len}, Total episodes: {self.num_episodes}")
-
+            self.dataset_len = temp_data_num
+            print(f"Dataset length: {self.dataset_len}, Total episodes: {self.num_episodes}")
         # concat the selected dataset
         # self.dataset = ConcatDataset(selected_subsets)
         
