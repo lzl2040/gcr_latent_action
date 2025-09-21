@@ -204,7 +204,7 @@ class LatentActionModel(PreTrainedPolicy):
                                   act_embeddings, 
                                   actions)
         action_loss = losses["action_loss"]
-        image_loss = losses["action_loss"]
+        image_loss = losses["image_loss"]
         loss_dict["action_losses_after_forward"] = action_loss.clone()
 
         if actions_is_pad is not None:
@@ -222,6 +222,7 @@ class LatentActionModel(PreTrainedPolicy):
         loss_dict["total_loss"] = loss.item()
         loss_dict["action_loss"] = action_loss.mean().item()
         loss_dict["image_loss"] = image_loss.mean().item()
+        # print(loss_dict["total_loss"], loss_dict["action_loss"], loss_dict["image_loss"])
 
         return loss, loss_dict
 
