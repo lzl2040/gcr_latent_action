@@ -181,6 +181,8 @@ def train_step(model, batch, scaler, cfg, sync_flag):
         if sync_flag:
             loss, output_dict = model(batch)
             loss = loss / cfg.gradient_accumulation_steps
+            output_dict["action_loss"] = output_dict["action_loss"] / cfg.gradient_accumulation_steps
+            output_dict["image_loss"] = output_dict["image_loss"] / cfg.gradient_accumulation_steps
             # 反向传播
             if scaler is not None:
                 scaler.scale(loss).backward()
