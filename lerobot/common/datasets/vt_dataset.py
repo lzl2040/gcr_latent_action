@@ -1591,7 +1591,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             ]
             print(tabulate(table_data, headers=["Dataset", "Frames", "Sample Frames", "Ratio"], tablefmt="grid"))
             # sample and use NamedSubset to contain dataset_name
-            self.id2data = {}
+            self.id2data = []
             self.num_episodes = 0
             self.dataset_len = 0
             temp_data_num = 0
@@ -1608,9 +1608,12 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                     episode_this_dataset = int(dataset.num_episodes * (len(sampled_indices) / len(dataset)))
                     self.num_episodes += episode_this_dataset
                 for idx in sampled_indices:
-                    self.id2data[temp_data_num] = (ds_id, idx)
+                    self.id2data.append((ds_id, idx))
                     temp_data_num += 1
-        
+
+            # 打乱
+            random.shuffle(self.id2data)
+            print(f"Has shuffled the indices")
             self.dataset_len = temp_data_num
             print(f"Dataset length: {self.dataset_len}, Total episodes: {self.num_episodes}")
         # concat the selected dataset
@@ -1623,8 +1626,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                                   "observation.images.secondary", 
                                   "observation.images.wrist"] # follow https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/rlds/oxe/configs.py
         self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
-        save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
-        # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
+        # save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
+        save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
         # remove state
         self.use_state = cfg.policy.use_state
         if self.use_state == False:
