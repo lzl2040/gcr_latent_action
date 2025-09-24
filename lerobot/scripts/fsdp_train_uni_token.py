@@ -267,7 +267,8 @@ def train(cfg: TrainPipelineConfig):
             steps = [int(os.path.basename(pt).split(".")[0].split("step")[1]) for pt in pts]
             step = sorted(steps)[-1] + 1
             seed += (step-1)
-            
+    
+    print(f"Seed is {seed}")
     image_transforms = ImageTransforms(cfg.dataset.image_transforms)
     wrist_image_transforms = ImageTransforms(cfg.dataset.wrist_image_transforms)
     print(f"image transforms:{image_transforms}")
