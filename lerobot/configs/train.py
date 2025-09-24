@@ -45,7 +45,7 @@ class TrainPipelineConfig(HubMixin):
     # `seed` is used for training (eg: model initialization, dataset shuffling)
     # AND for the evaluation environments.
     # update in 0924, inital value is 1000
-    seed: int | None = 1001
+    seed: int | None = 2001
     # Number of workers for the dataloader.
     local_rank: int = 0
     num_workers: int = 8
