@@ -44,7 +44,8 @@ class TrainPipelineConfig(HubMixin):
     gradient_accumulation_steps: int = 4
     # `seed` is used for training (eg: model initialization, dataset shuffling)
     # AND for the evaluation environments.
-    seed: int | None = 1000
+    # update in 0924, inital value is 1000
+    seed: int | None = 1001
     # Number of workers for the dataloader.
     local_rank: int = 0
     num_workers: int = 8
