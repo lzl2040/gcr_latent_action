@@ -179,6 +179,8 @@ def aggregate_stats(stats_list: list[dict[str, dict]]) -> dict[str, dict[str, np
     return aggregated_stats
 
 def cal_stats(stats, datasets, start_dim, end_dim, data_key):
+    if len(datasets) == 0:
+        return stats
     for stat_key in ["min", "max"]:
         # compute `max(dataset_0["max"], dataset_1["max"], ...)`
         # print(stats[data_key].keys())

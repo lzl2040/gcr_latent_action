@@ -74,8 +74,9 @@ def decode_video_frames_torchvision(
     # set the first and last requested timestamps
     # Note: previous timestamps are usually loaded, since we need to access the previous key frame
     first_ts = min(timestamps)
-    if return_all:
-        first_ts = min(first_ts, 0.0)
+    # 这个会从最开始一帧算
+    # if return_all:
+    #     first_ts = min(first_ts, 0.0)
     last_ts = max(timestamps)
 
     # access closest key frame of the first requested frame
@@ -87,6 +88,7 @@ def decode_video_frames_torchvision(
     loaded_frames = []
     loaded_ts = []
 
+    # 只返回当前帧
     if max_frame_window == -1:
         # 读到 last_ts
         for frame in reader:
@@ -101,14 +103,15 @@ def decode_video_frames_torchvision(
         # 从first_ts往后取max_frame_window帧
         for frame in reader:
             current_ts = frame["pts"]
-            if current_ts < first_ts:
-                continue
+            # if current_ts < first_ts:
+            #     continue
             if len(loaded_frames) >= max_frame_window:
                 break
             if log_loaded_timestamps:
                 logging.info(f"frame loaded at timestamp={current_ts:.4f}")
             loaded_frames.append(frame["data"])
             loaded_ts.append(current_ts)
+            # print(current_ts, first_ts, len(loaded_frames))
 
     if backend == "pyav":
         reader.container.close()

@@ -16,6 +16,9 @@ from lerobot.common.policies.latent_action.image_decoder import ImagePredictionM
 from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
 from lerobot.common.policies.latent_action.vlm_wrapper import InternVLModelWrapper
 
+import numpy as np
+import cv2
+
 def pad_vector(vector, new_dim):
     """Can be (batch_size x sequence_length x features_dimension)
     or (batch_size x features_dimension)
@@ -226,6 +229,53 @@ class LatentActionModel(PreTrainedPolicy):
 
         return loss, loss_dict
 
+
+    def infer(self, batch: dict[str, Tensor]):
+        pixel_values = batch["pixel_values"]
+        input_ids = batch["input_ids"] # 对于224分辨率图像，每个image占64个token
+        attention_mask = batch["attention_mask"].to(dtype=self.dtype)
+        video_len = batch["video_len"]
+        first_image = batch["first_image"]
+        # print(input_ids.shape, pixel_values.shape)
+        # print(input_ids.shape) # min: 2000, max: 4100
+        # print(first_image.shape, torch.max(first_image)) # 0-255
+        actions = self.prepare_action(batch)
+        actions = self.convert_to_dtype(actions)
+        bsize = input_ids.shape[0]
+        # torch.Size([B*T, 3, 224, 224]) torch.Size([1, 3266]) torch.Size([1, 3266])
+        # print(pixel_values.shape, input_ids.shape, attention_mask.shape)
+        output = self.vlm(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+        )
+        # output_hidden_states = output
+        output_hidden_states = output.hidden_states # num_layers + 1
+        sc_token_mask, act_token_mask = self.generate_token_mask(input_ids)
+        # get token embeddings
+        # torch.Size([128, 1024]) torch.Size([4, 1024])
+        sc_embeddings = output_hidden_states[-1][sc_token_mask]
+        act_embeddings = output_hidden_states[-1][act_token_mask]
+        hidden_size = sc_embeddings.shape[-1]
+        sc_embeddings = sc_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
+        act_embeddings = act_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
+
+        actions = self.uni_decoder.sample_actions(sc_embeddings, act_embeddings) # 128
+        actions = actions.detach().cpu()
+
+        # denormalization
+        mean = batch["action.mean"]
+        std = batch["action.std"]
+        # print(actions.shape, mean.shape)
+        actions = actions * (std + 1e-8) + mean
+        
+        # actions = actions.numpy()
+
+        furture_image = self.uni_decoder.sample_images(first_image, sc_embeddings)
+
+        return actions, furture_image
+
 def sample_beta(alpha, beta, bsize, device):
     gamma1 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / alpha)
     gamma2 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / beta)
@@ -272,7 +322,7 @@ class UniDecoder(nn.Module):
         time = time_beta * 0.999 + 0.001
         return time.to(dtype=self.dtype, device=device)
 
-    def embed_prefix_for_action(self, images, con_embeddings):
+    def embed_prefix_for_action(self, con_embeddings):
         embs = []
         pad_masks = []
         att_masks = []
@@ -367,7 +417,7 @@ class UniDecoder(nn.Module):
         u_t = action_noise - actions
         con_embeddings = torch.cat([sc_embedding, act_embeddings], dim = 1)
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix_for_action(
-            first_image, con_embeddings=con_embeddings
+            con_embeddings=con_embeddings
         )
         # torch.Size([2, 578, 2048])
         # print(prefix_embs.shape)
@@ -399,3 +449,137 @@ class UniDecoder(nn.Module):
         # image predict
         losses["image_loss"] = self.image_decoder(sc_embedding, first_image, last_image)
         return losses
+
+
+    def sample_actions(self, sc_embedding, act_embeddings, action_noise = None):
+        bsize = sc_embedding.shape[0]
+        device = sc_embedding.device
+        if action_noise is None:
+            actions_shape = (bsize, self.config.n_action_steps, self.config.max_action_dim)
+            noise = self.sample_noise(actions_shape, device)
+        
+        con_embeddings = torch.cat([sc_embedding, act_embeddings], dim = 1)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix_for_action(
+            con_embeddings=con_embeddings
+        )
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        _, past_key_values = self.action_decoder.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=self.config.use_cache,
+            fill_kv_cache=True,
+        )
+
+        dt = -1.0 / self.config.num_steps
+        dt = torch.tensor(dt, dtype=torch.float32, device=device)
+
+        x_t = noise
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+            v_t = self.denoise_step(
+                prefix_pad_masks,
+                past_key_values,
+                x_t,
+                expanded_time,
+            )
+
+            # Euler step
+            x_t += dt * v_t
+            time += dt
+        return x_t
+
+    def denoise_step(
+        self,
+        prefix_pad_masks,
+        past_key_values,
+        x_t,
+        timestep,
+    ):
+        """Apply one denoising step of the noise `x_t` at a given timestep."""
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix_for_action(x_t, timestep)
+
+        suffix_len = suffix_pad_masks.shape[1]
+        batch_size = prefix_pad_masks.shape[0]
+        prefix_len = prefix_pad_masks.shape[1]
+        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
+
+        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+
+        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
+
+        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+
+        outputs_embeds, _ = self.action_decoder.forward(
+            attention_mask=full_att_2d_masks,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=[None, suffix_embs],
+            use_cache=self.config.use_cache,
+            fill_kv_cache=False,
+        )
+        suffix_out = outputs_embeds[1]
+        suffix_out = suffix_out[:, -self.config.n_action_steps :]
+        # suffix_out = suffix_out.to(dtype=torch.float32)
+        v_t = self.action_out_proj(suffix_out)
+        return v_t
+    
+    def sample_images(self, first_image, sc_embeddings, num_inference_steps=10):
+        # https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/sana/pipeline_sana.py#L131
+        b, c, h, w = first_image.shape
+        device = first_image.device
+        # because we double the channel in the config
+        latent_channels = self.image_decoder.transformer.config.in_channels // 2 # 32
+        latents = self.image_decoder.prepare_latents(b, latent_channels, 
+                                                     h, w, self.dtype, device)
+        prompt_embeds = self.image_decoder.con_proj(sc_embeddings)
+        prompt_attention_mask = torch.ones(prompt_embeds.shape[0], prompt_embeds.shape[1], dtype=torch.long, device=prompt_embeds.device)
+        image_latents = self.image_decoder.vae.encode(first_image.to(self.dtype)).latent
+        self.image_decoder.noise_scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.image_decoder.noise_scheduler.timesteps
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.image_decoder.noise_scheduler.order, 0)
+        for i, t in enumerate(timesteps):
+            # no classifier_free_guidance
+            latent_model_input = latents
+            # concat latents, image_latents in the channel dimension
+            latent_model_input = torch.cat([latent_model_input, image_latents], dim=1)
+            # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+            timestep = t.expand(latent_model_input.shape[0])
+            timestep = timestep * self.image_decoder.transformer.config.timestep_scale
+            # print(latent_model_input.shape)
+
+            # predict noise model_output
+            noise_pred = self.image_decoder.transformer(
+                latent_model_input.to(dtype=self.dtype),
+                encoder_hidden_states=prompt_embeds.to(dtype=self.dtype),
+                encoder_attention_mask=prompt_attention_mask,
+                timestep=timestep,
+                return_dict=False
+            )[0]
+            noise_pred = noise_pred.float()
+
+            # learned sigma
+            # print(self.image_decoder.transformer.config.out_channels // 2, latent_channels)
+            if self.image_decoder.transformer.config.out_channels // 2 == latent_channels:
+                noise_pred = noise_pred.chunk(2, dim=1)[0]
+
+            # compute previous image: x_t -> x_t-1
+            latents = self.image_decoder.noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+        
+        
+        try:
+            latents = latents.to(dtype=self.dtype)
+            image = self.image_decoder.vae.decode(latents / self.image_decoder.vae.config.scaling_factor, return_dict=False)[0]
+        except Exception as e:
+            print(
+                f"{e}. \n"
+                f"Try to use VAE tiling for large images. For example: \n"
+                f"pipe.vae.enable_tiling(tile_sample_min_width=512, tile_sample_min_height=512)"
+            )
+        image = self.image_decoder.image_processor.postprocess(image, output_type="np")
+        return image
+

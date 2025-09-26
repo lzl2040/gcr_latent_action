@@ -843,6 +843,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                     return_all=True, return_type="image",
                     max_frame_window=self.max_frame
                 )
+                # print(query_ts, len(frames), self.max_frame)
                 # print(len(frames), query_ts)
                 # frames = [frame.resize((112, 112)) for frame in frames]
                 # item[vid_key] = frames
@@ -1963,7 +1964,9 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
         last_image = np.array(item[select_key][-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
         # let the model not see the last frame
-        vision["video"] = vision["video"][:-1]
+        if len(vision["video"]) > 1:
+            vision["video"] = vision["video"][:-1]
+        # print(len(vision["video"]))
         return vision, first_image, last_image
 
     def _prepare_language(self, vision, item):

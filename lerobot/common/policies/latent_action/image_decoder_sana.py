@@ -6,6 +6,8 @@ from diffusers import (
     SanaPipeline,
     SanaTransformer2DModel,
 )
+from diffusers.utils.torch_utils import get_device, is_torch_version, randn_tensor
+from diffusers.image_processor import PixArtImageProcessor
 from transformers import Gemma2Model, AutoTokenizer, AutoConfig
 import torchvision.transforms as transforms
 import math
@@ -59,6 +61,12 @@ class ImagePredictionModel(nn.Module):
         self.transformer.enable_gradient_checkpointing()
         self.vae.requires_grad_(False)
         self.vae_config_scaling_factor = self.vae.config.scaling_factor
+        self.vae_scale_factor = (
+            2 ** (len(self.vae.config.encoder_block_out_channels) - 1)
+            if hasattr(self, "vae") and self.vae is not None
+            else 32
+        )
+        self.image_processor = PixArtImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.transform = transforms.Compose(
             [
                 # transforms.ToTensor(),
@@ -104,6 +112,26 @@ class ImagePredictionModel(nn.Module):
             print("transformer.pos_embed.proj", self.transformer.patch_embed.proj.weight.shape)
             self.transformer.patch_embed.proj = new_proj
     
+    def prepare_latents(self, batch_size, num_channels_latents, height, width, 
+                        dtype, device, generator = None, latents=None):
+        if latents is not None:
+            return latents.to(device=device, dtype=dtype)
+
+        shape = (
+            batch_size,
+            num_channels_latents,
+            int(height) // self.vae_scale_factor,
+            int(width) // self.vae_scale_factor,
+        )
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+
+        latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        return latents
+
     def forward(self, prompt_embds, cond_image, target_image):
         prompt_embds = self.con_proj(prompt_embds)
         cond_image = cond_image / 255
