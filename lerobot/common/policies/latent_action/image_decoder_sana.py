@@ -321,10 +321,10 @@ class ImagePredictionModel(nn.Module):
     def forward(self, prompt_embds, cond_image, target_image):
         prompt_embds = self.con_proj(prompt_embds)
         # print(torch.max(cond_image), torch.max(target_image))
-        # cond_image = cond_image / 255
-        # target_image = target_image / 255
-        # cond_image = self.transform(cond_image)
-        # target_image = self.transform(target_image)
+        cond_image = cond_image / 255
+        target_image = target_image / 255
+        cond_image = self.transform(cond_image)
+        target_image = self.transform(target_image)
         target_latents = self.vae.encode(target_image).latent
         target_latents = target_latents * self.vae_config_scaling_factor
         noise = torch.randn_like(target_latents)

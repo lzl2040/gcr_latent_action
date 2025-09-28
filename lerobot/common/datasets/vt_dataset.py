@@ -1991,10 +1991,10 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         select_key = present_img_keys[0]
         # 3 H W
         img_pred_size = 512
-        # first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
-        # last_image = np.array(item[select_key][-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
-        first_image = self.image_decoder_processor.preprocess(item[select_key][0], height=img_pred_size, width=img_pred_size)
-        last_image = self.image_decoder_processor.preprocess(item[select_key][-1], height=img_pred_size, width=img_pred_size)
+        first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        last_image = np.array(item[select_key][-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        # first_image = self.image_decoder_processor.preprocess(item[select_key][0], height=img_pred_size, width=img_pred_size)
+        # last_image = self.image_decoder_processor.preprocess(item[select_key][-1], height=img_pred_size, width=img_pred_size)
         # let the model not see the last frame
         if len(vision["video"]) > 1:
             vision["video"] = vision["video"][:-1]

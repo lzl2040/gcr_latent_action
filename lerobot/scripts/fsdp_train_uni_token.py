@@ -280,11 +280,11 @@ def train(cfg: TrainPipelineConfig):
     print(f"image transforms:{image_transforms}")
     print(f"wrist image transforms:{wrist_image_transforms}")
 
-    img_gen_pipe = SanaPipeline.from_pretrained(
-        cfg.policy.img_pred_model,
-        variant="fp16",
-        torch_dtype=torch.float16
-    ).to(f"cuda:{local_rank}")
+    # img_gen_pipe = SanaPipeline.from_pretrained(
+    #     cfg.policy.img_pred_model,
+    #     variant="fp16",
+    #     torch_dtype=torch.float16
+    # ).to(f"cuda:{local_rank}")
 
     dataset = MultiDatasetforDistTraining(
         cfg=cfg, 
@@ -294,7 +294,7 @@ def train(cfg: TrainPipelineConfig):
         data_mix=cfg.data_mix,
         vla2root_json="vla2root.json",
         is_ft=cfg.is_ft,
-        image_decoder_processor=img_gen_pipe.image_processor
+        # image_decoder_processor=img_gen_pipe.image_processor
         # vla2root_json="vla2root_bak_single.json"
     )
     
