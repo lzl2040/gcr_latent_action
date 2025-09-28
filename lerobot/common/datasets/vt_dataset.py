@@ -1890,7 +1890,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                     "video": video,
                 },
             )
-        question = random.choice(QUESTION_LIST).format(sent=text)
+        frame_len = len(video)
+        question = random.choice(QUESTION_LIST).format(sent=text, T = frame_len-1, Tm1=frame_len - 2)
         message[0]["content"].append({"type": "text", "text": question})
 
         # add answer
@@ -1924,7 +1925,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         
         
         input_ids = getattr(inputs, "input_ids", None)
-        attention_mask = getattr(inputs, "attention_mask", None)
+        attention_mask = getattr(inputs, "attention_mask", None) # all is 1
+        # print(attention_mask)
         pixel_values = getattr(inputs, "pixel_values", None)
 
         # image_token_num = (input_ids == 151671).sum()

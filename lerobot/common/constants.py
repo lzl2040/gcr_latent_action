@@ -59,14 +59,21 @@ COMPRESS_ACTION_TOKEN = 'CP_ACT'
 
 ANSWER_LIST = [
     "Furture scene representations: [CP_SC]. Action representations: [CP_ACT].",
-    "The results for the furture scene are [CP_SC], while the motion is represented as [CP_ACT].",
+    "The results for the next-frame scene are [CP_SC], while the motion is represented as [CP_ACT].",
 ]
 
 # QUESTION_LIST = [
 #     "According to the instruction '{sent}', compress the video into scene-level and action-level representations.",
 #     "Observe the video frames under the task '{sent}', and summarize them into scene-level representations and action-level representations.",
 # ]
+# QUESTION_LIST = [
+#     "Given the instruction '{sent}', predict the next-frame scene-level representation from the historical video, and compress the historical video into an action-level representation.",
+#     "Based on the task '{sent}', use the historical video to forecast the next-frame scene-level representation, and condense the historical video into an action-level representation.",
+# ]
+
 QUESTION_LIST = [
-    "Given the instruction '{sent}', predict the next-frame scene-level representation from the historical video, and compress the historical video into an action-level representation.",
-    "Based on the task '{sent}', use the historical video to forecast the next-frame scene-level representation, and condense the historical video into an action-level representation.",
+    "Based on the instruction '{sent}', analyze the given {T} consecutive video frames.\n1. Forecast the next-frame scene-level representation.\n2. Generate {Tm1} action-level representations, one for each transition between consecutive frames.",
+    "Given the task '{sent}', process the {T} frames of video input as follows:\n1. Predict the scene representation for the upcoming frame.\n2. Produce {Tm1} action embeddings summarizing the transitions between adjacent frames.",
+    "Task: '{sent}'. You are provided with {T} continuous frames.\n1. Output the scene-level embedding that corresponds to the next frame.\n2. Output {Tm1} action-level embeddings, each describing one frame-to-frame transition.",
+    "Instruction: '{sent}'. Analyze the sequence of {T} frames.\n1. Forecast the representation of the scene in the next frame.\n2. Generate {Tm1} action embeddings to represent the motion between consecutive frames.",
 ]

@@ -203,11 +203,11 @@ class ActionDecoderModel(PreTrainedModel):
             weights = torch.load(action_expert_path, map_location="cpu")
             self.gemma_expert.load_state_dict(weights, strict=True)    
 
-        # self.latent_action_layers = nn.ModuleList([
-        #     LatentActionProjection(config) 
-        #                            for i in range(config.gemma_expert_config.num_hidden_layers)])
+        self.latent_action_layers = nn.ModuleList([
+            LatentActionProjection(config) 
+                                   for i in range(config.gemma_expert_config.num_hidden_layers)])
         
-        self.latent_action_layers = GemmaForCausalLM(config=config.gemma_expert_config)
+        # self.latent_action_layers = GemmaForCausalLM(config=config.gemma_expert_config)
 
         # self.gemma_expert_for_image = GemmaForCausalLM(config=config.gemma_expert_config)
         # self.gemma_expert_for_image.model.embed_tokens = None
@@ -268,7 +268,7 @@ class ActionDecoderModel(PreTrainedModel):
         use_cache: bool | None = None,
         fill_kv_cache: bool | None = None,
     ):
-        models = [self.latent_action_layers.model, self.gemma_expert.model]
+        models = [self.latent_action_layers, self.gemma_expert.model]
         # models = [self.paligemma.language_model, self.gemma_expert.model]
 
         for hidden_states in inputs_embeds:
@@ -292,28 +292,28 @@ class ActionDecoderModel(PreTrainedModel):
             for i, hidden_states in enumerate(inputs_embeds):
                 if hidden_states is None:
                     continue
-                # if i != 0:
-                layer = models[i].layers[layer_idx]
-                # normalizer = torch.tensor(models[i].config.hidden_size**0.5, dtype=hidden_states.dtype)
-                # hidden_states = hidden_states * normalizer
-                # print(hidden_states.shape)
-                hidden_states = layer.input_layernorm(hidden_states)
+                if i != 0:
+                    layer = models[i].layers[layer_idx]
+                    # normalizer = torch.tensor(models[i].config.hidden_size**0.5, dtype=hidden_states.dtype)
+                    # hidden_states = hidden_states * normalizer
+                    # print(hidden_states.shape)
+                    hidden_states = layer.input_layernorm(hidden_states)
 
-                input_shape = hidden_states.shape[:-1]
-                hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
+                    input_shape = hidden_states.shape[:-1]
+                    hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
 
-                hidden_states = hidden_states.to(dtype=torch.bfloat16)
-                query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape)
-                key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape)
-                value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape)
+                    hidden_states = hidden_states.to(dtype=torch.bfloat16)
+                    query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape)
+                    key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape)
+                    value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape)
                 # print(f"{i}", query_state.shape, key_state.shape, value_state.shape, hidden_states.shape)
-                # else:
-                #     input_shape = hidden_states.shape[:-1]
-                #     hidden_shape = (*input_shape, -1, head_dim)
-                #     layer = models[i][layer_idx]
-                #     query_state = layer.q_proj(hidden_states).view(hidden_shape)
-                #     key_state = layer.k_proj(hidden_states).view(hidden_shape)
-                #     value_state = layer.v_proj(hidden_states).view(hidden_shape)
+                else:
+                    input_shape = hidden_states.shape[:-1]
+                    hidden_shape = (*input_shape, -1, head_dim)
+                    layer = models[i][layer_idx]
+                    query_state = layer.q_proj(hidden_states).view(hidden_shape)
+                    key_state = layer.k_proj(hidden_states).view(hidden_shape)
+                    value_state = layer.v_proj(hidden_states).view(hidden_shape)
                     # print("cond:", query_state.shape, key_state.shape, value_state.shape, hidden_states.shape)
 
                 query_states.append(query_state)
@@ -360,33 +360,33 @@ class ActionDecoderModel(PreTrainedModel):
             for i, hidden_states in enumerate(inputs_embeds):
 
                 if hidden_states is not None:
-                    # if i != 0:
-                    layer = models[i].layers[layer_idx]
-                    end = start + hidden_states.shape[1]
+                    if i != 0:
+                        layer = models[i].layers[layer_idx]
+                        end = start + hidden_states.shape[1]
 
-                    if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
-                        att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
-                    out_emb = layer.self_attn.o_proj(att_output[:, start:end])
+                        if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
+                            att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
+                        out_emb = layer.self_attn.o_proj(att_output[:, start:end])
 
-                    # TODO: first dropout (by default 0.0)
+                        # TODO: first dropout (by default 0.0)
 
-                    # first residual
-                    out_emb += hidden_states
-                    after_first_residual = out_emb.clone()
+                        # first residual
+                        out_emb += hidden_states
+                        after_first_residual = out_emb.clone()
 
-                    out_emb = layer.post_attention_layernorm(out_emb)
-                    out_emb = layer.mlp(out_emb)
+                        out_emb = layer.post_attention_layernorm(out_emb)
+                        out_emb = layer.mlp(out_emb)
 
-                    # TODO: second dropout (by default 0.0)
+                        # TODO: second dropout (by default 0.0)
 
-                    # second residual
-                    out_emb += after_first_residual
+                        # second residual
+                        out_emb += after_first_residual
 
-                    outputs_embeds.append(out_emb)
+                        outputs_embeds.append(out_emb)
 
-                    start = end
-                    # else:
-                    #     outputs_embeds.append(hidden_states)
+                        start = end
+                    else:
+                        outputs_embeds.append(hidden_states)
                 else:
                     outputs_embeds.append(None)
 
@@ -396,10 +396,10 @@ class ActionDecoderModel(PreTrainedModel):
         outputs_embeds = []
         for i, hidden_states in enumerate(inputs_embeds):
             if hidden_states is not None:
-                # if i != 0:
-                out_emb = models[i].norm(hidden_states)
-                # else:
-                #     out_emb = hidden_states
+                if i != 0:
+                    out_emb = models[i].norm(hidden_states)
+                else:
+                    out_emb = hidden_states
                 outputs_embeds.append(out_emb)
             else:
                 outputs_embeds.append(None)

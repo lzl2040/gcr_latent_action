@@ -50,8 +50,8 @@ class LatentActionConfig(PreTrainedConfig):
     vlm_token_dim: int = 1024 # 1B
     # vlm_token_dim: int = 2048 # 2B
     # vlm_token_dim: int = 2560 # 4B
-    # img_dim: int = 2048 # for simple linear layer 
-    img_dim: int = 1024 # for gemma
+    img_dim: int = 2048 # for simple linear layer 
+    # img_dim: int = 1024 # for gemma
     
     img_loss_weight: float = 0.6
 
