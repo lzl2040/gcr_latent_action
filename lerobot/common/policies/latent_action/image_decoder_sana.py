@@ -8,9 +8,179 @@ from diffusers import (
 )
 from diffusers.utils.torch_utils import get_device, is_torch_version, randn_tensor
 from diffusers.image_processor import PixArtImageProcessor
+from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from transformers import Gemma2Model, AutoTokenizer, AutoConfig
 import torchvision.transforms as transforms
 import math
+import copy
+from typing import Optional, Dict, Any
+from PIL.Image import Image
+
+def forward_ip_adapter(
+    self,
+    hidden_states,
+    condition,
+    attention_mask,
+    encoder_hidden_states,
+    encoder_attention_mask,
+    timestep,
+    height,
+    width,
+):
+    batch_size = hidden_states.shape[0]
+
+    # 1. Modulation
+    shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+        self.scale_shift_table[None] + timestep.reshape(batch_size, 6, -1)
+    ).chunk(6, dim=1)
+
+    # 2. Self Attention
+    norm_hidden_states = self.norm1(hidden_states)
+    norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
+    norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
+
+    attn_output = self.attn1(norm_hidden_states)
+    hidden_states = hidden_states + gate_msa * attn_output
+
+    # 3. Cross Attention
+    if self.attn2 is not None:
+        attn_output = self.attn2(
+            hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            attention_mask=encoder_attention_mask,
+        )
+        hidden_states = attn_output + hidden_states
+        attn_output = self.attn3(
+            hidden_states,
+            encoder_hidden_states=condition,
+            # attention_mask=encoder_attention_mask2,
+        )
+        attn_output = self.zero_linear(attn_output)
+        hidden_states = attn_output + hidden_states
+
+    # 4. Feed-forward
+    norm_hidden_states = self.norm2(hidden_states)
+    norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
+
+    norm_hidden_states = norm_hidden_states.unflatten(1, (height, width)).permute(0, 3, 1, 2)
+    ff_output = self.ff(norm_hidden_states)
+    ff_output = ff_output.flatten(2, 3).permute(0, 2, 1)
+    hidden_states = hidden_states + gate_mlp * ff_output
+
+    return hidden_states
+
+
+def forward_c(
+    self,
+    hidden_states: torch.Tensor,
+    condition: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    timestep: torch.LongTensor,
+    encoder_attention_mask: Optional[torch.Tensor] = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    attention_kwargs: Optional[Dict[str, Any]] = None,
+    return_dict: bool = True,
+):
+    if attention_kwargs is not None:
+        attention_kwargs = attention_kwargs.copy()
+        lora_scale = attention_kwargs.pop("scale", 1.0)
+    else:
+        lora_scale = 1.0
+
+    if attention_mask is not None and attention_mask.ndim == 2:
+        attention_mask = (1 - attention_mask.to(hidden_states.dtype)) * -10000.0
+        attention_mask = attention_mask.unsqueeze(1)
+
+    if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
+        encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
+        encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
+
+    # 1. Input
+    batch_size, num_channels, height, width = hidden_states.shape
+    p = self.config.patch_size
+    post_patch_height, post_patch_width = height // p, width // p
+
+    hidden_states = self.patch_embed(hidden_states)
+
+    timestep, embedded_timestep = self.time_embed(
+        timestep, batch_size=batch_size, hidden_dtype=hidden_states.dtype
+    )
+
+    encoder_hidden_states = self.caption_projection(encoder_hidden_states)
+    encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
+    encoder_hidden_states = self.caption_norm(encoder_hidden_states)
+
+    # 2. Transformer blocks
+    if torch.is_grad_enabled() and self.gradient_checkpointing:
+        def create_custom_forward(module, return_dict=None):
+            def custom_forward(*inputs):
+                if return_dict is not None:
+                    return module(*inputs, return_dict=return_dict)
+                else:
+                    return module(*inputs)
+            return custom_forward
+
+        ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False}
+        for block in self.transformer_blocks:
+            hidden_states = torch.utils.checkpoint.checkpoint(
+                create_custom_forward(block),
+                hidden_states,
+                condition,
+                attention_mask,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                timestep,
+                post_patch_height,
+                post_patch_width,
+                **ckpt_kwargs,
+            )
+    else:
+        counter = 0
+        for block in self.transformer_blocks:
+            if counter < 14:
+                hidden_states = block(
+                    hidden_states,
+                    condition,
+                    attention_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    timestep,
+                    post_patch_height,
+                    post_patch_width,
+                )
+            else:
+                hidden_states = block(
+                    hidden_states,
+                    # condition is omitted for these blocks
+                    attention_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    timestep,
+                    post_patch_height,
+                    post_patch_width,
+                )
+            counter += 1
+
+    # 3. Normalization
+    shift, scale = (
+        self.scale_shift_table[None] + embedded_timestep[:, None].to(self.scale_shift_table.device)
+    ).chunk(2, dim=1)
+    hidden_states = self.norm_out(hidden_states)
+
+    # 4. Modulation
+    hidden_states = hidden_states * (1 + scale) + shift
+    hidden_states = self.proj_out(hidden_states)
+
+    # 5. Unpatchify
+    hidden_states = hidden_states.reshape(
+        batch_size, post_patch_height, post_patch_width, self.config.patch_size, self.config.patch_size, -1
+    )
+    hidden_states = hidden_states.permute(0, 5, 1, 3, 2, 4)
+    output = hidden_states.reshape(batch_size, -1, post_patch_height * p, post_patch_width * p)
+
+    if not return_dict:
+        return (output,)
+    return Transformer2DModelOutput(sample=output)
 
 def get_sigmas(noise_scheduler, timesteps, n_dim=4, dtype=torch.float32, device = "cuda"):
     sigmas = noise_scheduler.sigmas.to(device=device, dtype=dtype)
@@ -60,6 +230,8 @@ class ImagePredictionModel(nn.Module):
         # 梯度检查点
         self.transformer.enable_gradient_checkpointing()
         self.vae.requires_grad_(False)
+
+
         self.vae_config_scaling_factor = self.vae.config.scaling_factor
         self.vae_scale_factor = (
             2 ** (len(self.vae.config.encoder_block_out_channels) - 1)
@@ -73,11 +245,25 @@ class ImagePredictionModel(nn.Module):
                 transforms.Normalize([0.5], [0.5]),
             ]
         )
+        # follow instruct pix2pix
         self.replace_module()
 
-        # for param in self.transformer.parameters():
-        #     param.requires_grad = False
+        # follow ip-adapter
+        # https://github.com/rotem154154/ControlNet-Sana/blob/main/models/finetuner_ip_adapter.py#L115
+        # self.preapre_transformer_for_ip_adapter()
 
+    # def preapre_transformer_for_ip_adapter(self):
+    #     # Replace forward with our custom forward.
+    #     self.transformer.forward = forward_c.__get__(self.transformer)
+    #     for i in range(len(self.transformer.transformer_blocks)):
+    #         if i < 14:
+    #             self.transformer.transformer_blocks[i].forward = forward_ip_adapter.__get__(self.transformer.transformer_blocks[i])
+    #             self.transformer.transformer_blocks[i].attn3 = copy.deepcopy(self.transformer.transformer_blocks[i].attn2)
+    #             for param in self.transformer.transformer_blocks[i].attn3.parameters():
+    #                 param.requires_grad = True
+    #             self.transformer.transformer_blocks[i].zero_linear = nn.Linear(1152, 1152).to(next(self.transformer.transformer_blocks[i].parameters()).device)
+    #             nn.init.zeros_(self.transformer.transformer_blocks[i].zero_linear.weight)
+    #             nn.init.zeros_(self.transformer.transformer_blocks[i].zero_linear.bias)
 
     def replace_module(self):
         print("Initializing the new channel of DIT from the pretrained DIT.")
@@ -134,10 +320,11 @@ class ImagePredictionModel(nn.Module):
 
     def forward(self, prompt_embds, cond_image, target_image):
         prompt_embds = self.con_proj(prompt_embds)
-        cond_image = cond_image / 255
-        target_image = target_image / 255
-        cond_image = self.transform(cond_image)
-        target_image = self.transform(target_image)
+        # print(torch.max(cond_image), torch.max(target_image))
+        # cond_image = cond_image / 255
+        # target_image = target_image / 255
+        # cond_image = self.transform(cond_image)
+        # target_image = self.transform(target_image)
         target_latents = self.vae.encode(target_image).latent
         target_latents = target_latents * self.vae_config_scaling_factor
         noise = torch.randn_like(target_latents)
@@ -168,11 +355,11 @@ class ImagePredictionModel(nn.Module):
         # B 32 64 64
         concatenated_noisy_latents = torch.cat([noisy_model_input, original_image_embeds], dim=1)
         # 1=keep, 0=remove
-        prompt_attention_mask = torch.ones(prompt_embds.shape[0], prompt_embds.shape[1], dtype=torch.long, device=prompt_embds.device)
+        # prompt_attention_mask = torch.ones(prompt_embds.shape[0], prompt_embds.shape[1], dtype=torch.long, device=prompt_embds.device)
         # print(prompt_embds.shape)
         model_pred = self.transformer(
             hidden_states=concatenated_noisy_latents,
-            encoder_attention_mask=prompt_attention_mask,
+            # encoder_attention_mask=prompt_attention_mask,
             encoder_hidden_states=prompt_embds,
             timestep=timesteps,
             return_dict=False,
@@ -197,3 +384,10 @@ class ImagePredictionModel(nn.Module):
         )
         loss = loss.mean()
         return loss
+
+    # def forward(self, prompt_embds, cond_image, target_image):
+    #     prompt_embds = self.con_proj(prompt_embds)
+    #     cond_latents = self.vae.encoder(cond_image)
+    #     # torch.Size([25, 32, 16, 16])
+    #     print(cond_latents.shape)
+

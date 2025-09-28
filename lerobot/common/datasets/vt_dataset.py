@@ -49,6 +49,8 @@ from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.constants import REPOCARD_NAME
 from huggingface_hub.errors import RevisionNotFoundError
 
+from diffusers import SanaPipeline
+
 from lerobot.common.constants import HF_LEROBOT_HOME
 from lerobot.common.datasets.oxe_configs import OXE_DATASET_CONFIGS
 from lerobot.common.datasets.mixtures import OXE_NAMED_MIXTURES
@@ -1437,7 +1439,8 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
 class MultiDatasetforDistTraining(torch.utils.data.Dataset):
     def __init__(self, cfg, image_transforms, wrist_image_transforms = None, seed: int = 1000, 
-                 data_mix: str = "toy", vla2root_json: str = None, banlance_weight=True, is_ft = False):
+                 data_mix: str = "toy", vla2root_json: str = None, banlance_weight=True, is_ft = False,
+                 image_decoder_processor = None):
         """
         参数:
             cfg (TrainPipelineConfig): 训练配置文件
@@ -1518,7 +1521,9 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             print(f"CP_IMG token idx: {self.cp_sc_token_idx}, CP_ACT token idx: {self.cp_act_token_idx}")
         else:
             self.processor = None
-        
+
+        self.image_decoder_processor = image_decoder_processor
+
         self.datasets = []
         self.dataset_sizes = []
         self.dataset_names = []
@@ -1986,8 +1991,10 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         select_key = present_img_keys[0]
         # 3 H W
         img_pred_size = 512
-        first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
-        last_image = np.array(item[select_key][-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        # first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        # last_image = np.array(item[select_key][-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        first_image = self.image_decoder_processor.preprocess(item[select_key][0], height=img_pred_size, width=img_pred_size)
+        last_image = self.image_decoder_processor.preprocess(item[select_key][-1], height=img_pred_size, width=img_pred_size)
         # let the model not see the last frame
         if len(vision["video"]) > 1:
             vision["video"] = vision["video"][:-1]

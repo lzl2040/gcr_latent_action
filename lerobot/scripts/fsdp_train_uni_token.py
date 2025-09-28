@@ -82,6 +82,8 @@ from lerobot.scripts.eval import eval_policy
 from tqdm import tqdm
 import math
 
+from diffusers import SanaPipeline
+
 def init_logger(cfg, rank):
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO if rank == 0 else logging.WARN)
@@ -277,6 +279,13 @@ def train(cfg: TrainPipelineConfig):
     wrist_image_transforms = ImageTransforms(cfg.dataset.wrist_image_transforms)
     print(f"image transforms:{image_transforms}")
     print(f"wrist image transforms:{wrist_image_transforms}")
+
+    img_gen_pipe = SanaPipeline.from_pretrained(
+        cfg.policy.img_pred_model,
+        variant="fp16",
+        torch_dtype=torch.float16
+    ).to(f"cuda:{local_rank}")
+
     dataset = MultiDatasetforDistTraining(
         cfg=cfg, 
         image_transforms=image_transforms,
@@ -284,7 +293,8 @@ def train(cfg: TrainPipelineConfig):
         seed=seed,
         data_mix=cfg.data_mix,
         vla2root_json="vla2root.json",
-        is_ft=cfg.is_ft
+        is_ft=cfg.is_ft,
+        image_decoder_processor=img_gen_pipe.image_processor
         # vla2root_json="vla2root_bak_single.json"
     )
     
