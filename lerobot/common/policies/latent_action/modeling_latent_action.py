@@ -261,7 +261,12 @@ class LatentActionModel(PreTrainedPolicy):
         sc_embeddings = sc_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
         act_embeddings = act_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
 
+        actions_is_pad = batch.get("actions_id_pad")
+
         actions = self.uni_decoder.sample_actions(sc_embeddings, act_embeddings) # 128
+        if actions_is_pad is not None:
+            in_episode_bound = ~actions_is_pad
+            actions = actions * in_episode_bound.unsqueeze(-1)
         actions = actions.detach().cpu()
 
         # denormalization

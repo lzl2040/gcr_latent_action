@@ -787,6 +787,15 @@ class LeRobotDataset(torch.utils.data.Dataset):
         else:
             return get_hf_features_from_features(self.features)
 
+    def expand_true(self, mask, k=2):
+        mask = mask.clone()
+        true_idx = mask.nonzero(as_tuple=True)[0]
+        if len(true_idx) > 0:
+            start = true_idx[0].item()
+            new_start = max(0, start - k)
+            mask[new_start:] = True   # 注意这里是从 new_start 到最后都置为 True
+        return mask
+
     def _get_query_indices(self, idx: int, ep_idx: int) -> tuple[dict[str, list[int | bool]]]:
         ep_start = self.episode_data_index["from"][ep_idx]
         ep_end = self.episode_data_index["to"][ep_idx]
@@ -928,6 +937,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
             else:
                 video_frames = self._query_videos(query_timestamps, ep_idx, primary_obs_key=primary_obs_key)
             item = {**video_frames, **item}
+            if len(video_frames) < self.max_frame:
+                action_is_pad = padding["action_is_pad"]
+                # 假如从current_ts到最后只有30帧，我们期望只用29帧来得到它们之间的28个action，但现在代码用了30个action
+                action_is_pad = self.expand_true(action_is_pad, k=2)
+                padding["action_is_pad"] = action_is_pad
 
         if self.image_transforms is not None:
             image_keys = self.meta.camera_keys
@@ -1627,8 +1641,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                                   "observation.images.secondary", 
                                   "observation.images.wrist"] # follow https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/rlds/oxe/configs.py
         self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
-        # save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
-        save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
+        save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
+        # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
         # remove state
         self.use_state = cfg.policy.use_state
         if self.use_state == False:
@@ -1893,11 +1907,20 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         message[1]["content"].append({"type": "text", "text": answer_text})
         # print(self.processor.tokenizer)
 
+        # inputs = self.processor.apply_chat_template(message, 
+        #                                             add_generation_prompt=True, 
+        #                                             tokenize=False, 
+        #                                             return_dict=True, 
+        #                                             return_tensors="pt")
+        
+        # print(inputs)
+
         inputs = self.processor.apply_chat_template(message, 
                                                     add_generation_prompt=True, 
                                                     tokenize=True, 
                                                     return_dict=True, 
                                                     return_tensors="pt")
+                                                    
         
         
         input_ids = getattr(inputs, "input_ids", None)
