@@ -19,7 +19,7 @@ class LatentActionConfig(PreTrainedConfig):
     # img_pred_model: str = "/mnt/wangxiaofa/pt_weights/stable-diffusion-3.5-medium/"
     vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/"
     action_expert_path: str = "/mnt/wangxiaofa/pi0_pretrain/pi0_gemma_expert_only.pt"
-    img_encoder_model: str = "/mnt/wangxiaofa/pt_weight/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    img_encoder_model: str = "/mnt/wangxiaofa/pt_weights/CLIP-ViT-H-14-laion2B-s32B-b79K"
     # action_expert_path = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
     # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
     # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF"
