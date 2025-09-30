@@ -13,7 +13,8 @@ from lerobot.common.utils.utils import get_safe_dtype
 from lerobot.common.policies.latent_action.configuration_latent_action import LatentActionConfig
 from lerobot.common.policies.latent_action.action_decoder import PaliGemmaWithExpertConfig, ActionDecoderModel
 from lerobot.common.policies.latent_action.image_decoder import ImagePredictionModel as SDModel
-from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
+# from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
+from lerobot.common.policies.latent_action.image_decoder_sana_ip_adapter import ImagePredictionModel as SANAModel
 from lerobot.common.policies.latent_action.vlm_wrapper import InternVLModelWrapper
 
 import numpy as np
@@ -149,8 +150,8 @@ class LatentActionModel(PreTrainedPolicy):
     def generate_token_mask(self, input_ids):
         sc_token_ids = torch.tensor(self.sc_token_idx, device=input_ids.device)
         act_token_ids = torch.tensor(self.action_token_idx, device=input_ids.device)
-        sc_token_mask = torch.isin(input_ids, sc_token_ids)
         act_token_mask = torch.isin(input_ids, act_token_ids)
+        sc_token_mask = torch.isin(input_ids, sc_token_ids)
         
         # sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
         # act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)

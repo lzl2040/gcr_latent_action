@@ -73,7 +73,7 @@ def forward_ip_adapter(
 def forward_c(
     self,
     hidden_states: torch.Tensor,
-    condition: torch.Tensor,
+    # condition: torch.Tensor,
     encoder_hidden_states: torch.Tensor,
     timestep: torch.LongTensor,
     encoder_attention_mask: Optional[torch.Tensor] = None,
@@ -112,63 +112,35 @@ def forward_c(
 
     # 2. Transformer blocks
     if torch.is_grad_enabled() and self.gradient_checkpointing:
-        def create_custom_forward(module, return_dict=None):
-            def custom_forward(*inputs):
-                if return_dict is not None:
-                    return module(*inputs, return_dict=return_dict)
-                else:
-                    return module(*inputs)
-            return custom_forward
-
-        ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False}
-        for block in self.transformer_blocks:
-            hidden_states = torch.utils.checkpoint.checkpoint(
-                create_custom_forward(block),
+        for index_block, block in enumerate(self.transformer_blocks):
+            from torch.utils.checkpoint import checkpoint
+            # self._gradient_checkpointing_func
+            hidden_states = checkpoint(
+                block.forward,
                 hidden_states,
-                condition,
                 attention_mask,
                 encoder_hidden_states,
                 encoder_attention_mask,
                 timestep,
                 post_patch_height,
                 post_patch_width,
-                **ckpt_kwargs,
+                use_reentrant=True
             )
     else:
-        counter = 0
-        for block in self.transformer_blocks:
-            if counter < 14:
-                hidden_states = block(
-                    hidden_states,
-                    condition,
-                    attention_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                    timestep,
-                    post_patch_height,
-                    post_patch_width,
-                )
-            else:
-                hidden_states = block(
-                    hidden_states,
-                    # condition is omitted for these blocks
-                    attention_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                    timestep,
-                    post_patch_height,
-                    post_patch_width,
-                )
-            counter += 1
+        for index_block, block in enumerate(self.transformer_blocks):
+            hidden_states = block(
+                hidden_states,
+                attention_mask,
+                encoder_hidden_states,
+                encoder_attention_mask,
+                timestep,
+                post_patch_height,
+                post_patch_width,
+            )
 
     # 3. Normalization
-    shift, scale = (
-        self.scale_shift_table[None] + embedded_timestep[:, None].to(self.scale_shift_table.device)
-    ).chunk(2, dim=1)
-    hidden_states = self.norm_out(hidden_states)
+    hidden_states = self.norm_out(hidden_states, embedded_timestep, self.scale_shift_table)
 
-    # 4. Modulation
-    hidden_states = hidden_states * (1 + scale) + shift
     hidden_states = self.proj_out(hidden_states)
 
     # 5. Unpatchify
@@ -192,8 +164,6 @@ def get_sigmas(noise_scheduler, timesteps, n_dim=4, dtype=torch.float32, device 
     while len(sigma.shape) < n_dim:
         sigma = sigma.unsqueeze(-1)
     return sigma
-
-
 
 
 class ImagePredictionModel(nn.Module):
@@ -247,6 +217,7 @@ class ImagePredictionModel(nn.Module):
         )
         # follow instruct pix2pix
         self.replace_module()
+        # self.transformer.forward = forward_c.__get__(self.transformer)
 
         # follow ip-adapter
         # https://github.com/rotem154154/ControlNet-Sana/blob/main/models/finetuner_ip_adapter.py#L115
@@ -355,11 +326,11 @@ class ImagePredictionModel(nn.Module):
         # B 32 64 64
         concatenated_noisy_latents = torch.cat([noisy_model_input, original_image_embeds], dim=1)
         # 1=keep, 0=remove
-        # prompt_attention_mask = torch.ones(prompt_embds.shape[0], prompt_embds.shape[1], dtype=torch.long, device=prompt_embds.device)
+        prompt_attention_mask = torch.ones(prompt_embds.shape[0], prompt_embds.shape[1], dtype=torch.long, device=prompt_embds.device)
         # print(prompt_embds.shape)
         model_pred = self.transformer(
             hidden_states=concatenated_noisy_latents,
-            # encoder_attention_mask=prompt_attention_mask,
+            encoder_attention_mask=prompt_attention_mask,
             encoder_hidden_states=prompt_embds,
             timestep=timesteps,
             return_dict=False,

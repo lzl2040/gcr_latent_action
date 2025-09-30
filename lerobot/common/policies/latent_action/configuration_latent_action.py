@@ -15,16 +15,20 @@ class LatentActionConfig(PreTrainedConfig):
     # qwen_path: str = "/mnt/wangxiaofa/qwen_params/Qwen2.5-VL-7B-Instruct/"
     # qwen_path = "/datassd_1T/qwen25vl/Qwen2.5-VL-7B-Instruct/"
     # qwen_path: str = "/Data/lzl/qwen2.5_vl_7b/Qwen2.5-VL-7B-Instruct"
-    img_pred_model: str = "/mnt/wangxiaofa/pt_weights/Sana_600M_512px_diffusers/"
+    img_pred_model: str = "/mnt/wangxiaofa/pt_weights/Sana_1600M_512px_diffusers/"
     # img_pred_model: str = "/mnt/wangxiaofa/pt_weights/stable-diffusion-3.5-medium/"
-    vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-1B-HF/"
+    vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/"
     action_expert_path: str = "/mnt/wangxiaofa/pi0_pretrain/pi0_gemma_expert_only.pt"
+    img_encoder_model: str = "/mnt/wangxiaofa/pt_weight/CLIP-ViT-H-14-laion2B-s32B-b79K"
     # action_expert_path = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
     # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
-    # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-1B-HF"
+    # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF"
     # img_pred_model: str = "stabilityai/stable-diffusion-3.5-medium"
-    # img_pred_model: str = "/home/v-zuoleili/Pretrain/Sana_600M_512px_diffusers"
+    # img_pred_model: str = "/home/v-zuoleili/Pretrain/Sana_1600M_512px_diffusers"
     # action_expert_path: str = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
+    # img_encoder_model: str = "/home/v-zuoleili/Pretrain/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    ip_skip_num: int = 2
+    ip_token_num: int = 8
     
     # Input / output structure.
     n_obs_steps: int = 1
@@ -43,12 +47,12 @@ class LatentActionConfig(PreTrainedConfig):
     loss_type: str = "raw"
 
     # token num
-    num_action_token: int = 64
+    num_action_token: int = 50
     num_sc_token: int = 64
     action_token_idx: list = field(default_factory=list)
     sc_token_idx: list = field(default_factory=list)
-    vlm_token_dim: int = 1024 # 1B
-    # vlm_token_dim: int = 2048 # 2B
+    # vlm_token_dim: int = 1024 # 1B
+    vlm_token_dim: int = 2048 # 2B
     # vlm_token_dim: int = 2560 # 4B
     img_dim: int = 2048 # for simple linear layer 
     # img_dim: int = 1024 # for gemma

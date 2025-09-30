@@ -155,7 +155,7 @@ def clip_grad_norm_low_mem(parameters, max_norm):
         if p.grad is not None:
             # 分离梯度并复制，避免保持计算图
             grads.append(p.grad.detach().clone())
-    
+
     # 逐个处理梯度，减少峰值内存
     total_norm = 0.0
     for grad in grads:
@@ -195,6 +195,11 @@ def train_step(model, batch, scaler, cfg, sync_flag):
             else:
                 loss.backward()
             # 梯度裁剪（可选）
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None:
+            #         grad_norm = param.grad.norm(2)
+            #         if grad_norm.item() > 100:
+            #             print(name)
             grad_norm = clip_grad_norm_low_mem(model.parameters(), max_norm=6.0)
             # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             # 梯度平均，用于记录
@@ -343,6 +348,18 @@ def train(cfg: TrainPipelineConfig):
         trainable_params = sum(
             p.numel() for p in policy.parameters() if p.requires_grad
         )
+        vlm_trainbale_params = sum(
+            p.numel() for p in policy.vlm.parameters() if p.requires_grad
+        )
+        action_decoder_trainable_params = sum(
+            p.numel() for p in policy.uni_decoder.action_decoder.parameters() if p.requires_grad
+        )
+        image_decoder_trainable_params = sum(
+            p.numel() for p in policy.uni_decoder.image_decoder.parameters() if p.requires_grad
+        )
+        logger.info(f"VLM Trainable parameters: {vlm_trainbale_params:,} ({vlm_trainbale_params / 1e6:.2f}M)")
+        logger.info(f"Image Decoder Trainable parameters: {image_decoder_trainable_params:,} ({image_decoder_trainable_params / 1e6:.2f}M)")
+        logger.info(f"Action Decoder Trainable parameters: {action_decoder_trainable_params:,} ({action_decoder_trainable_params / 1e6:.2f}M)")
         logger.info(f"Trainable parameters: {trainable_params:,} ({trainable_params / 1e6:.2f}M)")
        
     # 训练状态初始化
