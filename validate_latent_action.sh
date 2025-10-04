@@ -1,23 +1,20 @@
-torchrun --nnodes=1 \
-    --nproc_per_node=1 \
-    --master_port=9912 \
-    lerobot/scripts/fsdp_train_uni_token.py \
+python scripts/validate_latent_action.py \
     --policy.type="latent_act" \
-    --policy.max_frame=16 \
-    --is_ft=false \
+    --policy.max_frame=52 \
+    --is_ft=true \
     --save_freq=2000 \
     --dataset.repo_id="whatever" \
-    --dataset.image_transforms.enable=true \
+    --dataset.image_transforms.enable=false \
     --dataset.wrist_image_transforms.enable=true \
     --dataset.wrist_image_transforms.is_primary=false \
-    --dataset.processor="/home/v-zuoleili/Pretrain/InternVL3_5-1B-HF" \
+    --dataset.processor="/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF" \
     --dataset.parent_dir="/home/v-zuoleili/Data/lerobot_data" \
-    --data_mix="mini" \
+    --data_mix="simpler_bridge" \
     --dataset.sample_ratio=5 \
     --output_dir="qwen_flow" \
-    --batch_size=10 \
+    --batch_size=1 \
     --steps=60_0000 \
-    --policy.scheduler_warmup_steps=10 \
+    --policy.scheduler_warmup_steps=10000 \
     --policy.scheduler_decay_steps=25000 \
     --policy.scheduler_platform_steps=20000 \
     --policy.optimizer_lr=1e-4 \
@@ -27,5 +24,6 @@ torchrun --nnodes=1 \
     --policy.train_from_scratch=true \
     --wandb.project="fsdp_qwen_pi0_ft" \
     --job_name="debug_simpler_bridge" \
+    --policy.pretrained_path="/home/v-zuoleili/Pretrain/latent-action/step25000.pt"
     # --wandb.enable=true \
     

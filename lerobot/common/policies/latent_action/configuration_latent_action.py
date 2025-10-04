@@ -32,10 +32,10 @@ class LatentActionConfig(PreTrainedConfig):
     
     # Input / output structure.
     n_obs_steps: int = 1
-    chunk_size: int = 50
-    n_action_steps: int = 50
+    chunk_size: int = 15
+    n_action_steps: int = 15
     
-    max_frame: int = 50
+    max_frame: int = 16
     use_state: bool = True
     
     topk: int = 8
@@ -47,7 +47,7 @@ class LatentActionConfig(PreTrainedConfig):
     loss_type: str = "raw"
 
     # token num
-    num_action_token: int = 50
+    num_action_token: int = 64
     num_sc_token: int = 64
     action_token_idx: list = field(default_factory=list)
     sc_token_idx: list = field(default_factory=list)

@@ -942,7 +942,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if len(video_frames) < self.max_frame:
                 action_is_pad = padding["action_is_pad"]
                 # 假如从current_ts到最后只有30帧，我们期望只用29帧来得到它们之间的28个action，但现在代码用了30个action
-                action_is_pad = self.expand_true(action_is_pad, k=2)
+                action_is_pad = self.expand_true(action_is_pad, k=1)
                 padding["action_is_pad"] = action_is_pad
 
         if self.image_transforms is not None:
@@ -1633,6 +1633,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
 
             # 打乱
             random.shuffle(self.id2data)
+            # print(self.id2data)
             print(f"Has shuffled the indices")
             self.dataset_len = temp_data_num
             print(f"Dataset length: {self.dataset_len}, Total episodes: {self.num_episodes}")
@@ -1896,7 +1897,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 },
             )
         frame_len = len(video)
-        question = random.choice(QUESTION_LIST).format(sent=text, T = frame_len-1, Tm1=frame_len - 2)
+        idx = random.randrange(len(QUESTION_LIST))  # 随机选一个索引
+        question = QUESTION_LIST[idx].format(sent=text, T = frame_len-1, Tm1=frame_len - 2)
         message[0]["content"].append({"type": "text", "text": question})
 
         # add answer
@@ -1904,8 +1906,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}{i}]" for i in range(self.cfg.policy.num_action_token)])
         compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}]" for i in range(self.cfg.policy.num_sc_token)])
         compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}]" for i in range(self.cfg.policy.num_action_token)])
-        
-        answer_text = random.choice(ANSWER_LIST).replace(f"[{COMPRESS_ACTION_TOKEN}]", compress_act_replace)
+        answer = ANSWER_LIST[idx]
+        answer_text = answer.replace(f"[{COMPRESS_ACTION_TOKEN}]", compress_act_replace)
         answer_text = answer_text.replace(f"[{COMPRESS_SC_TOKEN}]", compress_sc_replace)
 
         # print(question, answer_text)
@@ -1996,8 +1998,9 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # first_image = self.image_decoder_processor.preprocess(item[select_key][0], height=img_pred_size, width=img_pred_size)
         # last_image = self.image_decoder_processor.preprocess(item[select_key][-1], height=img_pred_size, width=img_pred_size)
         # let the model not see the last frame
-        if len(vision["video"]) > 1:
-            vision["video"] = vision["video"][:-1]
+
+        # if len(vision["video"]) > 1:
+        #     vision["video"] = vision["video"][:-1]
         # print(len(vision["video"]))
         return vision, first_image, last_image
 
