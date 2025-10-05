@@ -32,10 +32,10 @@ class LatentActionConfig(PreTrainedConfig):
     
     # Input / output structure.
     n_obs_steps: int = 1
-    chunk_size: int = 15
-    n_action_steps: int = 15
+    chunk_size: int = 5
+    n_action_steps: int = 5
     
-    max_frame: int = 16
+    max_frame: int = 6
     use_state: bool = True
     
     topk: int = 8
