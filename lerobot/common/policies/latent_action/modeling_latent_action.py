@@ -13,12 +13,25 @@ from lerobot.common.utils.utils import get_safe_dtype
 from lerobot.common.policies.latent_action.configuration_latent_action import LatentActionConfig
 from lerobot.common.policies.latent_action.action_decoder import PaliGemmaWithExpertConfig, ActionDecoderModel
 from lerobot.common.policies.latent_action.image_decoder import ImagePredictionModel as SDModel
-# from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
-from lerobot.common.policies.latent_action.image_decoder_sana_ip_adapter import ImagePredictionModel as SANAModel
+from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
+# from lerobot.common.policies.latent_action.image_decoder_sana_ip_adapter import ImagePredictionModel as SANAModel
 from lerobot.common.policies.latent_action.vlm_wrapper import InternVLModelWrapper
 
 import numpy as np
 import cv2
+from PIL import Image
+
+def get_generator(seed, device):
+
+    if seed is not None:
+        if isinstance(seed, list):
+            generator = [torch.Generator(device).manual_seed(seed_item) for seed_item in seed]
+        else:
+            generator = torch.Generator(device).manual_seed(seed)
+    else:
+        generator = None
+
+    return generator
 
 def pad_vector(vector, new_dim):
     """Can be (batch_size x sequence_length x features_dimension)
@@ -278,7 +291,9 @@ class LatentActionModel(PreTrainedPolicy):
         
         # actions = actions.numpy()
 
-        furture_image = self.uni_decoder.sample_images(first_image, sc_embeddings)
+        furture_image = self.uni_decoder.sample_ip_adapter_images(first_image, 
+                                                                  sc_embeddings,
+                                                                  num_inference_steps=20)
 
         return actions, furture_image
 
@@ -533,7 +548,75 @@ class UniDecoder(nn.Module):
         # suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         return v_t
-    
+
+    def sample_ip_adapter_images(self, cond_image, sc_embeddings, num_inference_steps=10):
+        print("123")
+        prompt_embeds = self.image_decoder.con_proj(sc_embeddings)
+        # print(prompt_embeds.shape)
+        device = prompt_embeds.device
+        clip_imgs = []
+        bs = cond_image.shape[0]
+        cond_image = cond_image.permute(0, 2, 3, 1)
+        cond_image = cond_image.detach().cpu().numpy()
+        for i in range(bs):
+            img = cond_image[i]
+            pil_img = Image.fromarray(img, mode="RGB")
+            clip_img = self.image_decoder.clip_processor(images=pil_img, return_tensors="pt").pixel_values
+            clip_imgs.append(clip_img)
+        clip_imgs = torch.cat(clip_imgs, dim = 0).to(device=device)
+        image_embeds = self.image_decoder.image_encoder(clip_imgs).image_embeds # this is cls token embedding
+        ip_tokens = self.image_decoder.img_proj_model(image_embeds) # torch.Size([25, 4, 1152])
+        # print(ip_tokens.shape)
+        b, h, w, c = cond_image.shape
+        # because we double the channel in the config
+        latent_channels = self.image_decoder.transformer.config.in_channels
+        latents = self.image_decoder.prepare_latents(b, latent_channels, 
+                                                     h, w, self.dtype, device)
+        # print(latents.shape)
+        
+        self.image_decoder.noise_scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.image_decoder.noise_scheduler.timesteps
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.image_decoder.noise_scheduler.order, 0)
+        for i, t in enumerate(timesteps):
+            # no classifier_free_guidance
+            latent_model_input = latents
+            # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+            timestep = t.expand(latent_model_input.shape[0])
+            timestep = timestep * self.image_decoder.transformer.config.timestep_scale
+            # print(latent_model_input.shape)
+
+            # predict noise model_output
+            noise_pred = self.image_decoder.transformer(
+                latent_model_input.to(dtype=self.dtype),
+                encoder_hidden_states=prompt_embeds.to(dtype=self.dtype),
+                ip_tokens=ip_tokens,
+                timestep=timestep,
+                return_dict=False
+            )[0]
+            noise_pred = noise_pred.float()
+
+            # learned sigma
+            # print(self.image_decoder.transformer.config.out_channels // 2, latent_channels)
+            if self.image_decoder.transformer.config.out_channels // 2 == latent_channels:
+                noise_pred = noise_pred.chunk(2, dim=1)[0]
+
+            # compute previous image: x_t -> x_t-1
+            # print(noise_pred.shape, latents.shape)
+            latents = self.image_decoder.noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+        
+        try:
+            latents = latents.to(dtype=self.dtype)
+            image = self.image_decoder.vae.decode(latents / self.image_decoder.vae.config.scaling_factor, return_dict=False)[0]
+        except Exception as e:
+            print(
+                f"{e}. \n"
+                f"Try to use VAE tiling for large images. For example: \n"
+                f"pipe.vae.enable_tiling(tile_sample_min_width=512, tile_sample_min_height=512)"
+            )
+        image = self.image_decoder.image_processor.postprocess(image, output_type="np")
+        return image
+
+
     def sample_images(self, first_image, sc_embeddings, num_inference_steps=10):
         # https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/sana/pipeline_sana.py#L131
         b, c, h, w = first_image.shape
