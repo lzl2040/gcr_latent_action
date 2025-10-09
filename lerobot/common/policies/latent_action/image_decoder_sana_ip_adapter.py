@@ -8,8 +8,11 @@ from diffusers import (
 )
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection, CLIPTextModelWithProjection
 from diffusers.models.attention import BasicTransformerBlock,JointTransformerBlock
+from diffusers.utils.torch_utils import get_device, is_torch_version, randn_tensor
 from diffusers.models.transformers.sana_transformer import SanaTransformerBlock, SanaAttnProcessor2_0
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
+from diffusers.image_processor import PixArtImageProcessor
+from diffusers import StableDiffusionPipeline
 from diffusers.models.attention_processor import Attention
 from typing import Any, Dict, Optional, Tuple, Union
 import copy
@@ -17,6 +20,7 @@ from transformers import CLIPImageProcessor
 from PIL import Image
 import torchvision.transforms as transforms
 import math
+from lerobot.common.policies.latent_action.image_resampler import Resampler
 
 
 def get_sigmas(noise_scheduler, timesteps, n_dim=4, dtype=torch.float32, device = "cuda"):
@@ -29,6 +33,7 @@ def get_sigmas(noise_scheduler, timesteps, n_dim=4, dtype=torch.float32, device 
     while len(sigma.shape) < n_dim:
         sigma = sigma.unsqueeze(-1)
     return sigma
+
 
 class ImageProjModel(torch.nn.Module):
     """Projection Model"""
@@ -81,7 +86,7 @@ class SanaTransformerBlock_IP(SanaTransformerBlock):
             self.zero_linear = nn.Linear(cross_attention_dim, cross_attention_dim)
             nn.init.zeros_(self.zero_linear.weight)
             nn.init.zeros_(self.zero_linear.bias)
-        
+
     def forward(self, 
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
@@ -269,14 +274,31 @@ class ImagePredictionModel(nn.Module):
             locals_files_only=True
         )
 
-        self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(
-            self.img_encoder_model)
-        
-        self.img_proj_model = ImageProjModel(
-            cross_attention_dim=self.transformer.config.cross_attention_dim,
-            clip_embeddings_dim=self.image_encoder.config.projection_dim,
-            clip_extra_context_tokens=self.config.ip_token_num)
+        self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.img_encoder_model)
+        if config.ip_img_token_num == 1:
+            self.img_proj_model = ImageProjModel(
+                cross_attention_dim=self.transformer.config.cross_attention_dim,
+                clip_embeddings_dim=self.image_encoder.config.projection_dim,
+                clip_extra_context_tokens=self.config.ip_token_num)
+        else:
+            self.img_proj_model = Resampler(
+                                        dim=self.transformer.config.cross_attention_dim,
+                                        depth=4,
+                                        dim_head=64,
+                                        heads=12,
+                                        num_queries=config.ip_img_token_num,
+                                        embedding_dim=self.image_encoder.config.hidden_size,
+                                        output_dim=self.transformer.config.cross_attention_dim,
+                                        ff_mult=2)
         self.clip_processor = CLIPImageProcessor()
+
+        self.vae_config_scaling_factor = self.vae.config.scaling_factor
+        self.vae_scale_factor = (
+            2 ** (len(self.vae.config.encoder_block_out_channels) - 1)
+            if hasattr(self, "vae") and self.vae is not None
+            else 32
+        )
+        self.image_processor = PixArtImageProcessor(vae_scale_factor=self.vae_scale_factor)
 
         self.con_proj = nn.Linear(self.config.vlm_token_dim, self.transformer.config.caption_channels)
 
@@ -331,10 +353,31 @@ class ImagePredictionModel(nn.Module):
         self.transformer.forward = forward_c.__get__(self.transformer)
         missing_keys, unexpected_key = self.transformer.load_state_dict(old_transformer_weights, strict=False)
         print(missing_keys)
+    
+    def prepare_latents(self, batch_size, num_channels_latents, height, width, 
+                        dtype, device, generator = None, latents=None):
+        if latents is not None:
+            return latents.to(device=device, dtype=dtype)
 
-    def forward(self, prompt_embds, cond_image, target_image):
-        prompt_embds = self.con_proj(prompt_embds)
-        device = prompt_embds.device
+        shape = (
+            batch_size,
+            num_channels_latents,
+            int(height) // self.vae_scale_factor,
+            int(width) // self.vae_scale_factor,
+        )
+        # print(height, width, self.vae_scale_factor)
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+
+        latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        return latents
+
+    def forward(self, prompt_embeds, cond_image, target_image):
+        prompt_embeds = self.con_proj(prompt_embeds)
+        device = prompt_embeds.device
         clip_imgs = []
         bs = cond_image.shape[0]
         cond_image = cond_image.permute(0, 2, 3, 1)
@@ -345,8 +388,10 @@ class ImagePredictionModel(nn.Module):
             clip_img = self.clip_processor(images=pil_img, return_tensors="pt").pixel_values
             clip_imgs.append(clip_img)
         clip_imgs = torch.cat(clip_imgs, dim = 0).to(device=device)
-        image_embeds = self.image_encoder(clip_imgs).image_embeds # this is cls token embedding
+        # image_embeds = self.image_encoder(clip_imgs).image_embeds # this is cls token embedding
+        image_embeds = self.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
         ip_tokens = self.img_proj_model(image_embeds) # torch.Size([25, 4, 1152])
+        # print(ip_tokens.shape)
 
         target_image = target_image / 255
         target_image = self.transform(target_image)
@@ -377,7 +422,7 @@ class ImagePredictionModel(nn.Module):
         model_pred = self.transformer(
             hidden_states=noisy_model_input,
             # encoder_attention_mask=prompt_attention_mask,
-            encoder_hidden_states=prompt_embds,
+            encoder_hidden_states=prompt_embeds,
             ip_tokens=ip_tokens,
             timestep=timesteps,
             return_dict=False,
@@ -400,6 +445,7 @@ class ImagePredictionModel(nn.Module):
         )
         loss = loss.mean()
         return loss
+    
 
 
 

@@ -472,6 +472,7 @@ def train(cfg: TrainPipelineConfig):
         "loss": AverageMeter("loss", ":.4f"),
         "img_loss": AverageMeter("img_loss", ":.4f"),
         "action_loss": AverageMeter("action_loss", ":.4f"),
+        "language_loss": AverageMeter("language_loss", ":.4f"),
         "grad_norm": AverageMeter("grdn", ":.4f"),
         "lr": AverageMeter("lr", ":0.01e"),
         "update_s": AverageMeter("updt_s", ":.3f"),
@@ -502,6 +503,7 @@ def train(cfg: TrainPipelineConfig):
     loss_value = 0.0
     img_loss_value = 0.0
     action_loss_value = 0.0
+    language_loss_value = 0.0
     
     if cfg.is_ft:
         cfg.job_type = "finetune"
@@ -571,6 +573,7 @@ def train(cfg: TrainPipelineConfig):
         loss_value += loss.detach().mean().item()
         img_loss_value += outputs["image_loss"]
         action_loss_value += outputs["action_loss"]
+        language_loss_value += outputs["language_loss"]
             
         step_time = time.perf_counter() - step_start
         fwd_bwd_time += step_time
@@ -596,6 +599,7 @@ def train(cfg: TrainPipelineConfig):
             train_tracker.loss = loss_value
             train_tracker.img_loss = img_loss_value
             train_tracker.action_loss = action_loss_value
+            train_tracker.language_loss = language_loss_value
             train_tracker.grad_norm = grad_norm_value
             train_tracker.lr = optimizer.param_groups[0]["lr"]
             train_tracker.step()
@@ -605,6 +609,7 @@ def train(cfg: TrainPipelineConfig):
             loss_value = 0.0
             img_loss_value = 0.0
             action_loss_value = 0.0
+            language_loss_value = 0.0
             grad_norm_value = 0.0
             
             # 学习率调度

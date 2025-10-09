@@ -4,7 +4,7 @@ from collections import deque
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
-from transformers import AutoTokenizer, AutoModel, InternVLForConditionalGeneration, AutoConfig
+from transformers import AutoTokenizer, AutoModel, InternVLForConditionalGeneration, AutoConfig, LlamaForCausalLM, Trainer
 
 from lerobot.common.constants import ACTION, OBS_ROBOT
 
@@ -13,8 +13,8 @@ from lerobot.common.utils.utils import get_safe_dtype
 from lerobot.common.policies.latent_action.configuration_latent_action import LatentActionConfig
 from lerobot.common.policies.latent_action.action_decoder import PaliGemmaWithExpertConfig, ActionDecoderModel
 from lerobot.common.policies.latent_action.image_decoder import ImagePredictionModel as SDModel
-from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
-# from lerobot.common.policies.latent_action.image_decoder_sana_ip_adapter import ImagePredictionModel as SANAModel
+# from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
+from lerobot.common.policies.latent_action.image_decoder_sana_ip_adapter import ImagePredictionModel as SANAModel
 from lerobot.common.policies.latent_action.vlm_wrapper import InternVLModelWrapper
 
 import numpy as np
@@ -122,6 +122,7 @@ class LatentActionModel(PreTrainedPolicy):
                                                                     # config=vlm_config,
                                                                     local_files_only=True,
                                                                     trust_remote_code=True)
+        # print(self.vlm.loss_function) # ForCausalLMLoss
         # 有效果这个: 39G (wo)-> 31G (w), for bs=1, max_frame=30
         self.vlm.model.language_model._set_gradient_checkpointing()
         self.vlm.model.vision_tower.gradient_checkpointing = True
@@ -163,16 +164,17 @@ class LatentActionModel(PreTrainedPolicy):
     def generate_token_mask(self, input_ids):
         sc_token_ids = torch.tensor(self.sc_token_idx, device=input_ids.device)
         act_token_ids = torch.tensor(self.action_token_idx, device=input_ids.device)
-        act_token_mask = torch.isin(input_ids, act_token_ids)
-        sc_token_mask = torch.isin(input_ids, sc_token_ids)
+        # act_token_mask = torch.isin(input_ids, act_token_ids)
+        # sc_token_mask = torch.isin(input_ids, sc_token_ids)
         
-        # sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
-        # act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
-        # bs = sc_token_mask.shape[0]
-        # pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
-        # # print(act_token_mask.shape, pad.shape)
-        # act_token_mask = torch.cat([act_token_mask, pad], dim=1)
-        # sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
+        # because the loss is ForCausalLMLoss
+        sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
+        act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
+        bs = sc_token_mask.shape[0]
+        pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
+        # print(act_token_mask.shape, pad.shape)
+        act_token_mask = torch.cat([act_token_mask, pad], dim=1)
+        sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
         # print(sc_token_mask.sum().item(), act_token_mask.sum().item())
         return sc_token_mask, act_token_mask
     
@@ -180,6 +182,7 @@ class LatentActionModel(PreTrainedPolicy):
         # print(batch["video_len"])
         pixel_values = batch["pixel_values"]
         input_ids = batch["input_ids"] # 对于224分辨率图像，每个image占64个token
+        labels = batch["labels"]
         attention_mask = batch["attention_mask"]
         video_len = batch["video_len"]
         first_image = batch["first_image"]
@@ -192,8 +195,10 @@ class LatentActionModel(PreTrainedPolicy):
         bsize = input_ids.shape[0]
         # torch.Size([B*T, 3, 224, 224]) torch.Size([1, 3266]) torch.Size([1, 3266])
         # print(pixel_values.shape, input_ids.shape, attention_mask.shape)
+        # print(input_ids.shape, labels.shape)
         output = self.vlm(
             input_ids=input_ids,
+            labels=labels,
             pixel_values=pixel_values,
             attention_mask=attention_mask,
             output_hidden_states=True,
@@ -222,6 +227,7 @@ class LatentActionModel(PreTrainedPolicy):
                                   actions)
         action_loss = losses["action_loss"]
         image_loss = losses["image_loss"]
+        lg_loss = output.loss
         loss_dict["action_losses_after_forward"] = action_loss.clone()
 
         if actions_is_pad is not None:
@@ -239,6 +245,7 @@ class LatentActionModel(PreTrainedPolicy):
         loss_dict["total_loss"] = loss.item()
         loss_dict["action_loss"] = action_loss.mean().item()
         loss_dict["image_loss"] = image_loss.mean().item()
+        loss_dict["language_loss"] = lg_loss.mean().item()
         # print(loss_dict["total_loss"], loss_dict["action_loss"], loss_dict["image_loss"])
 
         return loss, loss_dict
@@ -470,7 +477,6 @@ class UniDecoder(nn.Module):
         # image predict
         losses["image_loss"] = self.image_decoder(sc_embedding, first_image, last_image)
         return losses
-
 
     def sample_actions(self, sc_embedding, act_embeddings, action_noise = None):
         bsize = sc_embedding.shape[0]

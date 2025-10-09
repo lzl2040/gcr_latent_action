@@ -111,7 +111,7 @@ from tabulate import tabulate
 
 
 CODEBASE_VERSION = "v2.1"
-PAD_VALUE = {"attention_mask": 0, "input_ids": 151643}
+PAD_VALUE = {"attention_mask": 0, "input_ids": 151643, "labels": IGNORE_TOKEN_ID}
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -1932,6 +1932,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         
         
         input_ids = getattr(inputs, "input_ids", None)
+        labels = preprocess_labels(input_ids, self.processor.tokenizer)
         attention_mask = getattr(inputs, "attention_mask", None) # all is 1
         # print(attention_mask)
         pixel_values = getattr(inputs, "pixel_values", None)
@@ -1941,6 +1942,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         
         return_dict = {
             "input_ids": input_ids,
+            "labels": labels,
             "attention_mask": attention_mask,
             "pixel_values": pixel_values,
             "video_len": frame_len,
@@ -2112,6 +2114,43 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             return self.dataset.features
         else:
             return get_hf_features_from_features(self.features)
+
+def preprocess_labels(input_ids, tokenizer):
+    """
+    仅保留第二个 <|im_start|> 到 <|im_end|> 之间的 token 作为有效标签，
+    其他位置标记为 IGNORE_ID。
+    使用 torch.nonzero() 实现高效索引查找。
+    """
+    # CP_IMG token idx: [151680], CP_ACT token idx: [151679]
+    if not isinstance(input_ids, torch.Tensor):
+        input_ids = torch.tensor(input_ids, dtype=torch.long)
+
+    # 获取特殊 token ID
+    img_start_id = tokenizer("<|im_start|>", add_special_tokens=False).input_ids[0]
+    img_end_id = tokenizer("<|im_end|>", add_special_tokens=False).input_ids[0]
+    # print(f"img_start_id={img_start_id}, img_end_id={img_end_id}")
+
+    # 找所有 start 和 end 索引
+    start_indices = torch.nonzero(input_ids[0] == img_start_id, as_tuple=False).flatten()
+    end_indices = torch.nonzero(input_ids[0] == img_end_id, as_tuple=False).flatten()
+    # print(start_indices.shape)
+
+    # 若不足两个 start 或没有 end，则直接全部 IGNORE
+    if len(start_indices) < 2 or len(end_indices) == 0:
+        return torch.full_like(input_ids, IGNORE_TOKEN_ID)
+
+    # 第二个 start
+    # print(start_indices, end_indices)
+    start = start_indices[1].item()
+    # print(input_ids[0, start+1:start+25])
+    end = end_indices[1].item()
+    # print(input_ids[0, end-25:end])
+
+    # 创建 labels
+    labels = torch.full_like(input_ids, IGNORE_TOKEN_ID)
+    labels[start:end + 1] = input_ids[start:end + 1]
+
+    return labels
 
 
 def preprocess_internvl2_5(
@@ -2306,7 +2345,7 @@ def dataset_func_test(cfg: TrainPipelineConfig):
         
 def extra_collate_fn(batch):
     collated = {}
-    key_to_pad = ["input_ids", "attention_mask"]
+    key_to_pad = ["input_ids", "attention_mask", "labels"]
     key_to_default_collate = ["observation.state", "action"]
     key_to_append_to_list = ["second_per_grid_ts"]
     for key in batch[0].keys():
