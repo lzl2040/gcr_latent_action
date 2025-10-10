@@ -221,7 +221,7 @@ class LatentActionModel(PreTrainedPolicy):
         # for action, feed sc_embeddings, act_embeddings into the decoder
         # pixel_values = pixel_values.view(bsize, -1, 3, h, w)
         loss_dict = {}
-        actions_is_pad = batch.get("actions_id_pad")
+        actions_is_pad = batch.get("actions_is_pad")
         losses = self.uni_decoder(first_image,
                                   last_image, 
                                   sc_embeddings, 

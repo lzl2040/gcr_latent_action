@@ -275,7 +275,7 @@ class ImagePredictionModel(nn.Module):
         )
 
         self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.img_encoder_model)
-        if config.ip_img_token_num == 1:
+        if config.ip_token_num == 8:
             self.img_proj_model = ImageProjModel(
                 cross_attention_dim=self.transformer.config.cross_attention_dim,
                 clip_embeddings_dim=self.image_encoder.config.projection_dim,
@@ -286,7 +286,7 @@ class ImagePredictionModel(nn.Module):
                                         depth=4,
                                         dim_head=64,
                                         heads=12,
-                                        num_queries=config.ip_img_token_num,
+                                        num_queries=config.ip_token_num,
                                         embedding_dim=self.image_encoder.config.hidden_size,
                                         output_dim=self.transformer.config.cross_attention_dim,
                                         ff_mult=2)

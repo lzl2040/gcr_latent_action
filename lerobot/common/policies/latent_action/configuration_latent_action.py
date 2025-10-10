@@ -24,12 +24,11 @@ class LatentActionConfig(PreTrainedConfig):
     # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
     # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF"
     # img_pred_model: str = "stabilityai/stable-diffusion-3.5-medium"
-    # img_pred_model: str = "/home/v-zuoleili/Pretrain/Sana_1600M_512px_diffusers"
+    #img_pred_model: str = "/home/v-zuoleili/Pretrain/Sana_1600M_512px_diffusers"
     # action_expert_path: str = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
     # img_encoder_model: str = "/home/v-zuoleili/Pretrain/CLIP-ViT-H-14-laion2B-s32B-b79K"
     ip_skip_num: int = 2
-    ip_token_num: int = 8
-    ip_img_token_num: int = 32
+    ip_token_num: int = 32 # for image projection is 8
     
     # Input / output structure.
     n_obs_steps: int = 1
