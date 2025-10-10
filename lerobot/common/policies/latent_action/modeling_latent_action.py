@@ -122,6 +122,8 @@ class LatentActionModel(PreTrainedPolicy):
                                                                     # config=vlm_config,
                                                                     local_files_only=True,
                                                                     trust_remote_code=True)
+        # vocab_size = self.vlm.config.vocab_size + 2
+        # self.
         # print(self.vlm.loss_function) # ForCausalLMLoss
         # 有效果这个: 39G (wo)-> 31G (w), for bs=1, max_frame=30
         self.vlm.model.language_model._set_gradient_checkpointing()
@@ -228,6 +230,7 @@ class LatentActionModel(PreTrainedPolicy):
         action_loss = losses["action_loss"]
         image_loss = losses["image_loss"]
         lg_loss = output.loss
+        # print(lg_loss)
         loss_dict["action_losses_after_forward"] = action_loss.clone()
 
         if actions_is_pad is not None:
@@ -240,7 +243,7 @@ class LatentActionModel(PreTrainedPolicy):
         loss_dict["action_losses_after_rm_padding"] = action_loss.clone()
 
         # For backward pass
-        loss = action_loss.mean() + self.config.img_loss_weight * image_loss.mean()
+        loss = action_loss.mean() + self.config.img_loss_weight * image_loss.mean() + lg_loss.mean()
         # For logging
         loss_dict["total_loss"] = loss.item()
         loss_dict["action_loss"] = action_loss.mean().item()
