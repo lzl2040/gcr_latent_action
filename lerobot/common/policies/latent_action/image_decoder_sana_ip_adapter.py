@@ -283,7 +283,7 @@ class ImagePredictionModel(nn.Module):
         else:
             self.img_proj_model = Resampler(
                                         dim=self.transformer.config.cross_attention_dim // 2,
-                                        depth=4,
+                                        depth=3,
                                         dim_head=32,
                                         heads=6,
                                         num_queries=config.ip_token_num,
