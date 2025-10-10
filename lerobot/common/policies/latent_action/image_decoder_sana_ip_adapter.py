@@ -282,9 +282,9 @@ class ImagePredictionModel(nn.Module):
                 clip_extra_context_tokens=self.config.ip_token_num)
         else:
             self.img_proj_model = Resampler(
-                                        dim=self.transformer.config.cross_attention_dim // 2,
-                                        depth=3,
-                                        dim_head=32,
+                                        dim=self.transformer.config.cross_attention_dim,
+                                        depth=4,
+                                        dim_head=64,
                                         heads=6,
                                         num_queries=config.ip_token_num,
                                         embedding_dim=self.image_encoder.config.hidden_size,
@@ -319,7 +319,7 @@ class ImagePredictionModel(nn.Module):
         self.prepare_ip_adapter_module(n = self.config.ip_skip_num, ip_token_num = self.config.ip_token_num)
         for name, param in self.transformer.named_parameters():
             # 10.10: add train attn2
-            if "attn3" in name or "zero_linear" in name or "attn2" in name:
+            if "attn3" in name or "zero_linear" in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
