@@ -21,6 +21,7 @@ CALVIN_SUB_TASK=0
 USE_STATE=true
 LOSS_TYPE="raw"
 IS_FT=true
+IP_TOKEN_NUM=16
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -89,6 +90,10 @@ while [[ $# -gt 0 ]]; do
             MAX_FRAME="$2"
             shift 2
             ;;
+        --ip_token_num)
+            IP_TOKEN_NUM="$2"
+            shift 2
+            ;;
         --calvin_sub_task)
             CALVIN_SUB_TASK="$2"
             shift 2
@@ -146,6 +151,7 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --policy.use_lora=$USE_LORA \
     --policy.max_frame=$MAX_FRAME \
     --policy.loss_type=$LOSS_TYPE \
+    --policy.ip_token_num=$IP_TOKEN_NUM \
     --output_dir="$FIXED_OUTPUT_DIR" \
     --dataset.repo_id="whatever" \
     --dataset.image_transforms.enable=false \

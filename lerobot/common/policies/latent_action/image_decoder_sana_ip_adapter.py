@@ -284,8 +284,8 @@ class ImagePredictionModel(nn.Module):
             self.img_proj_model = Resampler(
                                         dim=self.transformer.config.cross_attention_dim // 2,
                                         depth=4,
-                                        dim_head=64,
-                                        heads=12,
+                                        dim_head=32,
+                                        heads=6,
                                         num_queries=config.ip_token_num,
                                         embedding_dim=self.image_encoder.config.hidden_size,
                                         output_dim=self.transformer.config.cross_attention_dim,
