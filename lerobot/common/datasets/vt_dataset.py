@@ -2148,8 +2148,7 @@ def preprocess_labels(input_ids, tokenizer):
 
     # 创建 labels
     labels = torch.full_like(input_ids, IGNORE_TOKEN_ID)
-    labels[start:end + 1] = input_ids[start:end + 1]
-
+    labels[:, start:end + 1] = input_ids[:, start:end + 1]
     return labels
 
 
