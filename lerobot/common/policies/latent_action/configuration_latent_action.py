@@ -29,7 +29,7 @@ class LatentActionConfig(PreTrainedConfig):
     # img_encoder_model: str = "/home/v-zuoleili/Pretrain/CLIP-ViT-H-14-laion2B-s32B-b79K"
     ip_skip_num: int = 2
     ip_token_num: int = 8
-    ip_img_token_num: int = 16
+    ip_img_token_num: int = 32
     
     # Input / output structure.
     n_obs_steps: int = 1
