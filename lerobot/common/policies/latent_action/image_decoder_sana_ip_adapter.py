@@ -318,7 +318,8 @@ class ImagePredictionModel(nn.Module):
         
         self.prepare_ip_adapter_module(n = self.config.ip_skip_num, ip_token_num = self.config.ip_token_num)
         for name, param in self.transformer.named_parameters():
-            if "attn3" in name or "zero_linear" in name:
+            # 10.10: add train attn2
+            if "attn3" in name or "zero_linear" in name or "attn2" in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
