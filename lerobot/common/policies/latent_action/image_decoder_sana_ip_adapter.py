@@ -282,7 +282,7 @@ class ImagePredictionModel(nn.Module):
                 clip_extra_context_tokens=self.config.ip_token_num)
         else:
             self.img_proj_model = Resampler(
-                                        dim=self.transformer.config.cross_attention_dim,
+                                        dim=self.transformer.config.cross_attention_dim // 2,
                                         depth=4,
                                         dim_head=64,
                                         heads=12,

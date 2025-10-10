@@ -285,7 +285,8 @@ class LatentActionModel(PreTrainedPolicy):
         sc_embeddings = sc_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
         act_embeddings = act_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
 
-        actions_is_pad = batch.get("actions_id_pad")
+        actions_is_pad = batch.get("actions_is_pad")
+        # print(actions_is_pad)
 
         actions = self.uni_decoder.sample_actions(sc_embeddings, act_embeddings) # 128
         if actions_is_pad is not None:
@@ -559,7 +560,7 @@ class UniDecoder(nn.Module):
         return v_t
 
     def sample_ip_adapter_images(self, cond_image, sc_embeddings, num_inference_steps=10):
-        print("123")
+        # print("123")
         prompt_embeds = self.image_decoder.con_proj(sc_embeddings)
         # print(prompt_embeds.shape)
         device = prompt_embeds.device
