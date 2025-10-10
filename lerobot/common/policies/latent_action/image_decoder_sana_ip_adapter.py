@@ -317,12 +317,12 @@ class ImagePredictionModel(nn.Module):
         self.image_encoder.requires_grad_(False)
         
         self.prepare_ip_adapter_module(n = self.config.ip_skip_num, ip_token_num = self.config.ip_token_num)
-        # for name, param in self.transformer.named_parameters():
-        #     # 10.10: add train attn2
-        #     if "attn3" in name or "zero_linear" in name:
-        #         param.requires_grad = True
-        #     else:
-        #         param.requires_grad = False
+        for name, param in self.transformer.named_parameters():
+            # 10.10: add train attn2
+            if "attn3" in name or "zero_linear" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
     
     def prepare_ip_adapter_module(self, n = 2, ip_token_num = 4):
         print("Replace IP-Adapter Module")
