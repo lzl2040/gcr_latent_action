@@ -389,8 +389,10 @@ class ImagePredictionModel(nn.Module):
             clip_img = self.clip_processor(images=pil_img, return_tensors="pt").pixel_values
             clip_imgs.append(clip_img)
         clip_imgs = torch.cat(clip_imgs, dim = 0).to(device=device)
-        # image_embeds = self.image_encoder(clip_imgs).image_embeds # this is cls token embedding
-        image_embeds = self.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
+        # for img_proj_model is clip
+        image_embeds = self.image_encoder(clip_imgs).image_embeds # this is cls token embedding
+        # for img_proj_model is resampler
+        # image_embeds = self.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
         ip_tokens = self.img_proj_model(image_embeds) # torch.Size([25, 4, 1152])
         # print(ip_tokens.shape)
 

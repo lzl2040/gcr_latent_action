@@ -166,17 +166,17 @@ class LatentActionModel(PreTrainedPolicy):
     def generate_token_mask(self, input_ids):
         sc_token_ids = torch.tensor(self.sc_token_idx, device=input_ids.device)
         act_token_ids = torch.tensor(self.action_token_idx, device=input_ids.device)
-        # act_token_mask = torch.isin(input_ids, act_token_ids)
-        # sc_token_mask = torch.isin(input_ids, sc_token_ids)
+        act_token_mask = torch.isin(input_ids, act_token_ids)
+        sc_token_mask = torch.isin(input_ids, sc_token_ids)
         
         # because the loss is ForCausalLMLoss
-        sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
-        act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
-        bs = sc_token_mask.shape[0]
-        pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
-        # print(act_token_mask.shape, pad.shape)
-        act_token_mask = torch.cat([act_token_mask, pad], dim=1)
-        sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
+        # sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
+        # act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
+        # bs = sc_token_mask.shape[0]
+        # pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
+        # # print(act_token_mask.shape, pad.shape)
+        # act_token_mask = torch.cat([act_token_mask, pad], dim=1)
+        # sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
         # print(sc_token_mask.sum().item(), act_token_mask.sum().item())
         return sc_token_mask, act_token_mask
     
@@ -304,6 +304,7 @@ class LatentActionModel(PreTrainedPolicy):
 
         furture_image = self.uni_decoder.sample_ip_adapter_images(first_image, 
                                                                   sc_embeddings,
+                                                                  # default 20
                                                                   num_inference_steps=20)
 
         return actions, furture_image
