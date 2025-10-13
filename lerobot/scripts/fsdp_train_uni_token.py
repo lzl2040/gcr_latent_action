@@ -363,8 +363,12 @@ def train(cfg: TrainPipelineConfig):
         logger.info(f"Trainable parameters: {trainable_params:,} ({trainable_params / 1e6:.2f}M)")
        
     # 训练状态初始化
+    # print("Before resume:")
+    # print(torch.cuda.memory_allocated() / 1024**2, "MB allocated")
+    # print(torch.cuda.memory_reserved() / 1024**2, "MB reserved")
     if cfg.resume:
         if pts:
+            torch.cuda.empty_cache()
             cfg.resume = os.path.join(cfg.output_dir, f"step{step-1}.pt")
             logger.info(f"Resuming from checkpoint {cfg.resume} at step {step}")
             model_state_dict = torch.load(cfg.resume, map_location="cpu")
@@ -378,10 +382,15 @@ def train(cfg: TrainPipelineConfig):
             policy.load_state_dict(model_state_dict, strict=True)
             del model_state_dict
             del key_to_remove
+            torch.cuda.empty_cache()
+            logger.info("Checkpoint loaded successfully.")
         else:
             cfg.resume = False
             logger.info("No checkpoint found, starting from scratch.")
-            
+    
+    # print("\nAfter resume:")
+    # print(torch.cuda.memory_allocated() / 1024**2, "MB allocated")
+    # print(torch.cuda.memory_reserved() / 1024**2, "MB reserved")
     # 设置模型全部参数为BF16
     logger.info("Setting model parameters to BF16...")
     for params in policy.parameters():
@@ -484,7 +493,7 @@ def train(cfg: TrainPipelineConfig):
         dataset.num_frames,
         dataset.num_episodes,
         train_metrics,
-        initial_step=int(step/4)
+        initial_step=int(step//cfg.gradient_accumulation_steps)
     )
     
     # 主训练循环
@@ -509,6 +518,10 @@ def train(cfg: TrainPipelineConfig):
         cfg.job_type = "finetune"
     else:
         cfg.job_type = "pretrain"
+    
+    print("Before resume:")
+    print(torch.cuda.memory_allocated() / 1024**2, "MB allocated")
+    print(torch.cuda.memory_reserved() / 1024**2, "MB reserved")
     if cfg.resume:
         logger.info("Setting up learning rate scheduler...")
         # for _ in range(int((step-1)/cfg.gradient_accumulation_steps)):
@@ -531,6 +544,10 @@ def train(cfg: TrainPipelineConfig):
             resume_indices = epoch_indices[start_idx : ]
             
             resume_dataset = Subset(dataset, resume_indices)
+
+            del dataloader
+            del dataloader_iter
+            torch.cuda.empty_cache()
             
             dataloader = DataLoader(
                 resume_dataset,
@@ -553,6 +570,10 @@ def train(cfg: TrainPipelineConfig):
                 next(dataloader_iter)
             sampler.set_epoch(epoch_num)
     
+    print("After resume:")
+    print(torch.cuda.memory_allocated() / 1024**2, "MB allocated")
+    print(torch.cuda.memory_reserved() / 1024**2, "MB reserved")
+
     if rank == 0:
         logger.info("Starting training loop...")
         
