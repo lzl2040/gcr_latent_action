@@ -22,6 +22,7 @@ USE_STATE=true
 LOSS_TYPE="raw"
 IS_FT=true
 IP_TOKEN_NUM=16
+IP_TOKEN_GEN_TYPE="cls_proj"cls_proj
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -94,6 +95,10 @@ while [[ $# -gt 0 ]]; do
             IP_TOKEN_NUM="$2"
             shift 2
             ;;
+        --ip_token_gen_type)
+            IP_TOKEN_GEN_TYPE="$2"
+            shift 2
+            ;;
         --calvin_sub_task)
             CALVIN_SUB_TASK="$2"
             shift 2
@@ -152,6 +157,9 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --policy.max_frame=$MAX_FRAME \
     --policy.loss_type=$LOSS_TYPE \
     --policy.ip_token_num=$IP_TOKEN_NUM \
+    --policy.ip_token_gen_type=$IP_TOKEN_GEN_TYPE \
+    --policy.chunk_size=$((MAX_FRAME-1)) \
+    --policy.n_action_steps=$((MAX_FRAME-1)) \
     --output_dir="$FIXED_OUTPUT_DIR" \
     --dataset.repo_id="whatever" \
     --dataset.image_transforms.enable=false \
