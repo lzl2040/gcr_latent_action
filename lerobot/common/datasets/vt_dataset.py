@@ -1862,6 +1862,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             "source": item["source"],
             "observation.state": item["observation.state"],
             "action": item["action"],
+            "action_is_pad": item["action_is_pad"],
             **vl_item,
         }
         

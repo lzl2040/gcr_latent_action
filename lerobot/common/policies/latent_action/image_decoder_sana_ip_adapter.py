@@ -317,12 +317,12 @@ class ImagePredictionModel(nn.Module):
         self.image_encoder.requires_grad_(False)
         
         self.prepare_ip_adapter_module(n = self.config.ip_skip_num, ip_token_num = self.config.ip_token_num)
-        # for name, param in self.transformer.named_parameters():
-        #     # 10.10: add train attn2
-        #     if "attn3" in name or "zero_linear" in name:
-        #         param.requires_grad = True
-        #     else:
-        #         param.requires_grad = False
+        for name, param in self.transformer.named_parameters():
+            # 10.10: add train attn2
+            if "attn3" in name or "zero_linear" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
     
     def prepare_ip_adapter_module(self, n = 2, ip_token_num = 4):
         print("Replace IP-Adapter Module")
@@ -390,9 +390,9 @@ class ImagePredictionModel(nn.Module):
             clip_imgs.append(clip_img)
         clip_imgs = torch.cat(clip_imgs, dim = 0).to(device=device)
         # for img_proj_model is clip
-        # image_embeds = self.image_encoder(clip_imgs).image_embeds # this is cls token embedding
+        image_embeds = self.image_encoder(clip_imgs).image_embeds # this is cls token embedding
         # for img_proj_model is resampler
-        image_embeds = self.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
+        # image_embeds = self.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
         # print(image_embeds.shape)
         ip_tokens = self.img_proj_model(image_embeds) # torch.Size([25, 4, 1152])
         # print(ip_tokens.shape)
