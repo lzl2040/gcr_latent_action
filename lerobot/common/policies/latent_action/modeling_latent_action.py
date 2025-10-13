@@ -166,17 +166,17 @@ class LatentActionModel(PreTrainedPolicy):
     def generate_token_mask(self, input_ids):
         sc_token_ids = torch.tensor(self.sc_token_idx, device=input_ids.device)
         act_token_ids = torch.tensor(self.action_token_idx, device=input_ids.device)
-        act_token_mask = torch.isin(input_ids, act_token_ids)
-        sc_token_mask = torch.isin(input_ids, sc_token_ids)
+        # act_token_mask = torch.isin(input_ids, act_token_ids)
+        # sc_token_mask = torch.isin(input_ids, sc_token_ids)
         
         # because the loss is ForCausalLMLoss
-        # sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
-        # act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
-        # bs = sc_token_mask.shape[0]
-        # pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
-        # # print(act_token_mask.shape, pad.shape)
-        # act_token_mask = torch.cat([act_token_mask, pad], dim=1)
-        # sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
+        sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
+        act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
+        bs = sc_token_mask.shape[0]
+        pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
+        # print(act_token_mask.shape, pad.shape)
+        act_token_mask = torch.cat([act_token_mask, pad], dim=1)
+        sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
         # print(sc_token_mask.sum().item(), act_token_mask.sum().item())
         return sc_token_mask, act_token_mask
     
@@ -200,7 +200,7 @@ class LatentActionModel(PreTrainedPolicy):
         # print(input_ids.shape, labels.shape)
         output = self.vlm(
             input_ids=input_ids,
-            # labels=labels,
+            labels=labels,
             pixel_values=pixel_values,
             attention_mask=attention_mask,
             output_hidden_states=True,
@@ -229,8 +229,8 @@ class LatentActionModel(PreTrainedPolicy):
                                   actions)
         action_loss = losses["action_loss"]
         image_loss = losses["image_loss"]
-        # lg_loss = output.loss # use this will increase memory a lot
-        lg_loss = torch.tensor(0.0, device=action_loss.device)
+        lg_loss = output.loss # use this will increase memory a lot
+        # lg_loss = torch.tensor(0.0, device=action_loss.device)
         # print(lg_loss)
         loss_dict["action_losses_after_forward"] = action_loss.clone()
 
@@ -244,7 +244,7 @@ class LatentActionModel(PreTrainedPolicy):
         loss_dict["action_losses_after_rm_padding"] = action_loss.clone()
 
         # For backward pass
-        loss = action_loss.mean() + self.config.img_loss_weight * image_loss.mean()
+        loss = action_loss.mean() + self.config.img_loss_weight * image_loss.mean() + lg_loss.mean()
         # For logging
         loss_dict["total_loss"] = loss.item()
         loss_dict["action_loss"] = action_loss.mean().item()
