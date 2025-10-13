@@ -200,7 +200,7 @@ class LatentActionModel(PreTrainedPolicy):
         # print(input_ids.shape, labels.shape)
         output = self.vlm(
             input_ids=input_ids,
-            labels=labels,
+            # labels=labels,
             pixel_values=pixel_values,
             attention_mask=attention_mask,
             output_hidden_states=True,
