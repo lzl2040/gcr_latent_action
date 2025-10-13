@@ -229,7 +229,8 @@ class LatentActionModel(PreTrainedPolicy):
                                   actions)
         action_loss = losses["action_loss"]
         image_loss = losses["image_loss"]
-        lg_loss = output.loss
+        # lg_loss = output.loss # use this will increase memory a lot
+        lg_loss = torch.tensor(0.0, device=action_loss.device)
         # print(lg_loss)
         loss_dict["action_losses_after_forward"] = action_loss.clone()
 
@@ -243,7 +244,7 @@ class LatentActionModel(PreTrainedPolicy):
         loss_dict["action_losses_after_rm_padding"] = action_loss.clone()
 
         # For backward pass
-        loss = action_loss.mean() + self.config.img_loss_weight * image_loss.mean() + lg_loss.mean()
+        loss = action_loss.mean() + self.config.img_loss_weight * image_loss.mean()
         # For logging
         loss_dict["total_loss"] = loss.item()
         loss_dict["action_loss"] = action_loss.mean().item()
@@ -575,7 +576,11 @@ class UniDecoder(nn.Module):
             clip_img = self.image_decoder.clip_processor(images=pil_img, return_tensors="pt").pixel_values
             clip_imgs.append(clip_img)
         clip_imgs = torch.cat(clip_imgs, dim = 0).to(device=device)
+        # for img_proj_model is projection
         image_embeds = self.image_decoder.image_encoder(clip_imgs).image_embeds # this is cls token embedding
+        # for img_proj_model is resampler
+        # image_embeds = self.image_decoder.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
+        # print(image_embeds.shape)
         ip_tokens = self.image_decoder.img_proj_model(image_embeds) # torch.Size([25, 4, 1152])
         # print(ip_tokens.shape)
         b, h, w, c = cond_image.shape
