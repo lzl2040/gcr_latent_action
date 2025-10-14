@@ -166,17 +166,17 @@ class LatentActionModel(PreTrainedPolicy):
     def generate_token_mask(self, input_ids):
         sc_token_ids = torch.tensor(self.sc_token_idx, device=input_ids.device)
         act_token_ids = torch.tensor(self.action_token_idx, device=input_ids.device)
-        # act_token_mask = torch.isin(input_ids, act_token_ids)
-        # sc_token_mask = torch.isin(input_ids, sc_token_ids)
+        act_token_mask = torch.isin(input_ids, act_token_ids)
+        sc_token_mask = torch.isin(input_ids, sc_token_ids)
         
         # because the loss is ForCausalLMLoss
-        sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
-        act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
-        bs = sc_token_mask.shape[0]
-        pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
-        # print(act_token_mask.shape, pad.shape)
-        act_token_mask = torch.cat([act_token_mask, pad], dim=1)
-        sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
+        # sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
+        # act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
+        # bs = sc_token_mask.shape[0]
+        # pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
+        # # print(act_token_mask.shape, pad.shape)
+        # act_token_mask = torch.cat([act_token_mask, pad], dim=1)
+        # sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
         # print(sc_token_mask.sum().item(), act_token_mask.sum().item())
         return sc_token_mask, act_token_mask
     
@@ -200,7 +200,7 @@ class LatentActionModel(PreTrainedPolicy):
         # print(input_ids.shape, labels.shape)
         output = self.vlm(
             input_ids=input_ids,
-            labels=labels,
+            # labels=labels,
             pixel_values=pixel_values,
             attention_mask=attention_mask,
             output_hidden_states=True,
@@ -229,13 +229,14 @@ class LatentActionModel(PreTrainedPolicy):
                                   actions)
         action_loss = losses["action_loss"]
         image_loss = losses["image_loss"]
-        lg_loss = output.loss # use this will increase memory a lot
-        # lg_loss = torch.tensor(0.0, device=action_loss.device)
+        # lg_loss = output.loss # use this will increase memory a lot
+        lg_loss = torch.tensor(0.0, device=action_loss.device)
         # print(lg_loss)
         loss_dict["action_losses_after_forward"] = action_loss.clone()
 
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
+            # print(in_episode_bound.shape, action_loss.shape)
             action_loss = action_loss * in_episode_bound.unsqueeze(-1)
             loss_dict["action_losses_after_in_ep_bound"] = action_loss.clone()
 
@@ -320,12 +321,12 @@ class UniDecoder(nn.Module):
         super().__init__()
         self.config = config
 
-        paligemma_with_export_config = PaliGemmaWithExpertConfig(
+        paligemma_with_expert_config = PaliGemmaWithExpertConfig(
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
             attention_implementation=self.config.attention_implementation,
         )
-        self.action_decoder = ActionDecoderModel(paligemma_with_export_config, config.action_expert_path)
+        self.action_decoder = ActionDecoderModel(paligemma_with_expert_config, config.action_expert_path)
 
         # Projections are float32
         self.con_proj = nn.Linear(self.config.vlm_token_dim, self.config.img_dim)
@@ -340,6 +341,7 @@ class UniDecoder(nn.Module):
         self.image_decoder = SANAModel(config)
 
         self.dtype = torch.bfloat16
+        self.decoder_proj_type = config.ip_token_gen_type
     
     def sample_noise(self, shape, device):
         noise = torch.normal(
@@ -577,9 +579,11 @@ class UniDecoder(nn.Module):
             clip_imgs.append(clip_img)
         clip_imgs = torch.cat(clip_imgs, dim = 0).to(device=device)
         # for img_proj_model is projection
-        image_embeds = self.image_decoder.image_encoder(clip_imgs).image_embeds # this is cls token embedding
+        if self.decoder_proj_type == "cls_proj":
+            image_embeds = self.image_decoder.image_encoder(clip_imgs).image_embeds # this is cls token embedding
         # for img_proj_model is resampler
-        # image_embeds = self.image_decoder.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
+        else:
+            image_embeds = self.image_decoder.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
         # print(image_embeds.shape)
         ip_tokens = self.image_decoder.img_proj_model(image_embeds) # torch.Size([25, 4, 1152])
         # print(ip_tokens.shape)
