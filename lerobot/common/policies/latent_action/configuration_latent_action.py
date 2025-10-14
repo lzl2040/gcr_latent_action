@@ -22,13 +22,13 @@ class LatentActionConfig(PreTrainedConfig):
     img_encoder_model: str = "/mnt/wangxiaofa/pt_weights/CLIP-ViT-H-14-laion2B-s32B-b79K"
     # action_expert_path = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
     # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
-    #vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF"
+    # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF"
     # img_pred_model: str = "stabilityai/stable-diffusion-3.5-medium"
-    #img_pred_model: str = "/home/v-zuoleili/Pretrain/Sana_1600M_512px_diffusers"
-    #action_expert_path: str = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
-    #img_encoder_model: str = "/home/v-zuoleili/Pretrain/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    # img_pred_model: str = "/home/v-zuoleili/Pretrain/Sana_1600M_512px_diffusers"
+    # action_expert_path: str = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
+    # img_encoder_model: str = "/home/v-zuoleili/Pretrain/CLIP-ViT-H-14-laion2B-s32B-b79K"
     ip_skip_num: int = 2
-    ip_token_gen_type: str = "resampler"
+    ip_token_gen_type: str = "cls_proj"
     ip_token_num: int = 8 # for image projection is 8
     
     # Input / output structure.
@@ -63,6 +63,7 @@ class LatentActionConfig(PreTrainedConfig):
 
     # model weights
     freeze_vision_encoder: bool = True
+    img_decoder_part_train: bool = True
 
 
     normalization_mapping: dict[str, NormalizationMode] = field(
