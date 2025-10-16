@@ -276,7 +276,7 @@ class ImagePredictionModel(nn.Module):
 
         self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.img_encoder_model)
         self.img_proj_type = config.ip_token_gen_type
-        if config.img_proj_type == "cls_proj":
+        if self.img_proj_type == "cls_proj":
             self.img_proj_model = ImageProjModel(
                 cross_attention_dim=self.transformer.config.cross_attention_dim,
                 clip_embeddings_dim=self.image_encoder.config.projection_dim,
