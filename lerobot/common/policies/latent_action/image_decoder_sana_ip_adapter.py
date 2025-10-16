@@ -275,7 +275,8 @@ class ImagePredictionModel(nn.Module):
         )
 
         self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.img_encoder_model)
-        if config.ip_token_gen_type == "cls_proj":
+        self.img_proj_type = config.ip_token_gen_type
+        if config.img_proj_type == "cls_proj":
             self.img_proj_model = ImageProjModel(
                 cross_attention_dim=self.transformer.config.cross_attention_dim,
                 clip_embeddings_dim=self.image_encoder.config.projection_dim,
@@ -391,9 +392,11 @@ class ImagePredictionModel(nn.Module):
             clip_imgs.append(clip_img)
         clip_imgs = torch.cat(clip_imgs, dim = 0).to(device=device)
         # for img_proj_model is clip
-        image_embeds = self.image_encoder(clip_imgs).image_embeds # this is cls token embedding
+        if self.img_proj_type == "cls_proj":
+            image_embeds = self.image_encoder(clip_imgs).image_embeds # this is cls token embedding
         # for img_proj_model is resampler
-        # image_embeds = self.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
+        else:
+            image_embeds = self.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-1]
         # print(image_embeds.shape)
         ip_tokens = self.img_proj_model(image_embeds) # torch.Size([25, 4, 1152])
         # print(ip_tokens.shape)
