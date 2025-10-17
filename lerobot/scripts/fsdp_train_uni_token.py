@@ -655,9 +655,9 @@ def train(cfg: TrainPipelineConfig):
         # if step % 5 == 0:
             print("save")
             # cfg.output_dir
-            if rank == 0:
-                logger.info(f"Saving checkpoint at step {step}...")
-                save_fsdp_checkpoint(model, optimizer, cfg.output_dir, step)
+            # if rank == 0:
+            logger.info(f"Saving checkpoint at step {step}...")
+            save_fsdp_checkpoint(model, optimizer, cfg.output_dir, step)
         
         step += 1
     
