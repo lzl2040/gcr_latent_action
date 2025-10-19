@@ -279,8 +279,8 @@ class PI0Policy(PreTrainedPolicy):
         return self.parameters()
 
     def extract_vlm_hidden_states(self, batch):
-        batch = self.normalize_inputs(batch)
-        batch = self.normalize_targets(batch)
+        # batch = self.normalize_inputs(batch)
+        # batch = self.normalize_targets(batch)
         # print(batch["task"])
 
         images, img_masks = self.prepare_images(batch)
