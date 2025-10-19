@@ -292,6 +292,7 @@ class PI0Policy(PreTrainedPolicy):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.model.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
         )
+        print(prefix_embs.shape)
         output = self.model.paligemma_with_expert.paligemma(inputs_embeds=prefix_embs,
                                                                 output_hidden_states=True)
         output_hidden_states = output.hidden_states # num_layers + 1
@@ -476,7 +477,7 @@ class PI0Policy(PreTrainedPolicy):
             # padding="max_length",
             padding=True,
             padding_side="right",
-            max_length = 600,
+            max_length = 1200,
             # max_length=self.config.tokenizer_max_length,
             return_tensors="pt",
         )
