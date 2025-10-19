@@ -292,7 +292,7 @@ class PI0Policy(PreTrainedPolicy):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.model.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
         )
-        print(prefix_embs.shape)
+        # print(prefix_embs.shape)
         output = self.model.paligemma_with_expert.paligemma(inputs_embeds=prefix_embs,
                                                                 output_hidden_states=True)
         output_hidden_states = output.hidden_states # num_layers + 1
