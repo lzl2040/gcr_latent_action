@@ -164,6 +164,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         self.gemma_expert = GemmaForCausalLM(config=config.gemma_expert_config)
         # Remove unused embed_tokens
         self.gemma_expert.model.embed_tokens = None
+        self.paligemma.lm_head = nn.Identity()
 
         self.to_bfloat16_like_physical_intelligence()
         self.set_requires_grad()
