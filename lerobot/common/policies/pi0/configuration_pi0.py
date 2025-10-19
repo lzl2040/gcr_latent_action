@@ -57,8 +57,8 @@ class PI0Config(PreTrainedConfig):
     attention_implementation: str = "eager"  # or fa2, flex
 
     # Finetuning settings
-    freeze_vision_encoder: bool = False
-    train_expert_only: bool = True
+    freeze_vision_encoder: bool = True
+    train_expert_only: bool = False
     train_state_proj: bool = True
 
     # Training presets

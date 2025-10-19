@@ -116,16 +116,13 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
                 hidden_act="gelu_pytorch_tanh",
                 hidden_activation="gelu_pytorch_tanh",
                 hidden_size=1024,
-                # hidden_size = 2048,
                 initializer_range=0.02,
                 intermediate_size=4096,
                 max_position_embeddings=8192,
                 model_type="gemma",
-                # num_attention_heads=8,
-                num_attention_heads=32,
+                num_attention_heads=8,
                 num_hidden_layers=18,
-                # num_key_value_heads=1,
-                num_key_value_heads=2,
+                num_key_value_heads=1,
                 pad_token_id=0,
                 rms_norm_eps=1e-06,
                 rope_theta=10000.0,
@@ -155,51 +152,7 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
             raise ValueError(
                 f"Wrong value provided for `attention_implementation` ({self.attention_implementation}). Expected 'eager', 'fa2' or 'flex'."
             )
-            
-class DimensionalExpansion(nn.Module):
-    def __init__(self, in_dim=8, out_dim=64):
-        super().__init__()
-        self.linear = nn.Linear(in_dim, out_dim)
-        self.norm = nn.LayerNorm(out_dim)  # 或 nn.BatchNorm1d(out_dim)
-        self.activation = nn.GELU()
 
-    def forward(self, x):
-        # 输入形状: [batch, seq_len, in_dim, hidden] -> [4, 868, 8, 256]
-        batch, seq_len, in_dim, hidden = x.shape
-        x = x.permute(0, 1, 3, 2)  # 交换维度 -> [4, 868, 256, 8]
-        x = x.reshape(-1, in_dim)   # 合并维度 -> [4*868*256, 8]
-
-        # 线性变换扩展特征维度
-        x = self.linear(x)          # -> [4*868*256, 64]
-        x = self.norm(x)            # 归一化层
-        x = x.view(batch, seq_len, hidden, -1)  # 恢复形状 -> [4, 868, 256, 64]
-        x = x.permute(0, 1, 3, 2)  # 调整维度顺序 -> [4, 868, 64, 256]
-
-        # 激活函数
-        x = self.activation(x)
-        return x
-
-class DimensionalSqueezeBack(nn.Module):
-    def __init__(self, in_dim=16384, out_dim=2048):
-        super().__init__()
-        self.linear = nn.Linear(in_dim, out_dim)
-        self.norm = nn.LayerNorm(out_dim)
-        self.activation = nn.GELU()
-    
-    def forward(self, x):
-        # 输入形状: [batch, seq_len, hidden] -> [4, 868, 16384]
-        batch, seq_len, hidden = x.shape
-        x = x.reshape(-1, hidden)  # 合并维度 -> [4*868, 16384]
-
-        # 线性变换压缩特征维度
-        x = self.linear(x)          # -> [4*868, 2048]
-        x = self.norm(x)            # 归一化层
-        x = x.view(batch, seq_len, -1)  # 恢复形状 -> [4, 868, 2048]
-        
-        # 激活函数
-        x = self.activation(x)
-
-        return x
 
 class PaliGemmaWithExpertModel(PreTrainedModel):
     config_class = PaliGemmaWithExpertConfig
@@ -211,21 +164,6 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         self.gemma_expert = GemmaForCausalLM(config=config.gemma_expert_config)
         # Remove unused embed_tokens
         self.gemma_expert.model.embed_tokens = None
-        
-        num_layers = self.paligemma.config.text_config.num_hidden_layers
-        self.query_expansion_layers = nn.ModuleList([
-            DimensionalExpansion(in_dim=8, out_dim=32) for _ in range(num_layers)
-        ])
-        self.key_expansion_layers = nn.ModuleList([
-            DimensionalExpansion(in_dim=1, out_dim=2) for _ in range(num_layers)
-        ])
-        
-        self.value_expansion_layers = nn.ModuleList([
-            DimensionalExpansion(in_dim=1, out_dim=2) for _ in range(num_layers)
-        ])
-        self.attn_compression_layers = nn.ModuleList([
-            DimensionalSqueezeBack(in_dim=2048*4, out_dim=2048) for _ in range(num_layers)
-        ])
 
         self.to_bfloat16_like_physical_intelligence()
         self.set_requires_grad()
@@ -267,7 +205,8 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         return self.paligemma.get_image_features(image)
 
     def embed_language_tokens(self, tokens: torch.Tensor):
-        return self.paligemma.language_model.model.embed_tokens(tokens)
+        return self.paligemma.language_model.embed_tokens(tokens)
+        # return self.paligemma.language_model.model.embed_tokens(tokens)
 
     # TODO: break down this huge forward into modules or functions
     def forward(
@@ -296,11 +235,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             query_states = []
             key_states = []
             value_states = []
-            query_expansion = self.query_expansion_layers[layer_idx]
-            key_expansion = self.key_expansion_layers[layer_idx]
-            value_expansion = self.value_expansion_layers[layer_idx]
             for i, hidden_states in enumerate(inputs_embeds):
-                
                 if hidden_states is None:
                     continue
                 layer = models[i].layers[layer_idx]
@@ -315,15 +250,10 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape)
                 key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape)
                 value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape)
-                
-                if i == 0:
-                    query_states.append(query_expansion(query_state))
-                    key_states.append(key_expansion(key_state))
-                    value_states.append(value_expansion(value_state))
-                else:
-                    query_states.append(query_state)
-                    key_states.append(key_state)
-                    value_states.append(value_state)
+
+                query_states.append(query_state)
+                key_states.append(key_state)
+                value_states.append(value_state)
 
             # B,L,H,D with L sequence length, H number of heads, D head dim
             # concatenate on the number of embeddings/tokens
@@ -370,11 +300,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
 
                     if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
                         att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
-                    if i == 0:
-                        attn_compression_layer = self.attn_compression_layers[layer_idx]
-                        out_emb = layer.self_attn.o_proj(attn_compression_layer(att_output[:, start:end]))
-                    else:
-                        out_emb = layer.self_attn.o_proj(att_output[:, start:end])
+                    out_emb = layer.self_attn.o_proj(att_output[:, start:end])
 
                     # TODO: first dropout (by default 0.0)
 
@@ -426,14 +352,9 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
     def eager_attention_forward(
         self, attention_mask, batch_size, head_dim, query_states, key_states, value_states
     ):
-        # gemma_expert_config
-        num_att_heads = self.config.gemma_expert_config.num_attention_heads
-        num_key_value_heads = self.config.gemma_expert_config.num_key_value_heads
+        num_att_heads = self.config.paligemma_config.text_config.num_attention_heads
+        num_key_value_heads = self.config.paligemma_config.text_config.num_key_value_heads
         num_key_value_groups = num_att_heads // num_key_value_heads
-        # # paligemma_config
-        # num_att_heads = self.config.paligemma_config.text_config.num_attention_heads
-        # num_key_value_heads = self.config.paligemma_config.text_config.num_key_value_heads
-        # num_key_value_groups = num_att_heads // num_key_value_heads
 
         # query_states: batch_size, sequence_length, num_att_head, head_dim
         # key_states: batch_size, sequence_length, num_key_value_head, head_dim

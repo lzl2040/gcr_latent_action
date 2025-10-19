@@ -174,12 +174,10 @@ def make_policy(
 
     if weight_pt_path:
         weights = torch.load(weight_pt_path, map_location="cpu")
-        # 过滤掉包含 "gemma_expert" 的权重
-        # unfit_weight_key = [
-        #     "model.state_proj", "model.action_in_proj",
-        #     "model.action_out_proj", "model.action_time_mlp_in",
-        #     "model.action_time_mlp_out"
-        # ]
+        # for key, value in policy.named_parameters():
+        #     if "paligemma_with_expert" in key and "language_model" in key:
+        #         print(key, value.shape)
+
         key_to_remove = []
         for k, v in weights.items():
             if "awa_model.lm_head" in k or "qwen_expert.lm_head" in k:
@@ -195,20 +193,21 @@ def make_policy(
                 new_key = key.replace("compress_to_tgtdim_v2", "compress_to_tgtdim")
             else:
                 new_key = key
+            # if "paligemma_with_expert.paligemma" in key:
+            #     new_key = key.replace("paligemma_with_expert.paligemma", "paligemma_with_expert.paligemma.model")
+            #     # print(key)
             new_state_dict[new_key] = value
-        policy.load_state_dict(new_state_dict, strict=True)
-        
-        # weights = pad_state_dict_with_mask(weights, policy, prefix="model.paligemma_with_expert")
-        # keys_to_ignore = ['model.paligemma_with_expert.kv_repre']
-        # filtered_state_dict = {k: v for k, v in weights.items() if k not in keys_to_ignore}
-        policy.load_state_dict(new_state_dict, strict=True)
+        if "pi0" in cfg.pretrained_path:
+            missing_key, unexpected_keys = policy.load_state_dict(new_state_dict, strict=False)
+            print(missing_key, unexpected_keys)
+        else:
+            policy.load_state_dict(new_state_dict, strict=True)
+        # print(missing_keys, unspected_keys)
         print(f"Load pt weights from:{weight_pt_path}")
         del weights
         del key_to_remove
     
     
-    if cfg.use_lora:
-        policy.model.paligemma_with_expert.add_lora()
     # policy.to(device)
     assert isinstance(policy, nn.Module)
 

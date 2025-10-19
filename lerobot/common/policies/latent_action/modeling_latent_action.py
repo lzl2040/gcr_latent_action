@@ -4,7 +4,7 @@ from collections import deque
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
-from transformers import AutoTokenizer, AutoModel, InternVLForConditionalGeneration, AutoConfig, LlamaForCausalLM, Trainer
+from transformers import AutoTokenizer, AutoModel, InternVLForConditionalGeneration, AutoConfig, LlamaForCausalLM, Trainer, InternVLProcessor
 
 from lerobot.common.constants import ACTION, OBS_ROBOT
 
@@ -16,6 +16,7 @@ from lerobot.common.policies.latent_action.image_decoder import ImagePredictionM
 # from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
 from lerobot.common.policies.latent_action.image_decoder_sana_ip_adapter import ImagePredictionModel as SANAModel
 from lerobot.common.policies.latent_action.vlm_wrapper import InternVLModelWrapper
+from lerobot.common.constants import COMPRESS_ACTION_TOKEN, COMPRESS_SC_TOKEN
 
 import numpy as np
 import cv2
@@ -122,6 +123,19 @@ class LatentActionModel(PreTrainedPolicy):
                                                                     # config=vlm_config,
                                                                     local_files_only=True,
                                                                     trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.vlm_path,
+                                                                    # config=vlm_config,
+                                                                    local_files_only=True,
+                                                                    trust_remote_code=True)
+        new_action_tokens = [f"[{COMPRESS_ACTION_TOKEN}]"]
+        new_scene_tokens = [f"[{COMPRESS_SC_TOKEN}]"]
+        self.tokenizer.add_tokens(new_action_tokens)
+        self.tokenizer.add_tokens(new_scene_tokens)
+
+        self.cp_act_token_idx =  [self.tokenizer(f"[{COMPRESS_ACTION_TOKEN}]", add_special_tokens=False).input_ids[0]]
+        self.cp_sc_token_idx = [self.tokenizer(f"[{COMPRESS_SC_TOKEN}]", add_special_tokens=False).input_ids[0]]
+        
+        print(f"In model: CP_IMG token idx: {self.cp_sc_token_idx}, CP_ACT token idx: {self.cp_act_token_idx}")
         # vocab_size = self.vlm.config.vocab_size + 2
         # self.
         # print(self.vlm.loss_function) # ForCausalLMLoss
@@ -255,6 +269,58 @@ class LatentActionModel(PreTrainedPolicy):
 
         return loss, loss_dict
 
+    def extract_latent_embeddings(self, batch: dict[str, Tensor]):
+        pixel_values = batch["pixel_values"]
+        input_ids = batch["input_ids"] # 对于224分辨率图像，每个image占64个token
+        attention_mask = batch["attention_mask"].to(dtype=self.dtype)
+        output = self.vlm(
+            input_ids=input_ids,
+            # labels=labels,
+            pixel_values=pixel_values,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+        )
+        # output_hidden_states = output
+        output_hidden_states = output.hidden_states # num_layers + 1
+        sc_token_mask, act_token_mask = self.generate_token_mask(input_ids)
+        # get token embeddings
+        # torch.Size([128, 1024]) torch.Size([4, 1024])
+        last_hidden_states = output_hidden_states[-1]
+        last_hidden_states = self.vlm.model.language_model.norm(last_hidden_states)
+        
+        sc_embeddings = last_hidden_states[sc_token_mask]
+        act_embeddings = last_hidden_states[act_token_mask]
+        hidden_size = sc_embeddings.shape[-1]
+        bsize = input_ids.shape[0]
+        sc_embeddings = sc_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
+        act_embeddings = act_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
+        # print(sc_embeddings.shape, act_embeddings.shape)
+        latent_embeddings = torch.cat([sc_embeddings, act_embeddings], dim=1)
+        return latent_embeddings
+
+    def infer_tokens(self, batch: dict[str, Tensor]):
+        pixel_values = batch["pixel_values"]
+        input_ids = batch["input_ids"] # 对于224分辨率图像，每个image占64个token
+        attention_mask = batch["attention_mask"].to(dtype=self.dtype)
+        video_len = batch["video_len"]
+        first_image = batch["first_image"]
+        # print(input_ids.shape, pixel_values.shape)
+        # print(input_ids.shape) # min: 2000, max: 4100
+        # print(first_image.shape, torch.max(first_image)) # 0-255
+        actions = self.prepare_action(batch)
+        actions = self.convert_to_dtype(actions)
+        bsize = input_ids.shape[0]
+        # torch.Size([B*T, 3, 224, 224]) torch.Size([1, 3266]) torch.Size([1, 3266])
+        # print(pixel_values.shape, input_ids.shape, attention_mask.shape)
+        generate_ids = self.vlm.generate(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            attention_mask=attention_mask,
+            max_new_tokens=self.config.num_sc_token + self.config.num_action_token,
+        )
+        responese = self.tokenizer.batch_decode(generate_ids, skip_special_tokens=True)
+        print(responese)
+
 
     def infer(self, batch: dict[str, Tensor]):
         pixel_values = batch["pixel_values"]
@@ -276,6 +342,7 @@ class LatentActionModel(PreTrainedPolicy):
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
+        
         # output_hidden_states = output
         output_hidden_states = output.hidden_states # num_layers + 1
         sc_token_mask, act_token_mask = self.generate_token_mask(input_ids)
@@ -580,9 +647,11 @@ class UniDecoder(nn.Module):
         clip_imgs = torch.cat(clip_imgs, dim = 0).to(device=device)
         # for img_proj_model is projection
         if self.decoder_proj_type == "cls_proj":
+            # print("cls_proj")
             image_embeds = self.image_decoder.image_encoder(clip_imgs).image_embeds # this is cls token embedding
         # for img_proj_model is resampler
         else:
+            # print("resampler")
             image_embeds = self.image_decoder.image_encoder(clip_imgs, output_hidden_states=True).hidden_states[-2]
         # print(image_embeds.shape)
         ip_tokens = self.image_decoder.img_proj_model(image_embeds) # torch.Size([25, 4, 1152])

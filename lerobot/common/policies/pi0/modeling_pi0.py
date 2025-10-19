@@ -66,6 +66,10 @@ from lerobot.common.policies.pi0.paligemma_with_expert import (
 )
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.utils.utils import get_safe_dtype
+from lerobot.common.constants import (CLIP_MEAN, CLIP_STD, IMAGENET_MEAN, IMAGENET_STD,
+                        IMG_CONTEXT_TOKEN, IMG_END_TOKEN, IMG_START_TOKEN,
+                        SIGLIP_MEAN, SIGLIP_STD, COMPRESS_ACTION_TOKEN, COMPRESS_SC_TOKEN,
+                        QUESTION_LIST, ANSWER_LIST)
 
 
 def create_sinusoidal_pos_embedding(
@@ -248,10 +252,20 @@ class PI0Policy(PreTrainedPolicy):
             config.output_features, config.normalization_mapping, dataset_stats
         )
 
-        tokenizer_path = "/data_16T/lerobot_openx/paligemma-3b-pt-224/"
+        # tokenizer_path = "/home/v-zuoleili/Pretrain/pi0/paligemma-3b-pt-224/"
         tokenizer_path = "/mnt/wangxiaofa/RDT_module_params/paligemma-3b-pt-224/"
         self.language_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        new_action_tokens = [f"[{COMPRESS_ACTION_TOKEN}]"]
+        new_scene_tokens = [f"[{COMPRESS_SC_TOKEN}]"]
+        self.language_tokenizer.add_tokens(new_action_tokens)
+        self.language_tokenizer.add_tokens(new_scene_tokens)
+        # self.cp_act_token_idx =  [self.processor.tokenizer(f"[{COMPRESS_ACTION_TOKEN}{i}]", add_special_tokens=False).input_ids[0] for i in range(cfg.policy.num_action_token)]
+        # self.cp_sc_token_idx = [self.processor.tokenizer(f"[{COMPRESS_SC_TOKEN}{i}]", add_special_tokens=False).input_ids[0] for i in range(cfg.policy.num_sc_token)]
+        self.cp_act_token_idx =  [self.language_tokenizer(f"[{COMPRESS_ACTION_TOKEN}]", add_special_tokens=False).input_ids[0]]
+        self.cp_sc_token_idx = [self.language_tokenizer(f"[{COMPRESS_SC_TOKEN}]", add_special_tokens=False).input_ids[0]]
+        print(f"Pi0 CP_IMG token idx: {self.cp_sc_token_idx}, CP_ACT token idx: {self.cp_act_token_idx}")
         self.model = PI0FlowMatching(config)
+        self.model.paligemma_with_expert.paligemma.language_model.resize_token_embeddings(len(self.language_tokenizer))
         
         self.dtype = torch.bfloat16
 
@@ -263,6 +277,53 @@ class PI0Policy(PreTrainedPolicy):
 
     def get_optim_params(self) -> dict:
         return self.parameters()
+
+    def extract_vlm_hidden_states(self, batch):
+        batch = self.normalize_inputs(batch)
+        batch = self.normalize_targets(batch)
+        # print(batch["task"])
+
+        images, img_masks = self.prepare_images(batch)
+        lang_tokens, lang_masks = self.prepare_language(batch)
+        # print(lang_tokens.shape)
+
+        images = [self.convert_to_dtype(img) for img in images]
+        lang_tokens = self.convert_to_dtype(lang_tokens)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.model.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks
+        )
+        output = self.model.paligemma_with_expert.paligemma(inputs_embeds=prefix_embs,
+                                                                output_hidden_states=True)
+        output_hidden_states = output.hidden_states # num_layers + 1
+        last_hidden_states = output_hidden_states[-1] # torch.Size([1, 304, 2048])
+        last_hidden_states = self.model.paligemma_with_expert.paligemma.language_model.norm(last_hidden_states)
+
+        # get mask
+        sc_token_ids = torch.tensor(self.cp_sc_token_idx, device=last_hidden_states.device)
+        act_token_ids = torch.tensor(self.cp_act_token_idx, device=last_hidden_states.device)
+        lan_act_token_mask = torch.isin(lang_tokens, act_token_ids)
+        lan_sc_token_mask = torch.isin(lang_tokens, sc_token_ids)
+
+        B, L_total, _ = prefix_embs.shape
+        _, L_lang = lang_tokens.shape
+
+        # 创建全 False 的 pad 模板
+        sc_token_mask = torch.zeros((B, L_total), dtype=torch.bool, device=prefix_embs.device)
+        act_token_mask = torch.zeros((B, L_total), dtype=torch.bool, device=prefix_embs.device)
+
+        # 将原始 mask 拷贝到前部（长度与语言 token 对齐）
+        sc_token_mask[:, :L_lang] = lan_sc_token_mask
+        act_token_mask[:, :L_lang] = lan_act_token_mask
+        sc_embeddings = last_hidden_states[sc_token_mask]
+        act_embeddings = last_hidden_states[act_token_mask]
+        hidden_size = sc_embeddings.shape[-1]
+        sc_embeddings = sc_embeddings.view(B, -1, hidden_size)
+        act_embeddings = act_embeddings.view(B, -1, hidden_size)
+        latent_embeddings = torch.cat([sc_embeddings, act_embeddings], dim=1)
+        # print(latent_embeddings.shape)
+        return latent_embeddings # torch.Size([2, 128, 2048])
+        print(last_hidden_states.shape)
+
 
     @torch.no_grad
     def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
@@ -319,7 +380,7 @@ class PI0Policy(PreTrainedPolicy):
         state = self.prepare_state(batch)
         lang_tokens, lang_masks = self.prepare_language(batch)
         actions = self.prepare_action(batch)
-        actions_is_pad = batch.get("actions_id_pad")
+        actions_is_pad = batch.get("action_is_pad")
         
         images = [self.convert_to_dtype(img) for img in images]
         lang_tokens = self.convert_to_dtype(lang_tokens)
@@ -361,8 +422,11 @@ class PI0Policy(PreTrainedPolicy):
         images = []
         img_masks = []
 
-        present_img_keys = [key for key in self.config.image_features if key in batch]
-        missing_img_keys = [key for key in self.config.image_features if key not in batch]
+        # present_img_keys = [key for key in self.config.image_features if key in batch]
+        # missing_img_keys = [key for key in self.config.image_features if key not in batch]
+        # print(present_img_keys, missing_img_keys)
+        present_img_keys = ["observation.images.primary"]
+        missing_img_keys = []
 
         if len(present_img_keys) == 0:
             raise ValueError(
@@ -372,6 +436,8 @@ class PI0Policy(PreTrainedPolicy):
         # Preprocess image features present in the batch
         for key in present_img_keys:
             img = batch[key]
+            if torch.max(img) > 1:
+                img = img / 255
 
             if self.config.resize_imgs_with_padding is not None:
                 img = resize_with_pad(img, *self.config.resize_imgs_with_padding, pad_value=0)
@@ -407,9 +473,11 @@ class PI0Policy(PreTrainedPolicy):
 
         tokenized_prompt = self.language_tokenizer.__call__(
             tasks,
-            padding="max_length",
+            # padding="max_length",
+            padding=True,
             padding_side="right",
-            max_length=self.config.tokenizer_max_length,
+            max_length = 600,
+            # max_length=self.config.tokenizer_max_length,
             return_tensors="pt",
         )
         lang_tokens = tokenized_prompt["input_ids"].to(device=device)
@@ -524,6 +592,7 @@ class PI0FlowMatching(nn.Module):
         time = time_beta * 0.999 + 0.001
         return time.to(dtype=self.dtype, device=device)
 
+
     def embed_prefix(
         self, images, img_masks, lang_tokens, lang_masks
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -568,7 +637,6 @@ class PI0FlowMatching(nn.Module):
         # full attention between image and language inputs
         num_lang_embs = lang_emb.shape[1]
         att_masks += [0] * num_lang_embs
-
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)

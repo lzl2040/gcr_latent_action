@@ -957,13 +957,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
         task_idx = item["task_index"].item()
         task = self.meta.tasks[task_idx]
         item["task"] = task
-        if self.train2test is not None:
-            new_task = self.train2test[task]
-            if new_task == "ok":
-                # If the task is "ok", we don't want to add it to the item
-                item["task"] = task
-            else:
-                item["task"] = new_task
+        # if self.train2test is not None:
+        #     new_task = self.train2test[task]
+        #     if new_task == "ok":
+        #         # If the task is "ok", we don't want to add it to the item
+        #         item["task"] = task
+        #     else:
+        #         item["task"] = new_task
         
         # print(f"task:{task}, new_task:{new_task}")
         item["dataset_name"] = self.dataset_name
@@ -1440,7 +1440,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 class MultiDatasetforDistTraining(torch.utils.data.Dataset):
     def __init__(self, cfg, image_transforms, wrist_image_transforms = None, seed: int = 1000, 
                  data_mix: str = "toy", vla2root_json: str = None, banlance_weight=True, is_ft = False,
-                 image_decoder_processor = None):
+                 image_decoder_processor = None, is_train = True):
         """
         参数:
             cfg (TrainPipelineConfig): 训练配置文件
@@ -1472,6 +1472,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         super().__init__()
         self.episodes = None
         self.cfg = cfg
+        self.train = is_train
         # set seed
         set_seed(seed)
         # specific process
@@ -1857,12 +1858,24 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # print(f"secondary:", np.array(item["observation.images.secondary"]))
         # print(f"wrist:", np.array(item["observation.images.wrist"]))
         vl_item = self._prepare_intern_vl_data(item)
+        task = item["task"]
+        task_text = task
+        task_text = task_text + ". Scene representations:"
+        for i in range(self.cfg.policy.num_sc_token):
+            task_text += f"[{COMPRESS_SC_TOKEN}] "
+        task_text += ". Action representations:"
+        for i in range(self.cfg.policy.num_action_token):
+            task_text += f"[{COMPRESS_ACTION_TOKEN}] "
+        task_text += "."
         
         data_dict = {
             "source": item["source"],
             "observation.state": item["observation.state"],
             "action": item["action"],
             "action_is_pad": item["action_is_pad"].unsqueeze(0),
+            "observation."
+            "images.primary": vl_item["first_image"],
+            "task": task_text,
             **vl_item,
         }
         
@@ -1900,20 +1913,21 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         frame_len = len(video)
         idx = random.randrange(len(QUESTION_LIST))  # 随机选一个索引
         question = QUESTION_LIST[idx].format(sent=text, T = frame_len-1, Tm1=frame_len - 2)
+        # question = "What is your name?"
         message[0]["content"].append({"type": "text", "text": question})
+        if self.train:
+            # add answer
+            # compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}{i}]" for i in range(self.cfg.policy.num_sc_token)])
+            # compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}{i}]" for i in range(self.cfg.policy.num_action_token)])
+            compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}]" for i in range(self.cfg.policy.num_sc_token)])
+            compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}]" for i in range(self.cfg.policy.num_action_token)])
+            answer = ANSWER_LIST[idx]
+            answer_text = answer.replace(f"[{COMPRESS_ACTION_TOKEN}]", compress_act_replace)
+            answer_text = answer_text.replace(f"[{COMPRESS_SC_TOKEN}]", compress_sc_replace)
 
-        # add answer
-        # compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}{i}]" for i in range(self.cfg.policy.num_sc_token)])
-        # compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}{i}]" for i in range(self.cfg.policy.num_action_token)])
-        compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}]" for i in range(self.cfg.policy.num_sc_token)])
-        compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}]" for i in range(self.cfg.policy.num_action_token)])
-        answer = ANSWER_LIST[idx]
-        answer_text = answer.replace(f"[{COMPRESS_ACTION_TOKEN}]", compress_act_replace)
-        answer_text = answer_text.replace(f"[{COMPRESS_SC_TOKEN}]", compress_sc_replace)
+            # print(question, answer_text)
 
-        # print(question, answer_text)
-
-        message[1]["content"].append({"type": "text", "text": answer_text})
+            message[1]["content"].append({"type": "text", "text": answer_text})
         # print(self.processor.tokenizer)
 
         # inputs = self.processor.apply_chat_template(message, 
