@@ -327,7 +327,7 @@ def train(cfg: TrainPipelineConfig):
             for k in key_to_remove:
                 del model_state_dict[k]
             
-            policy.student_model.load_state_dict(model_state_dict, strict=True)
+            policy.student_model.load_state_dict(model_state_dict, strict=False)
             del model_state_dict
             del key_to_remove
             torch.cuda.empty_cache()
