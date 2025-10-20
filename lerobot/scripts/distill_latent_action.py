@@ -98,7 +98,7 @@ def save_fsdp_checkpoint(model, optim, output_dir, step):
 
     # 所有进程统一进入状态字典收集阶段
     with FSDP.state_dict_type(model, save_policy, full_state_dict_config):
-        model_state_dict = model.student_model.state_dict()
+        model_state_dict = model.state_dict()
     # 所有进程同步，防止部分进程提前退出
     dist.barrier()
 
@@ -327,7 +327,7 @@ def train(cfg: TrainPipelineConfig):
             for k in key_to_remove:
                 del model_state_dict[k]
             
-            policy.load_state_dict(model_state_dict, strict=True)
+            policy.student_model.load_state_dict(model_state_dict, strict=True)
             del model_state_dict
             del key_to_remove
             torch.cuda.empty_cache()
@@ -456,7 +456,7 @@ def train(cfg: TrainPipelineConfig):
             sampler.set_epoch(0)
             all_indices = list(sampler)
             samples_per_epoch = len(all_indices)
-            batches_per_epoch = math.ceil(samples_per_epoch / (cfg.batch_size + 2))
+            batches_per_epoch = math.ceil(samples_per_epoch / (cfg.batch_size))
             epoch_num = step // batches_per_epoch
             batch_in_epoch = step % batches_per_epoch
             sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank,
@@ -578,13 +578,13 @@ def train(cfg: TrainPipelineConfig):
             # cfg.output_dir
             # if rank == 0:
             logger.info(f"Saving checkpoint at step {step}...")
-            save_fsdp_checkpoint(model, optimizer, cfg.output_dir, step)
+            save_fsdp_checkpoint(model.student_model, optimizer, cfg.output_dir, step)
         
         step += 1
     
     # 最终保存
     if rank == 0:
-        save_fsdp_checkpoint(model, optimizer, cfg.output_dir, "final")
+        save_fsdp_checkpoint(model.student_model, optimizer, cfg.output_dir, "final")
         logger.info("Training completed successfully")
 
         
