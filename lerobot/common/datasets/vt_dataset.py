@@ -1858,6 +1858,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # print(f"secondary:", np.array(item["observation.images.secondary"]))
         # print(f"wrist:", np.array(item["observation.images.wrist"]))
         vl_item = self._prepare_intern_vl_data(item)
+        
         task = item["task"]
         task_text = task
         task_text = task_text + ". Scene representations:"
@@ -1873,8 +1874,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             "observation.state": item["observation.state"],
             "action": item["action"],
             "action_is_pad": item["action_is_pad"].unsqueeze(0),
-            "observation."
-            "images.primary": vl_item["first_image"],
+            "observation.images.primary": vl_item["first_image"],
             "task": task_text,
             **vl_item,
         }
@@ -1915,19 +1915,19 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         question = QUESTION_LIST[idx].format(sent=text, T = frame_len-1, Tm1=frame_len - 2)
         # question = "What is your name?"
         message[0]["content"].append({"type": "text", "text": question})
-        if self.train:
-            # add answer
-            # compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}{i}]" for i in range(self.cfg.policy.num_sc_token)])
-            # compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}{i}]" for i in range(self.cfg.policy.num_action_token)])
-            compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}]" for i in range(self.cfg.policy.num_sc_token)])
-            compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}]" for i in range(self.cfg.policy.num_action_token)])
-            answer = ANSWER_LIST[idx]
-            answer_text = answer.replace(f"[{COMPRESS_ACTION_TOKEN}]", compress_act_replace)
-            answer_text = answer_text.replace(f"[{COMPRESS_SC_TOKEN}]", compress_sc_replace)
+        # if self.train:
+        # add answer
+        # compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}{i}]" for i in range(self.cfg.policy.num_sc_token)])
+        # compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}{i}]" for i in range(self.cfg.policy.num_action_token)])
+        compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}]" for i in range(self.cfg.policy.num_sc_token)])
+        compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}]" for i in range(self.cfg.policy.num_action_token)])
+        answer = ANSWER_LIST[idx]
+        answer_text = answer.replace(f"[{COMPRESS_ACTION_TOKEN}]", compress_act_replace)
+        answer_text = answer_text.replace(f"[{COMPRESS_SC_TOKEN}]", compress_sc_replace)
 
-            # print(question, answer_text)
+        # print(question, answer_text)
 
-            message[1]["content"].append({"type": "text", "text": answer_text})
+        message[1]["content"].append({"type": "text", "text": answer_text})
         # print(self.processor.tokenizer)
 
         # inputs = self.processor.apply_chat_template(message, 

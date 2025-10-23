@@ -13,6 +13,7 @@ from lerobot.common.utils.utils import get_safe_dtype
 from lerobot.common.policies.latent_action.configuration_latent_action import LatentActionConfig
 from lerobot.common.policies.latent_action.action_decoder import PaliGemmaWithExpertConfig, ActionDecoderModel
 from lerobot.common.policies.latent_action.image_decoder import ImagePredictionModel as SDModel
+from lerobot.common.policies.latent_action.uni_decoder import UniDecoder as UniDecoder2
 # from lerobot.common.policies.latent_action.image_decoder_sana import ImagePredictionModel as SANAModel
 from lerobot.common.policies.latent_action.image_decoder_sana_ip_adapter import ImagePredictionModel as SANAModel
 from lerobot.common.policies.latent_action.vlm_wrapper import InternVLModelWrapper
@@ -123,6 +124,7 @@ class LatentActionModel(PreTrainedPolicy):
                                                                     # config=vlm_config,
                                                                     local_files_only=True,
                                                                     trust_remote_code=True)
+        
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.vlm_path,
                                                                     # config=vlm_config,
                                                                     local_files_only=True,
@@ -194,6 +196,8 @@ class LatentActionModel(PreTrainedPolicy):
         # print(sc_token_mask.sum().item(), act_token_mask.sum().item())
         return sc_token_mask, act_token_mask
     
+    # def forward_pi0(self, batch)
+
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, Tensor]]:
         # print(batch["video_len"])
         pixel_values = batch["pixel_values"]
@@ -235,7 +239,7 @@ class LatentActionModel(PreTrainedPolicy):
         # for action, feed sc_embeddings, act_embeddings into the decoder
         # pixel_values = pixel_values.view(bsize, -1, 3, h, w)
         loss_dict = {}
-        actions_is_pad = batch.get("action_is_pad")
+        actions_is_pad = batch.get("actions_is_pad")
         losses = self.uni_decoder(first_image,
                                   last_image, 
                                   sc_embeddings, 
@@ -256,6 +260,7 @@ class LatentActionModel(PreTrainedPolicy):
 
         # Remove padding
         action_loss = action_loss[:, :, : self.config.max_action_dim]
+        
         loss_dict["action_losses_after_rm_padding"] = action_loss.clone()
 
         # For backward pass
@@ -354,8 +359,9 @@ class LatentActionModel(PreTrainedPolicy):
         sc_embeddings = sc_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
         act_embeddings = act_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
 
-        actions_is_pad = batch.get("action_is_pad")
+        actions_is_pad = batch.get("actions_is_pad")
         # print(batch.keys())
+        # print(sc_embeddings.shape, act_embeddings.shape)
 
         actions = self.uni_decoder.sample_actions(sc_embeddings, act_embeddings) # 128
         if actions_is_pad is not None:
@@ -564,6 +570,7 @@ class UniDecoder(nn.Module):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix_for_action(
             con_embeddings=con_embeddings
         )
+        # print(prefix_embs.shape)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
         _, past_key_values = self.action_decoder.forward(
@@ -675,6 +682,7 @@ class UniDecoder(nn.Module):
             # print(latent_model_input.shape)
 
             # predict noise model_output
+            # print(self.image_decoder.transformer)
             noise_pred = self.image_decoder.transformer(
                 latent_model_input.to(dtype=self.dtype),
                 encoder_hidden_states=prompt_embeds.to(dtype=self.dtype),
