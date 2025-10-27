@@ -237,16 +237,16 @@ def convert_dataset_with_data_mix(
                 # revision=V20, 
                 # force_cache_sync=True
             )
-            print(f"Processing {dataset_name}")
-            if (dataset.root / EPISODES_STATS_PATH).is_file():
-                print(f"{dataset_name} has {EPISODES_STATS_PATH}")
-            else:
-                convert_stats(dataset, num_workers=num_workers)
-                ref_stats = load_stats(dataset.root)
-                check_aggregate_stats(dataset, ref_stats)
+            # print(f"Processing {dataset_name}")
+            # if (dataset.root / EPISODES_STATS_PATH).is_file():
+            #     print(f"{dataset_name} has {EPISODES_STATS_PATH}")
+            # else:
+            #     convert_stats(dataset, num_workers=num_workers)
+            #     ref_stats = load_stats(dataset.root)
+            #     check_aggregate_stats(dataset, ref_stats)
 
-                dataset.meta.info["codebase_version"] = V21
-                write_info(dataset.meta.info, dataset.root)
+            #     dataset.meta.info["codebase_version"] = V21
+            #     write_info(dataset.meta.info, dataset.root)
 
             print("Updating quantile_stats_for_dataset")
             # update quantile_stats_for_dataset
