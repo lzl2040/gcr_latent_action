@@ -29,6 +29,102 @@ import torchvision
 from datasets.features.features import register_feature
 from PIL import Image
 
+def decode_video_frames_torchvision_org(
+    video_path: Path | str,
+    timestamps: list[float],
+    tolerance_s: float,
+    backend: str = "pyav",
+    log_loaded_timestamps: bool = False,
+) -> torch.Tensor:
+    """Loads frames associated to the requested timestamps of a video
+
+    The backend can be either "pyav" (default) or "video_reader".
+    "video_reader" requires installing torchvision from source, see:
+    https://github.com/pytorch/vision/blob/main/torchvision/csrc/io/decoder/gpu/README.rst
+    (note that you need to compile against ffmpeg<4.3)
+
+    While both use cpu, "video_reader" is supposedly faster than "pyav" but requires additional setup.
+    For more info on video decoding, see `benchmark/video/README.md`
+
+    See torchvision doc for more info on these two backends:
+    https://pytorch.org/vision/0.18/index.html?highlight=backend#torchvision.set_video_backend
+
+    Note: Video benefits from inter-frame compression. Instead of storing every frame individually,
+    the encoder stores a reference frame (or a key frame) and subsequent frames as differences relative to
+    that key frame. As a consequence, to access a requested frame, we need to load the preceding key frame,
+    and all subsequent frames until reaching the requested frame. The number of key frames in a video
+    can be adjusted during encoding to take into account decoding time and video size in bytes.
+    """
+    video_path = str(video_path)
+
+    # set backend
+    keyframes_only = False
+    torchvision.set_video_backend(backend)
+    if backend == "pyav":
+        keyframes_only = True  # pyav doesn't support accurate seek
+
+    # set a video stream reader
+    # TODO(rcadene): also load audio stream at the same time
+    reader = torchvision.io.VideoReader(video_path, "video")
+
+    # set the first and last requested timestamps
+    # Note: previous timestamps are usually loaded, since we need to access the previous key frame
+    first_ts = min(timestamps)
+    last_ts = max(timestamps)
+
+    # access closest key frame of the first requested frame
+    # Note: closest key frame timestamp is usually smaller than `first_ts` (e.g. key frame can be the first frame of the video)
+    # for details on what `seek` is doing see: https://pyav.basswood-io.com/docs/stable/api/container.html?highlight=inputcontainer#av.container.InputContainer.seek
+    reader.seek(first_ts, keyframes_only=keyframes_only)
+
+    # load all frames until last requested frame
+    loaded_frames = []
+    loaded_ts = []
+    for frame in reader:
+        current_ts = frame["pts"]
+        if log_loaded_timestamps:
+            logging.info(f"frame loaded at timestamp={current_ts:.4f}")
+        loaded_frames.append(frame["data"])
+        loaded_ts.append(current_ts)
+        if current_ts >= last_ts:
+            break
+
+    if backend == "pyav":
+        reader.container.close()
+
+    reader = None
+
+    query_ts = torch.tensor(timestamps)
+    loaded_ts = torch.tensor(loaded_ts)
+
+    # compute distances between each query timestamp and timestamps of all loaded frames
+    dist = torch.cdist(query_ts[:, None], loaded_ts[:, None], p=1)
+    min_, argmin_ = dist.min(1)
+
+    is_within_tol = min_ < tolerance_s
+    assert is_within_tol.all(), (
+        f"One or several query timestamps unexpectedly violate the tolerance ({min_[~is_within_tol]} > {tolerance_s=})."
+        "It means that the closest frame that can be loaded from the video is too far away in time."
+        "This might be due to synchronization issues with timestamps during data collection."
+        "To be safe, we advise to ignore this item during training."
+        f"\nqueried timestamps: {query_ts}"
+        f"\nloaded timestamps: {loaded_ts}"
+        f"\nvideo: {video_path}"
+        f"\nbackend: {backend}"
+    )
+
+    # get closest frames to the query timestamps
+    closest_frames = torch.stack([loaded_frames[idx] for idx in argmin_])
+    closest_ts = loaded_ts[argmin_]
+
+    if log_loaded_timestamps:
+        logging.info(f"{closest_ts=}")
+
+    # convert to the pytorch format which is float32 in [0,1] range (and channel first)
+    closest_frames = closest_frames.type(torch.float32) / 255
+
+    assert len(timestamps) == len(closest_frames)
+    return closest_frames
 
 def decode_video_frames_torchvision(
     video_path: Path | str,

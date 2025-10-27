@@ -87,6 +87,7 @@ from lerobot.common.datasets.utils import (
 from lerobot.common.datasets.video_utils import (
     VideoFrame,
     decode_video_frames_torchvision,
+    decode_video_frames_torchvision_org,
     encode_video_frames,
     get_video_info,
 )
@@ -554,13 +555,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
         super().__init__()
         # print("__init__ 方法被调用")
         # specific proess
-        if "calvin" in dataset_name and int(calvin_sub_task) >= 0:
-            self.train2test_json = os.path.join(root, "meta", "train2test.json")
-            import json 
-            with open(self.train2test_json, "r") as f:
-                self.train2test = json.load(f)[str(calvin_sub_task)]
-        else:
-            self.train2test = None
+        # if "calvin" in dataset_name and int(calvin_sub_task) >= 0:
+        #     self.train2test_json = os.path.join(root, "meta", "train2test.json")
+        #     import json 
+        #     with open(self.train2test_json, "r") as f:
+        #         self.train2test = json.load(f)[str(calvin_sub_task)]
+        # else:
+        self.train2test = None
         print(f"Using calvin train2test mapping for sub-task {calvin_sub_task}: {self.train2test}")
         self.repo_id = repo_id
         self.root = Path(root) if root else HF_LEROBOT_HOME / repo_id
@@ -795,7 +796,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         for key in self.meta.video_keys:
             if query_indices is not None and key in query_indices:
                 timestamps = self.hf_dataset.select(query_indices[key])["timestamp"]
-                query_timestamps[key] = torch.stack(timestamps).tolist()
+                query_timestamps[key] = torch.stack(list(timestamps)).tolist()
             else:
                 query_timestamps[key] = [current_ts]
 
@@ -808,7 +809,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if key not in self.meta.video_keys
         }
 
-    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int, primary_obs_key: str) -> dict[str, torch.Tensor]:
+    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int, primary_obs_key = None) -> dict[str, torch.Tensor]:
         """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
         in the main process (e.g. by using a second Dataloader with num_workers=0). It will result in a
         Segmentation Fault. This probably happens because a memory reference to the video loader is created in
@@ -817,21 +818,37 @@ class LeRobotDataset(torch.utils.data.Dataset):
         item = {}
         for vid_key, query_ts in query_timestamps.items():
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
-            if vid_key == primary_obs_key:
-                # print(vid_key)
-                frames = decode_video_frames_torchvision(
-                    video_path, query_ts, self.tolerance_s, self.video_backend, return_all=True, return_type="image"
-                )
-                # frames = [frame.resize((112, 112)) for frame in frames]
-                # item[vid_key] = frames
-            else:
-                frames = decode_video_frames_torchvision(
-                    video_path, query_ts, self.tolerance_s, self.video_backend, return_type="image"
-                )
-            # item[vid_key] = frames.squeeze(0)
-            item[vid_key] = frames
+            frames = decode_video_frames_torchvision_org(
+                    video_path, query_ts, self.tolerance_s, self.video_backend, 
+            )
+            item[vid_key] = frames.squeeze(0)
 
         return item
+
+    # def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int, primary_obs_key: str) -> dict[str, torch.Tensor]:
+    #     """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
+    #     in the main process (e.g. by using a second Dataloader with num_workers=0). It will result in a
+    #     Segmentation Fault. This probably happens because a memory reference to the video loader is created in
+    #     the main process and a subprocess fails to access it.
+    #     """
+    #     item = {}
+    #     for vid_key, query_ts in query_timestamps.items():
+    #         video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
+    #         if vid_key == primary_obs_key:
+    #             # print(vid_key)
+    #             frames = decode_video_frames_torchvision(
+    #                 video_path, query_ts, self.tolerance_s, self.video_backend, return_all=True, return_type="image"
+    #             )
+    #             # frames = [frame.resize((112, 112)) for frame in frames]
+    #             # item[vid_key] = frames
+    #         else:
+    #             frames = decode_video_frames_torchvision(
+    #                 video_path, query_ts, self.tolerance_s, self.video_backend, return_type="image"
+    #             )
+    #         # item[vid_key] = frames.squeeze(0)
+    #         item[vid_key] = frames
+
+    #     return item
 
     def _add_padding_keys(self, item: dict, padding: dict[str, list[bool]]) -> dict:
         for key, val in padding.items():
@@ -882,10 +899,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
         else:
             item = self.hf_dataset[idx]
             ep_idx = item["episode_index"].item()
-            if OXE_DATASET_CONFIGS[self.dataset_name]["image_obs_keys"]["primary"] is not None:
-                primary_obs_key = f"""observation.images.{OXE_DATASET_CONFIGS[self.dataset_name]["image_obs_keys"]["primary"]}"""
-            else:
-                primary_obs_key = "Zeus" #We can use any random key here,  as there will be no matching video
+            primary_obs_key = None
+            # if OXE_DATASET_CONFIGS[self.dataset_name]["image_obs_keys"]["primary"] is not None:
+            #     primary_obs_key = f"""observation.images.{OXE_DATASET_CONFIGS[self.dataset_name]["image_obs_keys"]["primary"]}"""
+            # else:
+            #     primary_obs_key = "Zeus" #We can use any random key here,  as there will be no matching video
             
             query_indices = None
             if self.delta_indices is not None:
@@ -895,34 +913,34 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 for key, val in query_result.items():
                     item[key] = val
         
-        if len(self.meta.video_keys) > 0:
-            current_ts = item["timestamp"].item()
-            query_timestamps = self._get_query_timestamps(current_ts, query_indices)
-            if query_indices is not None:
-                video_frames = self._query_videos(query_timestamps, ep_idx, primary_obs_key=primary_obs_key)
-            else:
-                video_frames = self._query_videos(query_timestamps, ep_idx, primary_obs_key=primary_obs_key)
-            item = {**video_frames, **item}
+        # if len(self.meta.video_keys) > 0:
+        #     current_ts = item["timestamp"].item()
+        #     query_timestamps = self._get_query_timestamps(current_ts, query_indices)
+        #     if query_indices is not None:
+        #         video_frames = self._query_videos(query_timestamps, ep_idx, primary_obs_key=primary_obs_key)
+        #     else:
+        #         video_frames = self._query_videos(query_timestamps, ep_idx, primary_obs_key=primary_obs_key)
+        #     item = {**video_frames, **item}
 
-        if self.image_transforms is not None:
-            image_keys = self.meta.camera_keys
-            for cam in image_keys:
-                if "wrist" in cam:
-                    item[cam] = self.wrist_image_transforms(item[cam])
-                else:
-                    item[cam] = self.image_transforms(item[cam])
+        # if self.image_transforms is not None:
+        #     image_keys = self.meta.camera_keys
+        #     for cam in image_keys:
+        #         if "wrist" in cam:
+        #             item[cam] = self.wrist_image_transforms(item[cam])
+        #         else:
+        #             item[cam] = self.image_transforms(item[cam])
 
         # Add task as a string
         task_idx = item["task_index"].item()
         task = self.meta.tasks[task_idx]
         item["task"] = task
-        if self.train2test is not None:
-            new_task = self.train2test[task]
-            if new_task == "ok":
-                # If the task is "ok", we don't want to add it to the item
-                item["task"] = task
-            else:
-                item["task"] = new_task
+        # if self.train2test is not None:
+        #     new_task = self.train2test[task]
+        #     if new_task == "ok":
+        #         # If the task is "ok", we don't want to add it to the item
+        #         item["task"] = task
+        #     else:
+        #         item["task"] = new_task
         
         # print(f"task:{task}, new_task:{new_task}")
         item["dataset_name"] = self.dataset_name

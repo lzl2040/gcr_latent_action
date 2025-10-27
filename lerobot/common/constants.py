@@ -9,6 +9,9 @@ OBS_ROBOT = "observation.state"
 OBS_IMAGE = "observation.image"
 OBS_IMAGES = "observation.images"
 ACTION = "action"
+OBS_LANGUAGE = "observation.language"
+OBS_LANGUAGE_TOKENS = OBS_LANGUAGE + ".tokens"
+OBS_LANGUAGE_ATTENTION_MASK = OBS_LANGUAGE + ".attention_mask"
 
 # files & directories
 CHECKPOINTS_DIR = "checkpoints"
@@ -79,6 +82,7 @@ COMPRESS_ACTION_TOKEN = 'CP_ACT'
 #     "Instruction: '{sent}'. Analyze the sequence of {T} frames.\n1. Forecast the representation of the scene in the next frame.\n2. Generate {Tm1} action embeddings to represent the motion between consecutive frames.",
 # ]
 
+# ip_adapter
 QUESTION_LIST = [
     # 1. 通用生成型
     "You are given an instruction '{sent}' and a sequence of video frames. Analyze the visual content across these frames to understand how the scene evolves over time. Describe both the scene-level evolution—how the global environment and context change—and the action-level dynamics, detailing how objects or agents move and interact between consecutive frames.",
@@ -101,3 +105,5 @@ ANSWER_LIST = [
     "Scene-level embedding: [CP_SC]. Action-level embedding capturing motion transitions: [CP_ACT]."
 ]
 
+# openpi
+OPENPI_ATTENTION_MASK_VALUE = -2.3819763e38  # TODO(pepijn): Modify this when extending support to fp8 models
