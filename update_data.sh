@@ -3,7 +3,7 @@ DATA_MIX="simpler_bridge"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --data_mix)
-            USE_STATE="$2"
+            DATA_MIX="$2"
             shift 2
             ;;
     esac
