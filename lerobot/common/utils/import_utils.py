@@ -57,3 +57,5 @@ _torch_available, _torch_version = is_package_available("torch", return_version=
 _gym_xarm_available = is_package_available("gym_xarm")
 _gym_aloha_available = is_package_available("gym_aloha")
 _gym_pusht_available = is_package_available("gym_pusht")
+
+_transformers_available = is_package_available("transformers")
