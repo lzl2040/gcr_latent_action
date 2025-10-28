@@ -1760,6 +1760,110 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         
         return data_dict
     
+    def norm_data_with_mean_std(self, item):
+        if "agi" in item['dataset_name']:
+            action_end_dim = 14
+            state_end_dim = 16
+            state_mean = torch.zeros(self.max_state_dim)
+            state_mean[:state_end_dim] = self.stats["observation.state"]["mean"][:state_end_dim]
+            state_std = torch.ones(self.max_state_dim)
+            state_std[:state_end_dim] = self.stats["observation.state"]["std"][:state_end_dim]
+
+            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
+
+            action_mean = torch.zeros(self.max_action_dim)
+            action_mean[:action_end_dim] = self.stats["action"]["mean"][:action_end_dim]
+            action_std = torch.ones(self.max_action_dim)
+            action_std[:action_end_dim] = self.stats["action"]["std"][:action_end_dim]
+            item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
+            # item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
+            # item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
+        elif "ego_dex" in item['dataset_name']:
+            item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
+            item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
+        else:
+            state_mean = torch.zeros(self.max_state_dim)
+            state_mean[:8] = self.stats["observation.state"]["mean"][:8]
+            state_std = torch.ones(self.max_state_dim)
+
+            state_std[:8] = self.stats["observation.state"]["std"][:8]
+            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
+            
+            action_mean = torch.zeros(self.max_action_dim)
+            action_mean[:7] = self.stats["action"]["mean"][:7]
+            action_std = torch.ones(self.max_action_dim)
+            action_std[:7] = self.stats["action"]["std"][:7]
+            item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
+        return item
+
+    def norm_data_with_quantile(self, item):
+        key1 = "q01"
+        key2 = "q99"
+        if "agi" in item['dataset_name']:
+            action_end_dim = 14
+            state_end_dim = 16
+            state_q01 = torch.ones(self.max_state_dim) * -1
+            state_q01[:state_end_dim] = self.stats["observation.state"][key1][:state_end_dim]
+            state_q99 = torch.ones(self.max_state_dim)
+            state_q99[:state_end_dim] = self.stats["observation.state"][key2][:state_end_dim]
+
+            denom = state_q99 - state_q01
+            denom = torch.where(
+                denom == 0, torch.tensor(1e-8), denom
+            )
+            item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + state_q01
+
+            action_q01 = torch.ones(self.max_action_dim) * -1
+            action_q01[:action_end_dim] = self.stats["action"][key1][:action_end_dim]
+            action_q99 = torch.ones(self.max_action_dim)
+            action_q99[:action_end_dim] = self.stats["action"][key2][:action_end_dim]
+
+            denom = action_q99 - action_q01
+            denom = torch.where(
+                denom == 0, torch.tensor(1e-8), denom
+            )
+            item["action"] = (item["action"] + 1.0) * denom / 2.0 + action_q01
+            # item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
+            # item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
+        elif "ego_dex" in item['dataset_name']:
+            denom = self.stats["action"][key2] - self.stats["action"][key1]
+            denom = torch.where(
+                denom == 0, torch.tensor(1e-8), denom
+            )
+            item["action"] = (item["action"] + 1.0) * denom / 2.0 + self.stats["action"][key1]
+            
+            denom = self.stats["observation.state"][key2] - self.stats["observation.state"][key1]
+            denom = torch.where(
+                denom == 0, torch.tensor(1e-8), denom
+            )
+            item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + self.stats["observation.state"][key1]
+
+        else:
+            state_q01 = torch.ones(self.max_state_dim) * -1
+            state_q01[:8] = self.stats["observation.state"][key1][:8]
+            state_q99 = torch.ones(self.max_state_dim)
+
+            state_q99[:8] = self.stats["observation.state"][key2][:8]
+
+            denom = state_q99 - state_q01
+            denom = torch.where(
+                denom == 0, torch.tensor(1e-8), denom
+            )
+            item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + state_q01
+            
+            action_q01 = torch.ones(self.max_action_dim) * -1
+            action_q01[:7] = self.stats["action"][key1][:7]
+            action_q99 = torch.ones(self.max_action_dim)
+            action_q99[:7] = self.stats["action"][key2][:7]
+
+            denom = action_q99 - action_q01
+            denom = torch.where(
+                denom == 0, torch.tensor(1e-8), denom
+            )
+            item["action"] = (item["action"] + 1.0) * denom / 2.0 + action_q01
+
+        return item
+
     def _fetch_data_dict(self, item, image_obs_keys):
         
         exist_image = None
@@ -1825,39 +1929,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
         
         # Normlize the action and observation vectors
-        if "agi" in item['dataset_name']:
-            action_end_dim = 14
-            state_end_dim = 16
-            state_mean = torch.zeros(self.max_state_dim)
-            state_mean[:state_end_dim] = self.stats["observation.state"]["mean"][:state_end_dim]
-            state_std = torch.ones(self.max_state_dim)
-            state_std[:state_end_dim] = self.stats["observation.state"]["std"][:state_end_dim]
 
-            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
-
-            action_mean = torch.zeros(self.max_action_dim)
-            action_mean[:action_end_dim] = self.stats["action"]["mean"][:action_end_dim]
-            action_std = torch.ones(self.max_action_dim)
-            action_std[:action_end_dim] = self.stats["action"]["std"][:action_end_dim]
-            item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
-            # item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
-            # item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
-        elif "ego_dex" in item['dataset_name']:
-            item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
-            item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
-        else:
-            state_mean = torch.zeros(self.max_state_dim)
-            state_mean[:8] = self.stats["observation.state"]["mean"][:8]
-            state_std = torch.ones(self.max_state_dim)
-
-            state_std[:8] = self.stats["observation.state"]["std"][:8]
-            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
-            
-            action_mean = torch.zeros(self.max_action_dim)
-            action_mean[:7] = self.stats["action"]["mean"][:7]
-            action_std = torch.ones(self.max_action_dim)
-            action_std[:7] = self.stats["action"]["std"][:7]
-            item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
+        item = self.norm_data_with_quantile(item)
         
         # print("state:", item["observation.state"])
         # print(f"primary:", item["observation.images.primary"])
