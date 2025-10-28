@@ -215,6 +215,9 @@ class Normalize(nn.Module):
                 # q99 = stats.get("q99", None)
                 q01 = buffer["q01"]
                 q99 = buffer["q99"]
+                print("q01", q01)
+                print("q99", q99)
+                print(batch[key].shape)
                 if q01 is None or q99 is None:
                     raise ValueError(
                         "QUANTILES normalization mode requires q01 and q99 stats, please update the dataset with the correct stats using the `augment_dataset_quantile_stats.py` script"
