@@ -161,6 +161,7 @@ class Normalize(nn.Module):
         self.stats = stats
         self.eps = 1e-8
         stats_buffers = create_stats_buffers(features, norm_map, stats)
+        print("norm", stats_buffers)
         for key, buffer in stats_buffers.items():
             setattr(self, "buffer_" + key.replace(".", "_"), buffer)
 
