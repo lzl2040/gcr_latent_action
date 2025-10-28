@@ -182,17 +182,17 @@ class LatentActionModel(PreTrainedPolicy):
     def generate_token_mask(self, input_ids):
         sc_token_ids = torch.tensor(self.sc_token_idx, device=input_ids.device)
         act_token_ids = torch.tensor(self.action_token_idx, device=input_ids.device)
-        # act_token_mask = torch.isin(input_ids, act_token_ids)
-        # sc_token_mask = torch.isin(input_ids, sc_token_ids)
+        act_token_mask = torch.isin(input_ids, act_token_ids)
+        sc_token_mask = torch.isin(input_ids, sc_token_ids)
         
         # because the loss is ForCausalLMLoss
-        sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
-        act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
-        bs = sc_token_mask.shape[0]
-        pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
-        # print(act_token_mask.shape, pad.shape)
-        act_token_mask = torch.cat([act_token_mask, pad], dim=1)
-        sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
+        # sc_token_mask = torch.isin(input_ids[:, 1:], sc_token_ids)
+        # act_token_mask = torch.isin(input_ids[:, 1:], act_token_ids)
+        # bs = sc_token_mask.shape[0]
+        # pad = torch.zeros(bs, 1, dtype=torch.bool, device=act_token_ids.device)
+        # # print(act_token_mask.shape, pad.shape)
+        # act_token_mask = torch.cat([act_token_mask, pad], dim=1)
+        # sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
         # print(sc_token_mask.sum().item(), act_token_mask.sum().item())
         return sc_token_mask, act_token_mask
     
@@ -207,7 +207,6 @@ class LatentActionModel(PreTrainedPolicy):
         video_len = batch["video_len"]
         first_image = batch["first_image"]
         last_image = batch["last_image"]
-        # print(input_ids.shape, pixel_values.shape)
         # print(input_ids.shape) # min: 2000, max: 4100
         # print(first_image.shape, torch.max(first_image)) # 0-255
         actions = self.prepare_action(batch)
@@ -215,7 +214,6 @@ class LatentActionModel(PreTrainedPolicy):
         bsize = input_ids.shape[0]
         # torch.Size([B*T, 3, 224, 224]) torch.Size([1, 3266]) torch.Size([1, 3266])
         # print(pixel_values.shape, input_ids.shape, attention_mask.shape)
-        # print(input_ids.shape, labels.shape)
         output = self.vlm(
             input_ids=input_ids,
             labels=labels,
@@ -223,11 +221,10 @@ class LatentActionModel(PreTrainedPolicy):
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
-        # output_hidden_states = output
         output_hidden_states = output.hidden_states # num_layers + 1
         sc_token_mask, act_token_mask = self.generate_token_mask(input_ids)
         # get token embeddings
-        # torch.Size([128, 1024]) torch.Size([4, 1024])
+        # torch.Size([128, 1024])
         sc_embeddings = output_hidden_states[-1][sc_token_mask]
         act_embeddings = output_hidden_states[-1][act_token_mask]
         hidden_size = sc_embeddings.shape[-1]
@@ -288,20 +285,31 @@ class LatentActionModel(PreTrainedPolicy):
         )
         # output_hidden_states = output
         output_hidden_states = output.hidden_states # num_layers + 1
+        # logits = output.logits
         sc_token_mask, act_token_mask = self.generate_token_mask(input_ids)
         # get token embeddings
         # torch.Size([128, 1024]) torch.Size([4, 1024])
         last_hidden_states = output_hidden_states[-1]
-        last_hidden_states = self.vlm.model.language_model.norm(last_hidden_states)
+        # last_hidden_states = self.vlm.model.language_model.norm(last_hidden_states)
         
         sc_embeddings = last_hidden_states[sc_token_mask]
         act_embeddings = last_hidden_states[act_token_mask]
+        # sc_logits = logits[sc_token_mask]
+        # act_logits = logits[act_token_mask]
+        # print(sc_logits.shape, act_logits.shape, logits.shape, )
         hidden_size = sc_embeddings.shape[-1]
         bsize = input_ids.shape[0]
         sc_embeddings = sc_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
         act_embeddings = act_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
+
+        # sc_logits = sc_logits.view(bsize, -1, hidden_size).to(dtype=self.dtype)
+        # act_logits = act_logits.view(bsize, -1, hidden_size).to(dtype=self.dtype)
+
+
         # print(sc_embeddings.shape, act_embeddings.shape)
         latent_embeddings = torch.cat([sc_embeddings, act_embeddings], dim=1)
+        # latent_logits = torch.cat([sc_logits, act_logits], dim=1)
+        # print(latent_embeddings.shape, latent_logits.shape)
         return latent_embeddings
 
     def infer_tokens(self, batch: dict[str, Tensor]):
@@ -360,7 +368,7 @@ class LatentActionModel(PreTrainedPolicy):
         sc_embeddings = sc_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
         act_embeddings = act_embeddings.view(bsize, -1, hidden_size).to(dtype=self.dtype)
 
-        actions_is_pad = batch.get("actions_is_pad")
+        actions_is_pad = batch.get("action_is_pad")
         # print(batch.keys())
         # print(sc_embeddings.shape, act_embeddings.shape)
 

@@ -77,6 +77,15 @@ def create_stats_buffers(
                     "max": nn.Parameter(max, requires_grad=False),
                 }
             )
+        elif norm_mode is NormalizationMode.QUANTILES:
+            q01 = torch.ones(shape, dtype=torch.float32) * torch.inf
+            q99 = torch.ones(shape, dtype=torch.float32) * torch.inf
+            buffer = nn.ParameterDict(
+                {
+                    "q01": nn.Parameter(q01, requires_grad=False),
+                    "q99": nn.Parameter(q99, requires_grad=False),
+                }
+            )
 
         # TODO(aliberts, rcadene): harmonize this to only use one framework (np or torch)
         if stats:
@@ -87,6 +96,9 @@ def create_stats_buffers(
                 elif norm_mode is NormalizationMode.MIN_MAX:
                     buffer["min"].data = torch.from_numpy(stats[key]["min"]).to(dtype=torch.float32)
                     buffer["max"].data = torch.from_numpy(stats[key]["max"]).to(dtype=torch.float32)
+                elif norm_mode is NormalizationMode.QUANTILES:
+                    buffer["q01"].data = torch.from_numpy(stats[key]["q01"]).to(dtype=torch.float32)
+                    buffer["q99"].data = torch.from_numpy(stats[key]["q99"]).to(dtype=torch.float32)
             elif isinstance(stats[key]["mean"], torch.Tensor):
                 # Note: The clone is needed to make sure that the logic in save_pretrained doesn't see duplicated
                 # tensors anywhere (for example, when we use the same stats for normalization and
@@ -98,6 +110,9 @@ def create_stats_buffers(
                 elif norm_mode is NormalizationMode.MIN_MAX:
                     buffer["min"].data = stats[key]["min"].clone().to(dtype=torch.float32)
                     buffer["max"].data = stats[key]["max"].clone().to(dtype=torch.float32)
+                elif norm_mode is NormalizationMode.QUANTILES:
+                    buffer["q01"].data = stats[key]["q01"].clone().to(dtype=torch.float32)
+                    buffer["q99"].data = stats[key]["q99"].clone().to(dtype=torch.float32)
             else:
                 type_ = type(stats[key]["mean"])
                 raise ValueError(f"np.ndarray or torch.Tensor expected, but type is '{type_}' instead.")
@@ -144,6 +159,7 @@ class Normalize(nn.Module):
         self.features = features
         self.norm_map = norm_map
         self.stats = stats
+        self.eps = 1e-8
         stats_buffers = create_stats_buffers(features, norm_map, stats)
         for key, buffer in stats_buffers.items():
             setattr(self, "buffer_" + key.replace(".", "_"), buffer)
@@ -193,6 +209,22 @@ class Normalize(nn.Module):
                 batch[key] = (batch[key] - min) / (max - min + 1e-8)
                 # normalize to [-1, 1]
                 batch[key] = batch[key] * 2 - 1
+            elif norm_mode in NormalizationMode.QUANTILES:
+                # q01 = stats.get("q01", None)
+                # q99 = stats.get("q99", None)
+                q01 = buffer["q01"]
+                q99 = buffer["q99"]
+                if q01 is None or q99 is None:
+                    raise ValueError(
+                        "QUANTILES normalization mode requires q01 and q99 stats, please update the dataset with the correct stats using the `augment_dataset_quantile_stats.py` script"
+                    )
+
+                denom = q99 - q01
+                # Avoid division by zero by adding epsilon when quantiles are identical
+                denom = torch.where(
+                    denom == 0, torch.tensor(self.eps, device=batch[key].device, dtype=batch[key].dtype), denom
+                )
+                batch[key] = (batch[key] + 1.0) * denom / 2.0 + q01
             else:
                 raise ValueError(norm_mode)
         return batch
@@ -232,6 +264,7 @@ class Unnormalize(nn.Module):
         self.features = features
         self.norm_map = norm_map
         self.stats = stats
+        self.eps = 1e-8
         # `self.buffer_observation_state["mean"]` contains `torch.tensor(state_dim)`
         stats_buffers = create_stats_buffers(features, norm_map, stats)
         for key, buffer in stats_buffers.items():
@@ -264,6 +297,22 @@ class Unnormalize(nn.Module):
                 assert not torch.isinf(max).any(), _no_stats_error_str("max")
                 batch[key] = (batch[key] + 1) / 2
                 batch[key] = batch[key] * (max - min) + min
+            elif norm_mode in NormalizationMode.QUANTILES:
+                # q01 = stats.get("q01", None)
+                # q99 = stats.get("q99", None)
+                q01 = buffer["q01"]
+                q99 = buffer["q99"]
+                if q01 is None or q99 is None:
+                    raise ValueError(
+                        "QUANTILES normalization mode requires q01 and q99 stats, please update the dataset with the correct stats using the `augment_dataset_quantile_stats.py` script"
+                    )
+
+                denom = q99 - q01
+                # Avoid division by zero by adding epsilon when quantiles are identical
+                denom = torch.where(
+                    denom == 0, torch.tensor(self.eps, device=batch[key].device, dtype=batch[key].dtype), denom
+                )
+                batch[key] = (batch[key] + 1.0) * denom / 2.0 + q01
             else:
                 raise ValueError(norm_mode)
         return batch

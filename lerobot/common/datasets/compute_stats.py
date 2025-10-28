@@ -563,7 +563,7 @@ def aggregate_feature_stats(stats_ft_list: list[dict[str, dict]]) -> dict[str, d
     return aggregated
 
 
-def aggregate_stats(stats_list: list[dict[str, dict]]) -> dict[str, dict[str, np.ndarray]]:
+def aggregate_stats(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str, dict[str, np.ndarray]]:
     """Aggregate stats from multiple compute_stats outputs into a single set of stats.
 
     The final stats will have the union of all data keys from each of the stats dicts.
@@ -582,7 +582,28 @@ def aggregate_stats(stats_list: list[dict[str, dict]]) -> dict[str, dict[str, np
 
     for key in data_keys:
         stats_with_key = [stats[key] for stats in stats_list if key in stats]
-        aggregated_stats[key] = aggregate_feature_stats(stats_with_key)
+        # pad mean, std, q01, q99, max, min
+        if key in ["action", "observation.state"]:
+            pad_stats_with_key = []
+            for stats in stats_with_key:
+                pad_stats = {}
+                pad_len = max_dim - len(stats["mean"])
+                # np.pad(数组, (左补数量, 右补数量), mode="constant", constant_values=填充值)
+                pad_stats["mean"] = np.pad(stats["mean"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["std"] = np.pad(stats["std"], (0, pad_len), mode="constant", constant_values=1)
+                pad_stats["max"] = np.pad(stats["max"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["min"] = np.pad(stats["min"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["q01"] = np.pad(stats["q01"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["q99"] = np.pad(stats["q99"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["count"] = stats["count"]
+                pad_stats_with_key.append(pad_stats)
+        else:
+            pad_stats_with_key = stats_with_key
+        aggregated_stats[key] = aggregate_feature_stats(pad_stats_with_key)
+        for k, v in aggregated_stats[key].items():
+            if isinstance(aggregated_stats[key][k], np.ndarray):
+                aggregated_stats[key][k] = torch.from_numpy(aggregated_stats[key][k])
+        # print(key, type(aggregated_stats[key]))
 
     return aggregated_stats
 

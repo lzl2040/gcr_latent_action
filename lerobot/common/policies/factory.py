@@ -62,6 +62,9 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
     elif name == "latent_act":
         from lerobot.common.policies.latent_action.modeling_latent_action import LatentActionModel
         return LatentActionModel
+    elif name == "pi05":
+        from lerobot.common.policies.pi05.modeling_pi05 import PI05Policy
+        return PI05Policy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -198,8 +201,16 @@ def make_policy(
             #     # print(key)
             new_state_dict[new_key] = value
         if "pi0" in cfg.pretrained_path:
-            missing_key, unexpected_keys = policy.load_state_dict(new_state_dict, strict=False)
-            print(missing_key, unexpected_keys)
+            if "pi05" in cfg.pretrained_path:
+                # with open("model_pi05.txt", "w") as f:
+                #     for key, value in policy.named_parameters():
+                #         f.write(f"{key}:{value.shape}\n")
+                state_dict = policy._fix_pytorch_state_dict_keys(new_state_dict)
+                missing_key, unexpected_keys = policy.load_state_dict(state_dict, strict=False)
+                policy.resize_token_embedding()
+            else:
+                missing_key, unexpected_keys = policy.load_state_dict(new_state_dict, strict=False)
+            print("missing", missing_key, unexpected_keys)
         else:
             policy.load_state_dict(new_state_dict, strict=True)
         # print(missing_keys, unspected_keys)

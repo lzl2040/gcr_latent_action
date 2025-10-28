@@ -189,12 +189,16 @@ class LeRobotDatasetMetadata:
         check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)
         self.tasks, self.task_to_task_index = load_tasks(self.root)
         self.episodes = load_episodes(self.root)
-        if self._version < packaging.version.parse("v2.1"):
-            self.stats = load_stats(self.root)
-            self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
-        else:
+        self.stats = load_stats(self.root)
+        if self.stats == None:
             self.episodes_stats = load_episodes_stats(self.root)
             self.stats = aggregate_stats(list(self.episodes_stats.values()))
+        # if self._version < packaging.version.parse("v2.1"):
+        #     self.stats = load_stats(self.root)
+        #     self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
+        # else:
+        #     self.episodes_stats = load_episodes_stats(self.root)
+        #     self.stats = aggregate_stats(list(self.episodes_stats.values()))
 
     def pull_from_repo(
         self,
@@ -1647,7 +1651,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         all_new_obs_image_keys = ["observation.images.primary", 
                                   "observation.images.secondary", 
                                   "observation.images.wrist"] # follow https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/rlds/oxe/configs.py
-        self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
+        # self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
+        self.stats = aggregate_stats([dataset.meta.stats for dataset in self.datasets], self.max_action_dim)
         save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
         # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
         # remove state
@@ -1844,6 +1849,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             state_mean = torch.zeros(self.max_state_dim)
             state_mean[:8] = self.stats["observation.state"]["mean"][:8]
             state_std = torch.ones(self.max_state_dim)
+
             state_std[:8] = self.stats["observation.state"]["std"][:8]
             item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
             
@@ -1858,16 +1864,17 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # print(f"secondary:", np.array(item["observation.images.secondary"]))
         # print(f"wrist:", np.array(item["observation.images.wrist"]))
         vl_item = self._prepare_intern_vl_data(item)
-        
+
         task = item["task"]
         task_text = task
-        task_text = task_text + ". Scene representations:"
-        for i in range(self.cfg.policy.num_sc_token):
-            task_text += f"[{COMPRESS_SC_TOKEN}] "
-        task_text += ". Action representations:"
-        for i in range(self.cfg.policy.num_action_token):
-            task_text += f"[{COMPRESS_ACTION_TOKEN}] "
-        task_text += "."
+        # task_text = task_text + ". Scene representations:"
+        # for i in range(self.cfg.policy.num_sc_token):
+        #     task_text += f"[{COMPRESS_SC_TOKEN}] "
+        # task_text += ". Action representations:"
+        # for i in range(self.cfg.policy.num_action_token):
+        #     task_text += f"[{COMPRESS_ACTION_TOKEN}] "
+        # task_text += "."
+        
         
         data_dict = {
             "source": item["source"],

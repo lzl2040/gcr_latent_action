@@ -7,6 +7,7 @@ class DistillModel(nn.Module):
         super().__init__()
         self.teacher_model = teacher_model
         self.student_model = student_model
+        self.proj = nn.Linear(2048, 2048 // 4)  # 共享的映射层
         # print("Freeze Teacher model")
         # for param in self.teacher_model.parameters():
         #     param.requires_grad = False
@@ -17,6 +18,8 @@ class DistillModel(nn.Module):
         self,
         student_h: torch.Tensor,
         teacher_h: torch.Tensor,
+        student_logits:torch.Tensor,
+        teacher_logits:torch.Tensor,
         alpha: float = 1.0,
         temperature: float = 1.0,
         reduction: str = "batchmean",
@@ -44,16 +47,16 @@ class DistillModel(nn.Module):
         mse = mse_loss_fn(student_h, teacher_h)
 
         # ---------- KL 部分 ----------
-        log_p = F.log_softmax(student_h / temperature, dim=-1)
-        q = F.softmax(teacher_h / temperature, dim=-1)
+        log_p = F.log_softmax(student_logits, dim=-1)
+        q = F.softmax(teacher_logits, dim=-1)
 
-        kl = kl_loss_fn(log_p, q) * (temperature ** 2)
+        kl = kl_loss_fn(log_p, q)
 
         # ---------- 合并 ----------
-        # loss = mse + alpha * kl
-        loss = mse
-        # return loss, {"mse": mse.item(), "kl": kl.item()}
-        return loss, {"mse": mse.item(), "kl": 0.0}
+        loss = mse + alpha * kl
+        # loss = mse
+        return loss, {"mse": mse.item(), "kl": kl.item()}
+        # return loss, {"mse": mse.item(), "kl": 0.0}
 
     def get_optim_params(self) -> dict:
         return self.parameters()
@@ -67,9 +70,22 @@ class DistillModel(nn.Module):
         # print(student_latent_embeddings.requires_grad)  # True
         # print(teacher_latent_emebedings.requires_grad)  # False
         # print(torch.isnan(student_latent_embeddings).any(), torch.isnan(teacher_latent_emebedings).any())
+        # final norm: 110, 165
+        # wo norm: 10, 70
         # print(student_latent_embeddings.abs().max(), teacher_latent_emebedings.abs().max())
+        # student_logits = self.proj(student_latent_embeddings)
+        # teacher_logits = self.proj(teacher_latent_emebedings)
+        student_logits = student_latent_embeddings
+        teacher_logits = teacher_latent_emebedings
+        student_logits = student_logits / (student_logits.norm(dim=-1, keepdim=True) + 1e-6)
+        teacher_logits = teacher_logits / (teacher_logits.norm(dim=-1, keepdim=True) + 1e-6)
+        # student_logits = student_latent_embeddings / (student_latent_embeddings.norm(dim=-1, keepdim=True) + 1e-6)
+        # teacher_logits = teacher_latent_emebedings / (teacher_latent_emebedings.norm(dim=-1, keepdim=True) + 1e-6)
+
         loss, loss_dict = self.kl_mse_loss(student_h=student_latent_embeddings, 
                                            teacher_h=teacher_latent_emebedings,
-                                           alpha=0.4,
+                                           student_logits=student_logits,
+                                           teacher_logits=teacher_logits,
+                                           alpha=1,
                                            temperature=3)
         return loss, loss_dict
