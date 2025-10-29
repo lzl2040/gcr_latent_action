@@ -244,6 +244,7 @@ class PI05Policy(PreTrainedPolicy):
     
     
     def resize_token_embedding(self):
+        # for warning: Vision embedding key might need handling, it can be ignored: https://github.com/huggingface/lerobot/issues/2307
         self.model.paligemma_with_expert.paligemma.language_model.resize_token_embeddings(len(self.language_tokenizer))
 
     def _fix_pytorch_state_dict_keys(
@@ -588,7 +589,8 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
         # Initialize gradient checkpointing flag
-        self.gradient_checkpointing_enabled = False
+        self.gradient_checkpointing_enabled = True
+        self.gradient_checkpointing_enable()
 
         # Compile model if requested
         if config.compile_model:
