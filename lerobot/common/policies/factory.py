@@ -212,11 +212,12 @@ def make_policy(
                 missing_key, unexpected_keys = policy.load_state_dict(new_state_dict, strict=False)
             print("missing", missing_key, unexpected_keys)
         else:
-            policy.load_state_dict(new_state_dict, strict=True)
+            policy.load_state_dict(new_state_dict, strict=False)
         # print(missing_keys, unspected_keys)
         print(f"Load pt weights from:{weight_pt_path}")
         del weights
         del key_to_remove
+        del new_state_dict
     
     
     # policy.to(device)
