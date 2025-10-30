@@ -24,7 +24,7 @@ IS_FT=true
 IP_TOKEN_NUM=16
 IP_TOKEN_GEN_TYPE="cls_proj"cls_proj
 IMG_DECODER_PART_TRAIN=true
-NORM_TYPE="mean_std"
+NORM_TYPE="quantile"
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
