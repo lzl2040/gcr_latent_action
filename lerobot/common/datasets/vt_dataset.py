@@ -1929,9 +1929,9 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
         
         # Normlize the action and observation vectors
-        if self.cfg.norm_type == "quantile":
+        if self.cfg.policy.norm_type == "quantile":
             item = self.norm_data_with_quantile(item)
-        elif self.cfg.norm_type == "mean_std":
+        elif self.cfg.policy.norm_type == "mean_std":
             item = self.norm_data_with_mean_std(item)
         else:
             raise ValueError(f"Not defined norm type {self.cfg.norm_type}")
