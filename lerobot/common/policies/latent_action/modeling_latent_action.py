@@ -217,7 +217,7 @@ class LatentActionModel(PreTrainedPolicy):
         # print(pixel_values.shape, input_ids.shape, attention_mask.shape)
         output = self.vlm(
             input_ids=input_ids,
-            labels=labels,
+            # labels=labels,
             pixel_values=pixel_values,
             attention_mask=attention_mask,
             output_hidden_states=True,
@@ -246,8 +246,8 @@ class LatentActionModel(PreTrainedPolicy):
                                   actions)
         action_loss = losses["action_loss"]
         image_loss = losses["image_loss"]
-        lg_loss = output.loss # use this will increase memory a lot
-        # lg_loss = torch.tensor(0.0, device=action_loss.device)
+        # lg_loss = output.loss # use this will increase memory a lot
+        lg_loss = torch.tensor(0.0, device=action_loss.device)
         # print(lg_loss)
         loss_dict["action_losses_after_forward"] = action_loss.clone()
 
