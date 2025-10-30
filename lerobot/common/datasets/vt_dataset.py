@@ -1720,7 +1720,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 break
             retry += 1
             if self.is_ft:
-                dataset_id, data_id = self.id2dataset[index]
+                dataset_id, data_id = self.id2data[index]
                 dataset = self.datasets[dataset_id]
                 item = dataset[data_id]
                 dataset_name = item["dataset_name"]
