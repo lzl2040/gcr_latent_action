@@ -269,7 +269,6 @@ def train(cfg: TrainPipelineConfig):
         seed=seed,
         data_mix=cfg.data_mix,
         vla2root_json="vla2root.json",
-        is_ft=cfg.is_ft,
         # image_decoder_processor=img_gen_pipe.image_processor
         # vla2root_json="vla2root_bak_single.json"
     )
