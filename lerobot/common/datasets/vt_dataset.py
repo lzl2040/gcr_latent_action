@@ -1563,7 +1563,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - {dataset_name} not found in vla2root.json, skipping...")
         self.is_ft = cfg.is_ft
         if self.is_ft:
-            self.id2dataset = {}
+            self.id2data = []
             self.num_episodes = 0
             self.dataset_len = 0
             dataset_id = 0
@@ -1578,7 +1578,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 end_id = self.dataset_len
                 data_id = 0
                 for index in range(start_id, end_id):
-                    self.id2dataset[index] = (dataset_id, data_id)
+                    self.id2data.append((dataset_id, data_id))
                     data_id += 1
                 dataset_id += 1
                 assert data_id == num_frames
