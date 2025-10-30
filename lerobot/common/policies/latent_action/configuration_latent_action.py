@@ -16,12 +16,14 @@ class LatentActionConfig(PreTrainedConfig):
     # qwen_path = "/datassd_1T/qwen25vl/Qwen2.5-VL-7B-Instruct/"
     # qwen_path: str = "/Data/lzl/qwen2.5_vl_7b/Qwen2.5-VL-7B-Instruct"
     # img_pred_model: str = "/mnt/wangxiaofa/pt_weights/stable-diffusion-3.5-medium/"
+    
     img_pred_model: str = "/mnt/wangxiaofa/pt_weights/Sana_1600M_512px_diffusers/"
     vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/"
     action_expert_path: str = "/mnt/wangxiaofa/pi0_pretrain/pi0_gemma_expert_only.pt"
     img_encoder_model: str = "/mnt/wangxiaofa/pt_weights/CLIP-ViT-H-14-laion2B-s32B-b79K"
-    # action_expert_path = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
+
     # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
+    # action_expert_path = "/home/v-zuoleili/Pretrain/pi0/pi0_gemma_expert_only.pt"
     # vlm_path: str = "/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF"
     # # img_pred_model: str = "stabilityai/stable-diffusion-3.5-medium"
     # img_pred_model: str = "/home/v-zuoleili/Pretrain/Sana_1600M_512px_diffusers"
@@ -65,6 +67,7 @@ class LatentActionConfig(PreTrainedConfig):
     freeze_vision_encoder: bool = True
     img_decoder_part_train: bool = True
     is_distill: bool = False
+    norm_type: str = "mean_std"
 
 
     normalization_mapping: dict[str, NormalizationMode] = field(

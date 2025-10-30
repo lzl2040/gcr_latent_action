@@ -1443,7 +1443,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
 class MultiDatasetforDistTraining(torch.utils.data.Dataset):
     def __init__(self, cfg, image_transforms, wrist_image_transforms = None, seed: int = 1000, 
-                 data_mix: str = "toy", vla2root_json: str = None, banlance_weight=True, is_ft = False,
+                 data_mix: str = "toy", vla2root_json: str = None, banlance_weight=True,
                  image_decoder_processor = None, is_train = True):
         """
         参数:
@@ -1561,8 +1561,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 self.dataset_names.append(dataset_name)
             else:
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - {dataset_name} not found in vla2root.json, skipping...")
-        self.is_ft = is_ft
-        if is_ft:
+        self.is_ft = cfg.is_ft
+        if self.is_ft:
             self.id2dataset = {}
             self.num_episodes = 0
             self.dataset_len = 0
@@ -1589,6 +1589,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             #     self.num_episodes += dataset.num_episodes
             #     self.dataset_len += dataset.num_frames
             # self.dataset_len = self.dataset.num_frames
+            random.shuffle(self.id2data)
+            print(f"Has shuffled the indices")
             print(f"data mix:{data_mix} has {self.num_episodes} episodes, {self.dataset_len} frames.")
         else:
             if banlance_weight:
@@ -1642,8 +1644,6 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             print(f"Has shuffled the indices")
             self.dataset_len = temp_data_num
             print(f"Dataset length: {self.dataset_len}, Total episodes: {self.num_episodes}")
-        # concat the selected dataset
-        # self.dataset = ConcatDataset(selected_subsets)
         
         # calculate stats
         self.max_action_dim = cfg.policy.max_action_dim
@@ -1929,8 +1929,12 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
         
         # Normlize the action and observation vectors
-
-        item = self.norm_data_with_quantile(item)
+        if self.cfg.norm_type == "quantile":
+            item = self.norm_data_with_quantile(item)
+        elif self.cfg.norm_type == "mean_std":
+            item = self.norm_data_with_mean_std(item)
+        else:
+            raise ValueError(f"Not defined norm type {self.cfg.norm_type}")
         
         # print("state:", item["observation.state"])
         # print(f"primary:", item["observation.images.primary"])

@@ -298,7 +298,6 @@ def train(cfg: TrainPipelineConfig):
         seed=seed,
         data_mix=cfg.data_mix,
         vla2root_json="vla2root.json",
-        is_ft=cfg.is_ft,
         # image_decoder_processor=img_gen_pipe.image_processor
         # vla2root_json="vla2root_bak_single.json"
     )
@@ -532,7 +531,7 @@ def train(cfg: TrainPipelineConfig):
             sampler.set_epoch(0)
             all_indices = list(sampler)
             samples_per_epoch = len(all_indices)
-            batches_per_epoch = math.ceil(samples_per_epoch / (cfg.batch_size + 2))
+            batches_per_epoch = math.ceil(samples_per_epoch / (cfg.batch_size))
             # batches_per_epoch = math.ceil(samples_per_epoch / 15)
             epoch_num = step // batches_per_epoch
             batch_in_epoch = step % batches_per_epoch
