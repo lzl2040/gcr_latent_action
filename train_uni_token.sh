@@ -155,7 +155,7 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --node_rank=$NODE_RANK \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    lerobot/scripts/fsdp_train_uni_token.py \
+    -m lerobot.scripts.fsdp_train_uni_token \
     --policy.type="latent_act" \
     --policy.use_state=$USE_STATE \
     --policy.use_lora=$USE_LORA \
