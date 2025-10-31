@@ -1811,7 +1811,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             denom = torch.where(
                 denom == 0, torch.tensor(1e-8), denom
             )
-            item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + state_q01
+            item["observation.state"] = 2.0 * (item["observation.state"] - state_q01) / denom - 1.0
+            # item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + state_q01
 
             action_q01 = torch.ones(self.max_action_dim) * -1
             action_q01[:action_end_dim] = self.stats["action"][key1][:action_end_dim]
@@ -1822,7 +1823,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             denom = torch.where(
                 denom == 0, torch.tensor(1e-8), denom
             )
-            item["action"] = (item["action"] + 1.0) * denom / 2.0 + action_q01
+            item["action"] = 2.0 * (item["action"] - action_q01) / denom - 1.0
+            # item["action"] = (item["action"] + 1.0) * denom / 2.0 + action_q01
             # item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
             # item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
         elif "ego_dex" in item['dataset_name']:
@@ -1830,14 +1832,15 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             denom = torch.where(
                 denom == 0, torch.tensor(1e-8), denom
             )
-            item["action"] = (item["action"] + 1.0) * denom / 2.0 + self.stats["action"][key1]
+            item["action"] = 2.0 * (item["action"] - self.stats["action"][key1]) / denom - 1.0
+            # item["action"] = (item["action"] + 1.0) * denom / 2.0 + self.stats["action"][key1]
             
             denom = self.stats["observation.state"][key2] - self.stats["observation.state"][key1]
             denom = torch.where(
                 denom == 0, torch.tensor(1e-8), denom
             )
-            item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + self.stats["observation.state"][key1]
-
+            item["observation.state"] = 2.0 * (item["observation.state"] - self.stats["observation.state"][key1]) / denom - 1.0
+            # item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + self.stats["observation.state"][key1]
         else:
             state_q01 = torch.ones(self.max_state_dim) * -1
             state_q01[:8] = self.stats["observation.state"][key1][:8]
@@ -1849,7 +1852,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             denom = torch.where(
                 denom == 0, torch.tensor(1e-8), denom
             )
-            item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + state_q01
+            item["observation.state"] = 2.0 * (item["observation.state"] - state_q01) / denom - 1.0
+            # item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + state_q01
             
             action_q01 = torch.ones(self.max_action_dim) * -1
             action_q01[:7] = self.stats["action"][key1][:7]
@@ -1860,7 +1864,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             denom = torch.where(
                 denom == 0, torch.tensor(1e-8), denom
             )
-            item["action"] = (item["action"] + 1.0) * denom / 2.0 + action_q01
+            item["action"] = 2.0 * (item["action"] - action_q01) / denom - 1.0
+            # item["action"] = (item["action"] + 1.0) * denom / 2.0 + action_q01
 
         return item
 
