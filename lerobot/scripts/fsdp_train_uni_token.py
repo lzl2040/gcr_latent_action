@@ -325,10 +325,8 @@ def train(cfg: TrainPipelineConfig):
     if rank == 0:
         model_params = sum(p.numel() for p in policy.parameters()) / 1e9
         logger.info(f"Model parameters: {model_params} B")
-        action_decoder_params = sum(p.numel() for p in policy.uni_decoder.action_decoder.parameters()) / 1e9
         image_decoder_params = sum(p.numel() for p in policy.uni_decoder.image_decoder.parameters()) / 1e9
         vlm_params = sum(p.numel() for p in policy.vlm.parameters()) / 1e9
-        logger.info(f"Action decoder params:{action_decoder_params} B")
         logger.info(f"Image decoder params:{image_decoder_params} B")
         logger.info(f"VLM params:{vlm_params} B")
         # logger.info(f"Qwen VL visual parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.visual.parameters())}")
@@ -350,15 +348,19 @@ def train(cfg: TrainPipelineConfig):
         vlm_trainbale_params = sum(
             p.numel() for p in policy.vlm.parameters() if p.requires_grad
         )
-        action_decoder_trainable_params = sum(
-            p.numel() for p in policy.uni_decoder.action_decoder.parameters() if p.requires_grad
-        )
+
+        # action_decoder_params = sum(p.numel() for p in policy.uni_decoder.action_decoder.parameters()) / 1e9
+        # action_decoder_trainable_params = sum(
+        #     p.numel() for p in policy.uni_decoder.action_decoder.parameters() if p.requires_grad
+        # )
+        # logger.info(f"Action decoder params:{action_decoder_params} B")
+        # logger.info(f"Action Decoder Trainable parameters: {action_decoder_trainable_params:,} ({action_decoder_trainable_params / 1e6:.2f}M)")
+
         image_decoder_trainable_params = sum(
             p.numel() for p in policy.uni_decoder.image_decoder.parameters() if p.requires_grad
         )
         logger.info(f"VLM Trainable parameters: {vlm_trainbale_params:,} ({vlm_trainbale_params / 1e6:.2f}M)")
         logger.info(f"Image Decoder Trainable parameters: {image_decoder_trainable_params:,} ({image_decoder_trainable_params / 1e6:.2f}M)")
-        logger.info(f"Action Decoder Trainable parameters: {action_decoder_trainable_params:,} ({action_decoder_trainable_params / 1e6:.2f}M)")
         logger.info(f"Trainable parameters: {trainable_params:,} ({trainable_params / 1e6:.2f}M)")
        
     # 训练状态初始化
