@@ -2011,8 +2011,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         compress_sc_replace = ", ".join([f"[{COMPRESS_SC_TOKEN}]" for i in range(self.cfg.policy.num_sc_token)])
         compress_act_replace = ", ".join([f"[{COMPRESS_ACTION_TOKEN}]" for i in range(self.cfg.policy.num_action_token)])
         answer = ANSWER_LIST[idx]
-        # answer_text = answer.replace(f"[{COMPRESS_ACTION_TOKEN}]", compress_act_replace)
-        answer_text = answer.replace(f"[{COMPRESS_SC_TOKEN}]", compress_sc_replace)
+        answer_text = answer.replace(f"[{COMPRESS_ACTION_TOKEN}]", compress_act_replace)
+        answer_text = answer_text.replace(f"[{COMPRESS_SC_TOKEN}]", compress_sc_replace)
 
         # print(question, answer_text)
 
