@@ -82,27 +82,54 @@ COMPRESS_ACTION_TOKEN = 'CP_ACT'
 #     "Instruction: '{sent}'. Analyze the sequence of {T} frames.\n1. Forecast the representation of the scene in the next frame.\n2. Generate {Tm1} action embeddings to represent the motion between consecutive frames.",
 # ]
 
-# ip_adapter
+# ip_adapter, full prompt
+# QUESTION_LIST = [
+#     # 1. 通用生成型
+#     "You are given an instruction '{sent}' and a sequence of video frames. Analyze the visual content across these frames to understand how the scene evolves over time. Describe both the scene-level evolution—how the global environment and context change—and the action-level dynamics, detailing how objects or agents move and interact between consecutive frames.",
+#     # 2. Reasoning 型
+#     "Given the instruction '{sent}' and the video frames, reason about what happens within this time span. Explain how the overall scene changes, and identify the temporal dependencies between consecutive frames. Highlight the actions, interactions, and transitions that drive the scene’s evolution.",
+#     # 3. Summarization 型
+#     "According to the instruction '{sent}', generate a structured summary of the video segment. Describe the scene-level context and its temporal evolution, followed by the action-level motion between frames. Your summary should clearly separate static scene changes from dynamic object behaviors, providing a coherent overview of the visual events in this segment.",
+#     # 4. Embedding / Representation 型
+#     "Based on the instruction '{sent}', encode the video segment into hierarchical representations. The scene-level representation should summarize the overall visual environment and its evolution. The action-level representation should capture motion transitions and object interactions between adjacent frames. Together, they should form a compact embedding that reflects both global context and local temporal dynamics.",
+# ]
+
+# ANSWER_LIST = [
+#     # 1️⃣ 通用生成型 —— 直接分析场景与动作变化
+#     "Scene evolution description: [CP_SC]. Action dynamics description: [CP_ACT].",
+#     # 2️⃣ Reasoning 型 —— 体现逻辑、因果与时间推理
+#     "Scene reasoning: [CP_SC]. Action reasoning and temporal dependencies: [CP_ACT].",
+#     # 3️⃣ Summarization 型 —— 生成结构化摘要
+#     "Scene summary: [CP_SC]. Action summary of motion and interactions: [CP_ACT].",
+#     # 4️⃣ Embedding / Representation 型 —— 输出层次化表征
+#     "Scene-level embedding: [CP_SC]. Action-level embedding capturing motion transitions: [CP_ACT]."
+# ]
+
+# wo action summary
 QUESTION_LIST = [
     # 1. 通用生成型
-    "You are given an instruction '{sent}' and a sequence of video frames. Analyze the visual content across these frames to understand how the scene evolves over time. Describe both the scene-level evolution—how the global environment and context change—and the action-level dynamics, detailing how objects or agents move and interact between consecutive frames.",
+    "You are given an instruction '{sent}' and a sequence of video frames. Analyze the visual content to summarize the latent action that occurs from the first frame to the last, describing the underlying transition or process implied by the visual changes.",
+    
     # 2. Reasoning 型
-    "Given the instruction '{sent}' and the video frames, reason about what happens within this time span. Explain how the overall scene changes, and identify the temporal dependencies between consecutive frames. Highlight the actions, interactions, and transitions that drive the scene’s evolution.",
+    "Given the instruction '{sent}' and the video frames, reason about the latent action that unfolds throughout the sequence. Infer the implicit process or transformation connecting the initial and final visual states.",
+    
     # 3. Summarization 型
-    "According to the instruction '{sent}', generate a structured summary of the video segment. Describe the scene-level context and its temporal evolution, followed by the action-level motion between frames. Your summary should clearly separate static scene changes from dynamic object behaviors, providing a coherent overview of the visual events in this segment.",
+    "According to the instruction '{sent}', provide a concise summary of the latent action observed in the video segment. Describe the key transformation or continuous process that occurs from the first frame to the last.",
+    
     # 4. Embedding / Representation 型
-    "Based on the instruction '{sent}', encode the video segment into hierarchical representations. The scene-level representation should summarize the overall visual environment and its evolution. The action-level representation should capture motion transitions and object interactions between adjacent frames. Together, they should form a compact embedding that reflects both global context and local temporal dynamics.",
+    "Based on the instruction '{sent}', encode the video segment into a latent action representation that captures the underlying transformation or process occurring between the first and last frames.",
 ]
 
+
 ANSWER_LIST = [
-    # 1️⃣ 通用生成型 —— 直接分析场景与动作变化
-    "Scene evolution description: [CP_SC]. Action dynamics description: [CP_ACT].",
-    # 2️⃣ Reasoning 型 —— 体现逻辑、因果与时间推理
-    "Scene reasoning: [CP_SC]. Action reasoning and temporal dependencies: [CP_ACT].",
-    # 3️⃣ Summarization 型 —— 生成结构化摘要
-    "Scene summary: [CP_SC]. Action summary of motion and interactions: [CP_ACT].",
-    # 4️⃣ Embedding / Representation 型 —— 输出层次化表征
-    "Scene-level embedding: [CP_SC]. Action-level embedding capturing motion transitions: [CP_ACT]."
+    # 1️⃣ 通用生成型 —— 总结潜在动作变化
+    "Latent action description: [CP_SC].",
+    # 2️⃣ Reasoning 型 —— 强调推理与隐含过程
+    "Latent action reasoning: [CP_SC].",
+    # 3️⃣ Summarization 型 —— 生成潜在动作摘要
+    "Latent action summary: [CP_SC].",
+    # 4️⃣ Embedding / Representation 型 —— 输出潜在动作表征
+    "Latent action representation: [CP_SC]."
 ]
 
 # openpi
