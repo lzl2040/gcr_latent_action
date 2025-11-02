@@ -160,7 +160,7 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --node_rank=$NODE_RANK \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    lerobot/scripts/distill_latent_action.py \
+    -m lerobot.scripts.distill_latent_action.py \
     --policy.type="latent_act" \
     --policy2.type="pi05" \
     --policy.use_state=$USE_STATE \
