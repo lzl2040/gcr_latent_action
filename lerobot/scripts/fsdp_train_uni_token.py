@@ -110,25 +110,15 @@ def save_fsdp_checkpoint(model, optim, output_dir, step):
     save_policy = StateDictType.FULL_STATE_DICT
     full_state_dict_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
 
+
+    # --- Step 1: 预同步，确保所有 rank 到达保存阶段 ---
+    dist.barrier()
+
     # 所有进程统一进入状态字典收集阶段
     with FSDP.state_dict_type(model, save_policy, full_state_dict_config):
-        # lora_qwen25vl = model.model.paligemma_with_expert.qwen25vl.model
-        # lora_awa_model = model.model.paligemma_with_expert.awa_model.model
-        # lora_qwen_expert = model.model.paligemma_with_expert.qwen_expert.model
-        # merge_qwen25vl = lora_qwen25vl.merge_and_unload()
-        # merge_awa_model = lora_awa_model.merge_and_unload()
-        # merge_qwen_expert = lora_qwen_expert.merge_and_unload()
-        # model.model.paligemma_with_expert.qwen25vl = merge_qwen25vl
-        # model.model.paligemma_with_expert.awa_model = merge_awa_model
-        # model.model.paligemma_with_expert.qwen_expert = merge_qwen_expert
-        
         model_state_dict = model.state_dict()
-        # 恢复 LoRA 模型
-        # model.model.paligemma_with_expert.qwen25vl = lora_qwen25vl
-        # model.model.paligemma_with_expert.awa_model = lora_awa_model
-        # model.model.paligemma_with_expert.qwen_expert = lora_qwen_expert
     
-    # 所有进程同步，防止部分进程提前退出
+    # --- Step 3: 再次同步，防止部分 rank 提前退出通信 ---
     dist.barrier()
 
     # 仅主进程保存模型和优化器状态
@@ -147,6 +137,9 @@ def save_fsdp_checkpoint(model, optim, output_dir, step):
         torch.save(model_state_dict, ckpt_path)
 
         logging.info(f"Checkpoint saved at {ckpt_path}")
+    # 所有进程同步，防止部分进程提前退出
+    # --- Step 5: 确保 rank0 保存完后其他 rank 再继续 ---
+    dist.barrier()
         
 def clip_grad_norm_low_mem(parameters, max_norm):
     """低内存版本的梯度裁剪"""
@@ -325,10 +318,8 @@ def train(cfg: TrainPipelineConfig):
     if rank == 0:
         model_params = sum(p.numel() for p in policy.parameters()) / 1e9
         logger.info(f"Model parameters: {model_params} B")
-        action_decoder_params = sum(p.numel() for p in policy.uni_decoder.action_decoder.parameters()) / 1e9
         image_decoder_params = sum(p.numel() for p in policy.uni_decoder.image_decoder.parameters()) / 1e9
         vlm_params = sum(p.numel() for p in policy.vlm.parameters()) / 1e9
-        logger.info(f"Action decoder params:{action_decoder_params} B")
         logger.info(f"Image decoder params:{image_decoder_params} B")
         logger.info(f"VLM params:{vlm_params} B")
         # logger.info(f"Qwen VL visual parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.visual.parameters())}")
