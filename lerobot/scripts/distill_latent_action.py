@@ -96,6 +96,7 @@ def save_fsdp_checkpoint(model, optim, output_dir, step):
     save_policy = StateDictType.FULL_STATE_DICT
     full_state_dict_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
 
+    dist.barrier()
     # 所有进程统一进入状态字典收集阶段
     with FSDP.state_dict_type(model, save_policy, full_state_dict_config):
         model_state_dict = model.state_dict()
@@ -118,6 +119,7 @@ def save_fsdp_checkpoint(model, optim, output_dir, step):
         torch.save(model_state_dict, ckpt_path)
 
         logging.info(f"Checkpoint saved at {ckpt_path}")
+    dist.barrier()
         
 def clip_grad_norm_low_mem(parameters, max_norm):
     """低内存版本的梯度裁剪"""
