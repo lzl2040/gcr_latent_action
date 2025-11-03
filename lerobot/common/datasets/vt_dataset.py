@@ -1651,8 +1651,9 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         all_new_obs_image_keys = ["observation.images.primary", 
                                   "observation.images.secondary", 
                                   "observation.images.wrist"] # follow https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/rlds/oxe/configs.py
-        # self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
-        self.stats = aggregate_stats([dataset.meta.stats for dataset in self.datasets], self.max_action_dim)
+        self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
+        # for dataset with q01
+        # self.stats = aggregate_stats([dataset.meta.stats for dataset in self.datasets], self.max_action_dim)
         save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
         # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
         # remove state
