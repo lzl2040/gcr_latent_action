@@ -258,7 +258,7 @@ class LatentActionModel(PreTrainedPolicy):
             loss_dict["action_losses_after_in_ep_bound"] = action_loss.clone()
 
         # Remove padding
-        # action_loss = action_loss[:, :, : self.config.max_action_dim]
+        action_loss = action_loss[:, :, : self.config.max_action_dim]
         
         loss_dict["action_losses_after_rm_padding"] = action_loss.clone()
 
@@ -404,20 +404,20 @@ class UniDecoder(nn.Module):
         super().__init__()
         self.config = config
 
-        # paligemma_with_expert_config = PaliGemmaWithExpertConfig(
-        #     freeze_vision_encoder=self.config.freeze_vision_encoder,
-        #     train_expert_only=self.config.train_expert_only,
-        #     attention_implementation=self.config.attention_implementation,
-        # )
-        # self.action_decoder = ActionDecoderModel(paligemma_with_expert_config, config.action_expert_path)
+        paligemma_with_expert_config = PaliGemmaWithExpertConfig(
+            freeze_vision_encoder=self.config.freeze_vision_encoder,
+            train_expert_only=self.config.train_expert_only,
+            attention_implementation=self.config.attention_implementation,
+        )
+        self.action_decoder = ActionDecoderModel(paligemma_with_expert_config, config.action_expert_path)
 
-        # # Projections are float32
-        # self.con_proj = nn.Linear(self.config.vlm_token_dim, self.config.img_dim)
-        # self.action_in_proj = nn.Linear(self.config.max_action_dim, self.config.proj_width)
-        # self.action_out_proj = nn.Linear(self.config.proj_width, self.config.max_action_dim)
+        # Projections are float32
+        self.con_proj = nn.Linear(self.config.vlm_token_dim, self.config.img_dim)
+        self.action_in_proj = nn.Linear(self.config.max_action_dim, self.config.proj_width)
+        self.action_out_proj = nn.Linear(self.config.proj_width, self.config.max_action_dim)
 
-        # self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
-        # self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
+        self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
+        self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
 
         # image decoder
         # self.image_decoder = ImagePredictionModel(config)
@@ -519,8 +519,11 @@ class UniDecoder(nn.Module):
         # print(f"att mask shape is: {att_masks.shape}")
         return embs, pad_masks, att_masks
 
-    def forward_action_decoder(self, sc_embedding, act_embeddings, 
-        actions, action_noise=None, action_time=None):
+    def forward(
+        self, first_image, last_image, sc_embedding, act_embeddings, 
+        actions, action_noise=None, action_time=None
+    ) -> Tensor:
+        """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         if action_noise is None:
             action_noise = self.sample_noise(actions.shape, actions.device).to(dtype=self.dtype)
 
@@ -560,18 +563,8 @@ class UniDecoder(nn.Module):
         suffix_out = suffix_out.to(dtype=self.dtype)
         v_t = self.action_out_proj(suffix_out)
 
-        action_loss = F.mse_loss(u_t, v_t, reduction="none")
-        return action_loss
-
-    def forward(
-        self, first_image, last_image, sc_embedding, act_embeddings, 
-        actions, action_noise=None, action_time=None
-    ) -> Tensor:
-        """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
-
         losses = {}
-        # losses["action_loss"] = self.forward_action_decoder(sc_embedding, act_embeddings, actions)
-        losses["action_loss"] = torch.tensor(0.0, device=sc_embedding.device)
+        losses["action_loss"] = F.mse_loss(u_t, v_t, reduction="none")
         # image predict
         losses["image_loss"] = self.image_decoder(sc_embedding, first_image, last_image)
         return losses

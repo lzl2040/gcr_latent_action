@@ -341,19 +341,15 @@ def train(cfg: TrainPipelineConfig):
         vlm_trainbale_params = sum(
             p.numel() for p in policy.vlm.parameters() if p.requires_grad
         )
-
-        # action_decoder_params = sum(p.numel() for p in policy.uni_decoder.action_decoder.parameters()) / 1e9
-        # action_decoder_trainable_params = sum(
-        #     p.numel() for p in policy.uni_decoder.action_decoder.parameters() if p.requires_grad
-        # )
-        # logger.info(f"Action decoder params:{action_decoder_params} B")
-        # logger.info(f"Action Decoder Trainable parameters: {action_decoder_trainable_params:,} ({action_decoder_trainable_params / 1e6:.2f}M)")
-
+        action_decoder_trainable_params = sum(
+            p.numel() for p in policy.uni_decoder.action_decoder.parameters() if p.requires_grad
+        )
         image_decoder_trainable_params = sum(
             p.numel() for p in policy.uni_decoder.image_decoder.parameters() if p.requires_grad
         )
         logger.info(f"VLM Trainable parameters: {vlm_trainbale_params:,} ({vlm_trainbale_params / 1e6:.2f}M)")
         logger.info(f"Image Decoder Trainable parameters: {image_decoder_trainable_params:,} ({image_decoder_trainable_params / 1e6:.2f}M)")
+        logger.info(f"Action Decoder Trainable parameters: {action_decoder_trainable_params:,} ({action_decoder_trainable_params / 1e6:.2f}M)")
         logger.info(f"Trainable parameters: {trainable_params:,} ({trainable_params / 1e6:.2f}M)")
        
     # 训练状态初始化
