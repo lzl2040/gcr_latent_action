@@ -519,11 +519,8 @@ class UniDecoder(nn.Module):
         # print(f"att mask shape is: {att_masks.shape}")
         return embs, pad_masks, att_masks
 
-    def forward(
-        self, first_image, last_image, sc_embedding, act_embeddings, 
-        actions, action_noise=None, action_time=None
-    ) -> Tensor:
-        """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
+    def forward_action_decoder(self, sc_embedding, act_embeddings, 
+        actions, action_noise=None, action_time=None):
         if action_noise is None:
             action_noise = self.sample_noise(actions.shape, actions.device).to(dtype=self.dtype)
 
@@ -534,6 +531,7 @@ class UniDecoder(nn.Module):
         actions = actions.to(dtype=self.dtype)
         x_t = action_time_expanded * action_noise + (1 - action_time_expanded) * actions
         u_t = action_noise - actions
+        # print(sc_embedding.shape, act_embeddings.shape)
         con_embeddings = torch.cat([sc_embedding, act_embeddings], dim = 1)
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix_for_action(
             con_embeddings=con_embeddings
@@ -563,8 +561,18 @@ class UniDecoder(nn.Module):
         suffix_out = suffix_out.to(dtype=self.dtype)
         v_t = self.action_out_proj(suffix_out)
 
+        action_loss = F.mse_loss(u_t, v_t, reduction="none")
+        return action_loss
+
+    def forward(
+        self, first_image, last_image, sc_embedding, act_embeddings, 
+        actions, action_noise=None, action_time=None
+    ) -> Tensor:
+        """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
+
         losses = {}
-        losses["action_loss"] = F.mse_loss(u_t, v_t, reduction="none")
+        losses["action_loss"] = self.forward_action_decoder(sc_embedding, act_embeddings, actions)
+        # losses["action_loss"] = torch.tensor(0.0, device=sc_embedding.device)
         # image predict
         losses["image_loss"] = self.image_decoder(sc_embedding, first_image, last_image)
         return losses
