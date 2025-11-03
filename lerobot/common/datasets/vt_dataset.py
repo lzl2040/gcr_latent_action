@@ -191,6 +191,7 @@ class LeRobotDatasetMetadata:
         self.episodes = load_episodes(self.root)
         self.stats = load_stats(self.root)
         if self.stats == None:
+            print("load stats")
             self.episodes_stats = load_episodes_stats(self.root)
             self.stats = aggregate_stats(list(self.episodes_stats.values()))
         # if self._version < packaging.version.parse("v2.1"):
@@ -1665,11 +1666,11 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         print(f"Aggregated stats:{self.stats}")
         # update meta_features
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - meta features: {meta_features}")
-        new_obs_image_keys = []
-        for key in self.stats.keys():
-            if key in all_new_obs_image_keys:
-                new_obs_image_keys.append(key)
-        self.new_obs_image_keys = new_obs_image_keys
+        # new_obs_image_keys = []
+        # for key in self.stats.keys():
+        #     if key in all_new_obs_image_keys:
+        #         new_obs_image_keys.append(key)
+        # self.new_obs_image_keys = new_obs_image_keys
         img_feats = {}
         # first remove keys contaning images
         old_keys = list(meta_features.keys())
@@ -1686,7 +1687,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         img_feats["info"]["video.height"] = img_size
         img_feats["info"]["video.width"] = img_size
         # then use the new image keys
-        for new_key in new_obs_image_keys:
+        for new_key in all_new_obs_image_keys:
             meta_features[new_key] = img_feats
         print(f"Unified input features:{meta_features}")
         # finally create the meta class

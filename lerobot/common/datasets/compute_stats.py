@@ -583,6 +583,7 @@ def aggregate_stats(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str
     for key in data_keys:
         stats_with_key = [stats[key] for stats in stats_list if key in stats]
         # pad mean, std, q01, q99, max, min
+        # for dataset without ego_dex
         if key in ["action", "observation.state"]:
             pad_stats_with_key = []
             for stats in stats_with_key:
@@ -666,13 +667,18 @@ def aggregate_multi_stats(ls_datasets: list, data_names: list, max_dim: int) -> 
         # if d_name == "ego_dex":
         #     dataset.num_frames = dataset.num_frames // 100
         #     print(f"Because {d_name} wo gripper, so all the gripper is zero. We reduce the num frames to decrease the influence.")
+        
         data_config = OXE_DATASET_CONFIGS[d_name]
         image_obs_keys = data_config["image_obs_keys"]
         # print(d_name, image_obs_keys)
         for new_key, old_key in image_obs_keys.items():
-            if old_key != None:
-                dataset.meta.stats[f"observation.images.{new_key}"] = dataset.meta.stats[f"observation.images.{old_key}"]
+            # if old_key != None:
+            #     dataset.meta.stats[f"observation.images.{new_key}"] = dataset.meta.stats[f"observation.images.{old_key}"]
+            #     del dataset.meta.stats[f"observation.images.{old_key}"]
+            # in fact, the stats about image is not needed
+            if f"observation.images.{old_key}" in dataset.meta.stats.keys():
                 del dataset.meta.stats[f"observation.images.{old_key}"]
+        
         data_keys.update(dataset.meta.stats.keys())
         
     stats = {k: {} for k in data_keys}
