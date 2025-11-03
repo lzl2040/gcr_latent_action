@@ -522,8 +522,8 @@ def train(cfg: TrainPipelineConfig):
         sampler.set_epoch(0)
         all_indices = list(sampler)
         samples_per_epoch = len(all_indices)
-        batches_per_epoch = math.ceil(samples_per_epoch / (cfg.batch_size))
-        # batches_per_epoch = math.ceil(samples_per_epoch / 15)
+        # batches_per_epoch = math.ceil(samples_per_epoch / (cfg.batch_size))
+        batches_per_epoch = math.ceil(samples_per_epoch / 15)
         epoch_num = step // batches_per_epoch
         batch_in_epoch = step % batches_per_epoch
         sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank,
