@@ -8,5 +8,5 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-python lerobot/common/datasets/v21/convert_dataset_v20_to_v21.py \
+python -m lerobot.common.datasets.v21.convert_dataset_v20_to_v21 \
     --data_mix $DATA_MIX
