@@ -24,7 +24,7 @@ import concurrent.futures
 from huggingface_hub import HfApi
 
 from lerobot.common.datasets.lerobot_dataset import CODEBASE_VERSION, LeRobotDataset
-from lerobot.common.datasets.compute_stats import DEFAULT_QUANTILES, aggregate_stats, get_feature_stats
+from lerobot.common.datasets.compute_stats import DEFAULT_QUANTILES, aggregate_stats_v2 as aggregate_stats, get_feature_stats
 from lerobot.common.datasets.utils import EPISODES_STATS_PATH, STATS_PATH, load_stats, write_info
 from lerobot.common.datasets.v21.convert_stats import check_aggregate_stats, convert_stats
 from lerobot.common.datasets.utils import write_stats
@@ -237,7 +237,7 @@ def convert_dataset_with_data_mix(
                 # revision=V20, 
                 # force_cache_sync=True
             )
-            # print(f"Processing {dataset_name}")
+            print(f"Processing {dataset_name}")
             # if (dataset.root / EPISODES_STATS_PATH).is_file():
             #     print(f"{dataset_name} has {EPISODES_STATS_PATH}")
             # else:

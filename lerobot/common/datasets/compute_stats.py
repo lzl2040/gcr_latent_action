@@ -562,6 +562,28 @@ def aggregate_feature_stats(stats_ft_list: list[dict[str, dict]]) -> dict[str, d
 
     return aggregated
 
+def aggregate_stats_v2(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str, dict[str, np.ndarray]]:
+    """Aggregate stats from multiple compute_stats outputs into a single set of stats.
+
+    The final stats will have the union of all data keys from each of the stats dicts.
+
+    For instance:
+    - new_min = min(min_dataset_0, min_dataset_1, ...)
+    - new_max = max(max_dataset_0, max_dataset_1, ...)
+    - new_mean = (mean of all data, weighted by counts)
+    - new_std = (std of all data)
+    """
+
+    _assert_type_and_shape(stats_list)
+
+    data_keys = {key for stats in stats_list for key in stats}
+    aggregated_stats = {key: {} for key in data_keys}
+
+    for key in data_keys:
+        stats_with_key = [stats[key] for stats in stats_list if key in stats]
+        aggregated_stats[key] = aggregate_feature_stats(stats_with_key)
+
+    return aggregated_stats
 
 def aggregate_stats(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str, dict[str, np.ndarray]]:
     """Aggregate stats from multiple compute_stats outputs into a single set of stats.
