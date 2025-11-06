@@ -18,7 +18,14 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.constants import COMPRESS_ACTION_TOKEN, COMPRESS_SC_TOKEN
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoProcessor
+from torchvision import transforms
+to_pil = transforms.ToPILImage()
+from PIL import Image
+import requests
+from transformers.trainer_pt_utils import LabelSmoother
+
+IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -210,6 +217,7 @@ class PI05Policy(PreTrainedPolicy):
         # tokenizer_path = "/home/v-zuoleili/Pretrain/pi0/paligemma-3b-pt-224/"
         tokenizer_path = "/mnt/wangxiaofa/RDT_module_params/paligemma-3b-pt-224/"
         self.language_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        self.processor = AutoProcessor.from_pretrained(tokenizer_path)
 
         new_action_tokens = [f"[{COMPRESS_ACTION_TOKEN}]"]
         new_scene_tokens = [f"[{COMPRESS_SC_TOKEN}]"]
@@ -311,6 +319,31 @@ class PI05Policy(PreTrainedPolicy):
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
     
+    def gen_subtask(self, batch):
+        image = batch["observation.images.primary"]
+        state_np = batch[OBS_ROBOT].cpu().numpy()
+        discretized_states = np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+        full_prompts = []
+        tasks = batch["task"]
+        for i, task in enumerate(tasks):
+            cleaned_text = task.strip().replace("_", " ").replace("\n", " ")
+            state_str = " ".join(map(str, discretized_states[i]))
+            full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
+            full_prompts.append(full_prompt)
+        task = full_prompts
+        image = to_pil(image[0])
+        task = task[0]
+        inputs = self.processor(image, task, return_tensors="pt")
+        # print(inputs.keys())
+
+        prompt = "What is in this image?"
+        url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/pipeline-cat-chonk.jpeg"
+        image = Image.open(requests.get(url, stream=True).raw)
+        inputs = self.processor(image, prompt, return_tensors="pt")
+
+        output = self.model.paligemma_with_expert.paligemma.generate(**inputs, max_new_tokens=50, cache_implementation="static")
+        print(self.processor.decode(output[0], skip_special_tokens=True))
+    
 
     def extract_vlm_hidden_states(self, batch):
         # batch = self.normalize_inputs(batch)
@@ -334,27 +367,38 @@ class PI05Policy(PreTrainedPolicy):
             summary_text = summary_text + "Scene representations:"
             for j in range(64):
                 summary_text += f"[{self.COMPRESS_SC_TOKEN}] "
-            summary_text += ". Action representations:"
-            for j in range(64):
-                summary_text += f"[{self.COMPRESS_ACTION_TOKEN}] "
-            summary_text += ".\nAction:"
+            # summary_text += ". Action representations:"
+            # for j in range(64):
+            #     summary_text += f"[{self.COMPRESS_ACTION_TOKEN}] "
+            # summary_text += ".\nAction:"
+            summary_text += ".\n"
             full_prompt = full_prompt + summary_text
             full_prompts.append(full_prompt)
-        
-        batch["task"] = full_prompts
 
+        # 构造 full_text
+        # full_texts = [i + t for i, t in zip(full_prompts, batch["sub_tasks"])]
+        batch["task"] = full_prompts
         lang_tokens, lang_masks = self.prepare_language(batch)
-        # print(lang_tokens.shape)
+
+        # labels = self.construct_input_target_pair(full_prompts, batch["sub_tasks"], lang_tokens)
 
         images = [self.convert_to_dtype(img) for img in images]
         lang_tokens = self.convert_to_dtype(lang_tokens)
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.model.embed_prefix(
+        prefix_embs, prefix_pad_masks, prefix_att_masks, img_token_num = self.model.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
         )
         # print(prefix_embs.shape)
+        # img_mask = torch.full((labels.size(0), img_token_num), IGNORE_TOKEN_ID, 
+        #                       dtype=torch.long, device=prefix_embs.device)
+        # labels = torch.cat([img_mask, labels], dim=1)
+        # print(labels.shape, img_token_num, prefix_embs.shape)
         output = self.model.paligemma_with_expert.paligemma(inputs_embeds=prefix_embs,
+                                                            # labels=labels,
                                                                 output_hidden_states=True)
         output_hidden_states = output.hidden_states # num_layers + 1
+        # lg_loss = output.loss
+        lg_loss = torch.tensor(0.0, device=output_hidden_states.device)
+
         last_hidden_states = output_hidden_states[-1] # torch.Size([1, 304, 2048])
         last_hidden_states = self.model.paligemma_with_expert.paligemma.language_model.norm(last_hidden_states)
 
@@ -383,7 +427,7 @@ class PI05Policy(PreTrainedPolicy):
         latent_embeddings = torch.cat([sc_embeddings, act_embeddings], dim=1)
         # print(latent_embeddings.shape)
         # print(latent_embeddings.shape)
-        return latent_embeddings # torch.Size([2, 128, 2048])
+        return latent_embeddings, lg_loss # torch.Size([2, 128, 2048])
 
     def convert_to_dtype(self, vector:torch.Tensor):
         if not isinstance(vector, type(None)):
@@ -520,6 +564,16 @@ class PI05Policy(PreTrainedPolicy):
 
         return actions
 
+    def construct_input_target_pair(self, input_texts, target_texts, input_ids):
+        labels = input_ids.clone()
+        # Mask掉输入部分 (不计算loss)
+        for i, (inp, tgt) in enumerate(zip(input_texts, target_texts)):
+            input_len = len(self.language_tokenizer(inp).input_ids)
+            labels[i, :input_len] = IGNORE_TOKEN_ID  # 忽略 input_text 的 token loss
+        # mask掉所有padding
+        labels[labels == self.language_tokenizer.pad_token_id] = IGNORE_TOKEN_ID
+        return labels
+
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training."""
 
@@ -543,7 +597,6 @@ class PI05Policy(PreTrainedPolicy):
         
         batch["task"] = full_prompts
         tokens, masks = self.prepare_language(batch)
-        # print(tokens.shape)
         # tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
         actions = self.prepare_action(batch)
@@ -659,6 +712,7 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
         embs = []
         pad_masks = []
         att_masks = []
+        img_token_num = 0
 
         # Process images
         for img, img_mask in zip(images, img_masks, strict=True):
@@ -672,6 +726,7 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
             embs.append(img_emb)
             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
             att_masks += [0] * num_img_embs
+            img_token_num += num_img_embs
 
         # Process language tokens
         def lang_embed_func(tokens):
@@ -693,7 +748,7 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
         bsize = pad_masks.shape[0]
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
-        return embs, pad_masks, att_masks
+        return embs, pad_masks, att_masks, img_token_num
 
     def embed_suffix(self, noisy_actions, timestep):
         """Embed noisy_actions, timestep to prepare for Expert Gemma processing."""

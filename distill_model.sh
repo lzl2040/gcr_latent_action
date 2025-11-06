@@ -201,7 +201,7 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --job_name="$JOB_NAME" \
     --log_dir="/mnt/wangxiaofa/latent_act_logs" \
     --resume=true \
-    --policy.pretrained_path="/mnt/wangxiaofa/latent_action_exp/1004_latent_action_oxe_sana_1.6B_ip_adapter_bs_15_frame_16/step60000.pt" \
+    --policy.pretrained_path=$PRETRAINED_PATH \
     --policy2.pretrained_path="/mnt/wangxiaofa/pi0_05/pi05_base/model_new.pt" \
     # --policy2.pretrained_path="/mnt/wangxiaofa/pi0_pretrain//model_new.pt" \
     
