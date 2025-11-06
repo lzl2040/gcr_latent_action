@@ -1,18 +1,73 @@
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
+from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration, AutoModelForVision2Seq
+# Qwen3VLForConditionalGeneration
 
 class DistillModel(nn.Module):
     def __init__(self, teacher_model, student_model):
         super().__init__()
         self.teacher_model = teacher_model
         self.student_model = student_model
-        self.proj = nn.Linear(2048, 2048 // 4)  # 共享的映射层
+        # self.subtask_teacher_model = Qwen3VLForConditionalGeneration.from_pretrained(
+        #     "Qwen/Qwen3-VL-2B-Instruct", dtype="auto", device_map="auto"
+        # )
+        # self.subtask_teacher_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        #     "Qwen/Qwen2.5-VL-3B-Instruct", dtype="auto", device_map="auto"
+        # )
+        # self.subtask_teacher_processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
+        # self.subtask_teacher_model = AutoModelForVision2Seq.from_pretrained("HuggingFaceTB/SmolVLM-Instruct")
+        # self.subtask_teacher_processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM-Instruct")
+        # self.proj = nn.Linear(2048, 2048 // 4)  # 共享的映射层
         # print("Freeze Teacher model")
         # for param in self.teacher_model.parameters():
         #     param.requires_grad = False
         self.teacher_model.eval()
         self.teacher_model.requires_grad_(False)
+        # self.subtask_teacher_model.requires_grad_(False)
+
+    def generate_sub_task(self, images, tasks):
+        sub_tasks = []
+        n = len(tasks)
+        for i in range(n):
+            task = tasks[i]
+            image = images[i]
+            sub_tasks.append(f"Subtask:{task}")
+            # print(images.shape)
+
+            # prompt = f"You are an expert robot task planner. \n Given a high-level instruction: {task}, and the current visual observation, determine what the robot should do next — describe the **next subtask** in one short sentence. \nFormat: Subtask: <description>"
+            # messages = [
+            #     {
+            #         "role": "user",
+            #         "content": [
+            #             {
+            #                 "type": "image",
+            #                 "image": image,
+            #             },
+            #             {"type": "text", "text": prompt},
+            #         ],
+            #     }
+            # ]
+            # # Preparation for inference
+            # inputs = self.subtask_teacher_processor.apply_chat_template(
+            #     messages,
+            #     tokenize=True,
+            #     add_generation_prompt=True,
+            #     return_dict=True,
+            #     return_tensors="pt"
+            # ).to(self.subtask_teacher_model.device)
+
+            # # Inference: Generation of the output
+            # generated_ids = self.subtask_teacher_model.generate(**inputs, max_new_tokens=128)
+            # generated_ids_trimmed = [
+            #     out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            # ]
+            # output_text = self.subtask_teacher_processor.batch_decode(
+            #     generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            # )
+            # # print(output_text)
+            # sub_tasks.append(output_text[0])
+        return sub_tasks
 
     def kl_mse_loss(
         self,
@@ -65,7 +120,10 @@ class DistillModel(nn.Module):
         with torch.no_grad():
             teacher_latent_emebedings = self.teacher_model.extract_latent_embeddings(batch)
         teacher_latent_emebedings = teacher_latent_emebedings.detach()
-        student_latent_embeddings = self.student_model.extract_vlm_hidden_states(batch)
+        
+        # sub_tasks = self.generate_sub_task(batch["observation.images.primary"], batch["task"])
+        # batch["sub_tasks"] = sub_tasks
+        student_latent_embeddings, lg_loss = self.student_model.extract_vlm_hidden_states(batch)
         # 检查
         # print(student_latent_embeddings.requires_grad)  # True
         # print(teacher_latent_emebedings.requires_grad)  # False
@@ -88,4 +146,7 @@ class DistillModel(nn.Module):
                                            teacher_logits=teacher_logits,
                                            alpha=1,
                                            temperature=3)
+        # loss = loss + 0.1 * lg_loss
+        lg_loss = torch.tensor(0.0, device=loss.device)
+        loss_dict["lg_loss"] = lg_loss
         return loss, loss_dict

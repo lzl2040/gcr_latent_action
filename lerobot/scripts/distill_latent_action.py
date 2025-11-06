@@ -162,6 +162,7 @@ def train_step(model, batch, scaler, cfg, sync_flag):
             loss = loss / cfg.gradient_accumulation_steps
             output_dict["mse_loss"] = output_dict["mse"] / cfg.gradient_accumulation_steps
             output_dict["kl_loss"] = output_dict["kl"] / cfg.gradient_accumulation_steps
+            output_dict["lg_loss"] = output_dict["lg_loss"] / cfg.gradient_accumulation_steps
             # 反向传播
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -195,7 +196,7 @@ def train_step(model, batch, scaler, cfg, sync_flag):
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
     # 初始化分布式环境
-    # os.environ["NODE_RANK"] = "0"
+    os.environ["NODE_RANK"] = "0"
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
     world_rank = int(os.environ["RANK"])
@@ -409,6 +410,7 @@ def train(cfg: TrainPipelineConfig):
         "loss": AverageMeter("loss", ":.4f"),
         "mse_loss": AverageMeter("mse_loss", ":.4f"),
         "kl_loss": AverageMeter("kl_loss", ":.4f"),
+        "lg_loss": AverageMeter("lg_loss", ":.4f"),
         # "language_loss": AverageMeter("language_loss", ":.4f"),
         "grad_norm": AverageMeter("grdn", ":.4f"),
         "lr": AverageMeter("lr", ":0.01e"),
@@ -438,6 +440,7 @@ def train(cfg: TrainPipelineConfig):
     loss_value = 0.0
     mse_loss_value = 0.0
     kl_loss_value = 0.0
+    lg_loss_value = 0.0
     
     if cfg.is_ft:
         cfg.job_type = "finetune"
@@ -519,6 +522,7 @@ def train(cfg: TrainPipelineConfig):
         loss_value += loss.detach().mean().item()
         mse_loss_value += outputs["mse_loss"]
         kl_loss_value += outputs["kl_loss"]
+        kg_loss_value += outputs["lg_loss"]
             
         step_time = time.perf_counter() - step_start
         fwd_bwd_time += step_time
@@ -544,6 +548,7 @@ def train(cfg: TrainPipelineConfig):
             train_tracker.loss = loss_value
             train_tracker.mse_loss = mse_loss_value
             train_tracker.kl_loss = kl_loss_value
+            train_tracker.lg_loss = lg_loss_value
             train_tracker.grad_norm = grad_norm_value
             train_tracker.lr = optimizer.param_groups[0]["lr"]
             train_tracker.step()
@@ -553,6 +558,7 @@ def train(cfg: TrainPipelineConfig):
             loss_value = 0.0
             mse_loss_value = 0.0
             kl_loss_value = 0.0
+            lg_loss_value = 0.0
             grad_norm_value = 0.0
             
             # 学习率调度
