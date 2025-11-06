@@ -522,7 +522,7 @@ def train(cfg: TrainPipelineConfig):
         loss_value += loss.detach().mean().item()
         mse_loss_value += outputs["mse_loss"]
         kl_loss_value += outputs["kl_loss"]
-        kg_loss_value += outputs["lg_loss"]
+        lg_loss_value += outputs["lg_loss"]
             
         step_time = time.perf_counter() - step_start
         fwd_bwd_time += step_time
