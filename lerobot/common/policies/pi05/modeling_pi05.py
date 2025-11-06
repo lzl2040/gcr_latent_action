@@ -397,7 +397,7 @@ class PI05Policy(PreTrainedPolicy):
                                                                 output_hidden_states=True)
         output_hidden_states = output.hidden_states # num_layers + 1
         # lg_loss = output.loss
-        lg_loss = torch.tensor(0.0, device=output_hidden_states.device)
+        lg_loss = torch.tensor(0.0, device=prefix_embs.device)
 
         last_hidden_states = output_hidden_states[-1] # torch.Size([1, 304, 2048])
         last_hidden_states = self.model.paligemma_with_expert.paligemma.language_model.norm(last_hidden_states)
