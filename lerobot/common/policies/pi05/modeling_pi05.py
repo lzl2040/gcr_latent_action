@@ -390,7 +390,7 @@ class PI05Policy(PreTrainedPolicy):
         img_mask = torch.full((labels.size(0), img_token_num), IGNORE_TOKEN_ID, 
                               dtype=torch.long, device=prefix_embs.device)
         labels = torch.cat([img_mask, labels], dim=1)
-        # print(labels.shape, img_token_num, prefix_embs.shape)
+        print(labels.shape, img_token_num, prefix_embs.shape)
         output = self.model.paligemma_with_expert.paligemma(inputs_embeds=prefix_embs,
                                                             labels=labels,
                                                                 output_hidden_states=True)
