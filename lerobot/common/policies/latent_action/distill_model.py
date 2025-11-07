@@ -121,8 +121,8 @@ class DistillModel(nn.Module):
             teacher_latent_emebedings = self.teacher_model.extract_latent_embeddings(batch)
         teacher_latent_emebedings = teacher_latent_emebedings.detach()
         
-        # sub_tasks = self.generate_sub_task(batch["observation.images.primary"], batch["task"])
-        # batch["sub_tasks"] = sub_tasks
+        sub_tasks = self.generate_sub_task(batch["observation.images.primary"], batch["task"])
+        batch["sub_tasks"] = sub_tasks
         student_latent_embeddings, lg_loss = self.student_model.extract_vlm_hidden_states(batch)
         # 检查
         # print(student_latent_embeddings.requires_grad)  # True
@@ -146,7 +146,7 @@ class DistillModel(nn.Module):
                                            teacher_logits=teacher_logits,
                                            alpha=1,
                                            temperature=3)
-        # loss = loss + 0.1 * lg_loss
-        lg_loss = torch.tensor(0.0, device=loss.device)
+        loss = loss + 0.1 * lg_loss
+        # lg_loss = torch.tensor(0.0, device=loss.device)
         loss_dict["lg_loss"] = lg_loss
         return loss, loss_dict
