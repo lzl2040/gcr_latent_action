@@ -364,39 +364,40 @@ class PI05Policy(PreTrainedPolicy):
             # full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
             full_prompt = f"Task: {cleaned_text}, State: {state_str}; "
             summary_text = ""
-            summary_text = summary_text + "Scene representations:"
+            # Latent, Scene
+            summary_text = summary_text + "Latent representations:"
             for j in range(64):
                 summary_text += f"[{self.COMPRESS_SC_TOKEN}] "
-            summary_text += ". Action representations:"
-            for j in range(64):
-                summary_text += f"[{self.COMPRESS_ACTION_TOKEN}] "
+            # summary_text += ". Action representations:"
+            # for j in range(64):
+            #     summary_text += f"[{self.COMPRESS_ACTION_TOKEN}] "
             # summary_text += ".\nAction:"
             summary_text += ".\n"
             full_prompt = full_prompt + summary_text
             full_prompts.append(full_prompt)
 
         # 构造 full_text
-        full_texts = [i + t for i, t in zip(full_prompts, batch["sub_tasks"])]
-        batch["task"] = full_texts
+        # full_texts = [i + t for i, t in zip(full_prompts, batch["sub_tasks"])]
+        batch["task"] = full_prompts
         lang_tokens, lang_masks = self.prepare_language(batch)
 
-        labels = self.construct_input_target_pair(full_prompts, batch["sub_tasks"], lang_tokens)
+        # labels = self.construct_input_target_pair(full_prompts, batch["sub_tasks"], lang_tokens)
 
         images = [self.convert_to_dtype(img) for img in images]
         lang_tokens = self.convert_to_dtype(lang_tokens)
         prefix_embs, prefix_pad_masks, prefix_att_masks, img_token_num = self.model.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
         )
-        img_mask = torch.full((labels.size(0), img_token_num), IGNORE_TOKEN_ID, 
-                              dtype=torch.long, device=prefix_embs.device)
-        labels = torch.cat([img_mask, labels], dim=1)
-        print(labels.shape, img_token_num, prefix_embs.shape)
+        # img_mask = torch.full((labels.size(0), img_token_num), IGNORE_TOKEN_ID, 
+        #                       dtype=torch.long, device=prefix_embs.device)
+        # labels = torch.cat([img_mask, labels], dim=1)
+        # print(labels.shape, img_token_num, prefix_embs.shape)
         output = self.model.paligemma_with_expert.paligemma(inputs_embeds=prefix_embs,
-                                                            labels=labels,
+                                                            # labels=labels,
                                                                 output_hidden_states=True)
         output_hidden_states = output.hidden_states # num_layers + 1
-        lg_loss = output.loss
-        # lg_loss = torch.tensor(0.0, device=prefix_embs.device)
+        # lg_loss = output.loss
+        lg_loss = torch.tensor(0.0, device=prefix_embs.device)
 
         last_hidden_states = output_hidden_states[-1] # torch.Size([1, 304, 2048])
         last_hidden_states = self.model.paligemma_with_expert.paligemma.language_model.norm(last_hidden_states)
