@@ -229,7 +229,7 @@ class PI05Policy(PreTrainedPolicy):
         self.cp_sc_token_idx = [self.language_tokenizer(f"[{COMPRESS_SC_TOKEN}]", add_special_tokens=False).input_ids[0]]
         print(f"Pi05 CP_IMG token idx: {self.cp_sc_token_idx}, CP_ACT token idx: {self.cp_act_token_idx}")
         self.model = PI05FlowMatching(config)
-        # self.model.paligemma_with_expert.paligemma.lm_head = nn.Identity()
+        self.model.paligemma_with_expert.paligemma.lm_head = nn.Identity()
         
         # Enable gradient checkpointing if requested
         if config.gradient_checkpointing:
