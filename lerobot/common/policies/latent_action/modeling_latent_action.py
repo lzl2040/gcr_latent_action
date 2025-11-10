@@ -404,20 +404,20 @@ class UniDecoder(nn.Module):
         super().__init__()
         self.config = config
 
-        # paligemma_with_expert_config = PaliGemmaWithExpertConfig(
-        #     freeze_vision_encoder=self.config.freeze_vision_encoder,
-        #     train_expert_only=self.config.train_expert_only,
-        #     attention_implementation=self.config.attention_implementation,
-        # )
-        # self.action_decoder = ActionDecoderModel(paligemma_with_expert_config, config.action_expert_path)
+        paligemma_with_expert_config = PaliGemmaWithExpertConfig(
+            freeze_vision_encoder=self.config.freeze_vision_encoder,
+            train_expert_only=self.config.train_expert_only,
+            attention_implementation=self.config.attention_implementation,
+        )
+        self.action_decoder = ActionDecoderModel(paligemma_with_expert_config, config.action_expert_path)
 
-        # # Projections are float32
-        # self.con_proj = nn.Linear(self.config.vlm_token_dim, self.config.img_dim)
-        # self.action_in_proj = nn.Linear(self.config.max_action_dim, self.config.proj_width)
-        # self.action_out_proj = nn.Linear(self.config.proj_width, self.config.max_action_dim)
+        # Projections are float32
+        self.con_proj = nn.Linear(self.config.vlm_token_dim, self.config.img_dim)
+        self.action_in_proj = nn.Linear(self.config.max_action_dim, self.config.proj_width)
+        self.action_out_proj = nn.Linear(self.config.proj_width, self.config.max_action_dim)
 
-        # self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
-        # self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
+        self.action_time_mlp_in = nn.Linear(self.config.proj_width * 2, self.config.proj_width)
+        self.action_time_mlp_out = nn.Linear(self.config.proj_width, self.config.proj_width)
 
         # image decoder
         # self.image_decoder = ImagePredictionModel(config)
