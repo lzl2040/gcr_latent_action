@@ -200,6 +200,7 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --wandb.project="latent_act" \
     --job_name="$JOB_NAME" \
     --log_dir="/mnt/wangxiaofa/latent_act_logs" \
+    --weight_resume=true \
     --resume=false \
     --policy.pretrained_path=$PRETRAINED_PATH \
     --policy2.pretrained_path="/mnt/wangxiaofa/pi0_05/pi05_base/model_new.pt" \

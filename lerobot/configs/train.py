@@ -37,6 +37,7 @@ class TrainPipelineConfig(HubMixin):
     # Note that when resuming a run, the default behavior is to use the configuration from the checkpoint,
     # regardless of what's provided with the training command at the time of resumption.
     resume: bool = False
+    weight_resume: bool = True
     device: str | None = None  # cuda | cpu | mp
     log_dir: str | None = None
     # `use_amp` determines whether to use Automatic Mixed Precision (AMP) for training and evaluation. With AMP,
@@ -55,7 +56,7 @@ class TrainPipelineConfig(HubMixin):
     data_mix: str = "oxe_magic_soup_plus"
     steps: int = 2000_000
     eval_freq: int = 2000
-    log_freq: int = 100
+    log_freq: int = 10
     save_checkpoint: bool = True
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
     save_freq: int = 5000
