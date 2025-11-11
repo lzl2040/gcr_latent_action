@@ -1989,7 +1989,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         
         
         video = vision["video"]
-        # video = [video[0], video[-1]]
+        video = [video[0], video[-1]]
         frame_len = len(video)
         # print(len(video))
         # print(np.array(video[0]).shape)
