@@ -31,7 +31,7 @@
     "libero_spatial_no_noops": "libero_spatial_no_noops_lerobot",
     "libero_object_no_noops": "libero_object_no_noops_lerobot",
     "libero_10_no_noops" : "libero_10_no_noops_lerobot",
-    "simpler_fractal" : "simpler_fractal_v2",
+    "simpler_fractal" : "simpler_fractal",
     "simpler_fractal_sub1" : "simpler_fractal_sub1",
     "simpler_fractal_sub2" : "simpler_fractal_sub2",
     "simpler_fractal_sub2_v1" : "simpler_fractal_sub2_v1",
@@ -53,5 +53,10 @@
     "pizza_task_16_sep2": "pizza_v9_task_16_sep2",
     "pizza_task_3": "pizza_v9_task_3_sep1",
     "pizza_task_19": "pizza_v9_task_19_sep1",
-    "ego_dex": "EgoDex"
+    "ego_dex_split2": "EgoDex",
+    "ego_dex_split1": "EgoDex_split1",
+    "cup_4hz": "cup_hz_4_plus_1103",
+    "pizza_sub1": "pizza_sub_1_hz_15",
+    "pizza_sub2": "pizza_sub_2_hz_15",
+    "pizza_sub4": "pizza_sub_4_hz_15"
 }

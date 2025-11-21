@@ -685,7 +685,15 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_POS,
     },
     ### EgoDex
-    "ego_dex":{
+
+    "ego_dex_split1":{
+        "image_obs_keys": {"primary": "primary", "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["proprio"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "ego_dex_split2":{
         "image_obs_keys": {"primary": "primary", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
@@ -874,6 +882,27 @@ OXE_DATASET_CONFIGS = {
     },
     "pizza_task_19": {
         "image_obs_keys": {"primary": "primary", "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "pizza_sub2": {
+        "image_obs_keys": {"primary": "right_rgb", "secondary": "top_rgb", "wrist": "wrist_rgb"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "pizza_sub4": {
+        "image_obs_keys": {"primary": "right_rgb", "secondary": "top_rgb", "wrist": "wrist_rgb"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "pizza_sub1": {
+        "image_obs_keys": {"primary": "right_rgb", "secondary": "top_rgb", "wrist": "wrist_rgb"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.POS_EULER,
