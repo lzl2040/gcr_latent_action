@@ -1600,10 +1600,10 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                     for sw, dataset in zip(sample_weights, included_datasets) 
                     if dataset in vla2data_root.keys()
                 ]
-                sample_weights = np.array(new_sample_weights) * np.array(self.dataset_sizes)
+                sample_num = np.array(new_sample_weights) * np.array(self.dataset_sizes)
                 # print(f"Banlanced:{sample_weights}")
-            self.sample_weights = np.array(sample_weights) / np.sum(sample_weights)
-            print(f"Final weights = (dataset_size * sample_weights)/ Sum(dataset_size * sample_weights):{sample_weights}")
+            self.sample_weights = np.array(sample_num) / np.sum(sample_num)
+            print(f"Final weights = (dataset_size * sample_weights)/ Sum(dataset_size * sample_weights):{self.sample_weights}")
             total_dataset_len = sum(self.dataset_sizes)
             sample_dataset_len = int(total_dataset_len * cfg.dataset.sample_ratio)
             dataset_sample_counts = []  # 计算子集大小
@@ -1989,7 +1989,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         
         
         video = vision["video"]
-        video = [video[0], video[-1]]
+        # video = [video[0], video[-1]]
         frame_len = len(video)
         # print(len(video))
         # print(np.array(video[0]).shape)

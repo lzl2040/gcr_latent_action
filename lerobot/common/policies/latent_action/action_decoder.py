@@ -71,6 +71,16 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
         self.freeze_vision_encoder = freeze_vision_encoder
         self.train_expert_only = train_expert_only
         self.attention_implementation = attention_implementation
+        # setting, for consistent with sana
+        head_dim = 32
+        num_attention_heads = 70
+        num_hidden_layers = 20
+        num_key_value_heads = 7
+        # 
+        # head_dim = 256
+        # num_attention_heads = 8
+        # num_hidden_layers = 18
+        # num_key_value_heads = 1
 
         if paligemma_config is None:
             # Default config from Pi0
@@ -89,10 +99,13 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
                     "hidden_size": 2048,
                     "intermediate_size": 16384,
                     "model_type": "gemma",
-                    "num_attention_heads": 8,
-                    "num_hidden_layers": 18,
+                    "num_attention_heads": num_attention_heads,
+                    "num_hidden_layers": num_hidden_layers,
+                    "head_dim": head_dim,
+                    "num_key_value_heads": num_key_value_heads,
                     "num_image_tokens": 256,
-                    "num_key_value_heads": 1,
+                    # "num_key_value_heads": 1,
+                    # "num_attention_heads": 8,
                     "torch_dtype": "float32",
                     "vocab_size": 257152,
                 },
@@ -125,7 +138,7 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
                 attention_dropout=0.0,
                 bos_token_id=2,
                 eos_token_id=1,
-                head_dim=256,
+                head_dim=head_dim, # for adapt sana
                 hidden_act="gelu_pytorch_tanh",
                 hidden_activation="gelu_pytorch_tanh",
                 hidden_size=1024,
@@ -133,9 +146,12 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
                 intermediate_size=4096,
                 max_position_embeddings=8192,
                 model_type="gemma",
-                num_attention_heads=8,
-                num_hidden_layers=18,
-                num_key_value_heads=1,
+                # head_dim=256,
+                # num_attention_heads=8,
+                # num_key_value_heads=1,
+                num_attention_heads=num_attention_heads, # for adapt sana
+                num_hidden_layers=num_hidden_layers,
+                num_key_value_heads=num_key_value_heads, # for adapt sana
                 pad_token_id=0,
                 rms_norm_eps=1e-06,
                 rope_theta=10000.0,
@@ -200,8 +216,8 @@ class ActionDecoderModel(PreTrainedModel):
         # load pi0 weights
         if action_expert_path is not None:
             print(f"Load expert weights from {action_expert_path}")
-            weights = torch.load(action_expert_path, map_location="cpu")
-            self.gemma_expert.load_state_dict(weights, strict=True)    
+            # weights = torch.load(action_expert_path, map_location="cpu")
+            # self.gemma_expert.load_state_dict(weights, strict=True)    
 
         self.latent_action_layers = nn.ModuleList([
             LatentActionProjection(config) 
@@ -279,6 +295,7 @@ class ActionDecoderModel(PreTrainedModel):
             if hidden_states is None:
                 continue
             batch_size = hidden_states.shape[0]
+            # print(hidden_states.shape)
 
         # RMSNorm
         # num_layers = self.paligemma.config.text_config.num_hidden_layers
@@ -301,11 +318,14 @@ class ActionDecoderModel(PreTrainedModel):
 
                     input_shape = hidden_states.shape[:-1]
                     hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
+                    # print(hidden_shape)
 
                     hidden_states = hidden_states.to(dtype=torch.bfloat16)
+                    # print(layer.self_attn.q_proj)
                     query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape)
                     key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape)
                     value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape)
+                    # print(key_state.shape)
                 # print(f"{i}", query_state.shape, key_state.shape, value_state.shape, hidden_states.shape)
                 else:
                     input_shape = hidden_states.shape[:-1]
@@ -325,6 +345,7 @@ class ActionDecoderModel(PreTrainedModel):
             query_states = torch.cat(query_states, dim=1)
             key_states = torch.cat(key_states, dim=1)
             value_states = torch.cat(value_states, dim=1)
+            # print(query_states.shape, key_states.shape, value_states.shape)
 
             query_states = apply_rope(query_states, position_ids)
             key_states = apply_rope(key_states, position_ids)

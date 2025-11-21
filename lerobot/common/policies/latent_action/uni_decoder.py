@@ -246,22 +246,6 @@ class UniDecoder(nn.Module):
         pad_masks = []
         att_masks = []
         bsize = con_embeddings.shape[0]
-        # for image decoder
-        # for img in images:
-        #     img_emb = self.paligemma_with_expert.embed_image(img)
-        #     img_emb = img_emb.to(dtype=torch.bfloat16)
-        #     # Normalize image embeddings
-        #     img_emb_dim = img_emb.shape[-1]
-        #     img_emb = img_emb * torch.tensor(img_emb_dim**0.5, dtype=img_emb.dtype, device=img_emb.device)
-
-        #     bsize, num_img_embs = img_emb.shape[:2]
-        #     embs.append(img_emb)
-        #     # Create attention masks so that image tokens attend to each other
-        #     att_masks += [0] * num_img_embs
-
-        #     img_mask = torch.ones(bsize, dtype=torch.bool, device=img_emb.device)
-        #     img_mask = img_mask[:, None].expand(bsize, num_img_embs)
-        #     pad_masks.append(img_mask)
 
         # torch.Size([2, 256, 2048]) torch.Size([2, 66, 1024])
         # print(embs[0].shape, con_embeddings.shape)
