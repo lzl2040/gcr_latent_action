@@ -125,6 +125,8 @@ class LatentActionModel(PreTrainedPolicy):
                                                                     local_files_only=True,
                                                                     trust_remote_code=True)
         
+        self.vlm.lm_head = nn.Identity()
+        
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.vlm_path,
                                                                     # config=vlm_config,
                                                                     local_files_only=True,
@@ -153,8 +155,8 @@ class LatentActionModel(PreTrainedPolicy):
         self.sc_token_idx = config.sc_token_idx
         self.action_token_idx = config.action_token_idx
         if config.is_distill == False:
-            # self.uni_decoder = UniDecoder(config)
-            self.uni_decoder = UniDecoder2(config)
+            self.uni_decoder = UniDecoder(config)
+            # self.uni_decoder = UniDecoder2(config)
 
         self.dtype = torch.bfloat16
 
