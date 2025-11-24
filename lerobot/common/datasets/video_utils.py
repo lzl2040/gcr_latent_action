@@ -197,17 +197,52 @@ def decode_video_frames_torchvision(
                 break
     else:
         # 从first_ts往后取max_frame_window帧
-        for frame in reader:
-            current_ts = frame["pts"]
-            # if current_ts < first_ts:
-            #     continue
-            if len(loaded_frames) >= max_frame_window:
-                break
-            if log_loaded_timestamps:
-                logging.info(f"frame loaded at timestamp={current_ts:.4f}")
-            loaded_frames.append(frame["data"])
-            loaded_ts.append(current_ts)
+        # for frame in reader:
+        #     current_ts = frame["pts"]
+        #     # if current_ts < first_ts:
+        #     #     continue
+        #     if len(loaded_frames) >= max_frame_window:
+        #         break
+        #     if log_loaded_timestamps:
+        #         logging.info(f"frame loaded at timestamp={current_ts:.4f}")
+        #     loaded_frames.append(frame["data"])
+        #     loaded_ts.append(current_ts)
             # print(current_ts, first_ts, len(loaded_frames))
+        
+        reader_iter = iter(reader)
+
+        for _ in range(max_frame_window):
+            try:
+                frame = next(reader_iter)   # 关键：显式 next 才能捕获异常
+                current_ts = frame['pts']
+                tensor = frame["data"]  # (C,H,W)
+
+                if log_loaded_timestamps:
+                    logging.info(f"frame loaded at timestamp={current_ts:.4f}")
+
+                loaded_frames.append(frame["data"])
+                loaded_ts.append(current_ts)
+
+            except StopIteration:
+                # 视频已读完，直接退出，不补帧
+                logging.info("Video finished early. Stop reading.")
+                break
+
+            except Exception as e:
+                # 解码错误时：补一个全 1 tensor
+                logging.warning(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
+
+                if len(loaded_frames) > 0:
+                    ones_frame = torch.ones_like(loaded_frames[0])
+                else:
+                    # 如果第一帧就坏，必须给定 frame_shape
+                    meta = reader.get_metadata()
+                    w = meta["video"]["width"]
+                    h = meta["video"]["height"]
+                    ones_frame = torch.ones((3, h, w), dtype=torch.uint8)
+
+                loaded_frames.append(ones_frame)
+                loaded_ts.append(-1)
 
     if backend == "pyav":
         reader.container.close()
