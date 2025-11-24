@@ -231,7 +231,7 @@ def decode_video_frames_torchvision(
             except Exception as e:
                 # 解码错误时：补一个全 1 tensor
                 logging.warning(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
-
+                print(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
                 if len(loaded_frames) > 0:
                     ones_frame = torch.ones_like(loaded_frames[0])
                 else:

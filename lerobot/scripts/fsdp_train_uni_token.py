@@ -262,7 +262,7 @@ def train(cfg: TrainPipelineConfig):
     
     step = 1
     seed = cfg.seed + rank
-    if cfg.resume:
+    if cfg.weight_resume:
         logger.info("Resume is set, will model from checkpoint...")
         os.makedirs(cfg.output_dir, exist_ok=True)
         pts = sorted(glob.glob(os.path.join(cfg.output_dir, "*.pt")))
