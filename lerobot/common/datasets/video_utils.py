@@ -197,17 +197,20 @@ def decode_video_frames_torchvision(
                 break
     else:
         # 从first_ts往后取max_frame_window帧
-        for frame in reader:
-            current_ts = frame["pts"]
-            # if current_ts < first_ts:
-            #     continue
-            if len(loaded_frames) >= max_frame_window:
-                break
-            if log_loaded_timestamps:
-                logging.info(f"frame loaded at timestamp={current_ts:.4f}")
-            loaded_frames.append(frame["data"])
-            loaded_ts.append(current_ts)
-            # print(current_ts, first_ts, len(loaded_frames))
+        try:
+            for frame in reader:
+                current_ts = frame["pts"]
+                # if current_ts < first_ts:
+                #     continue
+                if len(loaded_frames) >= max_frame_window:
+                    break
+                if log_loaded_timestamps:
+                    logging.info(f"frame loaded at timestamp={current_ts:.4f}")
+                loaded_frames.append(frame["data"])
+                loaded_ts.append(current_ts)
+                # print(current_ts, first_ts, len(loaded_frames))
+        except Exception as e:
+            print(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
         
         # reader_iter = iter(reader)
 
