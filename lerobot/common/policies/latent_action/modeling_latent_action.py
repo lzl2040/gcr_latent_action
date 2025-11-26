@@ -125,7 +125,7 @@ class LatentActionModel(PreTrainedPolicy):
                                                                     local_files_only=True,
                                                                     trust_remote_code=True)
         
-        self.vlm.lm_head = nn.Identity()
+        # self.vlm.lm_head = nn.Identity()
         
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.vlm_path,
                                                                     # config=vlm_config,
