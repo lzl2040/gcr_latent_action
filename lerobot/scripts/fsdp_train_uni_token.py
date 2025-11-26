@@ -360,7 +360,7 @@ def train(cfg: TrainPipelineConfig):
     # print("Before resume:")
     # print(torch.cuda.memory_allocated() / 1024**2, "MB allocated")
     # print(torch.cuda.memory_reserved() / 1024**2, "MB reserved")
-    if cfg.resume:
+    if cfg.weight_resume:
         if pts:
             torch.cuda.empty_cache()
             cfg.resume = os.path.join(cfg.output_dir, f"step{step-1}.pt")
