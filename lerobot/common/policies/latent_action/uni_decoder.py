@@ -150,6 +150,7 @@ class UniDecoder(nn.Module):
         # image decoder
         # self.image_decoder = ImagePredictionModel(config)
         self.image_decoder = SANAModel(config)
+        print(f"scale table:{print(self.image_decoder.transformer.transformer_blocks[0].scale_shift_table.shape)}")
 
         self.dtype = torch.bfloat16
         self.decoder_proj_type = config.ip_token_gen_type
@@ -409,7 +410,7 @@ class UniDecoder(nn.Module):
         models = [self.image_decoder.transformer, # 20
                   self.action_decoder.latent_action_layers,  # 18
                   self.action_decoder.gemma_expert.model] # 18
-        print(models[0].transformer_blocks[0].scale_shift_table.shape)
+        print(models[0].transformer_blocks[0].scale_shift_table.shape, models[0].transformer_blocks[0])
         for hidden_states in inputs_embeds:
             # print(hidden_states.shape)
             # TODO this is very inefficient
