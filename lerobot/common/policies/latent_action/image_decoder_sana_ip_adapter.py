@@ -354,6 +354,7 @@ class ImagePredictionModel(nn.Module):
                 self.transformer.transformer_blocks[i] = SanaTransformerBlock_IP(
                     False, ip_token_num,
                     **block_kwargs)
+            print(self.transformer.transformer_blocks[i].scale_shift_table.shape)
         
         self.transformer.forward = forward_c.__get__(self.transformer)
         missing_keys, unexpected_key = self.transformer.load_state_dict(old_transformer_weights, strict=False)
