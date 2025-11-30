@@ -232,6 +232,7 @@ class UniDecoder(nn.Module):
         timestep, embedded_timestep = self.image_decoder.transformer.time_embed(
             timestep, batch_size=batch_size, hidden_dtype=image_latent_embs.dtype
         )
+        print(f"Timestep:{timestep.shape}")
 
         prompt_embs = self.image_decoder.transformer.caption_projection(prompt_embs)
         prompt_embs = prompt_embs.view(batch_size, -1, image_latent_embs.shape[-1])
