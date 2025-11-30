@@ -433,7 +433,7 @@ class UniDecoder(nn.Module):
                 if i == 0:
                     layer = models[i].transformer_blocks[layer_idx]
                     # 1. Modulation
-                    print(layer.scale_shift_table, t_for_id.shape, layer)
+                    print(layer.scale_shift_table.shape, t_for_id.shape)
                     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
                         layer.scale_shift_table[None] + t_for_id.reshape(batch_size, 6, -1)
                     ).chunk(6, dim=1)
