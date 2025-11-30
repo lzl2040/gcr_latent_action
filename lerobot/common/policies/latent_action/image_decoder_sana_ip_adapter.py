@@ -183,6 +183,7 @@ def forward_c(
     post_patch_height, post_patch_width = height // p, width // p
 
     hidden_states = self.patch_embed(hidden_states)
+    # print(hidden_states.shape) # B L hidden_size=2240
 
     timestep, embedded_timestep = self.time_embed(
         timestep, batch_size=batch_size, hidden_dtype=hidden_states.dtype
@@ -330,6 +331,7 @@ class ImagePredictionModel(nn.Module):
         print("Replace IP-Adapter Module")
         inner_dim = self.transformer.config.num_attention_heads * self.transformer.config.attention_head_dim
         old_transformer_weights = self.transformer.state_dict()
+        print(f"Inner dim:{inner_dim}")
         block_kwargs = dict(
             dim=inner_dim,
             num_attention_heads=self.transformer.config.num_attention_heads,
