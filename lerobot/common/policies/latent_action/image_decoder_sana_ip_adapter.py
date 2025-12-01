@@ -62,6 +62,8 @@ class SanaTransformerBlock_IP(SanaTransformerBlock):
         super().__init__(**kwargs)
         self.is_ip_adapter = is_ip_adapter
         self.ip_token_num = ip_token_num
+        dim = kwargs.get("dim", 2240),
+        self.scale_shift_table = nn.Parameter(torch.randn(6, dim) / dim**0.5)
         if self.is_ip_adapter:
             cross_attention_dim = kwargs.get("cross_attention_dim", 1152)
             # self.attn3 = copy.deepcopy(self.attn2)
@@ -354,7 +356,7 @@ class ImagePredictionModel(nn.Module):
                 self.transformer.transformer_blocks[i] = SanaTransformerBlock_IP(
                     False, ip_token_num,
                     **block_kwargs)
-            print(self.transformer.transformer_blocks[i].scale_shift_table.shape)
+            # print(self.transformer.transformer_blocks[i].scale_shift_table.shape)
         
         self.transformer.forward = forward_c.__get__(self.transformer)
         missing_keys, unexpected_key = self.transformer.load_state_dict(old_transformer_weights, strict=False)
