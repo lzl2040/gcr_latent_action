@@ -62,7 +62,9 @@ class SanaTransformerBlock_IP(SanaTransformerBlock):
         super().__init__(**kwargs)
         self.is_ip_adapter = is_ip_adapter
         self.ip_token_num = ip_token_num
-        dim = kwargs.get("dim", 2240)
+        # dim = kwargs.get("dim", 2240)
+        dim = 2240
+        print("Dim:", kwargs.get("dim", 2240))
         self.scale_shift_table = nn.Parameter(torch.randn(6, dim) / dim**0.5)
         if self.is_ip_adapter:
             cross_attention_dim = kwargs.get("cross_attention_dim", 1152)
