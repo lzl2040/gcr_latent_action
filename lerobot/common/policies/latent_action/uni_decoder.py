@@ -335,7 +335,6 @@ class UniDecoder(nn.Module):
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
 
-
         image_latent_embs, prompt_embs_for_id, t_for_id, ip_tokens_for_id, \
             h, w, embedded_timestep, sigmas, latents, noise = self.embed_image_latent_for_image_decoder(first_image=first_image,
                                                                                                                       last_image=last_image,
@@ -438,26 +437,7 @@ class UniDecoder(nn.Module):
                     layer = models[i].transformer_blocks[layer_idx]
                     # 1. Modulation
                     # print(layer.scale_shift_table.shape, t_for_id.shape)
-                    shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-                        layer.scale_shift_table[None] + t_for_id.reshape(batch_size, 6, -1)
-                    ).chunk(6, dim=1)
-
-                    # 2. Self Attention
-                    norm_hidden_states = layer.norm1(hidden_states)
-                    norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
-                    norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
-
-                    query = layer.attn1.to_q(norm_hidden_states)
-                    key = layer.attn1.to_k(norm_hidden_states)
-                    value = layer.attn1.to_v(norm_hidden_states)
-                    query = query.transpose(1, 2).unflatten(1, (layer.attn1.heads, -1))
-                    key = key.transpose(1, 2).unflatten(1, (layer.attn1.heads, -1))
-                    value = value.transpose(1, 2).unflatten(1, (layer.attn1.heads, -1))
-                    # torch.Size([8, 70, 32, 256]) torch.Size([8, 70, 256, 32]) torch.Size([8, 70, 32, 256])
-                    # print(query.shape, key.shape, value.shape)
-                    query, key, value = query.float(), key.float(), value.float()
-
-                    value = F.pad(value, (0, 0, 0, 1), mode="constant", value=1.0)
+                    query, key, value = layer.prepare_qkv(hidden_states, t_for_id)
                     # print("image", torch.isnan(query).any(), torch.isnan(key).any(), torch.isnan(value).any())
                 elif i == 2:
                     layer = models[i].layers[layer_idx]

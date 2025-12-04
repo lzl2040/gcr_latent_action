@@ -21,6 +21,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 import math
 from lerobot.common.policies.latent_action.image_resampler import Resampler
+import torch.nn.functional as F
 
 
 def get_sigmas(noise_scheduler, timesteps, n_dim=4, dtype=torch.float32, device = "cuda"):
@@ -62,10 +63,6 @@ class SanaTransformerBlock_IP(SanaTransformerBlock):
         super().__init__(**kwargs)
         self.is_ip_adapter = is_ip_adapter
         self.ip_token_num = ip_token_num
-        dim = kwargs.get("dim", 2240)
-        # dim = 2240
-        print("Dim:", kwargs.get("dim", 2240))
-        self.scale_shift_table = nn.Parameter(torch.randn(6, dim) / dim**0.5)
         if self.is_ip_adapter:
             cross_attention_dim = kwargs.get("cross_attention_dim", 1152)
             # self.attn3 = copy.deepcopy(self.attn2)
@@ -90,6 +87,32 @@ class SanaTransformerBlock_IP(SanaTransformerBlock):
             self.zero_linear = nn.Linear(cross_attention_dim, cross_attention_dim)
             nn.init.zeros_(self.zero_linear.weight)
             nn.init.zeros_(self.zero_linear.bias)
+
+    def prepare_qkv(self, hidden_states, timestep):
+        batch_size = hidden_states.shape[0]
+        print(self.scale_shift_table[None].shape)
+        # 1. Modulation
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+            self.scale_shift_table[None] + timestep.reshape(batch_size, 6, -1)
+        ).chunk(6, dim=1)
+
+        # 2. Self Attention
+        norm_hidden_states = self.norm1(hidden_states)
+        norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
+        norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
+
+        query = self.attn1.to_q(norm_hidden_states)
+        key = self.attn1.to_k(norm_hidden_states)
+        value = self.attn1.to_v(norm_hidden_states)
+        query = query.transpose(1, 2).unflatten(1, (self.attn1.heads, -1))
+        key = key.transpose(1, 2).unflatten(1, (self.attn1.heads, -1))
+        value = value.transpose(1, 2).unflatten(1, (self.attn1.heads, -1))
+        # torch.Size([8, 70, 32, 256]) torch.Size([8, 70, 256, 32]) torch.Size([8, 70, 32, 256])
+        # print(query.shape, key.shape, value.shape)
+        query, key, value = query.float(), key.float(), value.float()
+
+        value = F.pad(value, (0, 0, 0, 1), mode="constant", value=1.0)
+        return query, key, value
 
     def forward(self, 
         hidden_states: torch.Tensor,
