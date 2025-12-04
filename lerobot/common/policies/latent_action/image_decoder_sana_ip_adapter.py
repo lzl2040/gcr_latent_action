@@ -8,7 +8,7 @@ from diffusers import (
 )
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection, CLIPTextModelWithProjection
 from diffusers.models.attention import BasicTransformerBlock,JointTransformerBlock
-from diffusers.utils.torch_utils import get_device, is_torch_version, randn_tensor
+from diffusers.utils.torch_utils import is_torch_version, randn_tensor
 from diffusers.models.transformers.sana_transformer import SanaTransformerBlock, SanaAttnProcessor2_0
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.image_processor import PixArtImageProcessor
@@ -58,6 +58,22 @@ class ImageProjModel(torch.nn.Module):
         clip_extra_context_tokens = self.norm(clip_extra_context_tokens)
         return clip_extra_context_tokens
 
+
+class SanaModulatedNorm_Modified(nn.Module):
+    def __init__(self, dim: int, elementwise_affine: bool = False, eps: float = 1e-6, scale_shift_table: torch.Tensor = None):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim, elementwise_affine=elementwise_affine, eps=eps)
+        self.scale_shift_table = scale_shift_table
+
+    def forward(
+        self, hidden_states: torch.Tensor, temb: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_states = self.norm(hidden_states)
+        shift, scale = (self.scale_shift_table[None] + temb[:, None].to(self.scale_shift_table.device)).chunk(2, dim=1)
+        hidden_states = hidden_states * (1 + scale) + shift
+        return hidden_states
+    
+
 class SanaTransformerBlock_IP(SanaTransformerBlock):
     def __init__(self, is_ip_adapter, ip_token_num, **kwargs):
         super().__init__(**kwargs)
@@ -90,7 +106,7 @@ class SanaTransformerBlock_IP(SanaTransformerBlock):
 
     def prepare_qkv(self, hidden_states, timestep):
         batch_size = hidden_states.shape[0]
-        print(self.scale_shift_table[None].shape)
+        # print(self.scale_shift_table[None].shape)
         # 1. Modulation
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.scale_shift_table[None] + timestep.reshape(batch_size, 6, -1)
@@ -112,7 +128,7 @@ class SanaTransformerBlock_IP(SanaTransformerBlock):
         query, key, value = query.float(), key.float(), value.float()
 
         value = F.pad(value, (0, 0, 0, 1), mode="constant", value=1.0)
-        return query, key, value
+        return query, key, value, gate_msa, shift_mlp, scale_mlp, gate_mlp
 
     def forward(self, 
         hidden_states: torch.Tensor,
@@ -121,7 +137,11 @@ class SanaTransformerBlock_IP(SanaTransformerBlock):
         encoder_attention_mask: Optional[torch.Tensor] = None,
         timestep: Optional[torch.LongTensor] = None,
         height: int = None,
-        width: int = None,):
+        width: int = None,
+        is_split_layer = False):
+        
+        if is_split_layer:
+            return self.prepare_qkv(hidden_states, timestep)
 
         num_tokens = self.ip_token_num
         end_pos = encoder_hidden_states.shape[1] - num_tokens
@@ -301,6 +321,11 @@ class ImagePredictionModel(nn.Module):
             subfolder="transformer", 
             locals_files_only=True
         )
+        inner_dim = self.transformer.config.num_attention_heads * self.transformer.config.attention_head_dim
+        self.transformer.norm_out = SanaModulatedNorm_Modified(inner_dim, 
+                                                               elementwise_affine=False, 
+                                                               eps=1e-6, 
+                                                               scale_shift_table=self.transformer.scale_shift_table)
 
         self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.img_encoder_model)
         self.img_proj_type = config.ip_token_gen_type

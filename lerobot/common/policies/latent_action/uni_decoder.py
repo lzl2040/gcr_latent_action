@@ -437,7 +437,7 @@ class UniDecoder(nn.Module):
                     layer = models[i].transformer_blocks[layer_idx]
                     # 1. Modulation
                     # print(layer.scale_shift_table.shape, t_for_id.shape)
-                    query, key, value = layer.prepare_qkv(hidden_states, t_for_id)
+                    query, key, value, gate_msa, shift_mlp, scale_mlp, gate_mlp = layer(hidden_states=hidden_states, timestep=t_for_id, is_split_layer = True)
                     # print("image", torch.isnan(query).any(), torch.isnan(key).any(), torch.isnan(value).any())
                 elif i == 2:
                     layer = models[i].layers[layer_idx]
@@ -623,8 +623,7 @@ class UniDecoder(nn.Module):
                 if i == 0:
                     # 3. Normalization
                     hidden_states = models[i].norm_out(hidden_states, 
-                                                       embedded_t, 
-                                                       models[i].scale_shift_table)
+                                                       embedded_t)
 
                     hidden_states = models[i].proj_out(hidden_states)
 
