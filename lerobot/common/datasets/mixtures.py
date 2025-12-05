@@ -136,8 +136,9 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("dobbe", 0.2),
         ("droid", 0.001),
         ("agibot_alpha", 0.1),
-        ("ego_dex_split1", 0.10),
-        ("ego_dex_split2", 0.10),
+        ("ego_dex_split1", 0.08),
+        ("ego_dex_split2", 0.08),
+        ("ego_dex_split3", 0.08),
     ],
 
     "oxe_magic_soup_plus_minus_v1": [
@@ -276,7 +277,7 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("libero_10_no_noops", 1.0),
     ],
     "mini" : [
-        ("ego_dex", 1),
+        ("ego_dex_split3", 1),
         ("simpler_bridge", 1),
     ],
      "toy": [

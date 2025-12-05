@@ -700,6 +700,14 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
+    
+    "ego_dex_split3":{
+        "image_obs_keys": {"primary": "primary", "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["proprio"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
 
     ### LIBERO datasets (modified versions)
     "libero_spatial_no_noops": {

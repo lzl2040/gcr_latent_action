@@ -236,7 +236,7 @@ class UniDecoder(nn.Module):
         timestep, embedded_timestep = self.image_decoder.transformer.time_embed(
             timestep, batch_size=batch_size, hidden_dtype=image_latent_embs.dtype
         )
-        print(f"Timestep:{timestep.shape}")
+        # print(f"Timestep:{timestep.shape}")
 
         prompt_embs = self.image_decoder.transformer.caption_projection(prompt_embs)
         prompt_embs = prompt_embs.view(batch_size, -1, image_latent_embs.shape[-1])
@@ -412,7 +412,7 @@ class UniDecoder(nn.Module):
         models = [self.image_decoder.transformer, # 20
                   self.action_decoder.latent_action_layers,  # 18
                   self.action_decoder.gemma_expert.model] # 18
-        print(models[0].transformer_blocks[0].scale_shift_table.shape, models[0].transformer_blocks[0])
+        # print(models[0].transformer_blocks[0].scale_shift_table.shape, models[0].transformer_blocks[0])
         for hidden_states in inputs_embeds:
             # print(hidden_states.shape)
             # TODO this is very inefficient
