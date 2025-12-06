@@ -56,7 +56,7 @@ class TrainPipelineConfig(HubMixin):
     data_mix: str = "oxe_magic_soup_plus"
     steps: int = 2000_000
     eval_freq: int = 2000
-    log_freq: int = 10
+    log_freq: int = 100
     save_checkpoint: bool = True
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
     save_freq: int = 5000
