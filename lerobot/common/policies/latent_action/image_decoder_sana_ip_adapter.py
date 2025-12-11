@@ -60,10 +60,10 @@ class ImageProjModel(torch.nn.Module):
 
 
 class SanaModulatedNorm_Modified(nn.Module):
-    def __init__(self, dim: int, elementwise_affine: bool = False, eps: float = 1e-6, scale_shift_table: torch.Tensor = None):
+    def __init__(self, dim: int, elementwise_affine: bool = False, eps: float = 1e-6, inner_dim: int = None):
         super().__init__()
         self.norm = nn.LayerNorm(dim, elementwise_affine=elementwise_affine, eps=eps)
-        self.scale_shift_table = scale_shift_table
+        self.scale_shift_table = nn.Parameter(torch.randn(2, inner_dim) / inner_dim**0.5)
 
     def forward(
         self, hidden_states: torch.Tensor, temb: torch.Tensor
@@ -325,7 +325,7 @@ class ImagePredictionModel(nn.Module):
         self.transformer.norm_out = SanaModulatedNorm_Modified(inner_dim, 
                                                                elementwise_affine=False, 
                                                                eps=1e-6, 
-                                                               scale_shift_table=self.transformer.scale_shift_table)
+                                                               inner_dim=inner_dim)
 
         self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(self.img_encoder_model)
         self.img_proj_type = config.ip_token_gen_type
@@ -411,6 +411,19 @@ class ImagePredictionModel(nn.Module):
         self.transformer.forward = forward_c.__get__(self.transformer)
         missing_keys, unexpected_key = self.transformer.load_state_dict(old_transformer_weights, strict=False)
         print(missing_keys)
+        
+        print(f"Replace scale_shift_table...")
+        old_table = self.transformer.scale_shift_table.data 
+        old_table = old_table.view(2, -1)  # [2, 2240]
+
+        new_table = self.transformer.norm_out.scale_shift_table.data  # [2, 2240]
+
+        # 把旧权重扩展拷贝进去
+        new_table[:, :old_table.shape[1]] = old_table
+
+        # 更新 norm_out 的表
+        self.transformer.norm_out.scale_shift_table.data = new_table
+
     
     def prepare_latents(self, batch_size, num_channels_latents, height, width, 
                         dtype, device, generator = None, latents=None):
