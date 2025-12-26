@@ -95,10 +95,6 @@ while [[ $# -gt 0 ]]; do
             IMG_DECODER_PART_TRAIN="$2"
             shift 2
             ;;
-        --calvin_sub_task)
-            CALVIN_SUB_TASK="$2"
-            shift 2
-            ;;
         --loss_type)
             LOSS_TYPE="$2"
             shift 2
@@ -144,7 +140,6 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --master_port=$MASTER_PORT \
     -m lerobot.scripts.fsdp_train_world \
     --policy.type="latent_wm" \
-    --policy.use_state=$USE_STATE \
     --policy.max_frame=$MAX_FRAME \
     --policy.max_history_frame=$MAX_HISTORY \
     --policy.loss_type=$LOSS_TYPE \
