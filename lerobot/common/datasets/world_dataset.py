@@ -103,8 +103,7 @@ from lerobot.common.datasets.video_transforms import ToTensorVideo, ResizeCrop
 from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.constants import (CLIP_MEAN, CLIP_STD, IMAGENET_MEAN, IMAGENET_STD,
                         IMG_CONTEXT_TOKEN, IMG_END_TOKEN, IMG_START_TOKEN,
-                        SIGLIP_MEAN, SIGLIP_STD, COMPRESS_ACTION_TOKEN, COMPRESS_SC_TOKEN,
-                        QUESTION_LIST)
+                        SIGLIP_MEAN, SIGLIP_STD)
 
 from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
@@ -114,6 +113,20 @@ from tabulate import tabulate
 
 CODEBASE_VERSION = "v2.1"
 PAD_VALUE = {"attention_mask": 0, "input_ids": 151643, "labels": IGNORE_TOKEN_ID}
+
+QUESTION_LIST = [
+    # 1. 通用生成型（Future-oriented Generation）
+    "You are given the current video frame(s) and an instruction '{sent}'. Based on the observed visual state and the instruction, infer how the scene is likely to evolve in the near future. Describe the expected scene-level changes, including how the global environment or context may change, and predict the action-level dynamics, detailing how objects or agents are likely to move or interact next.",
+
+    # 2. Reasoning 型（Action-conditioned Reasoning）
+    "Given the current frame(s) and the instruction '{sent}', reason about the most plausible future events. Explain how the instruction influences the anticipated scene evolution, and analyze the causal relationships that may lead from the current visual state to future actions, interactions, and transitions.",
+
+    # 3. Predictive Summarization 型（Future Summary）
+    "According to the instruction '{sent}', generate a structured prediction of the upcoming video content. First, describe the expected future scene-level state, then summarize the predicted action-level behaviors and motions. Clearly distinguish between stable environmental elements and dynamic changes driven by the instruction.",
+
+    # 4. Embedding / Representation 型（Predictive Representation）
+    "Based on the current visual observation and the instruction '{sent}', construct predictive hierarchical representations of the future. The scene-level representation should encode the anticipated global context and environmental changes, while the action-level representation should model the expected future motions and interactions. Together, they should form a compact representation of the predicted future dynamics."
+]
 
 ANSWER_LIST = [
     # 1️⃣ 通用生成型 —— 直接分析场景与动作变化
