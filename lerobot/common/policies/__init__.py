@@ -4,5 +4,6 @@ from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .pi0.configuration_qwen import QwenConfig as QwenConfig
 from .pi05.configuration_pi05 import PI05Config as PI05Config
 from .latent_action.configuration_latent_action import LatentActionConfig as LatentActionConfig
+from .world_model.configuration_world_model import LatentWorldModelConfig as LatentWorldModelConfig
 from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
 from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig

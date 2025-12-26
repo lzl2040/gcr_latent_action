@@ -63,6 +63,9 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
     elif name == "latent_act":
         from lerobot.common.policies.latent_action.modeling_latent_action import LatentActionModel
         return LatentActionModel
+    elif name == "latent_wm":
+        from lerobot.common.policies.world_model.modeling_world import LatentWorldModel
+        return LatentWorldModel
     elif name == "pi05":
         from lerobot.common.policies.pi05.modeling_pi05 import PI05Policy
         return PI05Policy

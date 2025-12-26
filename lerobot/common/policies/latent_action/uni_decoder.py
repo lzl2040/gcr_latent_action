@@ -150,10 +150,10 @@ class UniDecoder(nn.Module):
         # image decoder
         # self.image_decoder = ImagePredictionModel(config)
         self.image_decoder = SANAModel(config)
-        print(f"scale table:{self.image_decoder.transformer.transformer_blocks[0].scale_shift_table}")
-        print(f"scale table:{self.image_decoder.transformer.transformer_blocks[1].scale_shift_table}")
-        print(f"scale table:{self.image_decoder.transformer.transformer_blocks[2].scale_shift_table}")
-        print(f"scale table:{self.image_decoder.transformer.transformer_blocks[2].scale_shift_table.shape}")
+        # print(f"scale table:{self.image_decoder.transformer.transformer_blocks[0].scale_shift_table}")
+        # print(f"scale table:{self.image_decoder.transformer.transformer_blocks[1].scale_shift_table}")
+        # print(f"scale table:{self.image_decoder.transformer.transformer_blocks[2].scale_shift_table}")
+        # print(f"scale table:{self.image_decoder.transformer.transformer_blocks[2].scale_shift_table.shape}")
 
         self.dtype = torch.bfloat16
         self.decoder_proj_type = config.ip_token_gen_type
