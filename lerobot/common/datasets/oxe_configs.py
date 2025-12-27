@@ -743,7 +743,7 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
-    "game_stardew":{
+    "game_minecraft":{
         "image_obs_keys": {"primary": "primary", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
