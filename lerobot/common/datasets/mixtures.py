@@ -169,6 +169,9 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("bc_z", 0.2),                                          # Note: use v0.1.0 --> later versions broken
         ("fmb_dataset", 1.0),
         ("dobbe", 0.2),
+        ("game_minecraft", 1.0),
+        ("game_stardew", 1.0),
+        ("game_csgo", 1.0),
     ],
 
     "oxe_magic_soup_plus_minus_v2": [
@@ -277,8 +280,10 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("libero_10_no_noops", 1.0),
     ],
     "mini" : [
-        ("ego_dex_split3", 1),
+        # ("ego_dex_split3", 1),
         ("simpler_bridge", 1),
+        ("local_game_minecraft", 1),
+        ("local_game_stardew", 1)
     ],
      "toy": [
         ("jaco_play", 0.54087122203),                # Google RT-1 Robot Data (Large-Scale)

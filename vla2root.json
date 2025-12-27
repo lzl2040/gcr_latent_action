@@ -56,8 +56,16 @@
     "ego_dex_split2": "EgoDex",
     "ego_dex_split1": "EgoDex_split1",
     "ego_dex_split3": "EgoDex_split3",
+    "ego_dex_split4": "EgoDex_split4",
+    "ego_dex_split5": "EgoDex_split5",
     "cup_4hz": "cup_hz_4_plus_1103",
     "pizza_sub1": "pizza_sub_1_hz_15",
     "pizza_sub2": "pizza_sub_2_hz_15",
-    "pizza_sub4": "pizza_sub_4_hz_15"
+    "pizza_sub4": "pizza_sub_4_hz_15",
+    "local_game_minecraft": "GameData/D2E/Minecraft_1.21.8",
+    "game_minecraft": "game_data/Minecraft_1.21.8",
+    "local_game_stardew": "GameData/D2E/Stardew_Valley",
+    "game_stardew": "game_data/Stardew_Valley",
+    "local_game_csgo": "GameData/D2E/Counter-Strike_2",
+    "game_csgo": "game_data/Counter-Strike_2"
 }

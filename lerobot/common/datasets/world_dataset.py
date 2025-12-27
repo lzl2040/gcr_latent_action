@@ -57,7 +57,7 @@ from lerobot.common.datasets.oxe_configs import OXE_DATASET_CONFIGS
 from lerobot.common.datasets.mixtures import OXE_NAMED_MIXTURES
 from lerobot.common.datasets.utils import cycle, save_to_json
 # from lerobot.common.datasets.factory import resolve_delta_timestamps
-from lerobot.common.datasets.compute_stats import aggregate_stats, compute_episode_stats, aggregate_multi_stats
+from lerobot.common.datasets.compute_stats import aggregate_stats_with_game, compute_episode_stats, aggregate_multi_stats
 from lerobot.common.datasets.transforms import ImageTransforms
 from lerobot.common.datasets.image_writer import AsyncImageWriter, write_image
 from lerobot.common.datasets.utils import (
@@ -1636,11 +1636,11 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         self.max_action_dim = cfg.policy.max_action_dim
         self.max_state_dim = cfg.policy.max_state_dim
         # self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
-        self.stats = aggregate_stats([dataset.meta.stats for dataset in self.datasets], self.max_action_dim)
+        self.stats = aggregate_stats_with_game([dataset.meta.stats for dataset in self.datasets], self.max_action_dim)
         save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
         # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
         
-        print(f"Aggregated stats:{self.stats}")
+        # print(f"Aggregated stats:{self.stats}")
         # update meta_features
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - meta features: {meta_features}")
         
@@ -1740,37 +1740,49 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         return data_dict
     
     def norm_data_with_mean_std(self, item):
+        state_mean = torch.zeros(self.max_state_dim)
+        state_std = torch.ones(self.max_state_dim)
+        action_mean = torch.zeros(self.max_action_dim)
+        action_std = torch.ones(self.max_action_dim)
         if "agi" in item['dataset_name']:
             action_end_dim = 14
             state_end_dim = 16
-            state_mean = torch.zeros(self.max_state_dim)
             state_mean[:state_end_dim] = self.stats["observation.state"]["mean"][:state_end_dim]
-            state_std = torch.ones(self.max_state_dim)
             state_std[:state_end_dim] = self.stats["observation.state"]["std"][:state_end_dim]
 
             item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
 
-            action_mean = torch.zeros(self.max_action_dim)
             action_mean[:action_end_dim] = self.stats["action"]["mean"][:action_end_dim]
-            action_std = torch.ones(self.max_action_dim)
             action_std[:action_end_dim] = self.stats["action"]["std"][:action_end_dim]
             item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
             # item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
             # item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
+        elif "game" in item["dataset_name"]:
+            action_start_dim = 14 + 30
+            action_end_dim = 14 + 30 + 50
+            state_start_dim = 16 + 30
+            state_end_dim = 16 + 30 + 50
+            
+            state_mean[:state_end_dim] = self.stats["observation.state"]["mean"][:state_end_dim]
+            state_std[:state_end_dim] = self.stats["observation.state"]["std"][:state_end_dim]
+
+            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
+
+            action_mean[:action_end_dim] = self.stats["action"]["mean"][:action_end_dim]
+            action_std[:action_end_dim] = self.stats["action"]["std"][:action_end_dim]
+            item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
+            
         elif "ego_dex" in item['dataset_name']:
+            # print(item["action"].shape)
             item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
             item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
         else:
-            state_mean = torch.zeros(self.max_state_dim)
             state_mean[:8] = self.stats["observation.state"]["mean"][:8]
-            state_std = torch.ones(self.max_state_dim)
 
             state_std[:8] = self.stats["observation.state"]["std"][:8]
             item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
             
-            action_mean = torch.zeros(self.max_action_dim)
             action_mean[:7] = self.stats["action"]["mean"][:7]
-            action_std = torch.ones(self.max_action_dim)
             action_std[:7] = self.stats["action"]["std"][:7]
             item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
         return item
@@ -1778,12 +1790,14 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
     def norm_data_with_quantile(self, item):
         key1 = "q01"
         key2 = "q99"
+        state_q01 = torch.ones(self.max_state_dim) * -1
+        state_q99 = torch.ones(self.max_state_dim)
+        action_q01 = torch.ones(self.max_action_dim) * -1
+        action_q99 = torch.ones(self.max_action_dim)
         if "agi" in item['dataset_name']:
             action_end_dim = 14
             state_end_dim = 16
-            state_q01 = torch.ones(self.max_state_dim) * -1
             state_q01[:state_end_dim] = self.stats["observation.state"][key1][:state_end_dim]
-            state_q99 = torch.ones(self.max_state_dim)
             state_q99[:state_end_dim] = self.stats["observation.state"][key2][:state_end_dim]
 
             denom = state_q99 - state_q01
@@ -1793,9 +1807,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             item["observation.state"] = 2.0 * (item["observation.state"] - state_q01) / denom - 1.0
             # item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + state_q01
 
-            action_q01 = torch.ones(self.max_action_dim) * -1
             action_q01[:action_end_dim] = self.stats["action"][key1][:action_end_dim]
-            action_q99 = torch.ones(self.max_action_dim)
             action_q99[:action_end_dim] = self.stats["action"][key2][:action_end_dim]
 
             denom = action_q99 - action_q01
@@ -1821,9 +1833,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             item["observation.state"] = 2.0 * (item["observation.state"] - self.stats["observation.state"][key1]) / denom - 1.0
             # item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + self.stats["observation.state"][key1]
         else:
-            state_q01 = torch.ones(self.max_state_dim) * -1
             state_q01[:8] = self.stats["observation.state"][key1][:8]
-            state_q99 = torch.ones(self.max_state_dim)
 
             state_q99[:8] = self.stats["observation.state"][key2][:8]
 
@@ -1833,10 +1843,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             )
             item["observation.state"] = 2.0 * (item["observation.state"] - state_q01) / denom - 1.0
             # item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + state_q01
-            
-            action_q01 = torch.ones(self.max_action_dim) * -1
+        
             action_q01[:7] = self.stats["action"][key1][:7]
-            action_q99 = torch.ones(self.max_action_dim)
             action_q99[:7] = self.stats["action"][key2][:7]
 
             denom = action_q99 - action_q01
@@ -1909,6 +1917,20 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             item["source"] = f"{item['dataset_name']}_with_unknown_episode_id"
         
         # Pad the action and observation vectors
+        if "game" in item["dataset_name"]:
+            item["action"] = F.pad(
+                    item["action"],
+                    (44, 0),   # 对最后一维：左 pad 46，右 pad 0
+                    mode="constant",
+                    value=0
+                )
+            item["observation.state"] = F.pad(
+                    item["observation.state"],
+                    (46, 0),   # 对最后一维：左 pad 44，右 pad 0
+                    mode="constant",
+                    value=0
+                )
+        # print(item["dataset_name"], item["action"].shape)
         item["action"] = self.pad_vector(item["action"], self.max_action_dim)
         item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
         

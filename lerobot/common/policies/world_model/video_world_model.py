@@ -424,62 +424,32 @@ class VideoWorldModel(nn.Module):
         time = time_beta * 0.999 + 0.001
         return time.to(dtype=self.dtype, device=device)
     
-    def embed_action(self, noisy_actions, timestep):
+    def embed_action(self, noisy_actions):
         embs = []
         pad_masks = []
         att_masks = []
         dtype = noisy_actions.dtype
         device = noisy_actions.device
 
-        time_emb = create_sinusoidal_pos_embedding(
-            timestep, self.inner_dim, min_period=4e-3, max_period=4.0, device=device
-        )
-        time_emb = time_emb.type(dtype=dtype)
-
         # Fuse timestep + action information using an MLP
         action_emb = self.action_in_proj(noisy_actions)
-
-        time_emb = time_emb[:, None, :].expand_as(action_emb)
-        action_time_emb = torch.cat([action_emb, time_emb], dim=2)
-
-        action_time_emb = self.action_time_mlp_in(action_time_emb)
-        action_time_emb = F.silu(action_time_emb)  # swish == silu
-        action_time_emb = self.action_time_mlp_out(action_time_emb)
-
         # Add to input tokens
-        embs.append(action_time_emb)
-
-        bsize, action_time_dim = action_time_emb.shape[:2]
-        action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=device)
-        pad_masks.append(action_time_mask)
-
-        # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] + ([0] * (self.config.n_action_steps - 1))
-
-        embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
-        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
-
-        # print(f"pad mask shape is: {pad_masks.shape}")
-        # print(f"att mask shape is: {att_masks.shape}")
-        return embs, pad_masks, att_masks
+        embs.append(action_emb)
+        embs = torch.cat(embs, dim=1).to(dtype=dtype, device=device)
+        return embs
     
-    def prepare_noise_action(self, actions):
-        action_noise = self.sample_action_noise(actions.shape, actions.device).to(dtype=self.dtype)
-        action_time = self.sample_action_time(actions.shape[0], actions.device).to(dtype=self.dtype)
-        action_time_expanded = action_time[:, None, None]
-        actions = actions.to(dtype=self.dtype)
-        x_t = action_time_expanded * action_noise + (1 - action_time_expanded) * actions
-        noise_action_embeds, _, _ = self.embed_action(x_t, action_time)
+    def prepare_noise_action(self, actions, timesteps):
+        action_noise = torch.rand_like(actions)
+        # action_time = self.sample_action_time(actions.shape[0], actions.device).to(dtype=self.dtype)
+        # action_time_expanded = action_time[:, None, None]
+        # actions = actions.to(dtype=self.dtype)
+        # x_t = action_time_expanded * action_noise + (1 - action_time_expanded) * actions
+        x_t = self.noise_scheduler.add_noise(actions, action_noise, timesteps)
+        noise_action_embeds = self.embed_action(x_t)
         target_action = action_noise - actions
         return noise_action_embeds, target_action
         
-    
     def forward(self, img_embeds, sc_embeds, act_embeds, target_imgs, actions):
-        # prepare action
-        noisy_action_input, action_target = self.prepare_noise_action(actions)
-        # print(noise_action_embeds.shape, target_action.shape) # torch.Size([10, 30, 1024]) torch.Size([10, 30, 64])
         # prepare image
         prompt_embeds = torch.cat([img_embeds, sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
@@ -505,6 +475,9 @@ class VideoWorldModel(nn.Module):
         sigmas = get_sigmas(self.noise_scheduler, timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype)
         # noisy_model_input = (1.0 - sigmas) * clean_images + sigmas * noise
         noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
+        
+        noisy_action_input, action_target = self.prepare_noise_action(actions, timesteps)
+        
         model_output = self.transformer(
             hidden_states=noisy_model_input,
             action_hidden_states=noisy_action_input,

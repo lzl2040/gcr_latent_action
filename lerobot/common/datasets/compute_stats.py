@@ -633,6 +633,97 @@ def aggregate_stats(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str
 
     return aggregated_stats
 
+
+
+def aggregate_stats_with_game(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str, dict[str, np.ndarray]]:
+    """Aggregate stats from multiple compute_stats outputs into a single set of stats.
+
+    The final stats will have the union of all data keys from each of the stats dicts.
+
+    For instance:
+    - new_min = min(min_dataset_0, min_dataset_1, ...)
+    - new_max = max(max_dataset_0, max_dataset_1, ...)
+    - new_mean = (mean of all data, weighted by counts)
+    - new_std = (std of all data)
+    """
+
+    _assert_type_and_shape(stats_list)
+
+    data_keys = {key for stats in stats_list for key in stats} # action, state, timestamp
+    aggregated_stats = {key: {} for key in data_keys}
+
+    for key in data_keys:
+        # stats: ["action":["mean":, "std": , ], "state":["mean":, "std":, ]]
+        stats_with_key = [stats[key] for stats in stats_list if key in stats] # contains all dataset
+        # pad mean, std, q01, q99, max, min
+        # for dataset without ego_dex
+        if key in ["action", "observation.state"]:
+            pad_stats_with_key = []
+            for stats in stats_with_key:
+                if len(stats["mean"]) == 50: # this is action stats
+                    print("Processing game data")
+                    if key == "observation.state":
+                        stats["mean"] = np.pad(stats["mean"], (46, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=0)
+                        stats["std"] = np.pad(stats["std"], (46, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=1)
+                        stats["max"] = np.pad(stats["max"], (46, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=1)
+                        stats["min"] = np.pad(stats["min"], (46, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=1)
+                        stats["q01"] = np.pad(stats["q01"], (46, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=-1)
+                        stats["q10"] = np.pad(stats["q10"], (46, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=-0.5)
+                        stats["q50"] = np.pad(stats["q50"], (46, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=0)
+                        stats["q90"] = np.pad(stats["q90"], (46, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=0.5)
+                        stats["q99"] = np.pad(stats["q99"], (46, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=1)
+                    elif key == "action":
+                        stats["mean"] = np.pad(stats["mean"], (44, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=0)
+                        stats["std"] = np.pad(stats["std"], (44, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=1)
+                        stats["max"] = np.pad(stats["max"], (44, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=1)
+                        stats["min"] = np.pad(stats["min"], (44, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=1)
+                        stats["q01"] = np.pad(stats["q01"], (44, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=-1)
+                        stats["q10"] = np.pad(stats["q10"], (44, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=-0.5)
+                        stats["q50"] = np.pad(stats["q50"], (44, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=0)
+                        stats["q90"] = np.pad(stats["q90"], (44, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=0.5)
+                        stats["q99"] = np.pad(stats["q99"], (44, 0),  # 前面补 44 个，后面不补
+                            mode="constant",constant_values=1)
+                pad_stats = {}
+                pad_len = max_dim - len(stats["mean"])
+                # np.pad(数组, (左补数量, 右补数量), mode="constant", constant_values=填充值)
+                pad_stats["mean"] = np.pad(stats["mean"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["std"] = np.pad(stats["std"], (0, pad_len), mode="constant", constant_values=1)
+                pad_stats["max"] = np.pad(stats["max"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["min"] = np.pad(stats["min"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["q01"] = np.pad(stats["q01"], (0, pad_len), mode="constant", constant_values=-1)
+                pad_stats["q10"] = np.pad(stats["q10"], (0, pad_len), mode="constant", constant_values=-0.5)
+                pad_stats["q50"] = np.pad(stats["q50"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["q90"] = np.pad(stats["q90"], (0, pad_len), mode="constant", constant_values=0.5)
+                pad_stats["q99"] = np.pad(stats["q99"], (0, pad_len), mode="constant", constant_values=1)
+                pad_stats["count"] = stats["count"]
+                pad_stats_with_key.append(pad_stats)
+        else:
+            pad_stats_with_key = stats_with_key
+        aggregated_stats[key] = aggregate_feature_stats(pad_stats_with_key)
+        for k, v in aggregated_stats[key].items():
+            if isinstance(aggregated_stats[key][k], np.ndarray):
+                aggregated_stats[key][k] = torch.from_numpy(aggregated_stats[key][k])
+        # print(key, type(aggregated_stats[key]))
+
+    return aggregated_stats
+
 def cal_stats(stats, datasets, start_dim, end_dim, data_key):
     if len(datasets) == 0:
         return stats
