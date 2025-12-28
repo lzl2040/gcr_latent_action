@@ -237,6 +237,11 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("dobbe", 0.2),
         # ("droid", 0.06),
     ],
+    "ego":[
+        ("ego_dex_split2", 0.08),
+        ("ego_dex_split5", 0.08),
+        ("ego_dex_split3", 0.08),
+    ],
 
     # === T-DROID Dataset ===
     "tdroid_carrot_in_bowl": [

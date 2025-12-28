@@ -207,16 +207,20 @@ def decode_video_frames_torchcodec(
         frames = frames.data
     else:
         chunks = split_indices(frame_list, num_chunks=worker_count)
-        results = []
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-               executor.submit(decode_frame_torchcodec, raw_bytes, chunk) 
-               for chunk in chunks
-            ]
-            for f in futures:
-               results.append(f.result())
-        frames = torch.cat([frame_batch.data for frame_batch in results], dim=0)
-        
+        try:
+            results = []
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [
+                    executor.submit(decode_frame_torchcodec, raw_bytes, chunk) 
+                    for chunk in chunks
+                ]
+                for f in futures:
+                    results.append(f.result())
+                frames = torch.cat([frame_batch.data for frame_batch in results], dim=0)
+        except Exception as e:
+            frames = torch.zeros((35, 3, 224, 224), dtype=torch.float32)
+            print(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
+            logging.info(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
         
     if return_type == "tensor":
         return frames
