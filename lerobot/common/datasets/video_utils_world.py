@@ -144,6 +144,7 @@ def split_indices(indices: List[int], num_chunks: int) -> List[List[int]]:
 
 def convert_to_giventype(data: torch.Tensor, type: int = 1):
     npimg = data.cpu().numpy()
+    # print(npimg.shape)
     if npimg.shape[0] in (1, 3, 4):
         npimg = np.transpose(npimg, (1, 2, 0))
     return Image.fromarray(npimg) if type else npimg
@@ -218,7 +219,8 @@ def decode_video_frames_torchcodec(
                     results.append(f.result())
                 frames = torch.cat([frame_batch.data for frame_batch in results], dim=0)
         except Exception as e:
-            frames = torch.zeros((35, 3, 224, 224), dtype=torch.float32)
+            history_frame_num = 5
+            frames = torch.zeros((35, 3, 224, 224), dtype=torch.uint8)
             print(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
             logging.info(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
         
@@ -226,6 +228,8 @@ def decode_video_frames_torchcodec(
         return frames
     elif return_type == "image" or return_type == "numpy":
         actual_type = 1 if return_type == "image" else 0
+        # print(frames.shape)
+        # print(frames.shape)
         to_convert = [(frames[idx], actual_type) for idx in range(frames.shape[0])]
         image_list = []
         with ThreadPoolExecutor(max_workers=worker_count) as conv_exe:
