@@ -219,7 +219,7 @@ def decode_video_frames_torchcodec(
                     results.append(f.result())
                 frames = torch.cat([frame_batch.data for frame_batch in results], dim=0)
         except Exception as e:
-            history_frame_num = 5
+            history_frame_num = 8
             frames = torch.zeros((35, 3, 224, 224), dtype=torch.uint8)
             print(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
             logging.info(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
