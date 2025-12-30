@@ -131,9 +131,11 @@ def prepare_encoder_attention_mask(
     video_q = slice(0, N_V)
     history_k = slice(0, M_H)
     scene_k = slice(M_H, M_H + M_LS)
+    motion_k = slice(M_H + M_LS, M_H + M_LS + M_LM)
 
     attn_mask[video_q, history_k] = 0.0
     attn_mask[video_q, scene_k] = 0.0
+    attn_mask[video_q, motion_k] = 0.0
 
     # ----- Action queries -----
     action_q = slice(N_V, N_V + N_A)
