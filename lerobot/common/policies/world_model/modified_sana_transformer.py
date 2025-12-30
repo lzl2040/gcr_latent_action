@@ -325,13 +325,13 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
             norm_type=None, 
             residual_connection=False
         )
-        # self.ff_action = FeedForward(
-        #     dim=kwargs.get("dim", 2240),
-        #     dropout=0.0,
-        #     final_dropout=0.0,
-        #     activation_fn="geglu",
-        #     bias=True
-        # )
+        self.ff_action = FeedForward(
+            dim=kwargs.get("dim", 2240),
+            dropout=0.0,
+            final_dropout=0.0,
+            activation_fn="geglu",
+            bias=True
+        )
         # our design: cross attention between image latents, noised action
         # self.norm3 = nn.LayerNorm(kwargs.get("dim", 2240), 
         #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
@@ -409,10 +409,10 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
         ff_output = self.ff(norm_hidden_states)
         # need a ffn layer for action
         # print(norm_hidden_states_action.shape)
-        # ff_action_output = self.ff_action(norm_hidden_states_action)
+        ff_action_output = self.ff_action(norm_hidden_states_action)
         
         ff_output = ff_output.flatten(1, 3)
-        ff_output = torch.cat([ff_output, norm_hidden_states_action], dim = 1)
+        ff_output = torch.cat([ff_output, ff_action_output], dim = 1)
         
         hidden_states = hidden_states + gate_mlp * ff_output
 

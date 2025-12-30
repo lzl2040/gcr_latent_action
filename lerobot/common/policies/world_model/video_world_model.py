@@ -355,9 +355,6 @@ class VideoWorldModel(nn.Module):
         # for action
         self.action_in_proj = nn.Linear(self.config.max_action_dim, self.inner_dim)
         self.action_out_proj = nn.Linear(self.inner_dim, self.config.max_action_dim)
-
-        self.action_time_mlp_in = nn.Linear(self.inner_dim * 2, self.inner_dim)
-        self.action_time_mlp_out = nn.Linear(self.inner_dim, self.inner_dim)
         
         # 梯度检查点
         self.transformer.enable_gradient_checkpointing()
@@ -426,8 +423,6 @@ class VideoWorldModel(nn.Module):
     
     def embed_action(self, noisy_actions):
         embs = []
-        pad_masks = []
-        att_masks = []
         dtype = noisy_actions.dtype
         device = noisy_actions.device
 
