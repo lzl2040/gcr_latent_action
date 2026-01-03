@@ -81,8 +81,8 @@ class LatentWorldModelConfig(PreTrainedConfig):
     )
 
     # Shorter state and action vectors will be padded
-    max_state_dim: int = 128
-    max_action_dim: int = 128
+    max_state_dim: int = 64
+    max_action_dim: int = 64
 
     # Image preprocessing
     resize_imgs_with_padding: tuple[int, int] = (224, 224)
