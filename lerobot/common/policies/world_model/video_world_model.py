@@ -498,7 +498,6 @@ class VideoWorldModel(nn.Module):
         )
         action_loss = F.mse_loss(action_target, action_pred, reduction="none")
         video_loss = video_loss.mean()
-        action_loss = action_loss.mean()
         # print(video_loss.shape, action_loss.shape)
         loss = {}
         loss["video_loss"] = video_loss

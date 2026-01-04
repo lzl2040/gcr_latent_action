@@ -1510,6 +1510,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             self.processor = None
 
         self.image_decoder_processor = image_decoder_processor
+        # https://github.com/NVlabs/Sana/blob/main/diffusion/data/datasets/video/sana_video_data.py#L386
         self.video_processor = T.Compose(
             [
                 ToTensorVideo(),  # TCHW
@@ -1744,17 +1745,18 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         state_std = torch.ones(self.max_state_dim)
         action_mean = torch.zeros(self.max_action_dim)
         action_std = torch.ones(self.max_action_dim)
+        action_mask = torch.zeros(self.max_action_dim)
         if "agi" in item['dataset_name']:
             action_end_dim = 14
             state_end_dim = 16
             state_mean[:state_end_dim] = self.stats["observation.state"]["mean"][:state_end_dim]
             state_std[:state_end_dim] = self.stats["observation.state"]["std"][:state_end_dim]
 
-            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
-
             action_mean[:action_end_dim] = self.stats["action"]["mean"][:action_end_dim]
             action_std[:action_end_dim] = self.stats["action"]["std"][:action_end_dim]
+            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
             item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
+            action_mask[:action_end_dim] = 1
             # item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
             # item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
         elif "game" in item["dataset_name"]:
@@ -1763,19 +1765,28 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             state_start_dim = 16 + 30
             state_end_dim = 16 + 30 + 50
             
-            state_mean[:state_end_dim] = self.stats["observation.state"]["mean"][:state_end_dim]
-            state_std[:state_end_dim] = self.stats["observation.state"]["std"][:state_end_dim]
-
+            state_mean[state_start_dim:state_end_dim] = self.stats["observation.state"]["mean"][state_start_dim:state_end_dim]
+            state_std[state_start_dim:state_end_dim] = self.stats["observation.state"]["std"][state_start_dim:state_end_dim]
+            action_mean[action_start_dim:action_end_dim] = self.stats["action"]["mean"][action_start_dim:action_end_dim]
+            action_std[action_start_dim:action_end_dim] = self.stats["action"]["std"][action_start_dim:action_end_dim]
             item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
-
-            action_mean[:action_end_dim] = self.stats["action"]["mean"][:action_end_dim]
-            action_std[:action_end_dim] = self.stats["action"]["std"][:action_end_dim]
             item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
-            
+            action_mask[action_start_dim:action_end_dim] = 1
         elif "ego_dex" in item['dataset_name']:
             # print(item["action"].shape)
-            item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
-            item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
+            action_start_dim = 0
+            action_end_dim = 14 + 30
+            state_start_dim = 0
+            state_end_dim = 16 + 30
+            
+            state_mean[state_start_dim:state_end_dim] = self.stats["observation.state"]["mean"][state_start_dim:state_end_dim]
+            state_std[state_start_dim:state_end_dim] = self.stats["observation.state"]["std"][state_start_dim:state_end_dim]
+            action_mean[action_start_dim:action_end_dim] = self.stats["action"]["mean"][action_start_dim:action_end_dim]
+            action_std[action_start_dim:action_end_dim] = self.stats["action"]["std"][action_start_dim:action_end_dim]
+
+            item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
+            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
+            action_mask[action_start_dim:action_end_dim] = 1
         else:
             state_mean[:8] = self.stats["observation.state"]["mean"][:8]
 
@@ -1785,6 +1796,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             action_mean[:7] = self.stats["action"]["mean"][:7]
             action_std[:7] = self.stats["action"]["std"][:7]
             item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
+            action_mask[:8] = 1
+        item["action_mask"] = action_mask
         return item
 
     def norm_data_with_quantile(self, item):
@@ -1920,13 +1933,13 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         if "game" in item["dataset_name"]:
             item["action"] = F.pad(
                     item["action"],
-                    (44, 0),   # 对最后一维：左 pad 46，右 pad 0
+                    (44, 0),   # 对最后一维：左 pad 44个0，右 pad 0个0
                     mode="constant",
                     value=0
                 )
             item["observation.state"] = F.pad(
                     item["observation.state"],
-                    (46, 0),   # 对最后一维：左 pad 44，右 pad 0
+                    (46, 0),   # 对最后一维：左 pad 46个0，右 pad 0个0
                     mode="constant",
                     value=0
                 )
@@ -1966,6 +1979,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             "action_is_pad": item["action_is_pad"].unsqueeze(0),
             "observation.images.primary": vl_item["first_image"],
             "task": task_text,
+            "action_mask" : item["action_mask"].unsqueeze(0),
             **vl_item,
         }
         
@@ -1993,7 +2007,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         frame_len = len(history_video)
         # print(f"history len:{frame_len}")
         if frame_len < self.cfg.policy.max_history_frame + 1:
-            pad_frame = history_video[-1]
+            pad_frame = history_video[0]
             pad_len = self.cfg.policy.max_history_frame + 1 - frame_len
             for i in range(pad_len):
                 history_video.append(pad_frame)
@@ -2048,11 +2062,11 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         if len(furture_images) > 0:
             furture_images_np = np.array([np.array(img) for img in furture_images])  # T H W C
             furture_images = torch.from_numpy(furture_images_np).clone().permute(0, 3, 1, 2)  # TCHW
-            video_tensor = self.video_processor(furture_images)  # TCHW
+            video_tensor = self.video_processor(furture_images)  # TCHW for video generator model
             num_frames = video_tensor.shape[0]
             if num_frames < self.cfg.policy.max_frame - 1:
                 pad_frames = self.cfg.policy.max_frame - 1 - num_frames
-                pad_tensor = video_tensor[-1:, :, :, :].repeat(pad_frames, 1, 1, 1)
+                pad_tensor = video_tensor[-1:, :, :, :].repeat(pad_frames, 1, 1, 1) # last frame
                 # use last frame to pad
                 video_tensor = torch.cat([video_tensor, pad_tensor], dim=0)
             
@@ -2117,7 +2131,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         select_key = present_img_keys[0]
         # 3 H W
         img_pred_size = 512
-        first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        first_image = np.array(history_frames[0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        # first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
         last_image = np.array(item[select_key][-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
         
         return vision, first_image, last_image

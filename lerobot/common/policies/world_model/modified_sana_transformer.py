@@ -337,18 +337,18 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
         #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
         #                           eps=kwargs.get("norm_eps", 1e-6)
         #                           )
-        # self.attn3 = Attention(
-        #     query_dim=kwargs.get("dim", 2240),
-        #     qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-        #     kv_heads=kwargs.get("num_cross_attention_heads", 20),
-        #     cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
-        #     heads=kwargs.get("num_attention_heads", 20),
-        #     dim_head=kwargs.get("attention_head_dim", 112),
-        #     dropout=kwargs.get("dropout", 0.0),
-        #     bias=True,
-        #     out_bias=kwargs.get("attention_out_bias", True),
-        #     processor=Modified_SanaAttnProcessor2_0(),
-        # )
+        self.attn3 = Attention(
+            query_dim=kwargs.get("dim", 2240),
+            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+            kv_heads=kwargs.get("num_cross_attention_heads", 20),
+            cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+            heads=kwargs.get("num_attention_heads", 20),
+            dim_head=kwargs.get("attention_head_dim", 112),
+            dropout=kwargs.get("dropout", 0.0),
+            bias=True,
+            out_bias=kwargs.get("attention_out_bias", True),
+            processor=Modified_SanaAttnProcessor2_0(),
+        )
         
         
     def forward(
@@ -381,12 +381,12 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
         attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
         hidden_states = hidden_states + gate_msa * attn_output
         
-        # if self.attn3 is not None:
-        #     attn_output = self.attn3(
-        #         hidden_states=hidden_states,
-        #         attention_mask=attention_mask
-        #     )
-        #     hidden_states = attn_output + hidden_states
+        if self.attn3 is not None:
+            attn_output = self.attn3(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask
+            )
+            hidden_states = attn_output + hidden_states
 
         # 3. Cross Attention
         if self.attn2 is not None:
