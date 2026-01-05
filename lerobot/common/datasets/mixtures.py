@@ -173,6 +173,9 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("dobbe", 0.2),
         ("droid", 0.001),
         ("agibot_alpha", 0.1),
+        ("game_minecraft", 1.0),
+        ("game_stardew", 1.0),
+        ("game_csgo", 1.0),
     ],
 
     "oxe_magic_soup_plus_minus_v2": [
