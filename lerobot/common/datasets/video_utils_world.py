@@ -192,7 +192,8 @@ def decode_video_frames_torchcodec(
         
         # prepare future frame list
         if max_future_num > 0:
-            future_frame_list = np.arange(max_tx_frame + 1, min(max_tx_frame + max_future_num, total_frames), 1).tolist()
+            # max_future_num - 1 frames
+            future_frame_list = np.arange(max_tx_frame + 1, min(max_tx_frame + max_future_num + 1, total_frames), 1).tolist()
             if len(future_frame_list) == 0:
                 # use current frame as future frame
                 future_frame_list = np.arange(max_tx_frame, max_tx_frame + 1, 1).tolist()
