@@ -204,7 +204,10 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("bc_z", 0.2),                                          # Note: use v0.1.0 --> later versions broken
         ("fmb_dataset", 1.0),
         ("dobbe", 0.2),
-        ("ego_dex", 0.005),
+        ("game_minecraft", 1.0),
+        ("game_stardew", 1.0),
+        ("game_csgo", 1.0),
+        # ("ego_dex", 0.005),
     ],
 
     "oxe_magic_soup_plus_minus": [
