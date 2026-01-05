@@ -2101,7 +2101,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             )
         
         history_frame_num = item["primary_history_frame_num"]
-        history_frames = item[present_img_keys[0]][:history_frame_num] # including current frame
+        history_frames = item[present_img_keys[0]][:history_frame_num] # including current frame at the last
         # print(len(item[present_img_keys[0]]), history_frame_num, len(history_frames))
         item[present_img_keys[0]] = item[present_img_keys[0]][history_frame_num:]
         # print(len(history_frames), len(item[present_img_keys[0]]))
@@ -2131,7 +2131,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         select_key = present_img_keys[0]
         # 3 H W
         img_pred_size = 512
-        first_image = np.array(history_frames[0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        first_image = np.array(history_frames[-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
         # first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
         last_image = np.array(item[select_key][-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
         
