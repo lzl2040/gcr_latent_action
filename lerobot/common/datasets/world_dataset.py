@@ -2064,8 +2064,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             furture_images = torch.from_numpy(furture_images_np).clone().permute(0, 3, 1, 2)  # TCHW
             video_tensor = self.video_processor(furture_images)  # TCHW for video generator model
             num_frames = video_tensor.shape[0]
-            if num_frames < self.cfg.policy.max_frame - 1:
-                pad_frames = self.cfg.policy.max_frame - 1 - num_frames
+            if num_frames < self.cfg.policy.max_frame:
+                pad_frames = self.cfg.policy.max_frame - num_frames
                 pad_tensor = video_tensor[-1:, :, :, :].repeat(pad_frames, 1, 1, 1) # last frame
                 # use last frame to pad
                 video_tensor = torch.cat([video_tensor, pad_tensor], dim=0)
