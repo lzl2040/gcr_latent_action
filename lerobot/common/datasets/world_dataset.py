@@ -2007,7 +2007,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         frame_len = len(history_video)
         # print(f"history len:{frame_len}")
         if frame_len < self.cfg.policy.max_history_frame + 1:
-            pad_frame = history_video[0]
+            pad_frame = history_video[-1]
             pad_len = self.cfg.policy.max_history_frame + 1 - frame_len
             for i in range(pad_len):
                 history_video.append(pad_frame)
