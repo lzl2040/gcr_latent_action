@@ -206,6 +206,20 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("dobbe", 0.2),
         ("ego_dex", 0.005),
     ],
+    
+    "oxe_magic_soup_plus_minus_v3": [
+        ("berkeley_cable_routing", 1.0),
+        ("fractal20220817_data", 0.54087122203),                # Google RT-1 Robot Data (Large-Scale)
+        ("kuka", 0.8341046294),
+        ("bridge_orig", 1.0),                                   # Original Version of Bridge V2 from Project Website
+        ("taco_play", 2.0),
+        ("jaco_play", 1.0),
+        ("roboturk", 2.0),
+        ("viola", 2.0),
+        ("berkeley_autolab_ur5", 2.0),
+        ("toto", 1.0),
+        ("language_table", 0.1),
+    ],
 
     "oxe_magic_soup_plus_minus": [
         ("fractal20220817_data", 1.0),                          # Google RT-1 Robot Data (Large-Scale)
