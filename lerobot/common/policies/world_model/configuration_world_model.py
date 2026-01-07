@@ -32,6 +32,7 @@ class LatentWorldModelConfig(PreTrainedConfig):
     # video_pred_model: str = "/Data/lzl/huggingface/SANA-Video_2B_480p_diffusers"
     # action_expert_path: str = "/Data/lzl/weights/pi_zero_pt/pi0_gemma_expert_only.pt"
     # img_encoder_model: str = "/Data/lzl/huggingface/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    pretrained_path: str = ""
     
     # Input / output structure.
     n_obs_steps: int = 1

@@ -103,6 +103,10 @@ while [[ $# -gt 0 ]]; do
             SAVE_FREQ="$2"
             shift 2
             ;;
+        --pt_weights)
+            PRETRAINED_PATH="$2"
+            shift 2
+            ;;
         --gradient_acc)
             GRADIENT_ACCUMULATION_STEPS="$2"
             shift 2

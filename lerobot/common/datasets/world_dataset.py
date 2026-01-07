@@ -1641,7 +1641,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
         # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
         
-        # print(f"Aggregated stats:{self.stats}")
+        print(f"Aggregated stats:{self.stats}")
         # update meta_features
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - meta features: {meta_features}")
         

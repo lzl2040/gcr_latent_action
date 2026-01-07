@@ -165,19 +165,6 @@ def make_policy(
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
     cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
     kwargs["config"] = cfg
-    
-    # kwargs["pretrained_name_or_path"] = "/mnt/wangxiaofa/pi0_pretrain"
-    # policy = policy_cls.from_pretrained(**kwargs)
-    # print(f"Load from:{cfg.pretrained_path}")
-    # if cfg.pretrained_path:
-    #     # Load a pretrained policy and override the config if needed (for example, if there are inference-time
-    #     # hyperparameters that we want to vary).
-    #     cfg.train_from_scratch = False
-    #     kwargs["pretrained_name_or_path"] = cfg.pretrained_path
-    #     policy = policy_cls.from_pretrained(**kwargs)
-    #     print(f"Load from:{cfg.pretrained_path}")
-    # else:
-    #     # Make a fresh policy.
     policy = policy_cls(**kwargs)
     print("training from scratch")
 
@@ -216,10 +203,9 @@ def make_policy(
                 policy.resize_token_embedding()
             else:
                 missing_key, unexpected_keys = policy.load_state_dict(new_state_dict, strict=False)
-            print("missing", missing_key, unexpected_keys)
         else:
-            policy.load_state_dict(new_state_dict, strict=False)
-        # print(missing_keys, unspected_keys)
+            missing_keys, unspected_keys = policy.load_state_dict(new_state_dict, strict=False)
+        print(missing_keys, unspected_keys)
         print(f"Load pt weights from:{weight_pt_path}")
         del weights
         del key_to_remove
