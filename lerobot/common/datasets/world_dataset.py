@@ -1955,6 +1955,13 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         else:
             raise ValueError(f"Not defined norm type {self.cfg.norm_type}")
         
+        # print(np.max(np.array(item["observation.images.primary"][0])))
+        if np.max(np.array(item["observation.images.primary"][0])) < 2:
+            source = item["source"]
+            print(f"There exist error data in {source}")
+            item["action"] = torch.zeros_like(item["action"])
+        
+        
         # print("state:", item["observation.state"])
         # print(f"primary:", item["observation.images.primary"])
         # print(f"secondary:", np.array(item["observation.images.secondary"]))

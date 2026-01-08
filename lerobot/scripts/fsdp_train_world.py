@@ -492,7 +492,7 @@ def train(cfg: TrainPipelineConfig):
     if cfg.weight_resume:
         logger.info("Setting up learning rate scheduler...")
         # for _ in range(int((step-1)/cfg.gradient_accumulation_steps)):
-        for _ in range(int((step-1)/cfg.gradient_accumulation_steps)):
+        for _ in range(int((step-1) / cfg.gradient_accumulation_steps)):
             lr_scheduler.step()
         logger.info("Resuming Data Batch")
         # if cfg.job_type == "pretrain":
@@ -551,6 +551,11 @@ def train(cfg: TrainPipelineConfig):
         sync_flag = (step % cfg.gradient_accumulation_steps == 0)
         batch_start = time.perf_counter()
         batch = next(dataloader_iter)
+        
+        # prevent video loss become large
+        if step > 4200 and step < 5500:
+            step += 1
+            continue
         data_time = time.perf_counter() - batch_start
         dataloading_s += data_time
         
