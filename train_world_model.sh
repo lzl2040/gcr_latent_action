@@ -63,11 +63,11 @@ while [[ $# -gt 0 ]]; do
             OPTIMIZER_DECAY_LR="$2"
             shift 2
             ;;
-        --scheduler_warmup_steps)
+        --warm_up_steps)
             SCHEDULER_WARMUP_STEPS="$2"
             shift 2
             ;;
-        --scheduler_decay_steps)
+        --decay_steps)
             SCHEDULER_DECAY_STEPS="$2"
             shift 2
             ;;
