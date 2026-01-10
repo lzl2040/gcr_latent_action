@@ -13,6 +13,11 @@ from lerobot.common.policies.world_model.modified_sana_transformer import Modifi
 from lerobot.common.utils.utils import get_safe_dtype
 import math
 import torch.nn.functional as F  # noqa: N812
+from diffusers.video_processor import VideoProcessor
+import imageio.v2 as imageio
+import numpy as np
+import time
+
 
 latents_mean =  [
     -0.7571,
@@ -327,9 +332,12 @@ class VideoWorldModel(nn.Module):
             subfolder="vae",
             local_files_only=True
         )
+        self.vae_scale_factor_temporal = self.vae.config.scale_factor_temporal
+        self.vae_scale_factor_spatial = self.vae.config.scale_factor_spatial
         self.vae_mean = torch.tensor(latents_mean)
         self.vae_std = torch.tensor(latents_std)
         self.z_dim = self.vae.z_dim
+        self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
         self.noise_scheduler = DPMSolverMultistepScheduler.from_pretrained(
             config.video_pred_model, 
@@ -436,7 +444,8 @@ class VideoWorldModel(nn.Module):
         return embs
     
     def prepare_noise_action(self, actions, timesteps):
-        action_noise = torch.rand_like(actions)
+        # action_noise = torch.rand_like(actions) # 均匀分布，no 正态分布
+        action_noise = torch.randn_like(actions)
         # action_time = self.sample_action_time(actions.shape[0], actions.device).to(dtype=self.dtype)
         # action_time_expanded = action_time[:, None, None]
         # actions = actions.to(dtype=self.dtype)
@@ -445,7 +454,30 @@ class VideoWorldModel(nn.Module):
         noise_action_embeds = self.embed_action(x_t)
         target_action = action_noise - actions
         return noise_action_embeds, target_action
-        
+    
+    def save_video(self, video_latents, save_name):
+        latents_mean = (
+            torch.tensor(self.vae.config.latents_mean)
+            .view(1, self.vae.config.z_dim, 1, 1, 1)
+            .to(video_latents.device, video_latents.dtype)
+        )
+        latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, self.vae.config.z_dim, 1, 1, 1).to(
+            video_latents.device, video_latents.dtype
+        )
+        video_latents = video_latents / latents_std + latents_mean
+        try:
+            video = self.vae.decode(video_latents, return_dict=False)[0]
+        except Exception as e:
+            print(
+                f"{e}. \n"
+                f"Try to use VAE tiling for large images. For example: \n"
+                f"pipe.vae.enable_tiling(tile_sample_min_width=512, tile_sample_min_height=512)"
+            )
+        video = self.video_processor.postprocess_video(video.detach(), output_type="np")[0]
+        if video.dtype != np.uint8:
+            video = (video * 255).clip(0, 255).astype(np.uint8)
+        imageio.mimsave(save_name, video, fps=10)
+    
     def forward(self, img_embeds, sc_embeds, act_embeds, target_imgs, actions):
         # prepare image
         prompt_embeds = torch.cat([img_embeds, sc_embeds, act_embeds], dim = 1)
@@ -454,6 +486,7 @@ class VideoWorldModel(nn.Module):
         # target_imgs: 10 3 T H W
         # print(target_imgs.shape) # 224 * 224
         target_z = self.vae.encode(target_imgs).latent_dist.mode().to(device)
+        # print(target_z.shape) # torch.Size([2, 16, 8, 28, 28])
         vae_mean = self.vae_mean.to(device=device)
         vae_std = self.vae_std.to(device=device)
         # follow https://github.com/NVlabs/Sana/blob/main/diffusion/model/wan/vae.py#L497
@@ -502,6 +535,14 @@ class VideoWorldModel(nn.Module):
         loss = {}
         loss["video_loss"] = video_loss
         loss["action_loss"] = action_loss
+        
+        
+        # video_latents = noise - video_pred
+        # # decode video
+        
+        # self.save_video(video_latents, "pred.mp4")
+        # self.save_video(clean_images, "gt.mp4")
+        # time.sleep(5)
         return loss
         
         
