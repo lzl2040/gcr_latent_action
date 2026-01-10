@@ -23,6 +23,7 @@ USE_STATE=true
 LOSS_TYPE="raw"
 IS_FT=true
 IMG_DECODER_PART_TRAIN=true
+MAX_ACTION_DIM=32
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -81,6 +82,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --bs)
             BATCH_SIZE="$2"
+            shift 2
+            ;;
+        --max_action_dim)
+            MAX_ACTION_DIM="$2"
             shift 2
             ;;
         --max_frame)
@@ -146,6 +151,8 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --policy.type="latent_wm" \
     --policy.max_frame=$MAX_FRAME \
     --policy.max_history_frame=$MAX_HISTORY \
+    --policy.max_action_dim=$MAX_ACTION_DIM \
+    --policy.max_state_dim=$MAX_ACTION_DIM \
     --policy.loss_type=$LOSS_TYPE \
     --policy.img_decoder_part_train=$IMG_DECODER_PART_TRAIN \
     --policy.chunk_size=$MAX_FRAME \
