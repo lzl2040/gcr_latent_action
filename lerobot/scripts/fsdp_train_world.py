@@ -553,10 +553,10 @@ def train(cfg: TrainPipelineConfig):
         batch = next(dataloader_iter)
         
         # prevent video loss become large
-        if step > 6000 and step < 7000:
-            print(f"skip step {step}")
-            step += 1
-            continue
+        # if step > 6000 and step < 7000:
+        #     print(f"skip step {step}")
+        #     step += 1
+        #     continue
         data_time = time.perf_counter() - batch_start
         dataloading_s += data_time
         
