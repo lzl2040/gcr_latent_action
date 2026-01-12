@@ -139,8 +139,9 @@ class LatentWorldModel(PreTrainedPolicy):
         # print(sc_embeds.shape, act_embeds.shape, img_embeds.shape)
         # print(img_embeds.shape) # 640 2048
         # print(losses["action_loss"].shape, batch["action_mask"].shape)
-        action_mask = batch["action_mask"].unsqueeze(1)
-        losses["action_loss"] = losses["action_loss"] * action_mask
+        if self.config.use_action_mask:
+            action_mask = batch["action_mask"].unsqueeze(1)
+            losses["action_loss"] = losses["action_loss"] * action_mask
         losses["action_loss"] = losses["action_loss"].mean()
         # print(action_mask.shape, losses["action_loss"].shape)
         # loss = losses["action_loss"] + self.config.img_loss_weight * losses["video_loss"]

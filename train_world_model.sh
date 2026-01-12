@@ -24,6 +24,7 @@ LOSS_TYPE="raw"
 IS_FT=true
 IMG_DECODER_PART_TRAIN=true
 MAX_ACTION_DIM=32
+USE_ATTENTION_MASK=true
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -100,6 +101,10 @@ while [[ $# -gt 0 ]]; do
             IMG_DECODER_PART_TRAIN="$2"
             shift 2
             ;;
+        --use_attention_mask)
+            USE_ATTENTION_MASK="$2"
+            shift 2
+            ;;
         --loss_type)
             LOSS_TYPE="$2"
             shift 2
@@ -153,6 +158,7 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --policy.max_history_frame=$MAX_HISTORY \
     --policy.max_action_dim=$MAX_ACTION_DIM \
     --policy.max_state_dim=$MAX_ACTION_DIM \
+    --policy.use_attention_mask=$USE_ATTENTION_MASK \
     --policy.loss_type=$LOSS_TYPE \
     --policy.img_decoder_part_train=$IMG_DECODER_PART_TRAIN \
     --policy.chunk_size=$MAX_FRAME \
