@@ -10,7 +10,8 @@ from lerobot.common.constants import ACTION, OBS_ROBOT
 
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.world_model.configuration_world_model import LatentWorldModelConfig
-from lerobot.common.policies.world_model.video_world_model import VideoWorldModel
+# from lerobot.common.policies.world_model.video_world_model import VideoWorldModel
+from lerobot.common.policies.world_model.video_world_model_only_video import VideoWorldModel
 
 def pad_vector(vector, new_dim):
     """Can be (batch_size x sequence_length x features_dimension)
@@ -139,7 +140,8 @@ class LatentWorldModel(PreTrainedPolicy):
         # losses["action_loss"] = losses["action_loss"] * action_mask
         losses["action_loss"] = losses["action_loss"].mean()
         # print(action_mask.shape, losses["action_loss"].shape)
-        loss = losses["action_loss"] + self.config.img_loss_weight * losses["video_loss"]
+        # loss = losses["action_loss"] + self.config.img_loss_weight * losses["video_loss"]
+        loss = losses["action_loss"] +  losses["video_loss"]
         loss_dict = {}
         loss_dict["total_loss"] = loss.item()
         loss_dict["action_loss"] = losses["action_loss"].item()
