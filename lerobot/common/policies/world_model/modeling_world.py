@@ -12,6 +12,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.world_model.configuration_world_model import LatentWorldModelConfig
 from lerobot.common.policies.world_model.video_world_model import VideoWorldModel
 # from lerobot.common.policies.world_model.video_world_model_only_video import VideoWorldModel
+# from lerobot.common.policies.world_model.video_world_model_only_action import VideoWorldModel
 
 def pad_vector(vector, new_dim):
     """Can be (batch_size x sequence_length x features_dimension)
@@ -109,6 +110,8 @@ class LatentWorldModel(PreTrainedPolicy):
         actions = self.prepare_action(batch)
         actions = self.convert_to_dtype(actions)
         action_is_pad = batch.get("action_is_pad")
+        # torch.Size([2, 1255]) torch.Size([22, 3, 224, 224]) torch.Size([2, 1255]) torch.Size([2, 30, 3, 224, 224]) torch.Size([2, 30, 32])
+        # print(input_ids.shape, pixel_values.shape, attention_mask.shape, future_imgs.shape, actions.shape)
         
         sc_token_mask, act_token_mask, img_token_mask = self.generate_token_mask(input_ids)
         # print(pixel_values.shape, input_ids.shape, attention_mask.shape) # bs

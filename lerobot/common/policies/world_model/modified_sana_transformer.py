@@ -85,6 +85,65 @@ class Modified_SanaAttnProcessor2_0:
 
         return hidden_states
 
+class Modified_SanaLinearAttnProcessor3_0_Action:
+    r"""
+    Processor for implementing scaled dot-product linear attention.
+    """
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        rotary_emb: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        original_dtype = hidden_states.dtype
+        
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        query = query.unflatten(2, (attn.heads, -1))
+        key = key.unflatten(2, (attn.heads, -1))
+        value = value.unflatten(2, (attn.heads, -1))
+        # B,N,H,C
+
+        query = F.relu(query)
+        key = F.relu(key)
+        # B,H,C,N
+        query = query.permute(0, 2, 3, 1)
+        key = key.permute(0, 2, 3, 1)
+        value = value.permute(0, 2, 3, 1)
+
+        query, key, value = query.float(), key.float(), value.float()
+
+        z = 1 / (key.sum(dim=-1, keepdim=True).transpose(-2, -1) @ query + 1e-15)
+
+        scores = torch.matmul(value, key.transpose(-1, -2))
+        hidden_states = torch.matmul(scores, query)
+        # print(z.shape, hidden_states.shape, query_rotate.shape)
+
+        hidden_states = hidden_states * z
+        # B,H,C,N
+        hidden_states = hidden_states.flatten(1, 2).transpose(1, 2)
+        hidden_states = hidden_states.to(original_dtype)
+
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
+
+        return hidden_states
+
+
 class Modified_SanaLinearAttnProcessor3_0:
     r"""
     Processor for implementing scaled dot-product linear attention.
@@ -100,7 +159,9 @@ class Modified_SanaLinearAttnProcessor3_0:
     ) -> torch.Tensor:
         original_dtype = hidden_states.dtype
         
-        num_image_token = rotary_emb[0].shape[1]
+        if rotary_emb is not None:
+            num_image_token = rotary_emb[0].shape[1]
+            hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:] 
         # num_action_token = hidden_states.shape[1] - num_image_token
         # # num_action_token = rotary_emb_action[0].shape[1]
         # print(f"Action token:{num_action_token} Image token:{num_image_token}")
@@ -139,16 +200,16 @@ class Modified_SanaLinearAttnProcessor3_0:
                 out[..., 0::2] = x1 * cos - x2 * sin
                 out[..., 1::2] = x1 * sin + x2 * cos
                 return out.type_as(hidden_states)
-            query, action_query = query[:, :num_image_token], query[:, num_image_token:]
-            key, action_key = key[:, :num_image_token], key[:, num_image_token:]
+            # query, action_query = query[:, :num_image_token], query[:, num_image_token:]
+            # key, action_key = key[:, :num_image_token], key[:, num_image_token:]
             
             query_rotate = apply_rotary_emb(query, *rotary_emb)
             key_rotate = apply_rotary_emb(key, *rotary_emb)
             
-            query_rotate = torch.cat([query_rotate, action_query], dim = 1)
-            key_rotate = torch.cat([key_rotate, action_key], dim = 1)
-            query = torch.cat([query, action_query], dim = 1)
-            key = torch.cat([key, action_query], dim = 1)
+            # query_rotate = torch.cat([query_rotate, action_query], dim = 1)
+            # key_rotate = torch.cat([key_rotate, action_key], dim = 1)
+            # query = torch.cat([query, action_query], dim = 1)
+            # key = torch.cat([key, action_query], dim = 1)
 
         # B,H,C,N
         query = query.permute(0, 2, 3, 1)
@@ -172,6 +233,9 @@ class Modified_SanaLinearAttnProcessor3_0:
 
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
+
+        # add
+        hidden_states = torch.cat([hidden_states, action_hidden_states], dim=1)
 
         return hidden_states
 
@@ -297,6 +361,8 @@ class FeedForward(nn.Module):
             hidden_states = module(hidden_states)
         return hidden_states
 
+
+
 class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
     r"""
     Transformer block introduced in [Sana-Video](https://huggingface.co/papers/2509.24695).
@@ -337,18 +403,18 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
         #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
         #                           eps=kwargs.get("norm_eps", 1e-6)
         #                           )
-        # self.attn3 = Attention(
-        #     query_dim=kwargs.get("dim", 2240),
-        #     qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-        #     kv_heads=kwargs.get("num_cross_attention_heads", 20),
-        #     cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
-        #     heads=kwargs.get("num_attention_heads", 20),
-        #     dim_head=kwargs.get("attention_head_dim", 112),
-        #     dropout=kwargs.get("dropout", 0.0),
-        #     bias=True,
-        #     out_bias=kwargs.get("attention_out_bias", True),
-        #     processor=Modified_SanaAttnProcessor2_0(),
-        # )
+        self.attn3 = Attention(
+            query_dim=kwargs.get("dim", 2240),
+            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+            kv_heads=kwargs.get("num_cross_attention_heads", 20),
+            cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+            heads=kwargs.get("num_attention_heads", 20),
+            dim_head=kwargs.get("attention_head_dim", 112),
+            dropout=kwargs.get("dropout", 0.0),
+            bias=True,
+            out_bias=kwargs.get("attention_out_bias", True),
+            processor=Modified_SanaAttnProcessor2_0(),
+        )
         
         
     def forward(
@@ -381,12 +447,12 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
         attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
         hidden_states = hidden_states + gate_msa * attn_output
         
-        # if self.attn3 is not None:
-        #     attn_output = self.attn3(
-        #         hidden_states=hidden_states,
-        #         attention_mask=attention_mask
-        #     )
-        #     hidden_states = attn_output + hidden_states
+        if self.attn3 is not None:
+            attn_output = self.attn3(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask
+            )
+            hidden_states = attn_output + hidden_states
 
         # 3. Cross Attention
         if self.attn2 is not None:
@@ -418,6 +484,115 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
 
         return hidden_states
         
+        
+class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
+    r"""
+    Transformer block introduced in [Sana-Video](https://huggingface.co/papers/2509.24695).
+    """
+
+    def __init__(
+        self,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.attn1 = Attention(
+            query_dim=kwargs.get("dim", 2240),
+            heads=kwargs.get("num_attention_heads", 20),
+            dim_head=kwargs.get("attention_head_dim", 112),
+            kv_heads=kwargs.get("num_attention_heads", 20) if kwargs.get("qk_norm", "rms_norm_across_heads") is not None else None,
+            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+            dropout=kwargs.get("dropout", 0.0),
+            bias=kwargs.get("attention_bias", True),
+            cross_attention_dim=None,
+            processor=Modified_SanaLinearAttnProcessor3_0_Action(),
+        )
+        self.ff = GLUMBTempConv(
+            kwargs.get("dim", 2240), 
+            kwargs.get("dim", 2240), 
+            kwargs.get("mlp_ratio", 3.0), 
+            norm_type=None, 
+            residual_connection=False
+        )
+        self.ff_action = FeedForward(
+            dim=kwargs.get("dim", 2240),
+            dropout=0.0,
+            final_dropout=0.0,
+            activation_fn="geglu",
+            bias=True
+        )
+        # our design: cross attention between image latents, noised action
+        # self.norm3 = nn.LayerNorm(kwargs.get("dim", 2240), 
+        #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
+        #                           eps=kwargs.get("norm_eps", 1e-6)
+        #                           )
+        self.attn3 = Attention(
+            query_dim=kwargs.get("dim", 2240),
+            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+            kv_heads=kwargs.get("num_cross_attention_heads", 20),
+            cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+            heads=kwargs.get("num_attention_heads", 20),
+            dim_head=kwargs.get("attention_head_dim", 112),
+            dropout=kwargs.get("dropout", 0.0),
+            bias=True,
+            out_bias=kwargs.get("attention_out_bias", True),
+            processor=Modified_SanaAttnProcessor2_0(),
+        )
+        
+        
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.LongTensor] = None,
+        frames: int = None,
+        height: int = None,
+        width: int = None,
+        rotary_emb: Optional[torch.Tensor] = None,
+        rotary_emb_action: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        batch_size = hidden_states.shape[0]
+
+        # 1. Modulation
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+            self.scale_shift_table[None, None] + timestep.reshape(batch_size, timestep.shape[1], 6, -1)
+        ).unbind(dim=2)
+
+        # 2. Self Attention
+        norm_hidden_states = self.norm1(hidden_states)
+        norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
+        norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
+
+        attn_output = self.attn1(norm_hidden_states) # no rotary for action
+        hidden_states = hidden_states + gate_msa * attn_output
+        
+        if self.attn3 is not None:
+            attn_output = self.attn3(
+                hidden_states=hidden_states
+            )
+            hidden_states = attn_output + hidden_states
+
+        # 3. Cross Attention
+        if self.attn2 is not None:
+            attn_output = self.attn2(
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=encoder_attention_mask,
+            )
+            hidden_states = attn_output + hidden_states
+
+        # 4. Feed-forward
+        norm_hidden_states = self.norm2(hidden_states)
+        norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
+
+        # preprocess
+        ff_output = self.ff_action(norm_hidden_states)
+        
+        hidden_states = hidden_states + gate_mlp * ff_output
+
+        return hidden_states
+
 class Modified_WanRotaryPosEmbed(nn.Module):
     def __init__(
         self,
