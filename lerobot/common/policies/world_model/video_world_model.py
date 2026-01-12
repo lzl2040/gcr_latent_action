@@ -171,8 +171,14 @@ def prepare_attention_mask(
     )
     video_q = slice(0, N_V)
     action_q = slice(N_V, N_V + N_A)
-    attn_mask[video_q, action_q] = 0.0
+    # video can attend action
+    # attn_mask[video_q, action_q] = 0.0
+    # video attend self
+    # attn_mask[video_q, video_q] = 0.0
+    # action can attentd video
     attn_mask[action_q, video_q] = 0.0
+    # action attend self
+    attn_mask[action_q, action_q] = 0.0
     if batch_size is not None:
         attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
 
@@ -340,17 +346,18 @@ class VideoWorldModel(nn.Module):
         self.z_dim = self.vae.z_dim
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
-        self.noise_scheduler = DPMSolverMultistepScheduler.from_pretrained(
+        # https://github.com/NVlabs/Sana/blob/main/configs/sana_video_config/Sana_2000M_480px_AdamW_fsdp_chunk.yaml#L97
+        self.noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             config.video_pred_model, 
             subfolder="scheduler",
             local_files_only=True
         )
         
-        self.noise_scheduler_action = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            config.img_pred_model, 
-            subfolder="scheduler",
-            local_files_only=True
-        )
+        # self.noise_scheduler_action = FlowMatchEulerDiscreteScheduler.from_pretrained(
+        #     config.img_pred_model, 
+        #     subfolder="scheduler",
+        #     local_files_only=True
+        # )
         
         self.transformer = SanaVideoTransformer3DModel.from_pretrained(
             config.video_pred_model, 
@@ -423,6 +430,17 @@ class VideoWorldModel(nn.Module):
         # 更新 norm_out 的表
         self.transformer.norm_out.scale_shift_table.data = new_table
     
+    def get_sigmas(self, timesteps, device, n_dim=4, dtype=torch.float32):
+        sigmas = self.noise_scheduler.sigmas.to(device=device, dtype=dtype)
+        schedule_timesteps = self.noise_scheduler.timesteps.to(device)
+        timesteps = timesteps.to(device)
+        step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+
+        sigma = sigmas[step_indices].flatten()
+        while len(sigma.shape) < n_dim:
+            sigma = sigma.unsqueeze(-1)
+        return sigma
+    
     def sample_action_noise(self, shape, device):
         noise = torch.normal(
             mean=0.0,
@@ -450,21 +468,13 @@ class VideoWorldModel(nn.Module):
         embs = torch.cat(embs, dim=1).to(dtype=dtype, device=device)
         return embs
     
-    def prepare_noise_action(self, actions, timesteps, u, device="cuda"):
+    def prepare_noise_action(self, actions, timesteps, device="cuda"):
         # action_noise = torch.rand_like(actions) # 均匀分布，no 正态分布
         action_noise = torch.randn_like(actions)
-        # action_time = self.sample_action_time(actions.shape[0], actions.device).to(dtype=self.dtype)
-        # action_time_expanded = action_time[:, None, None]
-        # actions = actions.to(dtype=self.dtype)
-        # x_t = action_time_expanded * action_noise + (1 - action_time_expanded) * actions
-        # x_t = self.noise_scheduler_action.add_noise(actions, action_noise, timesteps)
-        # schedule_timesteps = self.noise_scheduler_action.timesteps.to(device)
-        # count = [(schedule_timesteps == t).any().item() for t in timesteps]
-        # print(timesteps, count)
-        indices = (u * self.noise_scheduler_action.config.num_train_timesteps).long().to(device=device)
-        sch_timesteps = self.noise_scheduler_action.timesteps.to(device=device)
-        timesteps = sch_timesteps[indices].to(device=device)
-        sigmas = get_sigmas(self.noise_scheduler_action, timesteps, n_dim=actions.ndim, dtype=actions.dtype)
+        # x_t = self.noise_scheduler.add_noise(actions, action_noise, timesteps)
+        
+        # video loss will be high, action new scheduler
+        sigmas = self.get_sigmas(timesteps, n_dim=actions.ndim, dtype=actions.dtype, device=device)
         x_t = (1.0 - sigmas) * actions + sigmas * action_noise
         noise_action_embeds = self.embed_action(x_t)
         target_action = action_noise - actions
@@ -517,14 +527,15 @@ class VideoWorldModel(nn.Module):
         timesteps = sch_timesteps[indices].to(device=device)
         noise = torch.randn_like(clean_images)
         # self.noise_scheduler.add_noise()
-        sigmas = get_sigmas(self.noise_scheduler, timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype)
+        sigmas = self.get_sigmas(timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype, device=device)
         # noisy_model_input = (1.0 - sigmas) * clean_images + sigmas * noise
-        noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
-        
-        noisy_action_input, action_target = self.prepare_noise_action(actions, timesteps, u)
-        
+        # noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
+        noisy_video_input = (1.0 - sigmas) * clean_images + sigmas * noise
+
+        noisy_action_input, action_target = self.prepare_noise_action(actions, timesteps)
+        # print(noisy_video_input.shape, noisy_action_input.shape) # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         model_output = self.transformer(
-            hidden_states=noisy_model_input,
+            hidden_states=noisy_video_input,
             action_hidden_states=noisy_action_input,
             # encoder_attention_mask=prompt_attention_mask,
             encoder_hidden_states=prompt_embeds,
