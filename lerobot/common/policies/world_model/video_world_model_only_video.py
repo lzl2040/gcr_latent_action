@@ -409,8 +409,8 @@ class VideoWorldModel(nn.Module):
         noise = torch.randn_like(clean_images)
         # self.noise_scheduler.add_noise()
         sigmas = get_sigmas(self.noise_scheduler, timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype)
-        # noisy_model_input = (1.0 - sigmas) * clean_images + sigmas * noise
-        noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
+        noisy_model_input = (1.0 - sigmas) * clean_images + sigmas * noise
+        # noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
         
         model_output = self.transformer(
             hidden_states=noisy_model_input,
