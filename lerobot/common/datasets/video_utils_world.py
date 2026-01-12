@@ -184,7 +184,7 @@ def decode_video_frames_torchcodec(
         max_ts = max(timestamps)
         # max_tx_frame = math.ceil(max_ts / frame_duration)
         max_tx_frame = round(max_ts / frame_duration)
-        if max_history_num > 0:
+        if max_history_num >= 0:
             history_frame_list = np.arange(max(0, max_tx_frame - max_history_num), min(max_tx_frame + 1, total_frames), 1).tolist() # including current frame
             frame_list = history_frame_list
             history_frame_num = len(frame_list)
@@ -200,7 +200,7 @@ def decode_video_frames_torchcodec(
             frame_list = future_frame_list
             assert len(future_frame_list) != 0, f"{max_ts} current frame:{max_tx_frame} total frame:{total_frames}"
         
-        if max_history_num > 0 and max_history_num > 0:
+        if max_history_num >= 0 and max_future_num > 0:
             frame_list = sorted(history_frame_list + future_frame_list)
             assert len(frame_list) == len(history_frame_list) + len(future_frame_list)
     

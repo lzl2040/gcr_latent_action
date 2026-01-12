@@ -1514,6 +1514,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         self.video_processor = T.Compose(
             [
                 ToTensorVideo(),  # TCHW
+                # for sana-video, this is 480, but we use 224
                 ResizeCrop((cfg.dataset.default_image_size, cfg.dataset.default_image_size)),
                 T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True),
             ]
