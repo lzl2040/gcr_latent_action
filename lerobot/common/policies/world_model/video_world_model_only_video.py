@@ -315,7 +315,7 @@ class VideoWorldModel(nn.Module):
         self.z_dim = self.vae.z_dim
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
-        self.noise_scheduler = DPMSolverMultistepScheduler.from_pretrained(
+        self.noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             config.video_pred_model, 
             subfolder="scheduler",
             local_files_only=True
@@ -344,30 +344,6 @@ class VideoWorldModel(nn.Module):
         self.dtype = torch.bfloat16
     
     def prepare_modules(self):
-        # print("Replace Transformer Block")
-        # inner_dim = self.transformer.config.num_attention_heads * self.transformer.config.attention_head_dim
-        # old_transformer_weights = self.transformer.state_dict()
-        # print(f"Inner dim:{inner_dim}")
-        # block_kwargs = dict(
-        #     dim=inner_dim,
-        #     num_attention_heads=self.transformer.config.num_attention_heads,
-        #     attention_head_dim=self.transformer.config.attention_head_dim,
-        #     dropout=self.transformer.config.dropout,
-        #     num_cross_attention_heads=self.transformer.config.num_cross_attention_heads,
-        #     cross_attention_head_dim=self.transformer.config.cross_attention_head_dim,
-        #     cross_attention_dim=self.transformer.config.cross_attention_dim,
-        #     attention_bias=self.transformer.config.attention_bias,
-        #     norm_elementwise_affine=self.transformer.config.norm_elementwise_affine,
-        #     norm_eps=self.transformer.config.norm_eps,
-        #     # attention_out_bias=self.transformer.config.attention_out_bias,
-        #     mlp_ratio=self.transformer.config.mlp_ratio,
-        #     qk_norm=self.transformer.config.qk_norm,
-        #     rope_max_seq_len=self.transformer.config.rope_max_seq_len,
-        # )
-
-        # for i in range(self.transformer.config.num_layers):
-        #     self.transformer.transformer_blocks[i] = Modified_SanaVideoTransformerBlock(
-        #         **block_kwargs)
 
         self.transformer.forward = forward_c.__get__(self.transformer)
         # missing_keys, unexpected_key = self.transformer.load_state_dict(old_transformer_weights, strict=False)
