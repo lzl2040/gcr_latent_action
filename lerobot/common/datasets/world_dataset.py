@@ -2030,7 +2030,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 },
             )
         idx = random.randrange(len(QUESTION_LIST))  # 随机选一个索引
-        question = QUESTION_LIST[idx].format(sent=text, T = frame_len-1, Tm1=frame_len - 2)
+        # question = QUESTION_LIST[idx].format(sent=text)
+        question = text
         # question = "What is your name?"
         message[0]["content"].append({"type": "text", "text": question})
         # if self.train:
@@ -2040,6 +2041,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         answer = ANSWER_LIST[idx]
         answer_text = answer.replace(self.act_token, compress_act_replace)
         answer_text = answer_text.replace(self.sc_token, compress_sc_replace)
+        # print(question, answer_text, np.array(history_video[-1]).shape)
 
         message[1]["content"].append({"type": "text", "text": answer_text})
 

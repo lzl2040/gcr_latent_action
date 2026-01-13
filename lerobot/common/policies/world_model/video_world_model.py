@@ -99,6 +99,7 @@ def prepare_encoder_attention_mask(
     N_V: int,
     N_A: int,
     M_H: int,
+    M_L: int, 
     M_LS: int,
     M_LM: int,
     *,
@@ -123,7 +124,7 @@ def prepare_encoder_attention_mask(
     """
 
     Q_len = N_V + N_A
-    K_len = M_H + M_LS + M_LM
+    K_len = M_H + M_L + M_LS + M_LM
 
     # initialize all masked
     attn_mask = torch.full(
@@ -136,18 +137,23 @@ def prepare_encoder_attention_mask(
     # ----- Video queries -----
     video_q = slice(0, N_V)
     history_k = slice(0, M_H)
-    scene_k = slice(M_H, M_H + M_LS)
-    motion_k = slice(M_H + M_LS, M_H + M_LS + M_LM)
+    lan_k = slice(M_H, M_H + M_L)
+    scene_k = slice(M_H + M_L, M_H + M_L + M_LS)
+    motion_k = slice(M_H + M_L + M_LS, M_H + M_L + M_LS + M_LM)
 
+    # print(f"Lan:{lan_k}")
     attn_mask[video_q, history_k] = 0.0
+    attn_mask[video_q, lan_k] = 0.0
     attn_mask[video_q, scene_k] = 0.0
     attn_mask[video_q, motion_k] = 0.0
 
     # ----- Action queries -----
     action_q = slice(N_V, N_V + N_A)
-    motion_k = slice(M_H + M_LS, M_H + M_LS + M_LM)
+    lan_k = slice(M_H, M_H + M_L)
+    motion_k = slice(M_H + M_L + M_LS, M_H + M_L + M_LS + M_LM)
 
     attn_mask[action_q, motion_k] = 0.0
+    attn_mask[action_q, lan_k] = 0.0
 
     if batch_size is not None:
         attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
@@ -243,7 +249,7 @@ def forward_c(
         if encoder_attention_mask is None:
             encoder_attention_mask = prepare_encoder_attention_mask(
                 N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
-                M_H = condition_len[0], M_LS = condition_len[1], M_LM = condition_len[2],
+                M_H = condition_len[0],  M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
                 batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
                 device=hidden_states.device
             )
@@ -377,8 +383,19 @@ class VideoWorldModel(nn.Module):
         self.prompt_proj = nn.Linear(self.config.vlm_token_dim, self.transformer.config.caption_channels)
         
         # for action
-        self.action_in_proj = nn.Linear(self.config.max_action_dim, self.inner_dim)
-        self.action_out_proj = nn.Linear(self.inner_dim, self.config.max_action_dim)
+        # self.action_in_proj = nn.Linear(self.config.max_action_dim, self.inner_dim)
+        # self.action_out_proj = nn.Linear(self.inner_dim, self.config.max_action_dim)
+        self.action_in_proj = nn.Sequential(
+            nn.Linear(self.config.max_action_dim, self.config.max_action_dim * 4),
+            nn.Mish(),
+            nn.Linear(self.config.max_action_dim * 4, self.inner_dim),
+        )
+        
+        self.action_out_proj = nn.Sequential(
+            nn.Linear(self.inner_dim, self.config.max_action_dim * 4),
+            nn.Mish(),
+            nn.Linear(self.config.max_action_dim * 4, self.config.max_action_dim),
+        )
         
         # 梯度检查点
         self.transformer.enable_gradient_checkpointing()
@@ -409,9 +426,14 @@ class VideoWorldModel(nn.Module):
             qk_norm=self.transformer.config.qk_norm,
             rope_max_seq_len=self.transformer.config.rope_max_seq_len,
         )
-
+        # mid_layer = self.transformer.config.num_layers // 2
+        mid_layer = 0
         for i in range(self.transformer.config.num_layers):
-            self.transformer.transformer_blocks[i] = Modified_SanaVideoTransformerBlock(
+            if i >= mid_layer:
+                action_video_fusion = True
+            else:
+                action_video_fusion = False
+            self.transformer.transformer_blocks[i] = Modified_SanaVideoTransformerBlock(action_video_fusion,
                 **block_kwargs)
 
         self.transformer.forward = forward_c.__get__(self.transformer)
@@ -503,9 +525,11 @@ class VideoWorldModel(nn.Module):
             video = (video * 255).clip(0, 255).astype(np.uint8)
         imageio.mimsave(save_name, video, fps=10)
     
-    def forward(self, img_embeds, sc_embeds, act_embeds, target_imgs, actions):
+    def forward(self, img_embeds, sc_embeds, act_embeds, task_info_dict, target_imgs, actions):
         # prepare image
-        prompt_embeds = torch.cat([img_embeds, sc_embeds, act_embeds], dim = 1)
+        # task_embeds = task_info_dict["embeds"]
+        task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
+        prompt_embeds = torch.cat([img_embeds, task_embeds, sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
         device = prompt_embeds.device
         # target_imgs: 10 3 T H W
@@ -539,7 +563,7 @@ class VideoWorldModel(nn.Module):
             action_hidden_states=noisy_action_input,
             # encoder_attention_mask=prompt_attention_mask,
             encoder_hidden_states=prompt_embeds,
-            condition_len = [img_embeds.shape[1], sc_embeds.shape[1], act_embeds.shape[1]],
+            condition_len = [img_embeds.shape[1], task_embeds.shape[1], sc_embeds.shape[1], act_embeds.shape[1]],
             timestep=timesteps,
             return_dict=False,
             # mask_index = mask_index

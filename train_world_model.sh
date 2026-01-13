@@ -17,6 +17,7 @@ BATCH_SIZE=10
 SAVE_FREQ=5000
 USE_LORA=false
 MAX_FRAME=3
+ACTION_CHUNK=10
 MAX_HISTORY=10
 CALVIN_SUB_TASK=0
 USE_STATE=true
@@ -93,6 +94,10 @@ while [[ $# -gt 0 ]]; do
             MAX_FRAME="$2"
             shift 2
             ;;
+        --action_chunk)
+            ACTION_CHUNK="$2"
+            shift 2
+            ;;
         --max_history_frame)
             MAX_HISTORY="$2"
             shift 2
@@ -161,8 +166,8 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --policy.use_action_mask=$USE_ACTION_MASK \
     --policy.loss_type=$LOSS_TYPE \
     --policy.img_decoder_part_train=$IMG_DECODER_PART_TRAIN \
-    --policy.chunk_size=$MAX_FRAME \
-    --policy.n_action_steps=$MAX_FRAME \
+    --policy.chunk_size=$ACTION_CHUNK \
+    --policy.n_action_steps=$ACTION_CHUNK \
     --output_dir="$FIXED_OUTPUT_DIR" \
     --dataset.repo_id="whatever" \
     --dataset.image_transforms.enable=false \

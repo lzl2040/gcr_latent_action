@@ -158,10 +158,10 @@ class Modified_SanaLinearAttnProcessor3_0:
         rotary_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         original_dtype = hidden_states.dtype
-        
-        if rotary_emb is not None:
-            num_image_token = rotary_emb[0].shape[1]
-            hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:] 
+        num_image_token = rotary_emb[0].shape[1]
+        # if rotary_emb is not None:
+        #     num_image_token = rotary_emb[0].shape[1]
+        #     hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:] 
         # num_action_token = hidden_states.shape[1] - num_image_token
         # # num_action_token = rotary_emb_action[0].shape[1]
         # print(f"Action token:{num_action_token} Image token:{num_image_token}")
@@ -200,16 +200,16 @@ class Modified_SanaLinearAttnProcessor3_0:
                 out[..., 0::2] = x1 * cos - x2 * sin
                 out[..., 1::2] = x1 * sin + x2 * cos
                 return out.type_as(hidden_states)
-            # query, action_query = query[:, :num_image_token], query[:, num_image_token:]
-            # key, action_key = key[:, :num_image_token], key[:, num_image_token:]
+            query, action_query = query[:, :num_image_token], query[:, num_image_token:]
+            key, action_key = key[:, :num_image_token], key[:, num_image_token:]
             
             query_rotate = apply_rotary_emb(query, *rotary_emb)
             key_rotate = apply_rotary_emb(key, *rotary_emb)
             
-            # query_rotate = torch.cat([query_rotate, action_query], dim = 1)
-            # key_rotate = torch.cat([key_rotate, action_key], dim = 1)
-            # query = torch.cat([query, action_query], dim = 1)
-            # key = torch.cat([key, action_query], dim = 1)
+            query_rotate = torch.cat([query_rotate, action_query], dim = 1)
+            key_rotate = torch.cat([key_rotate, action_key], dim = 1)
+            query = torch.cat([query, action_query], dim = 1)
+            key = torch.cat([key, action_query], dim = 1)
 
         # B,H,C,N
         query = query.permute(0, 2, 3, 1)
@@ -235,7 +235,7 @@ class Modified_SanaLinearAttnProcessor3_0:
         hidden_states = attn.to_out[1](hidden_states)
 
         # add
-        hidden_states = torch.cat([hidden_states, action_hidden_states], dim=1)
+        # hidden_states = torch.cat([hidden_states, action_hidden_states], dim=1)
 
         return hidden_states
 
@@ -361,7 +361,23 @@ class FeedForward(nn.Module):
             hidden_states = module(hidden_states)
         return hidden_states
 
+class MLP(nn.Module):
+    """Multilayer perceptron with two hidden layers."""
 
+    def __init__(self, in_dim, hidden_dim, out_dim, act=nn.GELU, drop=0.0):
+        super().__init__()
+        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.act = act()
+        self.fc2 = nn.Linear(hidden_dim, out_dim)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
 
 class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
     r"""
@@ -370,6 +386,7 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
 
     def __init__(
         self,
+        action_video_fusion,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -398,23 +415,36 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
             activation_fn="geglu",
             bias=True
         )
+        # self.ff_action = MLP(
+        #     in_dim=kwargs.get("dim", 2240),
+        #     hidden_dim=kwargs.get("dim", 2240) * 2,
+        #     out_dim=kwargs.get("dim", 2240),
+        #     act=nn.GELU,
+        #     drop=0.0
+        # )
+        
         # our design: cross attention between image latents, noised action
         # self.norm3 = nn.LayerNorm(kwargs.get("dim", 2240), 
         #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
         #                           eps=kwargs.get("norm_eps", 1e-6)
         #                           )
-        self.attn3 = Attention(
-            query_dim=kwargs.get("dim", 2240),
-            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-            kv_heads=kwargs.get("num_cross_attention_heads", 20),
-            cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
-            heads=kwargs.get("num_attention_heads", 20),
-            dim_head=kwargs.get("attention_head_dim", 112),
-            dropout=kwargs.get("dropout", 0.0),
-            bias=True,
-            out_bias=kwargs.get("attention_out_bias", True),
-            processor=Modified_SanaAttnProcessor2_0(),
-        )
+
+        self.action_video_fusion = action_video_fusion
+        if self.action_video_fusion:
+            self.attn3 = Attention(
+                query_dim=kwargs.get("dim", 2240),
+                qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+                kv_heads=kwargs.get("num_cross_attention_heads", 20),
+                cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+                heads=kwargs.get("num_attention_heads", 20),
+                dim_head=kwargs.get("attention_head_dim", 112),
+                dropout=kwargs.get("dropout", 0.0),
+                bias=True,
+                out_bias=kwargs.get("attention_out_bias", True),
+                processor=Modified_SanaAttnProcessor2_0(),
+            )
+        else:
+            self.attn3 = None
         
         
     def forward(

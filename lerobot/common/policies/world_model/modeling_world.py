@@ -102,16 +102,41 @@ class LatentWorldModel(PreTrainedPolicy):
         img_token_mask = torch.isin(input_ids, img_token_ids)
         return sc_token_mask, act_token_mask, img_token_mask
 
+    def process_task_language(self, tasks: list[str], device) -> dict[str, Tensor]:
+        """Tokenize task language instructions."""
+        encoding = self.tokenizer(
+            tasks,
+            padding="longest",
+            padding_side="right",
+            truncation=True,
+            max_length=300,
+            return_tensors="pt",
+        )
+        lan_input_ids = encoding["input_ids"].to(device=device)
+        lan_attention_mask = encoding["attention_mask"].to(device=device)
+        lan_embeds = self.future_latent_encoder.model.get_input_embeddings()(lan_input_ids)
+        return {
+            "input_ids": lan_input_ids,
+            "attention_mask": lan_attention_mask,
+            "embeds": lan_embeds,
+        }
+    
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, Tensor]]:
         pixel_values = batch["pixel_values"]
         input_ids = batch["input_ids"] # 对于224分辨率图像，每个image占64个token
         attention_mask = batch["attention_mask"]
         future_imgs = batch["video_tensor"]
+        tasks = batch["task"]
         actions = self.prepare_action(batch)
         actions = self.convert_to_dtype(actions)
+        device = pixel_values.device
         action_is_pad = batch.get("action_is_pad")
         # torch.Size([2, 1255]) torch.Size([22, 3, 224, 224]) torch.Size([2, 1255]) torch.Size([2, 30, 3, 224, 224]) torch.Size([2, 30, 32])
         # print(input_ids.shape, pixel_values.shape, attention_mask.shape, future_imgs.shape, actions.shape)
+        
+        # task_dict = self.process_task_language(tasks, device)
+        task_dict = None
+        # print("task_embeds", task_embeeds.shape) # task_embeds torch.Size([2, 16, 2048])
         
         sc_token_mask, act_token_mask, img_token_mask = self.generate_token_mask(input_ids)
         # print(pixel_values.shape, input_ids.shape, attention_mask.shape) # bs
@@ -135,7 +160,7 @@ class LatentWorldModel(PreTrainedPolicy):
         # prompt_embeds = torch.cat([img_embeds, sc_embeds, act_embeds], dim=1)
         future_imgs = future_imgs.permute(0, 2, 1, 3, 4)
         # print(future_imgs.shape)
-        losses = self.world_decoder_model(img_embeds, sc_embeds, act_embeds, future_imgs, actions)
+        losses = self.world_decoder_model(img_embeds, sc_embeds, act_embeds, task_dict, future_imgs, actions)
         # print(sc_embeds.shape, act_embeds.shape, img_embeds.shape)
         # print(img_embeds.shape) # 640 2048
         # print(losses["action_loss"].shape, batch["action_mask"].shape)
