@@ -169,8 +169,8 @@ class LatentWorldModel(PreTrainedPolicy):
             losses["action_loss"] = losses["action_loss"] * action_mask
         losses["action_loss"] = losses["action_loss"].mean()
         # print(action_mask.shape, losses["action_loss"].shape)
-        # loss = losses["action_loss"] + self.config.img_loss_weight * losses["video_loss"]
-        loss = losses["action_loss"] +  losses["video_loss"]
+        loss = losses["action_loss"] + self.config.img_loss_weight * losses["video_loss"]
+        # loss = losses["action_loss"] +  losses["video_loss"]
         loss_dict = {}
         loss_dict["total_loss"] = loss.item()
         loss_dict["action_loss"] = losses["action_loss"].item()
