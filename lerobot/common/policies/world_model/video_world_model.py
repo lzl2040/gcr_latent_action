@@ -154,6 +154,7 @@ def prepare_encoder_attention_mask(
 
     attn_mask[action_q, motion_k] = 0.0
     attn_mask[action_q, lan_k] = 0.0
+    attn_mask[action_q, history_k] = 0.0
 
     if batch_size is not None:
         attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)

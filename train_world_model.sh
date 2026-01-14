@@ -25,6 +25,7 @@ LOSS_TYPE="raw"
 IS_FT=true
 IMG_DECODER_PART_TRAIN=true
 MAX_ACTION_DIM=32
+IMG_LOSS_WEIGHT=0.1
 USE_ACTION_MASK=true
 
 # 解析命令行参数
@@ -126,6 +127,10 @@ while [[ $# -gt 0 ]]; do
             GRADIENT_ACCUMULATION_STEPS="$2"
             shift 2
             ;;
+        --img_loss_weight)
+            IMG_LOSS_WEIGHT="$2"
+            shift 2
+            ;;
         --is_ft)
             IS_FT="$2"
             shift 2
@@ -165,6 +170,7 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --policy.max_state_dim=$MAX_ACTION_DIM \
     --policy.use_action_mask=$USE_ACTION_MASK \
     --policy.loss_type=$LOSS_TYPE \
+    --policy.img_loss_weight=$IMG_LOSS_WEIGHT \
     --policy.img_decoder_part_train=$IMG_DECODER_PART_TRAIN \
     --policy.chunk_size=$ACTION_CHUNK \
     --policy.n_action_steps=$ACTION_CHUNK \
