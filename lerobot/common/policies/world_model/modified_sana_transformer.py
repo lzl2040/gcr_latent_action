@@ -159,9 +159,9 @@ class Modified_SanaLinearAttnProcessor3_0:
     ) -> torch.Tensor:
         original_dtype = hidden_states.dtype
         num_image_token = rotary_emb[0].shape[1]
-        # if rotary_emb is not None:
-        #     num_image_token = rotary_emb[0].shape[1]
-        #     hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:] 
+        if rotary_emb is not None:
+            num_image_token = rotary_emb[0].shape[1]
+            hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:] 
         # num_action_token = hidden_states.shape[1] - num_image_token
         # # num_action_token = rotary_emb_action[0].shape[1]
         # print(f"Action token:{num_action_token} Image token:{num_image_token}")
@@ -200,16 +200,16 @@ class Modified_SanaLinearAttnProcessor3_0:
                 out[..., 0::2] = x1 * cos - x2 * sin
                 out[..., 1::2] = x1 * sin + x2 * cos
                 return out.type_as(hidden_states)
-            query, action_query = query[:, :num_image_token], query[:, num_image_token:]
-            key, action_key = key[:, :num_image_token], key[:, num_image_token:]
+            # query, action_query = query[:, :num_image_token], query[:, num_image_token:]
+            # key, action_key = key[:, :num_image_token], key[:, num_image_token:]
             
             query_rotate = apply_rotary_emb(query, *rotary_emb)
             key_rotate = apply_rotary_emb(key, *rotary_emb)
             
-            query_rotate = torch.cat([query_rotate, action_query], dim = 1)
-            key_rotate = torch.cat([key_rotate, action_key], dim = 1)
-            query = torch.cat([query, action_query], dim = 1)
-            key = torch.cat([key, action_query], dim = 1)
+            # query_rotate = torch.cat([query_rotate, action_query], dim = 1)
+            # key_rotate = torch.cat([key_rotate, action_key], dim = 1)
+            # query = torch.cat([query, action_query], dim = 1)
+            # key = torch.cat([key, action_query], dim = 1)
 
         # B,H,C,N
         query = query.permute(0, 2, 3, 1)
@@ -235,7 +235,7 @@ class Modified_SanaLinearAttnProcessor3_0:
         hidden_states = attn.to_out[1](hidden_states)
 
         # add
-        # hidden_states = torch.cat([hidden_states, action_hidden_states], dim=1)
+        hidden_states = torch.cat([hidden_states, action_hidden_states], dim=1)
 
         return hidden_states
 
