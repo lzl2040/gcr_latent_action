@@ -426,8 +426,8 @@ class VideoWorldModel(nn.Module):
             qk_norm=self.transformer.config.qk_norm,
             rope_max_seq_len=self.transformer.config.rope_max_seq_len,
         )
-        mid_layer = self.transformer.config.num_layers // 2
-        # mid_layer = 0
+        # mid_layer = self.transformer.config.num_layers // 2
+        mid_layer = 0
         for i in range(self.transformer.config.num_layers):
             if i >= mid_layer:
                 action_video_fusion = True
