@@ -159,9 +159,9 @@ class Modified_SanaLinearAttnProcessor3_0:
     ) -> torch.Tensor:
         original_dtype = hidden_states.dtype
         num_image_token = rotary_emb[0].shape[1]
-        if rotary_emb is not None:
-            num_image_token = rotary_emb[0].shape[1]
-            hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:] 
+        # if rotary_emb is not None:
+        #     num_image_token = rotary_emb[0].shape[1]
+        #     hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:] 
         # num_action_token = hidden_states.shape[1] - num_image_token
         # # num_action_token = rotary_emb_action[0].shape[1]
         # print(f"Action token:{num_action_token} Image token:{num_image_token}")
@@ -200,16 +200,16 @@ class Modified_SanaLinearAttnProcessor3_0:
                 out[..., 0::2] = x1 * cos - x2 * sin
                 out[..., 1::2] = x1 * sin + x2 * cos
                 return out.type_as(hidden_states)
-            # query, action_query = query[:, :num_image_token], query[:, num_image_token:]
-            # key, action_key = key[:, :num_image_token], key[:, num_image_token:]
+            query, action_query = query[:, :num_image_token], query[:, num_image_token:]
+            key, action_key = key[:, :num_image_token], key[:, num_image_token:]
             
             query_rotate = apply_rotary_emb(query, *rotary_emb)
             key_rotate = apply_rotary_emb(key, *rotary_emb)
             
-            # query_rotate = torch.cat([query_rotate, action_query], dim = 1)
-            # key_rotate = torch.cat([key_rotate, action_key], dim = 1)
-            # query = torch.cat([query, action_query], dim = 1)
-            # key = torch.cat([key, action_query], dim = 1)
+            query_rotate = torch.cat([query_rotate, action_query], dim = 1)
+            key_rotate = torch.cat([key_rotate, action_key], dim = 1)
+            query = torch.cat([query, action_query], dim = 1)
+            key = torch.cat([key, action_query], dim = 1)
 
         # B,H,C,N
         query = query.permute(0, 2, 3, 1)
@@ -235,7 +235,7 @@ class Modified_SanaLinearAttnProcessor3_0:
         hidden_states = attn.to_out[1](hidden_states)
 
         # add
-        hidden_states = torch.cat([hidden_states, action_hidden_states], dim=1)
+        # hidden_states = torch.cat([hidden_states, action_hidden_states], dim=1)
 
         return hidden_states
 
@@ -555,18 +555,6 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
         #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
         #                           eps=kwargs.get("norm_eps", 1e-6)
         #                           )
-        self.attn3 = Attention(
-            query_dim=kwargs.get("dim", 2240),
-            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-            kv_heads=kwargs.get("num_cross_attention_heads", 20),
-            cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
-            heads=kwargs.get("num_attention_heads", 20),
-            dim_head=kwargs.get("attention_head_dim", 112),
-            dropout=kwargs.get("dropout", 0.0),
-            bias=True,
-            out_bias=kwargs.get("attention_out_bias", True),
-            processor=Modified_SanaAttnProcessor2_0(),
-        )
         
         
     def forward(
@@ -596,12 +584,6 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
 
         attn_output = self.attn1(norm_hidden_states) # no rotary for action
         hidden_states = hidden_states + gate_msa * attn_output
-        
-        if self.attn3 is not None:
-            attn_output = self.attn3(
-                hidden_states=hidden_states
-            )
-            hidden_states = attn_output + hidden_states
 
         # 3. Cross Attention
         if self.attn2 is not None:

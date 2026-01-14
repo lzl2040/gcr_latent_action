@@ -12,7 +12,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.world_model.configuration_world_model import LatentWorldModelConfig
 from lerobot.common.policies.world_model.video_world_model import VideoWorldModel
 # from lerobot.common.policies.world_model.video_world_model_only_video import VideoWorldModel
-# from lerobot.common.policies.world_model.video_world_model_only_action import VideoWorldModel
+from lerobot.common.policies.world_model.video_world_model_only_action import VideoWorldModel
 
 def pad_vector(vector, new_dim):
     """Can be (batch_size x sequence_length x features_dimension)
@@ -164,10 +164,14 @@ class LatentWorldModel(PreTrainedPolicy):
         # print(sc_embeds.shape, act_embeds.shape, img_embeds.shape)
         # print(img_embeds.shape) # 640 2048
         # print(losses["action_loss"].shape, batch["action_mask"].shape)
+        # print(batch["action_mask"])
         if self.config.use_action_mask:
             action_mask = batch["action_mask"].unsqueeze(1)
-            losses["action_loss"] = losses["action_loss"] * action_mask
-        losses["action_loss"] = losses["action_loss"].mean()
+            valid_len = action_mask.sum() * self.config.n_action_steps
+            # print("valid_len:", valid_len)
+            losses["action_loss"] = (losses["action_loss"] * action_mask).sum() / valid_len
+        else:
+            losses["action_loss"] = losses["action_loss"].mean()
         # print(action_mask.shape, losses["action_loss"].shape)
         loss = losses["action_loss"] + self.config.img_loss_weight * losses["video_loss"]
         # loss = losses["action_loss"] +  losses["video_loss"]

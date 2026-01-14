@@ -500,7 +500,7 @@ class VideoWorldModel(nn.Module):
         x_t = (1.0 - sigmas) * actions + sigmas * action_noise
         noise_action_embeds = self.embed_action(x_t)
         target_action = action_noise - actions
-        return noise_action_embeds, target_action
+        return noise_action_embeds, target_action, action_noise
     
     def save_video(self, video_latents, save_name):
         latents_mean = (
@@ -556,7 +556,7 @@ class VideoWorldModel(nn.Module):
         # noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
         noisy_video_input = (1.0 - sigmas) * clean_images + sigmas * noise
 
-        noisy_action_input, action_target = self.prepare_noise_action(actions, timesteps)
+        noisy_action_input, action_target, action_noise = self.prepare_noise_action(actions, timesteps)
         # print(noisy_video_input.shape, noisy_action_input.shape) # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         model_output = self.transformer(
             hidden_states=noisy_video_input,
@@ -585,13 +585,16 @@ class VideoWorldModel(nn.Module):
         loss = {}
         loss["video_loss"] = video_loss
         loss["action_loss"] = action_loss
-        
-        
         # video_latents = noise - video_pred
         # # decode video
         
         # self.save_video(video_latents, "pred.mp4")
         # self.save_video(clean_images, "gt.mp4")
+        
+        # action_pred_gt = action_noise - action_pred
+        # action_gt = actions
+        # print("Action GT:", action_gt[0, 0, :8], "Action Pred:", action_pred_gt[0, 0, :8], "Loss")
+        # print("Action Pred:", action_pred_gt[0, 0, :8])
         # time.sleep(5)
         return loss
         

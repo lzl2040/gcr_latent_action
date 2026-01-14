@@ -94,7 +94,6 @@ def sample_beta(alpha, beta, bsize, device):
     gamma2 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / beta)
     return gamma1 / (gamma1 + gamma2)
 
-
 def prepare_encoder_attention_mask(
     N_A: int,
     M_H: int,
@@ -134,8 +133,13 @@ def prepare_encoder_attention_mask(
 
     # ----- Action queries -----
     action_q = slice(0, N_A)
+    history_k = slice(0, M_H)
+    scene_k = slice(M_H, M_H + M_LS)
     motion_k = slice(M_H + M_LS, M_H + M_LS + M_LM)
 
+    
+    attn_mask[action_q, history_k] = 0.0
+    attn_mask[action_q, scene_k] = 0.0
     attn_mask[action_q, motion_k] = 0.0
 
     if batch_size is not None:
@@ -457,7 +461,7 @@ class VideoWorldModel(nn.Module):
             video = (video * 255).clip(0, 255).astype(np.uint8)
         imageio.mimsave(save_name, video, fps=10)
     
-    def forward(self, img_embeds, sc_embeds, act_embeds, target_imgs, actions):
+    def forward(self, img_embeds, sc_embeds, act_embeds, task_dict, target_imgs, actions):
         # prepare image
         prompt_embeds = torch.cat([img_embeds, sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
