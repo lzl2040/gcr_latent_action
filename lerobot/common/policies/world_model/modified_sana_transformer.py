@@ -705,6 +705,21 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
         #                           )
         
         
+        self.attn3 = Attention(
+                query_dim=kwargs.get("dim", 2240),
+                qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+                kv_heads=kwargs.get("num_cross_attention_heads", 20),
+                cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+                heads=kwargs.get("num_attention_heads", 20),
+                dim_head=kwargs.get("attention_head_dim", 112),
+                dropout=kwargs.get("dropout", 0.0),
+                bias=True,
+                out_bias=kwargs.get("attention_out_bias", True),
+                processor=Modified_SanaAttnProcessor2_0(),
+        )
+        self.attn2_action = copy.deepcopy(self.attn2)
+        
+        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -734,8 +749,15 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
         hidden_states = hidden_states + gate_msa * attn_output
 
         # 3. Cross Attention
-        if self.attn2 is not None:
-            attn_output = self.attn2(
+        if self.attn3 is not None:
+            attn_output = self.attn3(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask
+            )
+            hidden_states = attn_output + hidden_states
+            
+        if self.attn2_action is not None:
+            attn_output = self.attn2_action(
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=encoder_attention_mask,
