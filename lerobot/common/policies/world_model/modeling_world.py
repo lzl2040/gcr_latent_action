@@ -10,9 +10,9 @@ from lerobot.common.constants import ACTION, OBS_ROBOT
 
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.world_model.configuration_world_model import LatentWorldModelConfig
-from lerobot.common.policies.world_model.video_world_model import VideoWorldModel
+# from lerobot.common.policies.world_model.video_world_model import VideoWorldModel
 # from lerobot.common.policies.world_model.video_world_model_only_video import VideoWorldModel
-# from lerobot.common.policies.world_model.video_world_model_only_action import VideoWorldModel
+from lerobot.common.policies.world_model.video_world_model_only_action import VideoWorldModel
 
 def pad_vector(vector, new_dim):
     """Can be (batch_size x sequence_length x features_dimension)

@@ -139,7 +139,7 @@ def prepare_encoder_attention_mask(
 
     
     attn_mask[action_q, history_k] = 0.0
-    attn_mask[action_q, scene_k] = 0.0
+    # attn_mask[action_q, scene_k] = 0.0
     attn_mask[action_q, motion_k] = 0.0
 
     if batch_size is not None:
@@ -158,20 +158,9 @@ def prepare_attention_mask(
     # initialize all masked
     attn_mask = torch.full(
         (Q_len, Q_len),
-        float("-inf"),
-        device=device,
+        0.0,        device=device,
         dtype=dtype,
     )
-    video_q = slice(0, N_V)
-    action_q = slice(N_V, N_V + N_A)
-    # video can attend action
-    # attn_mask[video_q, action_q] = 0.0
-    # video attend self
-    # attn_mask[video_q, video_q] = 0.0
-    # action can attentd video
-    attn_mask[action_q, video_q] = 0.0
-    # action attend self
-    attn_mask[action_q, action_q] = 0.0
     if batch_size is not None:
         attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
 
@@ -229,12 +218,11 @@ def forward_c(
                 device=hidden_states.device
             )
         if attention_mask is None:
-            # attention_mask = prepare_attention_mask(
-            #     N_V = hidden_states.shape[1], N_A = hidden_states.shape[1],
-            #     batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
-            #     device=hidden_states.device
-            # )
-            attention_mask = None
+            attention_mask = prepare_attention_mask(N_V=0, N_A = hidden_states.shape[1],
+                batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
+                device=hidden_states.device
+            )
+            # attention_mask = None
 
         if guidance is not None:
             timestep, embedded_timestep = self.time_embed(
