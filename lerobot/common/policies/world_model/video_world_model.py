@@ -10,7 +10,7 @@ from diffusers import (
 )
 from typing import Any, Dict, Optional, Tuple, Union
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from lerobot.common.policies.world_model.modified_sana_transformer import Modified_SanaVideoTransformerBlock, Modified_SanaModulatedNorm, Modified_WanRotaryPosEmbed
+from lerobot.common.policies.world_model.modified_sana_transformer import Modified_SanaVideoTransformerBlock, Modified_SanaVideoTransformerBlock_V2, Modified_SanaModulatedNorm, Modified_WanRotaryPosEmbed
 from lerobot.common.utils.utils import get_safe_dtype
 import math
 import torch.nn.functional as F  # noqa: N812
@@ -143,7 +143,7 @@ def prepare_encoder_attention_mask(
 
     # print(f"Lan:{lan_k}")
     attn_mask[video_q, history_k] = 0.0
-    attn_mask[video_q, lan_k] = 0.0
+    # attn_mask[video_q, lan_k] = 0.0
     attn_mask[video_q, scene_k] = 0.0
     attn_mask[video_q, motion_k] = 0.0
 
@@ -153,7 +153,7 @@ def prepare_encoder_attention_mask(
     motion_k = slice(M_H + M_L + M_LS, M_H + M_L + M_LS + M_LM)
 
     attn_mask[action_q, motion_k] = 0.0
-    attn_mask[action_q, lan_k] = 0.0
+    # attn_mask[action_q, lan_k] = 0.0
     attn_mask[action_q, history_k] = 0.0
 
     if batch_size is not None:
@@ -179,7 +179,7 @@ def prepare_attention_mask(
     video_q = slice(0, N_V)
     action_q = slice(N_V, N_V + N_A)
     # video can attend action
-    # attn_mask[video_q, action_q] = 0.0
+    attn_mask[video_q, action_q] = 0.0
     # video attend self
     # attn_mask[video_q, video_q] = 0.0
     # action can attentd video
@@ -434,7 +434,7 @@ class VideoWorldModel(nn.Module):
                 action_video_fusion = True
             else:
                 action_video_fusion = False
-            self.transformer.transformer_blocks[i] = Modified_SanaVideoTransformerBlock(action_video_fusion,
+            self.transformer.transformer_blocks[i] = Modified_SanaVideoTransformerBlock_V2(action_video_fusion,
                 **block_kwargs)
 
         self.transformer.forward = forward_c.__get__(self.transformer)

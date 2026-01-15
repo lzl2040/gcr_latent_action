@@ -11,6 +11,7 @@ from diffusers.models.normalization import AdaLayerNormSingle, RMSNorm
 from diffusers.models.transformers.transformer_sana_video import SanaVideoTransformerBlock
 from diffusers.utils import deprecate, logging
 from diffusers.models.activations import GEGLU, GELU, ApproximateGELU, FP32SiLU, LinearActivation, SwiGLU
+import copy
 
 class Modified_SanaAttnProcessor2_0:
     r"""
@@ -514,6 +515,153 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
 
         return hidden_states
         
+
+class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
+    r"""
+    Transformer block introduced in [Sana-Video](https://huggingface.co/papers/2509.24695).
+    """
+
+    def __init__(
+        self,
+        action_video_fusion,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.attn1 = Attention(
+            query_dim=kwargs.get("dim", 2240),
+            heads=kwargs.get("num_attention_heads", 20),
+            dim_head=kwargs.get("attention_head_dim", 112),
+            kv_heads=kwargs.get("num_attention_heads", 20) if kwargs.get("qk_norm", "rms_norm_across_heads") is not None else None,
+            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+            dropout=kwargs.get("dropout", 0.0),
+            bias=kwargs.get("attention_bias", True),
+            cross_attention_dim=None,
+            processor=Modified_SanaLinearAttnProcessor3_0(),
+        )
+        self.ff = GLUMBTempConv(
+            kwargs.get("dim", 2240), 
+            kwargs.get("dim", 2240), 
+            kwargs.get("mlp_ratio", 3.0), 
+            norm_type=None, 
+            residual_connection=False
+        )
+        self.ff_action = FeedForward(
+            dim=kwargs.get("dim", 2240),
+            dropout=0.0,
+            final_dropout=0.0,
+            activation_fn="geglu",
+            bias=True
+        )
+        # self.ff_action = MLP(
+        #     in_dim=kwargs.get("dim", 2240),
+        #     hidden_dim=kwargs.get("dim", 2240) * 2,
+        #     out_dim=kwargs.get("dim", 2240),
+        #     act=nn.GELU,
+        #     drop=0.0
+        # )
+        
+        # our design: cross attention between image latents, noised action
+        # self.norm3 = nn.LayerNorm(kwargs.get("dim", 2240), 
+        #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
+        #                           eps=kwargs.get("norm_eps", 1e-6)
+        #                           )
+
+        self.action_video_fusion = action_video_fusion
+        if self.action_video_fusion:
+            self.attn3 = Attention(
+                query_dim=kwargs.get("dim", 2240),
+                qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+                kv_heads=kwargs.get("num_cross_attention_heads", 20),
+                cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+                heads=kwargs.get("num_attention_heads", 20),
+                dim_head=kwargs.get("attention_head_dim", 112),
+                dropout=kwargs.get("dropout", 0.0),
+                bias=True,
+                out_bias=kwargs.get("attention_out_bias", True),
+                processor=Modified_SanaAttnProcessor2_0(),
+            )
+        else:
+            self.attn3 = None
+        
+        self.attn2_action = copy.deepcopy(self.attn2)
+        
+        
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.LongTensor] = None,
+        frames: int = None,
+        height: int = None,
+        width: int = None,
+        rotary_emb: Optional[torch.Tensor] = None,
+        rotary_emb_action: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        batch_size = hidden_states.shape[0]
+        
+        num_image_token = rotary_emb[0].shape[1]
+
+        # 1. Modulation
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+            self.scale_shift_table[None, None] + timestep.reshape(batch_size, timestep.shape[1], 6, -1)
+        ).unbind(dim=2)
+
+        # 2. Self Attention
+        norm_hidden_states = self.norm1(hidden_states)
+        norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
+        norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
+
+        attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
+        hidden_states = hidden_states + gate_msa * attn_output
+        
+        if self.attn3 is not None:
+            attn_output = self.attn3(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask
+            )
+            hidden_states = attn_output + hidden_states
+
+        # 3. Cross Attention
+        if self.attn2 is not None:
+            hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:]
+            encoder_attention_mask, action_encoder_attention_mask = encoder_attention_mask[:, :num_image_token], encoder_attention_mask[:, num_image_token:]
+            attn_output = self.attn2(
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=encoder_attention_mask,
+            )
+            hidden_states = attn_output + hidden_states
+            
+            action_attn_output = self.attn2_action(
+                action_hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=action_encoder_attention_mask,
+            )
+            action_hidden_states = action_attn_output + action_hidden_states
+            hidden_states = torch.cat([hidden_states, action_hidden_states], dim=1)
+
+        # 4. Feed-forward
+        norm_hidden_states = self.norm2(hidden_states)
+        norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
+
+        # preprocess
+        norm_hidden_states, norm_hidden_states_action = norm_hidden_states[:, :num_image_token], norm_hidden_states[:, num_image_token:]
+        # print(norm_hidden_states.shape)
+        norm_hidden_states = norm_hidden_states.unflatten(1, (frames, height, width))
+        # print(norm_hidden_states.shape)
+        ff_output = self.ff(norm_hidden_states)
+        # need a ffn layer for action
+        # print(norm_hidden_states_action.shape)
+        ff_action_output = self.ff_action(norm_hidden_states_action)
+        
+        ff_output = ff_output.flatten(1, 3)
+        ff_output = torch.cat([ff_output, ff_action_output], dim = 1)
+        
+        hidden_states = hidden_states + gate_mlp * ff_output
+
+        return hidden_states
         
 class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
     r"""
