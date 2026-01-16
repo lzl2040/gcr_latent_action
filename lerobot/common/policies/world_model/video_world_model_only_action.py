@@ -400,7 +400,7 @@ class VideoWorldModel(nn.Module):
         )
         return noise
 
-    def sample_action_time(self, bsize, device):
+    def sample_action_sigma(self, bsize, device):
         time_beta = sample_beta(1.5, 1.0, bsize, device)
         time = time_beta * 0.999 + 0.001
         return time.to(dtype=self.dtype, device=device)
@@ -420,10 +420,13 @@ class VideoWorldModel(nn.Module):
     def prepare_noise_action(self, actions, timesteps, device="cuda"):
         # action_noise = torch.rand_like(actions) # 均匀分布，no 正态分布
         action_noise = torch.randn_like(actions)
+        bs_size = actions.shape[0]
         # x_t = self.noise_scheduler.add_noise(actions, action_noise, timesteps)
         
         # video loss will be high, action new scheduler
-        sigmas = self.get_sigmas(timesteps, n_dim=actions.ndim, dtype=actions.dtype, device=device)
+        # sigmas = self.get_sigmas(timesteps, n_dim=actions.ndim, dtype=actions.dtype, device=device)
+        sigmas = self.sample_action_sigma(bs_size, device=device)[:, None, None]
+        # print(sigmas)
         x_t = (1.0 - sigmas) * actions + sigmas * action_noise
         noise_action_embeds = self.embed_action(x_t)
         target_action = action_noise - actions
