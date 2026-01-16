@@ -134,8 +134,8 @@ class LatentWorldModel(PreTrainedPolicy):
         # torch.Size([2, 1255]) torch.Size([22, 3, 224, 224]) torch.Size([2, 1255]) torch.Size([2, 30, 3, 224, 224]) torch.Size([2, 30, 32])
         # print(input_ids.shape, pixel_values.shape, attention_mask.shape, future_imgs.shape, actions.shape)
         
-        # task_dict = self.process_task_language(tasks, device)
-        task_dict = None
+        task_dict = self.process_task_language(tasks, device)
+        # task_dict = None
         # print("task_embeds", task_embeeds.shape) # task_embeds torch.Size([2, 16, 2048])
         
         sc_token_mask, act_token_mask, img_token_mask = self.generate_token_mask(input_ids)
