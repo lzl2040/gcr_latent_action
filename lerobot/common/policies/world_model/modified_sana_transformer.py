@@ -684,13 +684,13 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
             cross_attention_dim=None,
             processor=Modified_SanaLinearAttnProcessor3_0_Action(),
         )
-        self.ff = GLUMBTempConv(
-            kwargs.get("dim", 2240), 
-            kwargs.get("dim", 2240), 
-            kwargs.get("mlp_ratio", 3.0), 
-            norm_type=None, 
-            residual_connection=False
-        )
+        # self.ff = GLUMBTempConv(
+        #     kwargs.get("dim", 2240), 
+        #     kwargs.get("dim", 2240), 
+        #     kwargs.get("mlp_ratio", 3.0), 
+        #     norm_type=None, 
+        #     residual_connection=False
+        # )
         self.ff_action = FeedForward(
             dim=kwargs.get("dim", 2240),
             dropout=0.0,
@@ -745,13 +745,13 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
         norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
         norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
 
-        attn_output = self.attn1(norm_hidden_states) # no rotary for action
-        hidden_states = hidden_states + gate_msa * attn_output
+        # attn_output = self.attn1(norm_hidden_states) # no rotary for action
+        # hidden_states = hidden_states + gate_msa * attn_output
 
         # 3. Cross Attention
         if self.attn3 is not None:
             attn_output = self.attn3(
-                hidden_states=hidden_states,
+                hidden_states=norm_hidden_states,
                 attention_mask=attention_mask
             )
             hidden_states = attn_output + hidden_states

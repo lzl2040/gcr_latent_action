@@ -81,7 +81,6 @@ class LatentWorldModel(PreTrainedPolicy):
     def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         print("not use")
     
-
     def prepare_action(self, batch):
         """Pad action"""
         actions = pad_vector(batch[ACTION], self.config.max_action_dim)
@@ -148,7 +147,10 @@ class LatentWorldModel(PreTrainedPolicy):
             output_hidden_states=True,
         )
         
-        img_embeds = output.hidden_states[0][img_token_mask]  # N_img_token x D
+        img_embeds = self.future_latent_encoder.get_image_features(pixel_values)
+        # print("Pre", img_embeds.shape)
+        
+        # img_embeds = output.hidden_states[0][img_token_mask]  # N_img_token x D
         sc_embeds = output.hidden_states[-1][sc_token_mask]
         act_embeds = output.hidden_states[-1][act_token_mask]
         hidden_size = sc_embeds.shape[-1]
