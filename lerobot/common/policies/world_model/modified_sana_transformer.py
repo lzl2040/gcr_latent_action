@@ -201,16 +201,16 @@ class Modified_SanaLinearAttnProcessor3_0:
                 out[..., 0::2] = x1 * cos - x2 * sin
                 out[..., 1::2] = x1 * sin + x2 * cos
                 return out.type_as(hidden_states)
-            query, action_query = query[:, :num_image_token], query[:, num_image_token:]
-            key, action_key = key[:, :num_image_token], key[:, num_image_token:]
+            # query, action_query = query[:, :num_image_token], query[:, num_image_token:]
+            # key, action_key = key[:, :num_image_token], key[:, num_image_token:]
             
             query_rotate = apply_rotary_emb(query, *rotary_emb)
             key_rotate = apply_rotary_emb(key, *rotary_emb)
             
-            query_rotate = torch.cat([query_rotate, action_query], dim = 1)
-            key_rotate = torch.cat([key_rotate, action_key], dim = 1)
-            query = torch.cat([query, action_query], dim = 1)
-            key = torch.cat([key, action_query], dim = 1)
+            # query_rotate = torch.cat([query_rotate, action_query], dim = 1)
+            # key_rotate = torch.cat([key_rotate, action_key], dim = 1)
+            # query = torch.cat([query, action_query], dim = 1)
+            # key = torch.cat([key, action_query], dim = 1)
 
         # B,H,C,N
         query = query.permute(0, 2, 3, 1)
@@ -566,24 +566,33 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         #                           eps=kwargs.get("norm_eps", 1e-6)
         #                           )
 
-        self.action_video_fusion = action_video_fusion
-        if self.action_video_fusion:
-            self.attn3 = Attention(
-                query_dim=kwargs.get("dim", 2240),
-                qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-                kv_heads=kwargs.get("num_cross_attention_heads", 20),
-                cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
-                heads=kwargs.get("num_attention_heads", 20),
-                dim_head=kwargs.get("attention_head_dim", 112),
-                dropout=kwargs.get("dropout", 0.0),
-                bias=True,
-                out_bias=kwargs.get("attention_out_bias", True),
-                processor=Modified_SanaAttnProcessor2_0(),
-            )
-        else:
-            self.attn3 = None
+        self.attn1_for_action = Attention(
+            query_dim=kwargs.get("dim", 2240),
+            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+            kv_heads=kwargs.get("num_cross_attention_heads", 20),
+            cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+            heads=kwargs.get("num_attention_heads", 20),
+            dim_head=kwargs.get("attention_head_dim", 112),
+            dropout=kwargs.get("dropout", 0.0),
+            bias=True,
+            out_bias=kwargs.get("attention_out_bias", True),
+            processor=Modified_SanaAttnProcessor2_0(),
+        )
         
-        self.attn2_action = copy.deepcopy(self.attn2)
+        # self.attn2_action = copy.deepcopy(self.attn2)
+        # self.attn2_full = Attention(
+        #         query_dim=kwargs.get("dim", 2240),
+        #         qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+        #         kv_heads=kwargs.get("num_cross_attention_heads", 20),
+        #         cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+        #         heads=kwargs.get("num_attention_heads", 20),
+        #         dim_head=kwargs.get("attention_head_dim", 112),
+        #         dropout=kwargs.get("dropout", 0.0),
+        #         bias=True,
+        #         out_bias=kwargs.get("attention_out_bias", True),
+        #         processor=Modified_SanaAttnProcessor2_0(),
+        #     )
+        self.action_video_fusion = action_video_fusion
         
         
     def forward(
@@ -612,35 +621,26 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         norm_hidden_states = self.norm1(hidden_states)
         norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
         norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
-
+        norm_hidden_states, norm_action_hidden_states = norm_hidden_states[:, :num_image_token], norm_hidden_states[:, num_image_token:]
         attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
-        hidden_states = hidden_states + gate_msa * attn_output
         
-        if self.attn3 is not None:
-            attn_output = self.attn3(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask
-            )
-            hidden_states = attn_output + hidden_states
+        attn_output_action = self.attn1_for_action(norm_action_hidden_states)
+        attn_output = torch.cat([attn_output, attn_output_action], dim = 1)
+        hidden_states = hidden_states + gate_msa * attn_output
 
         # 3. Cross Attention
         if self.attn2 is not None:
-            hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:]
-            encoder_attention_mask, action_encoder_attention_mask = encoder_attention_mask[:, :num_image_token], encoder_attention_mask[:, num_image_token:]
+            # if self.action_video_fusion:
+            #     encoder_attention_mask[:, :, :hidden_states.shape[1]] = float("-inf")
+            encoder_hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim = 1)
             attn_output = self.attn2(
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=encoder_attention_mask,
             )
-            hidden_states = attn_output + hidden_states
+            # attn_output_video = attn_output[:, :num_image_token]
             
-            action_attn_output = self.attn2_action(
-                action_hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                attention_mask=action_encoder_attention_mask,
-            )
-            action_hidden_states = action_attn_output + action_hidden_states
-            hidden_states = torch.cat([hidden_states, action_hidden_states], dim=1)
+            hidden_states = attn_output + hidden_states
 
         # 4. Feed-forward
         norm_hidden_states = self.norm2(hidden_states)
