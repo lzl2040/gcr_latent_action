@@ -124,7 +124,7 @@ def prepare_encoder_attention_mask(
     """
 
     Q_len = N_V + N_A
-    K_len = N_V + N_A + M_H + M_L + M_LS + M_LM
+    K_len = M_H + M_L + M_LS + M_LM
 
     # initialize all masked
     attn_mask = torch.full(
@@ -137,15 +137,17 @@ def prepare_encoder_attention_mask(
 
     # ----- Video queries -----
     video_q = slice(0, N_V)
+    
     video_k = slice(0, N_V)
     action_k = slice(N_V, N_V + N_A)
+    Q_len = 0
     history_k = slice(Q_len, Q_len + M_H)
     lan_k = slice(Q_len + M_H, Q_len + M_H + M_L)
     scene_k = slice(Q_len + M_H + M_L, Q_len + M_H + M_L + M_LS)
     motion_k = slice(Q_len + M_H + M_L + M_LS, Q_len + M_H + M_L + M_LS + M_LM)
 
     # print(f"Lan:{lan_k}")
-    attn_mask[video_q, action_k] = -3.0 # add 0 make nan
+    # attn_mask[video_q, action_k] = 0.0 # add 0 make nan
     attn_mask[video_q, history_k] = 0.0
     attn_mask[video_q, lan_k] = 0.0
     attn_mask[video_q, scene_k] = 0.0
@@ -155,7 +157,7 @@ def prepare_encoder_attention_mask(
     action_q = slice(N_V, N_V + N_A)
     
     attn_mask[action_q, video_k] = 0.0
-    attn_mask[action_q, history_k] = 0.0
+    # attn_mask[action_q, history_k] = 0.0
     attn_mask[action_q, lan_k] = 0.0
     attn_mask[action_q, motion_k] = 0.0
 
@@ -501,6 +503,7 @@ class VideoWorldModel(nn.Module):
         
         # video loss will be high, action new scheduler
         sigmas = self.get_sigmas(timesteps, n_dim=actions.ndim, dtype=actions.dtype, device=device)
+        # sigmas = self.sample_action_time(actions.shape[0], device)[:, None, None]
         x_t = (1.0 - sigmas) * actions + sigmas * action_noise
         noise_action_embeds = self.embed_action(x_t)
         target_action = action_noise - actions
@@ -529,36 +532,43 @@ class VideoWorldModel(nn.Module):
             video = (video * 255).clip(0, 255).astype(np.uint8)
         imageio.mimsave(save_name, video, fps=10)
     
-    def forward(self, img_embeds, sc_embeds, act_embeds, task_info_dict, target_imgs, actions):
+    def forward(self, img_embeds, sc_embeds, act_embeds, task_info_dict, target_imgs, actions, train_step):
         # prepare image
-        task_embeds = task_info_dict["embeds"]
-        # task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
+        if task_info_dict:
+            task_embeds = task_info_dict["embeds"]
+        else:
+            task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
         prompt_embeds = torch.cat([img_embeds, task_embeds, sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
         device = prompt_embeds.device
         # target_imgs: 10 3 T H W
         # print(target_imgs.shape) # 224 * 224
         target_z = self.vae.encode(target_imgs).latent_dist.mode().to(device)
-        # print(target_z.shape) # torch.Size([2, 16, 8, 28, 28])
-        vae_mean = self.vae_mean.to(device=device)
-        vae_std = self.vae_std.to(device=device)
-        # follow https://github.com/NVlabs/Sana/blob/main/diffusion/model/wan/vae.py#L497
-        target_z = (target_z - vae_mean.view(1, self.z_dim, 1, 1, 1)) / vae_std.view(1, self.z_dim, 1, 1, 1)
-        # print(target_z.shape) # [10, 16, 8, 28, 28]
-        clean_images = target_z
-        bs = clean_images.shape[0]
+        bs = target_z.shape[0]
         # for logit_normal
         u = torch.normal(mean=0.0, std=1.0, size=(bs,), device=device)
         u = torch.nn.functional.sigmoid(u)
         indices = (u * self.noise_scheduler.config.num_train_timesteps).long().to(device=device)
         sch_timesteps = self.noise_scheduler.timesteps.to(device=device)
         timesteps = sch_timesteps[indices].to(device=device)
-        noise = torch.randn_like(clean_images)
-        # self.noise_scheduler.add_noise()
-        sigmas = self.get_sigmas(timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype, device=device)
-        # noisy_model_input = (1.0 - sigmas) * clean_images + sigmas * noise
-        # noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
-        noisy_video_input = (1.0 - sigmas) * clean_images + sigmas * noise
+        # print(train_step)
+        if train_step > 6000:
+            # target_z = self.vae.encode(target_imgs).latent_dist.mode().to(device)
+            # print(target_z.shape) # torch.Size([2, 16, 8, 28, 28])
+            vae_mean = self.vae_mean.to(device=device)
+            vae_std = self.vae_std.to(device=device)
+            # follow https://github.com/NVlabs/Sana/blob/main/diffusion/model/wan/vae.py#L497
+            target_z = (target_z - vae_mean.view(1, self.z_dim, 1, 1, 1)) / vae_std.view(1, self.z_dim, 1, 1, 1)
+            # print(target_z.shape) # [10, 16, 8, 28, 28]
+            clean_images = target_z
+            noise = torch.randn_like(clean_images)
+            # self.noise_scheduler.add_noise()
+            sigmas = self.get_sigmas(timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype, device=device)
+            # noisy_model_input = (1.0 - sigmas) * clean_images + sigmas * noise
+            # noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
+            noisy_video_input = (1.0 - sigmas) * clean_images + sigmas * noise
+        else:
+            noisy_video_input = torch.zeros_like(target_z).to(dtype=target_z.dtype, device=target_z.device)
 
         noisy_action_input, action_target, action_noise = self.prepare_noise_action(actions, timesteps)
         # print(noisy_video_input.shape, noisy_action_input.shape) # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
@@ -576,15 +586,19 @@ class VideoWorldModel(nn.Module):
         action_pred = self.action_out_proj(action_pred)
         # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         # calculate loss
-        weighting = torch.ones_like(sigmas)
-        video_target = noise - clean_images
-        # Compute regular loss.
-        video_loss = torch.mean(
-            (weighting.float() * (video_pred.float() - video_target.float()) ** 2).reshape(video_target.shape[0], -1),
-            1,
-        )
+        if train_step > 6000:
+            weighting = torch.ones_like(sigmas)
+            video_target = noise - clean_images
+            # Compute regular loss.
+            video_loss = torch.mean(
+                (weighting.float() * (video_pred.float() - video_target.float()) ** 2).reshape(video_target.shape[0], -1),
+                1,
+            )
+            video_loss = video_loss.mean()
+        else:
+            video_loss = torch.tensor(0.0, device=target_z.device)
+            
         action_loss = F.mse_loss(action_target, action_pred, reduction="none")
-        video_loss = video_loss.mean()
         # print(video_loss.shape, action_loss.shape)
         loss = {}
         loss["video_loss"] = video_loss

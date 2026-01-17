@@ -632,7 +632,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         if self.attn2 is not None:
             # if self.action_video_fusion:
             #     encoder_attention_mask[:, :, :hidden_states.shape[1]] = float("-inf")
-            encoder_hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim = 1)
+            # encoder_hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim = 1)
             attn_output = self.attn2(
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
