@@ -168,13 +168,14 @@ def clip_grad_norm_low_mem(parameters, max_norm):
     
     return torch.tensor(total_norm, device=grads[0].device)
 
-def train_step(model, batch, scaler, cfg, sync_flag):
+def train_step(model, batch, scaler, cfg, sync_flag, step):
     """执行单个训练步骤"""
     # 前向传播
     sync_flag = True
     with torch.amp.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
         
         if sync_flag:
+            batch["step"] = step
             loss, output_dict = model(batch)
             loss = loss / cfg.gradient_accumulation_steps
             output_dict["action_loss"] = output_dict["action_loss"] / cfg.gradient_accumulation_steps
@@ -562,7 +563,7 @@ def train(cfg: TrainPipelineConfig):
         
         step_start = time.perf_counter()
         
-        loss, grad_norm, outputs = train_step(model, batch, scaler, cfg, sync_flag)
+        loss, grad_norm, outputs = train_step(model, batch, scaler, cfg, sync_flag, step)
         # del batch
         grad_to_record = grad_norm.item() if grad_norm is not None else 0.0
         grad_norm_value += grad_to_record
