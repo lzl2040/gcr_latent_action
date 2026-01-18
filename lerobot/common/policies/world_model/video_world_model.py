@@ -156,9 +156,10 @@ def prepare_encoder_attention_mask(
     # ----- Action queries -----
     action_q = slice(N_V, N_V + N_A)
     
-    attn_mask[action_q, video_k] = 0.0
-    # attn_mask[action_q, history_k] = 0.0
+    # attn_mask[action_q, video_k] = 0.0
+    attn_mask[action_q, history_k] = 0.0
     attn_mask[action_q, lan_k] = 0.0
+    
     attn_mask[action_q, motion_k] = 0.0
 
     if batch_size is not None:
@@ -552,7 +553,7 @@ class VideoWorldModel(nn.Module):
         sch_timesteps = self.noise_scheduler.timesteps.to(device=device)
         timesteps = sch_timesteps[indices].to(device=device)
         # print(train_step)
-        if train_step > 6000:
+        if train_step > 4000:
             # target_z = self.vae.encode(target_imgs).latent_dist.mode().to(device)
             # print(target_z.shape) # torch.Size([2, 16, 8, 28, 28])
             vae_mean = self.vae_mean.to(device=device)
@@ -586,7 +587,7 @@ class VideoWorldModel(nn.Module):
         action_pred = self.action_out_proj(action_pred)
         # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         # calculate loss
-        if train_step > 6000:
+        if train_step > 4000:
             weighting = torch.ones_like(sigmas)
             video_target = noise - clean_images
             # Compute regular loss.
