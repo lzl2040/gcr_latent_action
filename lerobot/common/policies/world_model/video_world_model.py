@@ -95,13 +95,13 @@ def sample_beta(alpha, beta, bsize, device):
     return gamma1 / (gamma1 + gamma2)
 
 
-def prepare_encoder_attention_mask(
+def prepare_encoder_attention_mask_text_condition(
     N_V: int,
     N_A: int,
-    M_H: int,
     M_L: int, 
     M_LS: int,
     M_LM: int,
+    M_H: int = 0,
     *,
     batch_size: int | None = None,
     device: torch.device | None = None,
@@ -124,7 +124,7 @@ def prepare_encoder_attention_mask(
     """
 
     Q_len = N_V + N_A
-    K_len = N_V + N_A + M_H + M_L + M_LS + M_LM
+    K_len = Q_len + M_H + M_L + M_LS + M_LM
 
     # initialize all masked
     attn_mask = torch.full(
@@ -138,18 +138,19 @@ def prepare_encoder_attention_mask(
     # ----- Video queries -----
     video_q = slice(0, N_V)
     
+    # key
     video_k = slice(0, N_V)
     action_k = slice(N_V, N_V + N_A)
     # Q_len = 0
+    # M_H = 0
     history_k = slice(Q_len, Q_len + M_H)
     lan_k = slice(Q_len + M_H, Q_len + M_H + M_L)
     scene_k = slice(Q_len + M_H + M_L, Q_len + M_H + M_L + M_LS)
     motion_k = slice(Q_len + M_H + M_L + M_LS, Q_len + M_H + M_L + M_LS + M_LM)
 
     # print(f"Lan:{lan_k}")
-    attn_mask[video_q, action_k] = -3.0 # add 0 make nan
+    attn_mask[video_q, action_k] = 0.0 # add 0 make nan
     attn_mask[video_q, history_k] = 0.0
-    attn_mask[video_q, lan_k] = 0.0
     attn_mask[video_q, lan_k] = 0.0
     attn_mask[video_q, scene_k] = 0.0
     attn_mask[video_q, motion_k] = 0.0
@@ -160,6 +161,7 @@ def prepare_encoder_attention_mask(
     attn_mask[action_q, video_k] = 0.0
     attn_mask[action_q, history_k] = 0.0
     attn_mask[action_q, lan_k] = 0.0
+    # attn_mask[video_q, scene_k] = 0.0
     attn_mask[action_q, motion_k] = 0.0
 
     if batch_size is not None:
@@ -202,6 +204,7 @@ def forward_c(
         hidden_states: torch.Tensor,
         action_hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
+        img_encoder_hidden_states: torch.Tensor,
         condition_len: list, 
         timestep: torch.Tensor,
         guidance: Optional[torch.Tensor] = None,
@@ -254,9 +257,9 @@ def forward_c(
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
         if encoder_attention_mask is None:
-            encoder_attention_mask = prepare_encoder_attention_mask(
+            encoder_attention_mask = prepare_encoder_attention_mask_text_condition(
                 N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
-                M_H = condition_len[0],  M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
+                M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
                 batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
                 device=hidden_states.device
             )
@@ -295,6 +298,7 @@ def forward_c(
                     hidden_states,
                     attention_mask,
                     encoder_hidden_states,
+                    img_encoder_hidden_states,
                     encoder_attention_mask,
                     timestep,
                     post_patch_num_frames,
@@ -312,6 +316,7 @@ def forward_c(
                     hidden_states,
                     attention_mask,
                     encoder_hidden_states,
+                    img_encoder_hidden_states,
                     encoder_attention_mask,
                     timestep,
                     post_patch_num_frames,
@@ -389,32 +394,11 @@ class VideoWorldModel(nn.Module):
         
         self.prompt_proj = nn.Linear(self.config.vlm_token_dim, self.transformer.config.caption_channels)
         
+        self.img_prompt_proj = nn.Linear(self.config.vlm_token_dim, self.inner_dim)
+        
         # for action
         self.action_in_proj = nn.Linear(self.config.max_action_dim, self.inner_dim)
         self.action_out_proj = nn.Linear(self.inner_dim, self.config.max_action_dim)
-        # self.action_in_proj = nn.Sequential(
-        #     nn.Linear(self.config.max_action_dim, self.config.max_action_dim * 4),
-        #     nn.Mish(),
-        #     nn.Linear(self.config.max_action_dim * 4, self.inner_dim),
-        # )
-        self.action_in_proj = nn.Linear(self.config.max_action_dim, self.inner_dim)
-        self.action_out_proj = nn.Linear(self.inner_dim, self.config.max_action_dim)
-        # self.action_in_proj = nn.Sequential(
-        #     nn.Linear(self.config.max_action_dim, self.config.max_action_dim * 4),
-        #     nn.Mish(),
-        #     nn.Linear(self.config.max_action_dim * 4, self.inner_dim),
-        # )
-        
-        # self.action_out_proj = nn.Sequential(
-        #     nn.Linear(self.inner_dim, self.config.max_action_dim * 4),
-        #     nn.Mish(),
-        #     nn.Linear(self.config.max_action_dim * 4, self.config.max_action_dim),
-        # )
-        # self.action_out_proj = nn.Sequential(
-        #     nn.Linear(self.inner_dim, self.config.max_action_dim * 4),
-        #     nn.Mish(),
-        #     nn.Linear(self.config.max_action_dim * 4, self.config.max_action_dim),
-        # )
         
         # 梯度检查点
         self.transformer.enable_gradient_checkpointing()
@@ -423,7 +407,24 @@ class VideoWorldModel(nn.Module):
         # self.transformer.forward = forward_c.__get__(self.transformer)
         self.prepare_modules()
         self.dtype = torch.bfloat16
-    
+        # count parameters
+        total_attn1 = 0
+        total_attn2 = 0
+        total_nolinear = 0
+        for name, p in self.transformer.named_parameters():
+            if "attn1" in name:
+                total_attn1 += p.numel()
+            elif "attn2" in name:
+                total_attn2 += p.numel()
+            elif "linear_attn" in name:
+                total_nolinear += p.numel()
+                
+        total_transformer = sum(p.numel() for p in self.transformer.parameters())
+        # 3.3B
+        print(f"Video model of transformer total parameters: total: {total_transformer/1e6:.2f}M")
+        # 800M, 400M, 50M
+        print(f"Video model of transformer total parameters: attn1: {total_attn1/1e6:.2f}M, attn2: {total_attn2/1e6:.2f}M, no linear: {total_nolinear/1e6:.2f}M")
+
     def prepare_modules(self):
         print("Replace Transformer Block")
         inner_dim = self.transformer.config.num_attention_heads * self.transformer.config.attention_head_dim
@@ -553,8 +554,9 @@ class VideoWorldModel(nn.Module):
             task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
         task_embeds = task_info_dict["embeds"]
         # task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
-        prompt_embeds = torch.cat([img_embeds, task_embeds, sc_embeds, act_embeds], dim = 1)
+        prompt_embeds = torch.cat([task_embeds, sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
+        img_prompt_embeds = self.img_prompt_proj(img_embeds)
         device = prompt_embeds.device
         # target_imgs: 10 3 T H W
         # print(target_imgs.shape) # 224 * 224
@@ -586,18 +588,21 @@ class VideoWorldModel(nn.Module):
             noisy_video_input = torch.zeros_like(target_z).to(dtype=target_z.dtype, device=target_z.device)
 
         noisy_action_input, action_target, action_noise = self.prepare_noise_action(actions, timesteps)
+        # print(torch.max(noisy_action_input), torch.min(noisy_action_input))
         # print(noisy_video_input.shape, noisy_action_input.shape) # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         model_output = self.transformer(
             hidden_states=noisy_video_input,
             action_hidden_states=noisy_action_input,
             # encoder_attention_mask=prompt_attention_mask,
             encoder_hidden_states=prompt_embeds,
+            img_encoder_hidden_states=img_prompt_embeds,
             condition_len = [img_embeds.shape[1], task_embeds.shape[1], sc_embeds.shape[1], act_embeds.shape[1]],
             timestep=timesteps,
             return_dict=False,
             # mask_index = mask_index
         )
         video_pred, action_pred = model_output
+        # print(action_pred)
         action_pred = self.action_out_proj(action_pred)
         # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         # calculate loss
@@ -612,8 +617,9 @@ class VideoWorldModel(nn.Module):
             video_loss = video_loss.mean()
         else:
             video_loss = torch.tensor(0.0, device=target_z.device)
-            
+        # print(action_pred)
         action_loss = F.mse_loss(action_target, action_pred, reduction="none")
+        # print(action_loss)
         # print(video_loss.shape, action_loss.shape)
         loss = {}
         loss["video_loss"] = video_loss

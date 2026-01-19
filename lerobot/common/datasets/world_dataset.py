@@ -872,25 +872,25 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if vid_key == primary_obs_key:
                 # print(vid_key)
                 # 返回query_ts到query_ts+self.max_frame的帧
-                # frames = decode_video_frames_torchvision(
-                #     video_path, query_ts, self.tolerance_s, self.video_backend, 
-                #     return_all=True, return_type="image",
-                #     max_frame_window=self.max_frame
-                # )
-                frames, history_frame_num = decode_video_frames_torchcodec(
-                    video_path, query_ts, self.tolerance_s, return_all=True, return_type="image",
-                    max_future_num=self.max_frame, max_history_num=self.max_history_frame, 
-                    worker_count = 16
+                frames = decode_video_frames_torchvision(
+                    video_path, query_ts, self.tolerance_s, self.video_backend, 
+                    return_all=True, return_type="image",
+                    max_frame_window=self.max_frame
                 )
-                item["primary_history_frame_num"] = history_frame_num
+                # frames, history_frame_num = decode_video_frames_torchcodec(
+                #     video_path, query_ts, self.tolerance_s, return_all=True, return_type="image",
+                #     max_future_num=self.max_frame, max_history_num=self.max_history_frame, 
+                #     worker_count = 16
+                # )
+                item["primary_history_frame_num"] = 0
             else:
-                # frames = decode_video_frames_torchvision(
-                #     video_path, query_ts, self.tolerance_s, self.video_backend, return_type="image"
-                # )
-                frames = decode_video_frames_torchcodec(
-                    video_path,  query_ts, self.tolerance_s, return_all=False, return_type="image",
-                    worker_count=1
+                frames = decode_video_frames_torchvision(
+                    video_path, query_ts, self.tolerance_s, self.video_backend, return_type="image"
                 )
+                # frames = decode_video_frames_torchcodec(
+                #     video_path,  query_ts, self.tolerance_s, return_all=False, return_type="image",
+                #     worker_count=1
+                # )
             # item[vid_key] = frames.squeeze(0)
             item[vid_key] = frames
             
@@ -2015,20 +2015,22 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         frame_len = len(history_video)
         # print(f"history len:{frame_len}")
         if frame_len < self.cfg.policy.max_history_frame + 1:
-            pad_frame = history_video[-1]
+            if len(history_video) == 0:
+                pad_frame = vision["video"][0]
+            else:
+                pad_frame = history_video[-1]
             pad_len = self.cfg.policy.max_history_frame + 1 - frame_len
             for i in range(pad_len):
                 history_video.append(pad_frame)
-        if frame_len > 0:
-            # there are history frames
-            message[0]["content"].append(
-                {
-                    # "type": "image",
-                    # "image": video[0],
-                    "type": "video",
-                    "video": history_video
-                },
-            )
+        # there are history frames
+        message[0]["content"].append(
+            {
+                # "type": "image",
+                # "image": video[0],
+                "type": "video",
+                "video": history_video
+            },
+        )
         idx = random.randrange(len(QUESTION_LIST))  # 随机选一个索引
         # question = QUESTION_LIST[idx].format(sent=text)
         question = text
@@ -2141,8 +2143,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         select_key = present_img_keys[0]
         # 3 H W
         img_pred_size = 512
-        first_image = np.array(history_frames[-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
-        # first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        # first_image = np.array(history_frames[-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
+        first_image = np.array(item[select_key][0].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
         last_image = np.array(item[select_key][-1].resize((img_pred_size, img_pred_size))).transpose(2, 0, 1)
         
         return vision, first_image, last_image

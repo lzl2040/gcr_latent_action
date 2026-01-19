@@ -527,44 +527,31 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         **kwargs
     ):
         super().__init__(**kwargs)
-        self.attn1 = Attention(
-            query_dim=kwargs.get("dim", 2240),
-            heads=kwargs.get("num_attention_heads", 20),
-            dim_head=kwargs.get("attention_head_dim", 112),
-            kv_heads=kwargs.get("num_attention_heads", 20) if kwargs.get("qk_norm", "rms_norm_across_heads") is not None else None,
-            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-            dropout=kwargs.get("dropout", 0.0),
-            bias=kwargs.get("attention_bias", True),
-            cross_attention_dim=None,
-            processor=Modified_SanaLinearAttnProcessor3_0(),
-        )
-        self.ff = GLUMBTempConv(
-            kwargs.get("dim", 2240), 
-            kwargs.get("dim", 2240), 
-            kwargs.get("mlp_ratio", 3.0), 
-            norm_type=None, 
-            residual_connection=False
-        )
+        # self.attn1 = Attention(
+        #     query_dim=kwargs.get("dim", 2240),
+        #     heads=kwargs.get("num_attention_heads", 20),
+        #     dim_head=kwargs.get("attention_head_dim", 112),
+        #     kv_heads=kwargs.get("num_attention_heads", 20) if kwargs.get("qk_norm", "rms_norm_across_heads") is not None else None,
+        #     qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+        #     dropout=kwargs.get("dropout", 0.0),
+        #     bias=kwargs.get("attention_bias", True),
+        #     cross_attention_dim=None,
+        #     processor=Modified_SanaLinearAttnProcessor3_0(),
+        # )
+        # self.ff = GLUMBTempConv(
+        #     kwargs.get("dim", 2240), 
+        #     kwargs.get("dim", 2240), 
+        #     kwargs.get("mlp_ratio", 3.0), 
+        #     norm_type=None, 
+        #     residual_connection=False
+        # )
         self.ff_action = FeedForward(
             dim=kwargs.get("dim", 2240),
             dropout=0.0,
             final_dropout=0.0,
-            activation_fn="geglu",
+            activation_fn="gelu",
             bias=True
         )
-        # self.ff_action = MLP(
-        #     in_dim=kwargs.get("dim", 2240),
-        #     hidden_dim=kwargs.get("dim", 2240) * 2,
-        #     out_dim=kwargs.get("dim", 2240),
-        #     act=nn.GELU,
-        #     drop=0.0
-        # )
-        
-        # our design: cross attention between image latents, noised action
-        # self.norm3 = nn.LayerNorm(kwargs.get("dim", 2240), 
-        #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
-        #                           eps=kwargs.get("norm_eps", 1e-6)
-        #                           )
 
         self.attn1_for_action = Attention(
             query_dim=kwargs.get("dim", 2240),
@@ -579,20 +566,24 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
             processor=Modified_SanaAttnProcessor2_0(),
         )
         
-        # self.attn2_action = copy.deepcopy(self.attn2)
-        # self.attn2_full = Attention(
-        #         query_dim=kwargs.get("dim", 2240),
-        #         qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-        #         kv_heads=kwargs.get("num_cross_attention_heads", 20),
-        #         cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
-        #         heads=kwargs.get("num_attention_heads", 20),
-        #         dim_head=kwargs.get("attention_head_dim", 112),
-        #         dropout=kwargs.get("dropout", 0.0),
-        #         bias=True,
-        #         out_bias=kwargs.get("attention_out_bias", True),
-        #         processor=Modified_SanaAttnProcessor2_0(),
-        #     )
-        self.action_video_fusion = action_video_fusion
+        # for image condition
+        cross_attention_dim = kwargs.get("cross_attention_dim", None)
+        dim = kwargs.get("dim", 2240)
+        # self.zero_linear_1 = nn.Linear(cross_attention_dim, cross_attention_dim)
+        # self.zero_linear = nn.Linear(cross_attention_dim, cross_attention_dim)
+        # nn.init.zeros_(self.zero_linear.weight)
+        # nn.init.zeros_(self.zero_linear.bias)
+        # nn.init.zeros_(self.zero_linear_1.weight)
+        # nn.init.zeros_(self.zero_linear_1.bias)
+        # self.attn3 = copy.deepcopy(self.attn2)
+        
+        # add non-linear
+        self.linear_attn = nn.Sequential(
+            nn.Linear(cross_attention_dim, cross_attention_dim // 4),
+            nn.GELU(),
+            nn.Linear(cross_attention_dim // 4, cross_attention_dim),
+        )
+        self.gate_ca = nn.Parameter(torch.zeros(1, dim) / dim**0.5) 
         
         
     def forward(
@@ -600,6 +591,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
+        img_encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         timestep: Optional[torch.LongTensor] = None,
         frames: int = None,
@@ -611,11 +603,13 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         batch_size = hidden_states.shape[0]
         
         num_image_token = rotary_emb[0].shape[1]
+        encoder_hidden_states = torch.cat([img_encoder_hidden_states, encoder_hidden_states], dim = 1)
 
         # 1. Modulation
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.scale_shift_table[None, None] + timestep.reshape(batch_size, timestep.shape[1], 6, -1)
         ).unbind(dim=2)
+        gate_ca = self.gate_ca.unsqueeze(0).repeat(batch_size, 1, 1)
 
         # 2. Self Attention
         norm_hidden_states = self.norm1(hidden_states)
@@ -625,6 +619,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
         
         attn_output_action = self.attn1_for_action(norm_action_hidden_states)
+        attn_output_action = self.linear_attn(attn_output_action)
         attn_output = torch.cat([attn_output, attn_output_action], dim = 1)
         hidden_states = hidden_states + gate_msa * attn_output
 
@@ -637,10 +632,21 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=encoder_attention_mask,
-            )
+            ) # very large lead to nan
+            
+            # print("hidden:", hidden_states.norm().item(), "attn2:", attn_output.norm().item(), "encoder:", encoder_hidden_states.norm().item())
+            # attn_output = self.zero_linear_1(attn_output)
+            
+            # if self.attn3 is not None:
+            #     img_attn_output = self.attn3(
+            #         hidden_states,
+            #         encoder_hidden_states=img_encoder_hidden_states
+            #     )
+            #     img_attn_output = self.zero_linear(img_attn_output)
+            #     attn_output = attn_output * gate_ca + img_attn_output
             # attn_output_video = attn_output[:, :num_image_token]
             
-            hidden_states = attn_output + hidden_states
+            hidden_states = attn_output * gate_ca + hidden_states
 
         # 4. Feed-forward
         norm_hidden_states = self.norm2(hidden_states)
@@ -755,7 +761,7 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
                 attention_mask=attention_mask
             )
             hidden_states = attn_output + hidden_states
-            
+        
         if self.attn2_action is not None:
             attn_output = self.attn2_action(
                 hidden_states,
