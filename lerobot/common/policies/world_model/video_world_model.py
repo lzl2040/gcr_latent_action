@@ -403,14 +403,19 @@ class VideoWorldModel(nn.Module):
         # 梯度检查点
         self.transformer.enable_gradient_checkpointing()
         self.vae.requires_grad_(False)
-        
-        # self.transformer.forward = forward_c.__get__(self.transformer)
         self.prepare_modules()
         self.dtype = torch.bfloat16
+        
+        print(f"Freeze transformer FFN weights")
+        for name, param in self.transformer.named_parameters():
+            if "ff" in name and "action" not in name:
+                param.requires_grad = False
+        
         # count parameters
         total_attn1 = 0
         total_attn2 = 0
         total_nolinear = 0
+        total_ffn = 0
         for name, p in self.transformer.named_parameters():
             if "attn1" in name:
                 total_attn1 += p.numel()
@@ -418,12 +423,14 @@ class VideoWorldModel(nn.Module):
                 total_attn2 += p.numel()
             elif "linear_attn" in name:
                 total_nolinear += p.numel()
+            elif "ff" in name:
+                total_ffn += p.numel()
                 
         total_transformer = sum(p.numel() for p in self.transformer.parameters())
         # 3.3B
         print(f"Video model of transformer total parameters: total: {total_transformer/1e6:.2f}M")
         # 800M, 400M, 50M
-        print(f"Video model of transformer total parameters: attn1: {total_attn1/1e6:.2f}M, attn2: {total_attn2/1e6:.2f}M, no linear: {total_nolinear/1e6:.2f}M")
+        print(f"Video model of transformer total parameters: attn1: {total_attn1/1e6:.2f}M, attn2: {total_attn2/1e6:.2f}M, no linear: {total_nolinear/1e6:.2f}M FFN:{total_ffn/1e6:.2f}M")
 
     def prepare_modules(self):
         print("Replace Transformer Block")

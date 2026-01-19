@@ -538,13 +538,13 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         #     cross_attention_dim=None,
         #     processor=Modified_SanaLinearAttnProcessor3_0(),
         # )
-        # self.ff = GLUMBTempConv(
-        #     kwargs.get("dim", 2240), 
-        #     kwargs.get("dim", 2240), 
-        #     kwargs.get("mlp_ratio", 3.0), 
-        #     norm_type=None, 
-        #     residual_connection=False
-        # )
+        self.ff = GLUMBTempConv(
+            kwargs.get("dim", 2240), 
+            kwargs.get("dim", 2240), 
+            kwargs.get("mlp_ratio", 3.0), 
+            norm_type=None, 
+            residual_connection=False
+        )
         self.ff_action = FeedForward(
             dim=kwargs.get("dim", 2240),
             dropout=0.0,
@@ -578,11 +578,17 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         # self.attn3 = copy.deepcopy(self.attn2)
         
         # add non-linear
-        self.linear_attn = nn.Sequential(
+        self.linear_attn_1 = nn.Sequential(
             nn.Linear(cross_attention_dim, cross_attention_dim // 4),
             nn.GELU(),
             nn.Linear(cross_attention_dim // 4, cross_attention_dim),
         )
+        self.linear_attn_2 = nn.Sequential(
+            nn.Linear(cross_attention_dim, cross_attention_dim // 2),
+            nn.GELU(),
+            nn.Linear(cross_attention_dim // 2, cross_attention_dim),
+        )
+        # self.linear_attn_fusion = nn.Linear(cross_attention_dim * 2, cross_attention_dim)
         self.gate_ca = nn.Parameter(torch.zeros(1, dim) / dim**0.5) 
         
         
@@ -619,7 +625,13 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
         
         attn_output_action = self.attn1_for_action(norm_action_hidden_states)
-        attn_output_action = self.linear_attn(attn_output_action)
+        # non-linear
+        attn_output_action_1 = self.linear_attn_1(attn_output_action)
+        attn_output_action_2 = self.linear_attn_2(attn_output_action)
+        # attn_output_action = torch.cat([attn_output_action_1, attn_output_action_2], dim = -1)
+        attn_output_action = (attn_output_action_1 + attn_output_action_2) / 2.0
+        # attn_output_action = self.linear_attn_fusion(attn_output_action)
+        
         attn_output = torch.cat([attn_output, attn_output_action], dim = 1)
         hidden_states = hidden_states + gate_msa * attn_output
 
