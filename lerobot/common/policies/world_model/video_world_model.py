@@ -569,7 +569,7 @@ class VideoWorldModel(nn.Module):
         sch_timesteps = self.noise_scheduler.timesteps.to(device=device)
         timesteps = sch_timesteps[indices].to(device=device)
         # print(train_step)
-        if train_step > 4000:
+        if train_step > 5000:
             # target_z = self.vae.encode(target_imgs).latent_dist.mode().to(device)
             # print(target_z.shape) # torch.Size([2, 16, 8, 28, 28])
             vae_mean = self.vae_mean.to(device=device)
@@ -606,7 +606,7 @@ class VideoWorldModel(nn.Module):
         action_pred = self.action_out_proj(action_pred)
         # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         # calculate loss
-        if train_step > 4000:
+        if train_step > 5000:
             weighting = torch.ones_like(sigmas)
             video_target = noise - clean_images
             # Compute regular loss.
