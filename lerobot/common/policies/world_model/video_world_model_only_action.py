@@ -424,8 +424,8 @@ class VideoWorldModel(nn.Module):
         # x_t = self.noise_scheduler.add_noise(actions, action_noise, timesteps)
         
         # video loss will be high, action new scheduler
-        # sigmas = self.get_sigmas(timesteps, n_dim=actions.ndim, dtype=actions.dtype, device=device)
-        sigmas = self.sample_action_sigma(bs_size, device=device)[:, None, None]
+        sigmas = self.get_sigmas(timesteps, n_dim=actions.ndim, dtype=actions.dtype, device=device)
+        # sigmas = self.sample_action_sigma(bs_size, device=device)[:, None, None]
         # print(sigmas)
         x_t = (1.0 - sigmas) * actions + sigmas * action_noise
         noise_action_embeds = self.embed_action(x_t)

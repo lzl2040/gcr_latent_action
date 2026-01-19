@@ -128,6 +128,7 @@ class LatentWorldModel(PreTrainedPolicy):
         tasks = batch["task"]
         actions = self.prepare_action(batch)
         actions = self.convert_to_dtype(actions)
+        train_step = batch["step"]
         device = pixel_values.device
         action_is_pad = batch.get("action_is_pad")
         # torch.Size([2, 1255]) torch.Size([22, 3, 224, 224]) torch.Size([2, 1255]) torch.Size([2, 30, 3, 224, 224]) torch.Size([2, 30, 32])
@@ -162,7 +163,7 @@ class LatentWorldModel(PreTrainedPolicy):
         # prompt_embeds = torch.cat([img_embeds, sc_embeds, act_embeds], dim=1)
         future_imgs = future_imgs.permute(0, 2, 1, 3, 4)
         # print(future_imgs.shape)
-        losses = self.world_decoder_model(img_embeds, sc_embeds, act_embeds, task_dict, future_imgs, actions)
+        losses = self.world_decoder_model(img_embeds, sc_embeds, act_embeds, task_dict, future_imgs, actions, train_step)
         # print(sc_embeds.shape, act_embeds.shape, img_embeds.shape)
         # print(img_embeds.shape) # 640 2048
         # print(losses["action_loss"].shape, batch["action_mask"].shape)
