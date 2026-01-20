@@ -32,6 +32,7 @@ class Modified_Gated_SanaAttnProcessor2_0:
         hidden_states: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        num_image_token: int = None
     ) -> torch.Tensor:
         batch_size, sequence_length, _ = (
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
@@ -45,7 +46,12 @@ class Modified_Gated_SanaAttnProcessor2_0:
             attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
 
         query = attn.to_q(hidden_states)
-        gate_score = attn.gate_g1(hidden_states)
+        gate_score_video = attn.gate_g1_video(hidden_states)
+        gate_score_action = attn.gate_g1_action(hidden_states)
+        gate_score_video = gate_score_video[:, :num_image_token, :]
+        gate_score_action = gate_score_action[:, num_image_token:, :]
+        gate_score = torch.cat([gate_score_video, gate_score_action], dim=1)
+        #print(gate_score.shape)
 
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
@@ -626,7 +632,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
             dim=kwargs.get("dim", 2240),
             dropout=0.0,
             final_dropout=0.0,
-            activation_fn="gelu",
+            activation_fn="geglu",
             bias=True
         )
 
@@ -667,7 +673,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         )
         # self.linear_attn_fusion = nn.Linear(cross_attention_dim * 2, cross_attention_dim)
         # prevent nan
-        # self.gate_ca = nn.Parameter(torch.zeros(1, dim) / dim**0.5) 
+        self.gate_ca = nn.Parameter(torch.zeros(1, dim) / dim**0.5) 
         # gated attention for cross attention
         self.attn2 = Attention(
                 query_dim=kwargs.get("dim", 2240),
@@ -681,7 +687,8 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
                 out_bias=kwargs.get("attention_out_bias", True),
                 processor=Modified_Gated_SanaAttnProcessor2_0(),
         )
-        self.attn2.gate_g1 = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
+        self.attn2.gate_g1_action = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
+        self.attn2.gate_g1_video = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
         
         
     def forward(
@@ -736,6 +743,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=encoder_attention_mask,
+                num_image_token=num_image_token
             ) # very large lead to nan
             
             # print("hidden:", hidden_states.norm().item(), "attn2:", attn_output.norm().item(), "encoder:", encoder_hidden_states.norm().item())
