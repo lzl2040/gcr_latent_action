@@ -202,6 +202,9 @@ def train_step(model, batch, scaler, cfg, sync_flag, step):
             with model.no_sync():
                 loss, output_dict = model(batch)
                 loss = loss / cfg.gradient_accumulation_steps
+                output_dict["action_loss"] = output_dict["action_loss"] / cfg.gradient_accumulation_steps
+                output_dict["video_loss"] = output_dict["video_loss"] / cfg.gradient_accumulation_steps
+                output_dict["language_loss"] = output_dict["language_loss"] / cfg.gradient_accumulation_steps
                 # 反向传播
                 if scaler is not None:
                     scaler.scale(loss).backward()
