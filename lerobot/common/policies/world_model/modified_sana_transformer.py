@@ -13,6 +13,83 @@ from diffusers.utils import deprecate, logging
 from diffusers.models.activations import GEGLU, GELU, ApproximateGELU, FP32SiLU, LinearActivation, SwiGLU
 import copy
 
+
+class Modified_Gated_SanaAttnProcessor2_0:
+    r"""
+    Processor for implementing scaled dot-product attention (enabled by default if you're using PyTorch 2.0).
+    """
+
+    _attention_backend = None
+    _parallel_config = None
+
+    def __init__(self):
+        if not hasattr(F, "scaled_dot_product_attention"):
+            raise ImportError("SanaAttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        batch_size, sequence_length, _ = (
+            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
+        )
+        # print(attention_mask.shape)
+
+        if attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+            # scaled_dot_product_attention expects attention_mask shape to be
+            # (batch, heads, source_length, target_length)
+            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+
+        query = attn.to_q(hidden_states)
+        gate_score = attn.gate_g1(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        query = query.view(batch_size, -1, attn.heads, head_dim)
+        key = key.view(batch_size, -1, attn.heads, head_dim)
+        value = value.view(batch_size, -1, attn.heads, head_dim)
+
+        # the output of sdp = (batch, num_heads, seq_len, head_dim)
+        hidden_states = dispatch_attention_fn(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            backend=self._attention_backend,
+            parallel_config=self._parallel_config,
+        )
+        hidden_states = hidden_states.flatten(2, 3)
+        hidden_states = hidden_states.type_as(query)
+        
+        hidden_states = hidden_states * torch.sigmoid(gate_score)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        hidden_states = hidden_states / attn.rescale_output_factor
+
+        return hidden_states
+
 class Modified_SanaAttnProcessor2_0:
     r"""
     Processor for implementing scaled dot-product attention (enabled by default if you're using PyTorch 2.0).
@@ -589,7 +666,22 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
             nn.Linear(cross_attention_dim // 2, cross_attention_dim),
         )
         # self.linear_attn_fusion = nn.Linear(cross_attention_dim * 2, cross_attention_dim)
-        self.gate_ca = nn.Parameter(torch.zeros(1, dim) / dim**0.5) 
+        # prevent nan
+        # self.gate_ca = nn.Parameter(torch.zeros(1, dim) / dim**0.5) 
+        # gated attention for cross attention
+        self.attn2 = Attention(
+                query_dim=kwargs.get("dim", 2240),
+                qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+                kv_heads=kwargs.get("num_cross_attention_heads", 20),
+                cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+                heads=kwargs.get("num_attention_heads", 20),
+                dim_head=kwargs.get("attention_head_dim", 112),
+                dropout=kwargs.get("dropout", 0.0),
+                bias=True,
+                out_bias=kwargs.get("attention_out_bias", True),
+                processor=Modified_Gated_SanaAttnProcessor2_0(),
+        )
+        self.attn2.gate_g1 = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
         
         
     def forward(
@@ -615,7 +707,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.scale_shift_table[None, None] + timestep.reshape(batch_size, timestep.shape[1], 6, -1)
         ).unbind(dim=2)
-        gate_ca = self.gate_ca.unsqueeze(0).repeat(batch_size, 1, 1)
+        # gate_ca = self.gate_ca.unsqueeze(0).repeat(batch_size, 1, 1)
 
         # 2. Self Attention
         norm_hidden_states = self.norm1(hidden_states)
@@ -658,7 +750,8 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
             #     attn_output = attn_output * gate_ca + img_attn_output
             # attn_output_video = attn_output[:, :num_image_token]
             
-            hidden_states = attn_output * gate_ca + hidden_states
+            # hidden_states = attn_output * gate_ca + hidden_states
+            hidden_states = attn_output + hidden_states
 
         # 4. Feed-forward
         norm_hidden_states = self.norm2(hidden_states)
