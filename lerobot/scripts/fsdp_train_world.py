@@ -577,6 +577,7 @@ def train(cfg: TrainPipelineConfig):
         
         # 参数更新
         if sync_flag:
+            # print(f"loss", loss_value, "action_loss", action_loss_value)
             # logger.info(f"Step {step}/{cfg.steps}")
             torch.cuda.empty_cache()
             optim_start = time.perf_counter()
@@ -621,8 +622,8 @@ def train(cfg: TrainPipelineConfig):
                 logger.info(train_tracker)
                 if wandb_logger:
                     wandb_log_dict = train_tracker.to_dict()
-                    if outputs:
-                        wandb_log_dict.update(outputs)
+                    # if outputs:
+                    #     wandb_log_dict.update(outputs)
                     wandb_logger.log_dict(wandb_log_dict, step)
                 train_tracker.reset_averages()
         
