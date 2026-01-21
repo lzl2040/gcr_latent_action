@@ -106,6 +106,7 @@ def prepare_encoder_attention_mask_text_condition(
     batch_size: int | None = None,
     device: torch.device | None = None,
     dtype: torch.dtype = torch.float32,
+    is_video_pad: bool = False
 ):
     """
     Build cross-attention mask for:
@@ -158,7 +159,10 @@ def prepare_encoder_attention_mask_text_condition(
     # ----- Action queries -----
     action_q = slice(N_V, N_V + N_A)
     
+    
     attn_mask[action_q, video_k] = 0.0
+    if is_video_pad:
+        attn_mask[action_q, video_k] = -10000.0
     attn_mask[action_q, history_k] = 0.0
     attn_mask[action_q, lan_k] = 0.0
     # attn_mask[video_q, scene_k] = 0.0
@@ -213,6 +217,7 @@ def forward_c(
         attention_kwargs: Optional[Dict[str, Any]] = None,
         controlnet_block_samples: Optional[Tuple[torch.Tensor]] = None,
         return_dict: bool = True,
+        is_video_pad = False
     ) -> Union[Tuple[torch.Tensor, ...], Transformer2DModelOutput]:
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
@@ -261,7 +266,7 @@ def forward_c(
                 N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
                 M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
                 batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
-                device=hidden_states.device
+                device=hidden_states.device, is_video_pad = is_video_pad
             )
         if attention_mask is None:
             attention_mask = prepare_attention_mask(
@@ -269,7 +274,7 @@ def forward_c(
                 batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
                 device=hidden_states.device
             )
-        # print(hidden_states.shape) # [10, 1568, 2240]
+        # print(hidden_states.shape) # [10, 1568, 2240] # for 30 frame
         hidden_states = torch.cat([hidden_states, action_hidden_states], dim = 1)
         
 
@@ -586,13 +591,14 @@ class VideoWorldModel(nn.Module):
             # print(target_z.shape) # [10, 16, 8, 28, 28]
             clean_images = target_z
             noise = torch.randn_like(clean_images)
-            # self.noise_scheduler.add_noise()
             sigmas = self.get_sigmas(timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype, device=device)
             # noisy_model_input = (1.0 - sigmas) * clean_images + sigmas * noise
             # noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
             noisy_video_input = (1.0 - sigmas) * clean_images + sigmas * noise
+            is_video_pad = False
         else:
             noisy_video_input = torch.zeros_like(target_z).to(dtype=target_z.dtype, device=target_z.device)
+            is_video_pad = True
 
         noisy_action_input, action_target, action_noise = self.prepare_noise_action(actions, timesteps)
         # print(torch.max(noisy_action_input), torch.min(noisy_action_input))
@@ -606,6 +612,7 @@ class VideoWorldModel(nn.Module):
             condition_len = [img_embeds.shape[1], task_embeds.shape[1], sc_embeds.shape[1], act_embeds.shape[1]],
             timestep=timesteps,
             return_dict=False,
+            is_video_pad = is_video_pad
             # mask_index = mask_index
         )
         video_pred, action_pred = model_output
@@ -627,7 +634,6 @@ class VideoWorldModel(nn.Module):
         # print(action_pred)
         action_loss = F.mse_loss(action_target, action_pred, reduction="none")
         # print(action_loss)
-        # print(video_loss.shape, action_loss.shape)
         loss = {}
         loss["video_loss"] = video_loss
         loss["action_loss"] = action_loss
