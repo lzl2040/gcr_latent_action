@@ -872,25 +872,25 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if vid_key == primary_obs_key:
                 # print(vid_key)
                 # 返回query_ts到query_ts+self.max_frame的帧
-                frames = decode_video_frames_torchvision(
-                    video_path, query_ts, self.tolerance_s, self.video_backend, 
-                    return_all=True, return_type="image",
-                    max_frame_window=self.max_frame
-                )
-                # frames, history_frame_num = decode_video_frames_torchcodec(
-                #     video_path, query_ts, self.tolerance_s, return_all=True, return_type="image",
-                #     max_future_num=self.max_frame, max_history_num=self.max_history_frame, 
-                #     worker_count = 16
+                # frames = decode_video_frames_torchvision(
+                #     video_path, query_ts, self.tolerance_s, self.video_backend, 
+                #     return_all=True, return_type="image",
+                #     max_frame_window=self.max_frame
                 # )
-                item["primary_history_frame_num"] = 0
+                frames, history_frame_num = decode_video_frames_torchcodec(
+                    video_path, query_ts, self.tolerance_s, return_all=True, return_type="image",
+                    max_future_num=self.max_frame, max_history_num=self.max_history_frame, 
+                    worker_count = 16
+                )
+                item["primary_history_frame_num"] = history_frame_num
             else:
-                frames = decode_video_frames_torchvision(
-                    video_path, query_ts, self.tolerance_s, self.video_backend, return_type="image"
-                )
-                # frames = decode_video_frames_torchcodec(
-                #     video_path,  query_ts, self.tolerance_s, return_all=False, return_type="image",
-                #     worker_count=1
+                # frames = decode_video_frames_torchvision(
+                #     video_path, query_ts, self.tolerance_s, self.video_backend, return_type="image"
                 # )
+                frames = decode_video_frames_torchcodec(
+                    video_path,  query_ts, self.tolerance_s, return_all=False, return_type="image",
+                    worker_count=1
+                )
             # item[vid_key] = frames.squeeze(0)
             item[vid_key] = frames
             
