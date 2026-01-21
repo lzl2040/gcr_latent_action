@@ -674,22 +674,22 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         # )
         # self.linear_attn_fusion = nn.Linear(cross_attention_dim * 2, cross_attention_dim)
         # self.gate_ca = nn.Parameter(torch.zeros(1, dim) / dim**0.5) 
-        # self.attn2 = Attention(
-        #     query_dim=kwargs.get("dim", 2240),
-        #     qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-        #     kv_heads=kwargs.get("num_cross_attention_heads", 20),
-        #     cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
-        #     heads=kwargs.get("num_attention_heads", 20),
-        #     dim_head=kwargs.get("attention_head_dim", 112),
-        #     dropout=kwargs.get("dropout", 0.0),
-        #     bias=True,
-        #     out_bias=kwargs.get("attention_out_bias", True),
-        #     processor=Modified_ExpertQKV_SanaAttnProcessor2_0(),
-        #     # processor=Modified_SanaAttnProcessor2_0()
-        # )
-        # self.attn2.to_q_action = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
-        # self.attn2.to_k_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
-        # self.attn2.to_v_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
+        self.attn2 = Attention(
+            query_dim=kwargs.get("dim", 2240),
+            qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
+            kv_heads=kwargs.get("num_cross_attention_heads", 20),
+            cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
+            heads=kwargs.get("num_attention_heads", 20),
+            dim_head=kwargs.get("attention_head_dim", 112),
+            dropout=kwargs.get("dropout", 0.0),
+            bias=True,
+            out_bias=kwargs.get("attention_out_bias", True),
+            processor=Modified_ExpertQKV_SanaAttnProcessor2_0(),
+            # processor=Modified_SanaAttnProcessor2_0()
+        )
+        self.attn2.to_q_action = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
+        self.attn2.to_k_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
+        self.attn2.to_v_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
         self.action_adaln = nn.Linear(dim, 6 * dim, bias=True)
         self.silu = nn.SiLU()
         
@@ -758,7 +758,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=encoder_attention_mask,
-                # num_image_token=num_image_token
+                num_image_token=num_image_token
             ) # very large lead to nan: maybe action tend to fuse video
             
             # print("hidden:", hidden_states.norm().item(), "attn2:", attn_output.norm().item(), "encoder:", encoder_hidden_states.norm().item())
@@ -993,5 +993,21 @@ class Modified_SanaModulatedNorm(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.norm(hidden_states)
         shift, scale = (self.scale_shift_table[None, None] + temb[:, :, None].to(self.scale_shift_table.device)).unbind(dim=2)
+        hidden_states = hidden_states * (1 + scale) + shift
+        return hidden_states
+
+class AdaLNTime(nn.Module):
+    def __init__(self, dim: int, elementwise_affine: bool = False, eps: float = 1e-6, inner_dim: int = None):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim, elementwise_affine=elementwise_affine, eps=eps)
+        self.linear = nn.Linear(dim, 2 * dim, bias=True)
+        self.act = nn.SiLU()
+    
+    def forward(
+        self, hidden_states: torch.Tensor, temb: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_states = self.norm(hidden_states)
+        batch_size = hidden_states.shape[0]
+        shift, scale = self.act(self.linear(temb)).reshape(batch_size, temb.shape[1], 2, -1).unbind(dim=2)
         hidden_states = hidden_states * (1 + scale) + shift
         return hidden_states

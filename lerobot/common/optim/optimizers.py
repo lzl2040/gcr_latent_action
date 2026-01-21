@@ -68,6 +68,18 @@ class AdamConfig(OptimizerConfig):
 @dataclass
 # class AdamWConfig(OptimizerConfig):
 #     lr: float = 1e-3
+#     betas: tuple[float, float] = (0.9, 0.999)
+#     eps: float = 1e-8
+#     weight_decay: float = 1e-2
+#     grad_clip_norm: float = 10.0
+
+#     def build(self, params: dict) -> torch.optim.Optimizer:
+#         kwargs = asdict(self)
+#         kwargs.pop("grad_clip_norm")
+#         return torch.optim.AdamW(params, **kwargs)
+
+# class AdamWConfig(OptimizerConfig):
+#     lr: float = 1e-3
 #     beta2_decay: float = -0.8
 #     eps: tuple[float | None, float] = (None, 0.001)
 #     weight_decay: float = 1e-2

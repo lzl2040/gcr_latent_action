@@ -10,7 +10,7 @@ from diffusers import (
 )
 from typing import Any, Dict, Optional, Tuple, Union
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
-from lerobot.common.policies.world_model.modified_sana_transformer import Modified_SanaVideoTransformerBlock, Modified_SanaVideoTransformerBlock_V2, Modified_SanaModulatedNorm, Modified_WanRotaryPosEmbed
+from lerobot.common.policies.world_model.modified_sana_transformer import Modified_SanaVideoTransformerBlock, Modified_SanaVideoTransformerBlock_V2, Modified_SanaModulatedNorm, Modified_WanRotaryPosEmbed, AdaLNTime
 from lerobot.common.utils.utils import get_safe_dtype
 import math
 import torch.nn.functional as F  # noqa: N812
@@ -335,10 +335,12 @@ def forward_c(
                     hidden_states = hidden_states + controlnet_block_samples[index_block - 1]
 
         # 3. Normalization
+        # important otherwise action loss will be very large
+        hidden_states = self.norm_out(hidden_states, embedded_timestep)
         num_action_token = action_hidden_states.shape[1]
         hidden_states, action_hidden_states = hidden_states[:, :-num_action_token], hidden_states[:, :num_action_token]
+        # action_hidden_states = self.norm_out_action(action_hidden_states, embedded_timestep)
         
-        hidden_states = self.norm_out(hidden_states, embedded_timestep)
         hidden_states = self.proj_out(hidden_states)
 
         # 5. Unpatchify
@@ -393,6 +395,10 @@ class VideoWorldModel(nn.Module):
                                                                elementwise_affine=False, 
                                                                eps=1e-6, 
                                                                inner_dim=self.inner_dim)
+        # self.transformer.norm_out_action = AdaLNTime(self.inner_dim, 
+        #                                                        elementwise_affine=False, 
+        #                                                        eps=1e-6, 
+        #                                                        inner_dim=self.inner_dim)
         
         self.transformer.rope = Modified_WanRotaryPosEmbed(self.transformer.config.attention_head_dim, 
                                                            self.transformer.config.patch_size, 
