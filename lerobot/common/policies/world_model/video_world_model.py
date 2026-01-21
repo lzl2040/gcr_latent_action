@@ -283,6 +283,7 @@ def forward_c(
                 timestep.flatten(), guidance=guidance, hidden_dtype=hidden_states.dtype
             )
         else:
+            # timestep包含shif, scale等参数, embedded_timestep不包含
             timestep, embedded_timestep = self.time_embed(
                 timestep.flatten(), batch_size=batch_size, hidden_dtype=hidden_states.dtype
             )
@@ -306,6 +307,7 @@ def forward_c(
                     img_encoder_hidden_states,
                     encoder_attention_mask,
                     timestep,
+                    embedded_timestep,
                     post_patch_num_frames,
                     post_patch_height,
                     post_patch_width,
@@ -333,11 +335,10 @@ def forward_c(
                     hidden_states = hidden_states + controlnet_block_samples[index_block - 1]
 
         # 3. Normalization
-        hidden_states = self.norm_out(hidden_states, embedded_timestep)
-
         num_action_token = action_hidden_states.shape[1]
         hidden_states, action_hidden_states = hidden_states[:, :-num_action_token], hidden_states[:, :num_action_token]
         
+        hidden_states = self.norm_out(hidden_states, embedded_timestep)
         hidden_states = self.proj_out(hidden_states)
 
         # 5. Unpatchify
@@ -581,7 +582,7 @@ class VideoWorldModel(nn.Module):
         sch_timesteps = self.noise_scheduler.timesteps.to(device=device)
         timesteps = sch_timesteps[indices].to(device=device)
         # print(train_step)
-        if train_step > 5000:
+        if train_step > self.config.action_warm_up_step:
             # target_z = self.vae.encode(target_imgs).latent_dist.mode().to(device)
             # print(target_z.shape) # torch.Size([2, 16, 8, 28, 28])
             vae_mean = self.vae_mean.to(device=device)
@@ -620,7 +621,7 @@ class VideoWorldModel(nn.Module):
         action_pred = self.action_out_proj(action_pred)
         # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         # calculate loss
-        if train_step > 5000:
+        if train_step > self.config.action_warm_up_step:
             weighting = torch.ones_like(sigmas)
             video_target = noise - clean_images
             # Compute regular loss.

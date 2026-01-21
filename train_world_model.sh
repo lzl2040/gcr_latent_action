@@ -27,6 +27,7 @@ IMG_DECODER_PART_TRAIN=true
 MAX_ACTION_DIM=32
 IMG_LOSS_WEIGHT=0.1
 USE_ACTION_MASK=true
+ACTION_WARM_UP_STEP=3000
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -69,6 +70,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --warm_up_steps)
             SCHEDULER_WARMUP_STEPS="$2"
+            shift 2
+            ;;
+        --action_warm_up_step)
+            ACTION_WARM_UP_STEP="$2"
             shift 2
             ;;
         --decay_steps)
@@ -169,6 +174,7 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --policy.max_action_dim=$MAX_ACTION_DIM \
     --policy.max_state_dim=$MAX_ACTION_DIM \
     --policy.use_action_mask=$USE_ACTION_MASK \
+    --policy.action_warm_up_step=$ACTION_WARM_UP_STEP \
     --policy.loss_type=$LOSS_TYPE \
     --policy.img_loss_weight=$IMG_LOSS_WEIGHT \
     --policy.img_decoder_part_train=$IMG_DECODER_PART_TRAIN \

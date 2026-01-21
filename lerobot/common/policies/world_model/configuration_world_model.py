@@ -43,6 +43,7 @@ class LatentWorldModelConfig(PreTrainedConfig):
     max_history_frame: int = 10
     use_state: bool = True
     use_action_mask: bool = True
+    action_warm_up_step: int = 0
     
     topk: int = 8
     # lora
