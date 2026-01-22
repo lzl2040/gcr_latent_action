@@ -275,6 +275,7 @@ def forward_c(
                 device=hidden_states.device
             )
         # print(hidden_states.shape) # [10, 1568, 2240] # for 30 frame
+        num_image_token = hidden_states.shape[1]
         hidden_states = torch.cat([hidden_states, action_hidden_states], dim = 1)
         
 
@@ -337,8 +338,7 @@ def forward_c(
         # 3. Normalization
         # important otherwise action loss will be very large
         hidden_states = self.norm_out(hidden_states, embedded_timestep)
-        num_action_token = action_hidden_states.shape[1]
-        hidden_states, action_hidden_states = hidden_states[:, :-num_action_token], hidden_states[:, :num_action_token]
+        hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:]
         # action_hidden_states = self.norm_out_action(action_hidden_states, embedded_timestep)
         
         hidden_states = self.proj_out(hidden_states)
