@@ -292,16 +292,16 @@ class Modified_SanaLinearAttnProcessor3_0:
                 out[..., 0::2] = x1 * cos - x2 * sin
                 out[..., 1::2] = x1 * sin + x2 * cos
                 return out.type_as(hidden_states)
-            # query, action_query = query[:, :num_image_token], query[:, num_image_token:]
-            # key, action_key = key[:, :num_image_token], key[:, num_image_token:]
+            query, action_query = query[:, :num_image_token], query[:, num_image_token:]
+            key, action_key = key[:, :num_image_token], key[:, num_image_token:]
             
             query_rotate = apply_rotary_emb(query, *rotary_emb)
             key_rotate = apply_rotary_emb(key, *rotary_emb)
             
-            # query_rotate = torch.cat([query_rotate, action_query], dim = 1)
-            # key_rotate = torch.cat([key_rotate, action_key], dim = 1)
-            # query = torch.cat([query, action_query], dim = 1)
-            # key = torch.cat([key, action_query], dim = 1)
+            query_rotate = torch.cat([query_rotate, action_query], dim = 1)
+            key_rotate = torch.cat([key_rotate, action_key], dim = 1)
+            query = torch.cat([query, action_query], dim = 1)
+            key = torch.cat([key, action_query], dim = 1)
 
         # B,H,C,N
         query = query.permute(0, 2, 3, 1)
@@ -507,36 +507,7 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
             activation_fn="geglu",
             bias=True
         )
-        # self.ff_action = MLP(
-        #     in_dim=kwargs.get("dim", 2240),
-        #     hidden_dim=kwargs.get("dim", 2240) * 2,
-        #     out_dim=kwargs.get("dim", 2240),
-        #     act=nn.GELU,
-        #     drop=0.0
-        # )
         
-        # our design: cross attention between image latents, noised action
-        # self.norm3 = nn.LayerNorm(kwargs.get("dim", 2240), 
-        #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
-        #                           eps=kwargs.get("norm_eps", 1e-6)
-        #                           )
-
-        self.action_video_fusion = action_video_fusion
-        if self.action_video_fusion:
-            self.attn3 = Attention(
-                query_dim=kwargs.get("dim", 2240),
-                qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-                kv_heads=kwargs.get("num_cross_attention_heads", 20),
-                cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
-                heads=kwargs.get("num_attention_heads", 20),
-                dim_head=kwargs.get("attention_head_dim", 112),
-                dropout=kwargs.get("dropout", 0.0),
-                bias=True,
-                out_bias=kwargs.get("attention_out_bias", True),
-                processor=Modified_SanaAttnProcessor2_0(),
-            )
-        else:
-            self.attn3 = None
         
         
     def forward(
@@ -544,8 +515,10 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
+        img_encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         timestep: Optional[torch.LongTensor] = None,
+        embedded_timestep: Optional[torch.LongTensor] = None,
         frames: int = None,
         height: int = None,
         width: int = None,
@@ -555,6 +528,7 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
         batch_size = hidden_states.shape[0]
         
         num_image_token = rotary_emb[0].shape[1]
+        encoder_hidden_states = torch.cat([img_encoder_hidden_states, encoder_hidden_states], dim = 1)
 
         # 1. Modulation
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
@@ -568,16 +542,10 @@ class Modified_SanaVideoTransformerBlock(SanaVideoTransformerBlock):
 
         attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
         hidden_states = hidden_states + gate_msa * attn_output
-        
-        if self.attn3 is not None:
-            attn_output = self.attn3(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask
-            )
-            hidden_states = attn_output + hidden_states
 
         # 3. Cross Attention
         if self.attn2 is not None:
+            encoder_hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim = 1)
             attn_output = self.attn2(
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
@@ -693,7 +661,83 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         self.action_adaln = nn.Linear(dim, 6 * dim, bias=True)
         self.silu = nn.SiLU()
         
+    # wo action adaln params
+    # def forward(
+    #     self,
+    #     hidden_states: torch.Tensor,
+    #     attention_mask: Optional[torch.Tensor] = None,
+    #     encoder_hidden_states: Optional[torch.Tensor] = None,
+    #     img_encoder_hidden_states: Optional[torch.Tensor] = None,
+    #     encoder_attention_mask: Optional[torch.Tensor] = None,
+    #     timestep: Optional[torch.LongTensor] = None,
+    #     embedded_timestep: Optional[torch.LongTensor] = None,
+    #     frames: int = None,
+    #     height: int = None,
+    #     width: int = None,
+    #     rotary_emb: Optional[torch.Tensor] = None,
+    #     rotary_emb_action: Optional[torch.Tensor] = None,
+    # ) -> torch.Tensor:
+    #     batch_size = hidden_states.shape[0]
         
+    #     num_image_token = rotary_emb[0].shape[1]
+    #     encoder_hidden_states = torch.cat([img_encoder_hidden_states, encoder_hidden_states], dim = 1)
+
+    #     # 1. Modulation
+    #     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+    #         self.scale_shift_table[None, None] + timestep.reshape(batch_size, timestep.shape[1], 6, -1)
+    #     ).unbind(dim=2)
+    #     # 2. Self Attention
+    #     norm_hidden_states = self.norm1(hidden_states)
+    #     norm_hidden_states, norm_action_hidden_states = norm_hidden_states[:, :num_image_token], norm_hidden_states[:, num_image_token:]
+        
+    #     norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
+    #     norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
+        
+    #     norm_action_hidden_states = norm_action_hidden_states.to(hidden_states.dtype)
+        
+    #     attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
+        
+    #     attn_output_action = self.attn1_for_action(norm_action_hidden_states)
+    #     attn_output = gate_msa * attn_output
+        
+    #     attn_output = torch.cat([attn_output, attn_output_action], dim = 1)
+    #     hidden_states = hidden_states + attn_output
+
+    #     # 3. Cross Attention
+    #     if self.attn2 is not None:
+    #         # if self.action_video_fusion:
+    #         #     encoder_attention_mask[:, :, :hidden_states.shape[1]] = float("-inf")
+    #         encoder_hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim = 1)
+    #         attn_output = self.attn2(
+    #             hidden_states,
+    #             encoder_hidden_states=encoder_hidden_states,
+    #             attention_mask=encoder_attention_mask,
+    #             # num_image_token=num_image_token
+    #         ) # very large lead to nan: maybe action tend to fuse video
+            
+    #         hidden_states = attn_output + hidden_states
+
+    #     # 4. Feed-forward
+    #     norm_hidden_states = self.norm2(hidden_states)
+    #     norm_hidden_states, norm_action_hidden_states = norm_hidden_states[:, :num_image_token], norm_hidden_states[:, num_image_token:]
+    #     norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
+        
+    #     norm_hidden_states = norm_hidden_states.unflatten(1, (frames, height, width))
+    #     ff_output = self.ff(norm_hidden_states)
+    #     # need a ffn layer for action
+    #     ff_action_output = self.ff_action(norm_action_hidden_states)
+        
+    #     ff_output = ff_output.flatten(1, 3)
+        
+    #     ff_output = ff_output * gate_mlp
+        
+    #     ff_output = torch.cat([ff_output, ff_action_output], dim = 1)
+        
+    #     hidden_states = hidden_states + ff_output
+
+    #     return hidden_states
+    
+    # action ada params
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -760,18 +804,6 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
                 attention_mask=encoder_attention_mask,
                 num_image_token=num_image_token
             ) # very large lead to nan: maybe action tend to fuse video
-            
-            # print("hidden:", hidden_states.norm().item(), "attn2:", attn_output.norm().item(), "encoder:", encoder_hidden_states.norm().item())
-            # attn_output = self.zero_linear_1(attn_output)
-            
-            # if self.attn3 is not None:
-            #     img_attn_output = self.attn3(
-            #         hidden_states,
-            #         encoder_hidden_states=img_encoder_hidden_states
-            #     )
-            #     img_attn_output = self.zero_linear(img_attn_output)
-            #     attn_output = attn_output * gate_ca + img_attn_output
-            # attn_output_video = attn_output[:, :num_image_token]
             hidden_states = attn_output + hidden_states
             # hidden_states = attn_output * gate_ca + hidden_states
 

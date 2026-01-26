@@ -151,6 +151,7 @@ def prepare_encoder_attention_mask_text_condition(
 
     # print(f"Lan:{lan_k}")
     attn_mask[video_q, action_k] = 0.0 # add 0 make nan
+    # attn_mask[video_q, action_k] = -10000.0
     attn_mask[video_q, history_k] = 0.0
     attn_mask[video_q, lan_k] = 0.0
     attn_mask[video_q, scene_k] = 0.0
@@ -163,6 +164,7 @@ def prepare_encoder_attention_mask_text_condition(
     attn_mask[action_q, video_k] = 0.0
     if is_video_pad:
         attn_mask[action_q, video_k] = -10000.0
+    # attn_mask[action_q, video_k] = -10000.0
     attn_mask[action_q, history_k] = 0.0
     attn_mask[action_q, lan_k] = 0.0
     # attn_mask[video_q, scene_k] = 0.0
@@ -337,9 +339,9 @@ def forward_c(
 
         # 3. Normalization
         # important otherwise action loss will be very large
-        hidden_states = self.norm_out(hidden_states, embedded_timestep)
         hidden_states, action_hidden_states = hidden_states[:, :num_image_token], hidden_states[:, num_image_token:]
-        # action_hidden_states = self.norm_out_action(action_hidden_states, embedded_timestep)
+        hidden_states = self.norm_out(hidden_states, embedded_timestep)
+        action_hidden_states = self.norm_out_action(action_hidden_states, embedded_timestep)
         
         hidden_states = self.proj_out(hidden_states)
 
@@ -395,10 +397,10 @@ class VideoWorldModel(nn.Module):
                                                                elementwise_affine=False, 
                                                                eps=1e-6, 
                                                                inner_dim=self.inner_dim)
-        # self.transformer.norm_out_action = AdaLNTime(self.inner_dim, 
-        #                                                        elementwise_affine=False, 
-        #                                                        eps=1e-6, 
-        #                                                        inner_dim=self.inner_dim)
+        self.transformer.norm_out_action = AdaLNTime(self.inner_dim, 
+                                                               elementwise_affine=False, 
+                                                               eps=1e-6, 
+                                                               inner_dim=self.inner_dim)
         
         self.transformer.rope = Modified_WanRotaryPosEmbed(self.transformer.config.attention_head_dim, 
                                                            self.transformer.config.patch_size, 

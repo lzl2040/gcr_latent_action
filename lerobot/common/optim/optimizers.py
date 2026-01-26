@@ -66,17 +66,17 @@ class AdamConfig(OptimizerConfig):
 
 @OptimizerConfig.register_subclass("adamw")
 @dataclass
-class AdamWConfig(OptimizerConfig):
-    lr: float = 1e-3
-    betas: tuple[float, float] = (0.9, 0.999)
-    eps: float = 1e-8
-    weight_decay: float = 1e-2
-    grad_clip_norm: float = 10.0
+# class AdamWConfig(OptimizerConfig):
+#     lr: float = 1e-3
+#     betas: tuple[float, float] = (0.9, 0.999)
+#     eps: float = 1e-8
+#     weight_decay: float = 1e-2
+#     grad_clip_norm: float = 10.0
 
-    def build(self, params: dict) -> torch.optim.Optimizer:
-        kwargs = asdict(self)
-        kwargs.pop("grad_clip_norm")
-        return torch.optim.AdamW(params, **kwargs)
+#     def build(self, params: dict) -> torch.optim.Optimizer:
+#         kwargs = asdict(self)
+#         kwargs.pop("grad_clip_norm")
+#         return torch.optim.AdamW(params, **kwargs)
 
 # class AdamWConfig(OptimizerConfig):
 #     lr: float = 1e-3
@@ -90,18 +90,18 @@ class AdamWConfig(OptimizerConfig):
 #         kwargs = asdict(self)
 #         kwargs.pop("grad_clip_norm")
 #         return torch.optim.Adafactor(params, **kwargs)
-# class AdamWConfig(OptimizerConfig):
-#     lr: float = 1e-3
-#     betas: tuple[float, float] = (0.9, 0.999)
-#     eps: float = 1e-8
-#     weight_decay: float = 1e-2
-#     grad_clip_norm: float = 10.0
+class AdamWConfig(OptimizerConfig):
+    lr: float = 1e-3
+    betas: tuple[float, float] = (0.9, 0.999)
+    eps: float = 1e-8
+    weight_decay: float = 1e-2
+    grad_clip_norm: float = 10.0
 
-#     def build(self, params: dict) -> torch.optim.Optimizer:
-#         kwargs = asdict(self)
-#         kwargs.pop("grad_clip_norm")
-#         adam8bit = bnb.optim.Adam8bit(params, **kwargs)
-#         return adam8bit
+    def build(self, params: dict) -> torch.optim.Optimizer:
+        kwargs = asdict(self)
+        kwargs.pop("grad_clip_norm")
+        adam8bit = bnb.optim.Adam8bit(params, **kwargs)
+        return adam8bit
         # return torch.optim.AdamW(params, **kwargs)
 
 
