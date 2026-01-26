@@ -199,13 +199,13 @@ def make_policy(
                 #     for key, value in policy.named_parameters():
                 #         f.write(f"{key}:{value.shape}\n")
                 state_dict = policy._fix_pytorch_state_dict_keys(new_state_dict)
-                missing_key, unexpected_keys = policy.load_state_dict(state_dict, strict=False)
+                missing_keys, unexpected_keys = policy.load_state_dict(state_dict, strict=False)
                 policy.resize_token_embedding()
             else:
-                missing_key, unexpected_keys = policy.load_state_dict(new_state_dict, strict=False)
+                missing_keys, unexpected_keys = policy.load_state_dict(new_state_dict, strict=False)
         else:
-            missing_keys, unspected_keys = policy.load_state_dict(new_state_dict, strict=False)
-        print(missing_keys, unspected_keys)
+            missing_keys, unexpected_keys = policy.load_state_dict(new_state_dict, strict=False)
+        print(missing_keys, unexpected_keys)
         print(f"Load pt weights from:{weight_pt_path}")
         del weights
         del key_to_remove
