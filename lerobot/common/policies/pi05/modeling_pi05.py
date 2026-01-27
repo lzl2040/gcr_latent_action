@@ -214,7 +214,7 @@ class PI05Policy(PreTrainedPolicy):
         # Initialize the core PI05 model
         self.model = PI05FlowMatching(config)
 
-        # tokenizer_path = "/home/v-zuoleili/Pretrain/pi0/paligemma-3b-pt-224/"
+        # tokenizer_path = "/Data/lzl/huggingface/paligemma-3b-pt-224"
         tokenizer_path = "/mnt/wangxiaofa/RDT_module_params/paligemma-3b-pt-224/"
         self.language_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         self.processor = AutoProcessor.from_pretrained(tokenizer_path)
@@ -229,7 +229,7 @@ class PI05Policy(PreTrainedPolicy):
         self.cp_sc_token_idx = [self.language_tokenizer(f"[{COMPRESS_SC_TOKEN}]", add_special_tokens=False).input_ids[0]]
         print(f"Pi05 CP_IMG token idx: {self.cp_sc_token_idx}, CP_ACT token idx: {self.cp_act_token_idx}")
         self.model = PI05FlowMatching(config)
-        self.model.paligemma_with_expert.paligemma.lm_head = nn.Identity()
+        # self.model.paligemma_with_expert.paligemma.lm_head = nn.Identity()
         
         # Enable gradient checkpointing if requested
         if config.gradient_checkpointing:
@@ -397,7 +397,7 @@ class PI05Policy(PreTrainedPolicy):
                                                                 output_hidden_states=True)
         output_hidden_states = output.hidden_states # num_layers + 1
         lg_loss = output.loss
-        lg_loss = torch.tensor(0.0, device=prefix_embs.device)
+        # lg_loss = torch.tensor(0.0, device=prefix_embs.device)
 
         last_hidden_states = output_hidden_states[-1] # torch.Size([1, 304, 2048])
         last_hidden_states = self.model.paligemma_with_expert.paligemma.language_model.norm(last_hidden_states)

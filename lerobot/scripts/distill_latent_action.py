@@ -196,7 +196,7 @@ def train_step(model, batch, scaler, cfg, sync_flag):
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
     # 初始化分布式环境
-    os.environ["NODE_RANK"] = "0"
+    # os.environ["NODE_RANK"] = "0"
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
     world_rank = int(os.environ["RANK"])
@@ -300,6 +300,8 @@ def train(cfg: TrainPipelineConfig):
         ds_meta=dataset.meta,
         weight_pt_path=cfg.policy2.pretrained_path
     )
+    stu_policy.resize_token_embedding()
+    print("lm head", stu_policy.model.paligemma_with_expert.paligemma.lm_head.weight.shape)
 
     # with open("/home/v-zuoleili/Project/gcr_latent_action/scripts/model_pi.txt", "w") as f:
     #     for name, param in stu_policy.named_parameters():

@@ -143,7 +143,7 @@ class PaliGemmaWithExpertModel(
         if use_adarms is None:
             use_adarms = [False, False]
         super().__init__()
-        vocab_size = 257155 # raw: 257152
+        vocab_size = 257152 # raw: 257152, 257155
         vlm_config_hf = CONFIG_MAPPING["paligemma"]()
         vlm_config_hf._vocab_size = vocab_size  # noqa: SLF001
         vlm_config_hf.image_token_index = 257152
@@ -154,14 +154,14 @@ class PaliGemmaWithExpertModel(
         vlm_config_hf.text_config.num_hidden_layers = vlm_config.depth
         vlm_config_hf.text_config.num_key_value_heads = vlm_config.num_kv_heads
         vlm_config_hf.text_config.hidden_activation = "gelu_pytorch_tanh"
-        vlm_config_hf.text_config.torch_dtype = "float32"
+        vlm_config_hf.text_config.torch_dtype = torch.float32 # "float32"
         vlm_config_hf.text_config.vocab_size = vocab_size
         vlm_config_hf.text_config.use_adarms = use_adarms[0]
         vlm_config_hf.text_config.adarms_cond_dim = vlm_config.width if use_adarms[0] else None
         vlm_config_hf.vision_config.intermediate_size = 4304
         vlm_config_hf.vision_config.projection_dim = 2048
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
-        vlm_config_hf.vision_config.torch_dtype = "float32"
+        vlm_config_hf.vision_config.torch_dtype = torch.float32
 
         action_expert_config_hf = CONFIG_MAPPING["gemma"](
             head_dim=action_expert_config.head_dim,
