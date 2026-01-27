@@ -100,8 +100,8 @@ def get_predict_error(p_states, a_states):
     step_5_error = error[:, 4, :]
     step_10_error = error[:, 9, :]
     step_15_error = error[:, 14, :]
-    step_20_error = error[:, 19, :]
-    step_25_error = error[:, 24, :]
+    step_20_error = error[:, 14, :]
+    step_25_error = error[:, 14, :]
     # print(np.mean(init_error-step_15_error))
     return init_error, step_5_error, step_10_error, step_15_error, step_20_error, step_25_error
 
@@ -118,7 +118,7 @@ def get_predict_action(batch, model, device):
     
     return predictd_actions, predicted_image
 
-def concat_with_gap(img1, img2, gap=10, direction="horizontal", color=255):
+def concat_with_gap(img1, img2, img3, gap=10, direction="horizontal", color=255):
     """
     img1, img2: numpy 数组 (H, W, C)，dtype=uint8
     gap: 间隔像素数
@@ -130,11 +130,11 @@ def concat_with_gap(img1, img2, gap=10, direction="horizontal", color=255):
         # 创建 gap 区域
         gap_block = np.ones((h, gap, img1.shape[2]), dtype=img1.dtype) * color
         # print(img1.shape, gap_block.shape, img2.shape)
-        result = np.concatenate((img1, gap_block, img2), axis=1)
+        result = np.concatenate((img3, gap_block, img1, gap_block, img2), axis=1)
     else:  # vertical
         w = max(img1.shape[1], img2.shape[1])
         gap_block = np.ones((gap, w, img1.shape[2]), dtype=img1.dtype) * color
-        result = np.concatenate((img1, gap_block, img2), axis=0)
+        result = np.concatenate((img3, gap_block, img1, gap_block, img2), axis=0)
     return result
 
 @parser.wrap()
@@ -157,11 +157,11 @@ def train(cfg: TrainPipelineConfig):
         seed=seed,
         data_mix=cfg.data_mix,
         vla2root_json="vla2root.json",
-        is_ft=cfg.is_ft
+        # is_ft=cfg.is_ft
         # vla2root_json="vla2root_bak_single.json"
     )
 
-    json_path = "/home/v-zuoleili/Pretrain/latent-action/oxe_magic_soup_plus_stats.json"
+    json_path = "/home/v-wangxiaofa/lzl/gcr_latent_action/lerobot/stats/oxe_magic_soup_plus_stats.json"
     with open(json_path, "r") as f:
         json_data = json.load(f)
 
@@ -236,11 +236,19 @@ def train(cfg: TrainPipelineConfig):
         actual_image = batch["last_image"]
         actual_image = actual_image.permute(0, 2, 3, 1)
         actual_image = actual_image.detach().cpu().numpy()
+        first_image = batch["first_image"]
+        first_image = first_image.permute(0, 2, 3, 1)
+        first_image = first_image.detach().cpu().numpy()
+        # first_image = cv2.cvtColor(actual_image[0], cv2.COLOR_BGR2RGB)
         actual_image = cv2.cvtColor(actual_image[0], cv2.COLOR_BGR2RGB)
+        first_image = cv2.cvtColor(first_image[0], cv2.COLOR_BGR2RGB)
         predicted_image = predicted_images[0] * 255
-        concat_img = concat_with_gap(predicted_image, actual_image, gap=20, direction="horizontal", color=255)
-        os.makedirs("predict", exist_ok=True)
-        cv2.imwrite(f"predict/batch_{i}.png", concat_img)
+        predicted_image = cv2.cvtColor(predicted_image, cv2.COLOR_BGR2RGB)
+        concat_img = concat_with_gap(predicted_image, actual_image, first_image, gap=20, direction="horizontal", color=255)
+        # concat_img = cv2.cvtColor(concat_img, cv2.COLOR_BGR2RGB)
+        save_root = "predict_libero"
+        os.makedirs(save_root, exist_ok=True)
+        cv2.imwrite(f"{save_root}/batch_{i}.png", concat_img)
 
     
     init_errors = np.array(init_errors)

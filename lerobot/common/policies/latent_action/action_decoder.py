@@ -72,15 +72,15 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
         self.train_expert_only = train_expert_only
         self.attention_implementation = attention_implementation
         # setting, for consistent with sana
-        head_dim = 32
-        num_attention_heads = 70
-        num_hidden_layers = 20
-        num_key_value_heads = 7
+        # head_dim = 32
+        # num_attention_heads = 70
+        # num_hidden_layers = 20
+        # num_key_value_heads = 7
         # 
-        # head_dim = 256
-        # num_attention_heads = 8
-        # num_hidden_layers = 18
-        # num_key_value_heads = 1
+        head_dim = 256
+        num_attention_heads = 8
+        num_hidden_layers = 18
+        num_key_value_heads = 1
 
         if paligemma_config is None:
             # Default config from Pi0
