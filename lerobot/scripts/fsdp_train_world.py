@@ -138,6 +138,23 @@ def save_fsdp_checkpoint(model, optim, output_dir, step):
     # --- Step 5: 确保 rank0 保存完后其他 rank 再继续 ---
     dist.barrier()
         
+
+def count_grad_norm(parameters):
+    """低内存版本的梯度裁剪"""
+    grads = []
+    for p in parameters:
+        if p.grad is not None:
+            # 分离梯度并复制，避免保持计算图
+            grads.append(p.grad.detach().clone())
+
+    # 逐个处理梯度，减少峰值内存
+    total_norm = 0.0
+    for grad in grads:
+        grad_norm = grad.norm(2)
+        total_norm += grad_norm.item() ** 2
+    total_norm = total_norm ** 0.5
+    return total_norm
+
 def clip_grad_norm_low_mem(parameters, max_norm):
     """低内存版本的梯度裁剪"""
     grads = []
@@ -192,7 +209,15 @@ def train_step(model, batch, scaler, cfg, sync_flag, step):
             #         grad_norm = param.grad.norm(2)
             #         if grad_norm.item() > 100:
             #             print(name)
+            # for name, param in model.named_parameters():
+            #     if "scale_shift_table" in name:
+            #         print(name, param.requires_grad)
+            #         if param.grad is not None:
+            #             grad_norm = param.grad.norm(2)
+            #             print(name, grad_norm)
             grad_norm = clip_grad_norm_low_mem(model.parameters(), max_norm=6.0)
+            # after_clip_grad_norm = count_grad_norm(model.parameters())
+            # print(grad_norm, after_clip_grad_norm)
             # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             # 梯度平均，用于记录
             if dist.is_initialized():
