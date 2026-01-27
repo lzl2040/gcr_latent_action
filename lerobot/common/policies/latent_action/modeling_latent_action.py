@@ -101,6 +101,48 @@ def make_att_2d_masks(pad_masks, att_masks):
     att_2d_masks = att_2d_masks & pad_2d_masks
     return att_2d_masks
 
+def save_attention_overlay_cv2(
+    original_image,      # H×W×3, RGB, np.uint8 or float
+    attention_map,       # h×w, torch.Tensor
+    output_path,
+    alpha=0.4,           # attention 权重
+    colormap=cv2.COLORMAP_JET
+):
+    # ---------- 原图处理 ----------
+    if original_image.dtype != np.uint8:
+        original_image = (original_image * 255).astype(np.uint8)
+
+    # RGB -> BGR (cv2 用 BGR)
+    original_bgr = cv2.cvtColor(original_image, cv2.COLOR_RGB2BGR)
+
+    h, w = original_bgr.shape[:2]
+
+    # ---------- attention resize ----------
+    att = F.interpolate(
+        attention_map.unsqueeze(0).unsqueeze(0).float(),
+        size=(h, w),
+        mode='bilinear',
+        align_corners=False
+    ).squeeze().cpu().numpy()
+
+    # ---------- normalize ----------
+    att = att - att.min()
+    att = att / (att.max() + 1e-8)
+    att = (att * 255).astype(np.uint8)
+
+    # ---------- colormap ----------
+    att_color = cv2.applyColorMap(att, colormap)
+
+    # ---------- overlay ----------
+    overlay = cv2.addWeighted(
+        original_bgr, 1 - alpha,
+        att_color, alpha,
+        0
+    )
+
+    # ---------- save ----------
+    cv2.imwrite(output_path, overlay)
+    print(f"Overlay saved to: {output_path}")
 
 def create_attention_visualization(original_image, attention_map, output_path):
     """Create and save attention map visualization."""
@@ -126,7 +168,7 @@ def create_attention_visualization(original_image, attention_map, output_path):
 
     # Overlay
     axes[2].imshow(original_image)
-    axes[2].imshow(attention_resized, cmap='hot', alpha=0.5)
+    axes[2].imshow(attention_resized, cmap='hot', alpha=0.8)
     axes[2].set_title('Attention Overlay')
     axes[2].axis('off')
 
@@ -160,16 +202,16 @@ class LatentActionModel(PreTrainedPolicy):
                                                                     # config=vlm_config,
                                                                     local_files_only=True,
                                                                     trust_remote_code=True,
-                                                                    # attn_implementation="eager"
+                                                                    attn_implementation="eager"
                                                                     )
         
         # self.vlm.lm_head = nn.Identity()
         # output attention for visualization
-        # self.vlm.config.output_attentions = True
-        # if hasattr(self.vlm, "text_model"):
-        #     self.vlm.text_model.config.output_attentions = True
-        # if hasattr(self.vlm, "vision_model"):
-        #     self.vlm.vision_model.config.output_attentions = True
+        self.vlm.config.output_attentions = True
+        if hasattr(self.vlm, "text_model"):
+            self.vlm.text_model.config.output_attentions = True
+        if hasattr(self.vlm, "vision_model"):
+            self.vlm.vision_model.config.output_attentions = True
         
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.vlm_path,
                                                                     # config=vlm_config,
@@ -245,6 +287,12 @@ class LatentActionModel(PreTrainedPolicy):
         # print(sc_token_mask.sum().item(), act_token_mask.sum().item())
         return sc_token_mask, act_token_mask
     
+    def process_attn_map(self, att):
+        th = torch.quantile(att, 0.7)
+        att = torch.where(att >= th, att, torch.zeros_like(att))
+        att = att / (att.sum() + 1e-8)
+        return att
+    
     def visualize_attn_map(self,batch: dict[str, Tensor], step) -> tuple[Tensor, dict[str, Tensor]]:
         device = "cuda"
         pixel_values = batch["pixel_values"].to(device=device)
@@ -256,7 +304,7 @@ class LatentActionModel(PreTrainedPolicy):
         last_image = batch["last_image"].to(device=device)
         num_frames = pixel_values.shape[0]
         # print(pixel_values.shape) # 16(batch size * T) 3 224 224
-        img1 = pixel_values[0].detach().cpu().numpy()
+        img1 = pixel_values[-1].detach().cpu().numpy()
         img1 = img1.transpose(1, 2, 0)
         mean = np.array([0.485, 0.456, 0.406])
         std  = np.array([0.229, 0.224, 0.225])
@@ -287,11 +335,11 @@ class LatentActionModel(PreTrainedPolicy):
         # print(len(image_token_indicies), len(motion_token_indicies), end_idx - start_idx + 1)
         start_idx_motion = motion_token_indicies[0]
         start_idx_scene = scene_token_indicies[0]
-        n_layer_to_collect = 12
+        n_layer_to_collect = 27
         n_layer_to_collect = min(n_layer_to_collect, len(all_attentions))
         attn_maps_all_layers_motion = []
         attn_maps_all_layers_scene = []
-        for layer_idx, layer_attn in enumerate(all_attentions[:n_layer_to_collect]):
+        for layer_idx, layer_attn in enumerate(all_attentions[n_layer_to_collect-1:n_layer_to_collect]):
             # layer_attn shape: (batch_size, num_heads, seq_len, seq_len)
             # Average across heads
             layer_attn_avg_head = layer_attn.mean(dim=1)
@@ -299,8 +347,17 @@ class LatentActionModel(PreTrainedPolicy):
             # Extract attention from text tokens to vision tokens
             # Text tokens are after the image tokens (end_idx+1:)
             # Vision tokens are from start_idx to end_idx+1
-            layer_attn_text_to_vis_motion = layer_attn_avg_head[:, start_idx_motion:start_idx_motion+1, image_token_indicies]
-            layer_attn_text_to_vis_scene = layer_attn_avg_head[:, start_idx_scene:start_idx_scene+1, image_token_indicies]
+            layer_attn_text_to_vis_motion = layer_attn_avg_head[:, start_idx_motion:start_idx_motion + 64, image_token_indicies]
+            layer_attn_text_to_vis_scene = layer_attn_avg_head[:, start_idx_scene:start_idx_scene + 64, image_token_indicies]
+            
+            # Average over all text query positions
+            layer_attn_vis_avg_motion = layer_attn_text_to_vis_motion.mean(dim=1)
+            layer_attn_vis_avg_scene = layer_attn_text_to_vis_scene.mean(dim=1)
+            
+            # layer_attn_text_to_vis_motion = layer_attn_avg_head[:, image_token_indicies, start_idx_motion: start_idx_motion + 64]
+            # layer_attn_text_to_vis_scene = layer_attn_avg_head[:, image_token_indicies, start_idx_scene: start_idx_scene + 64]
+            # layer_attn_text_to_vis_scene = layer_attn_text_to_vis_scene.transpose(-1, -2)
+            # layer_attn_text_to_vis_motion = layer_attn_text_to_vis_motion.transpose(-1, -2)
             
             # Average over all text query positions
             layer_attn_vis_avg_motion = layer_attn_text_to_vis_motion.mean(dim=1)
@@ -312,7 +369,7 @@ class LatentActionModel(PreTrainedPolicy):
         
         attention_map_motion = torch.stack(attn_maps_all_layers_motion, dim=0).mean(dim=0)
         attention_map_scene = torch.stack(attn_maps_all_layers_scene, dim=0).mean(dim=0)
-        selected_frame = 0
+        selected_frame = pixel_values.shape[0] - 1
         attention_map_motion = attention_map_motion[:, selected_frame * 64: (selected_frame + 1) * 64]
         attention_map_scene = attention_map_scene[:, selected_frame * 64: (selected_frame + 1) * 64]
         # print(attention_map.shape) # 1 64
@@ -340,14 +397,29 @@ class LatentActionModel(PreTrainedPolicy):
             attention_map_scene = torch.cat([attention_map_scene, zero_pad], dim=0)
 
         # Normalize attention map
+        # attention_map_motion = attention_map_motion.view(grid_size, grid_size)
+        # attention_map_motion = self.process_attn_map(attention_map_motion)
+        # attention_map_scene = attention_map_scene.view(grid_size, grid_size)
+        # attention_map_scene = self.process_attn_map(attention_map_scene)
+        
         attention_map_motion = attention_map_motion.view(grid_size, grid_size)
         attention_map_motion = attention_map_motion / (attention_map_motion.sum(dim=-1, keepdim=True) + 1e-8)
         
         attention_map_scene = attention_map_scene.view(grid_size, grid_size)
-        attention_map_scene = attention_map_scene / (attention_map_motion.sum(dim=-1, keepdim=True) + 1e-8)
+        attention_map_scene = attention_map_scene / (attention_map_scene.sum(dim=-1, keepdim=True) + 1e-8)
         
-        create_attention_visualization(img1, attention_map_motion, f"vis/motion/attention_visualization_{step}.png")
-        create_attention_visualization(img1, attention_map_scene, f"vis/scene/attention_visualization_{step}.png")
+        # tau = 6
+        # attention_map_motion = attention_map_motion.view(-1)
+        # attention_map_motion = torch.softmax(attention_map_motion / tau, dim=0)
+        # attention_map_motion = attention_map_motion.view(grid_size, grid_size)
+        
+        # attention_map_scene = attention_map_scene.view(-1)
+        # attention_map_scene = torch.softmax(attention_map_scene / tau, dim=0)
+        # attention_map_scene = attention_map_scene.view(grid_size, grid_size)
+        
+        # save_attention_overlay_cv2, create_attention_visualization
+        save_attention_overlay_cv2(img1, attention_map_motion, f"vis/motion/attention_visualization_{step}.png")
+        save_attention_overlay_cv2(img1, attention_map_scene, f"vis/scene/attention_visualization_{step}.png")
         
         
         
