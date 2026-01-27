@@ -365,12 +365,12 @@ class PI05Policy(PreTrainedPolicy):
             full_prompt = f"Task: {cleaned_text}, State: {state_str}; "
             summary_text = ""
             # Latent, Scene
-            summary_text = summary_text + "Latent representations:"
+            summary_text = summary_text + "Scene representations:"
             for j in range(64):
                 summary_text += f"[{self.COMPRESS_SC_TOKEN}] "
-            # summary_text += ". Action representations:"
-            # for j in range(64):
-            #     summary_text += f"[{self.COMPRESS_ACTION_TOKEN}] "
+            summary_text += ". Motion representations:"
+            for j in range(64):
+                summary_text += f"[{self.COMPRESS_ACTION_TOKEN}] "
             # summary_text += ".\nAction:"
             summary_text += ".\n"
             full_prompt = full_prompt + summary_text
