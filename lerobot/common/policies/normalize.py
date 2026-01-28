@@ -215,9 +215,9 @@ class Normalize(nn.Module):
                 # q99 = stats.get("q99", None)
                 q01 = buffer["q01"]
                 q99 = buffer["q99"]
-                print("q01", q01)
-                print("q99", q99)
-                print(batch[key].shape)
+                # print("q01", q01)
+                # print("q99", q99)
+                # print(batch[key].shape)
                 if q01 is None or q99 is None:
                     raise ValueError(
                         "QUANTILES normalization mode requires q01 and q99 stats, please update the dataset with the correct stats using the `augment_dataset_quantile_stats.py` script"
@@ -228,7 +228,8 @@ class Normalize(nn.Module):
                 denom = torch.where(
                     denom == 0, torch.tensor(self.eps, device=batch[key].device, dtype=batch[key].dtype), denom
                 )
-                batch[key] = (batch[key] + 1.0) * denom / 2.0 + q01
+                batch[key] = 2.0 * (batch[key] - q01) / denom - 1.0
+                # batch[key] = (batch[key] + 1.0) * denom / 2.0 + q01
             else:
                 raise ValueError(norm_mode)
         return batch

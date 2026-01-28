@@ -20,8 +20,8 @@ class DistillModel(nn.Module):
         # self.subtask_teacher_processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM-Instruct")
         # self.proj = nn.Linear(2048, 2048 // 4)  # 共享的映射层
         # print("Freeze Teacher model")
-        # for param in self.teacher_model.parameters():
-        #     param.requires_grad = False
+        for param in self.student_model.parameters():
+            param.data = param.data.bfloat16()
         self.teacher_model.eval()
         self.teacher_model.requires_grad_(False)
         # self.subtask_teacher_model.requires_grad_(False)
@@ -108,12 +108,12 @@ class DistillModel(nn.Module):
         kl = kl_loss_fn(log_p, q)
 
         # ---------- 合并 ----------
-        # loss = mse + alpha * kl
+        loss = mse + alpha * kl
         # loss = mse
-        loss = kl
-        # return loss, {"mse": mse.item(), "kl": kl.item()}
+        # loss = kl
+        return loss, {"mse": mse.item(), "kl": kl.item()}
         # return loss, {"mse": mse.item(), "kl": 0.0}
-        return loss, {"mse": 0.0, "kl": kl.item()}
+        # return loss, {"mse": 0.0, "kl": kl.item()}
 
     def get_optim_params(self) -> dict:
         return self.parameters()
@@ -148,7 +148,7 @@ class DistillModel(nn.Module):
                                            teacher_logits=teacher_logits,
                                            alpha=1,
                                            temperature=3)
-        loss = loss + 0.1 * lg_loss
+        loss = loss + 0.5 * lg_loss
         # lg_loss = torch.tensor(0.0, device=loss.device)
         loss_dict["lg_loss"] = lg_loss
         return loss, loss_dict

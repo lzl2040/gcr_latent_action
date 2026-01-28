@@ -216,6 +216,7 @@ class PI05Policy(PreTrainedPolicy):
 
         # tokenizer_path = "/home/v-zuoleili/Pretrain/pi0/paligemma-3b-pt-224/"
         tokenizer_path = "/mnt/wangxiaofa/RDT_module_params/paligemma-3b-pt-224/"
+        # tokenizer_path = "/Data/lzl/huggingface/paligemma-3b-pt-224"
         self.language_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         self.processor = AutoProcessor.from_pretrained(tokenizer_path)
 
@@ -229,7 +230,7 @@ class PI05Policy(PreTrainedPolicy):
         self.cp_sc_token_idx = [self.language_tokenizer(f"[{COMPRESS_SC_TOKEN}]", add_special_tokens=False).input_ids[0]]
         print(f"Pi05 CP_IMG token idx: {self.cp_sc_token_idx}, CP_ACT token idx: {self.cp_act_token_idx}")
         self.model = PI05FlowMatching(config)
-        self.model.paligemma_with_expert.paligemma.lm_head = nn.Identity()
+        # self.model.paligemma_with_expert.paligemma.lm_head = nn.Identity()
         
         # Enable gradient checkpointing if requested
         if config.gradient_checkpointing:
@@ -350,7 +351,7 @@ class PI05Policy(PreTrainedPolicy):
         # batch = self.normalize_targets(batch)
 
         images, img_masks = self._preprocess_images(batch)
-        # batch = self.normalize_inputs(batch)
+        batch = self.normalize_inputs(batch)
 
         # follow lerobot pi05: https://github.com/huggingface/lerobot/blob/main/src/lerobot/policies/pi05/processor_pi05.py#L79
         batch[OBS_ROBOT] = batch[OBS_ROBOT].to(dtype=torch.float32)
@@ -377,27 +378,27 @@ class PI05Policy(PreTrainedPolicy):
             full_prompts.append(full_prompt)
 
         # 构造 full_text
-        # full_texts = [i + t for i, t in zip(full_prompts, batch["sub_tasks"])]
-        batch["task"] = full_prompts
+        full_texts = [i + t for i, t in zip(full_prompts, batch["sub_tasks"])]
+        batch["task"] = full_texts
         lang_tokens, lang_masks = self.prepare_language(batch)
 
-        # labels = self.construct_input_target_pair(full_prompts, batch["sub_tasks"], lang_tokens)
+        labels = self.construct_input_target_pair(full_prompts, batch["sub_tasks"], lang_tokens)
 
         images = [self.convert_to_dtype(img) for img in images]
         lang_tokens = self.convert_to_dtype(lang_tokens)
         prefix_embs, prefix_pad_masks, prefix_att_masks, img_token_num = self.model.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
         )
-        # img_mask = torch.full((labels.size(0), img_token_num), IGNORE_TOKEN_ID, 
-        #                       dtype=torch.long, device=prefix_embs.device)
-        # labels = torch.cat([img_mask, labels], dim=1)
+        img_mask = torch.full((labels.size(0), img_token_num), IGNORE_TOKEN_ID, 
+                              dtype=torch.long, device=prefix_embs.device)
+        labels = torch.cat([img_mask, labels], dim=1)
         # print(labels.shape, img_token_num, prefix_embs.shape)
         output = self.model.paligemma_with_expert.paligemma(inputs_embeds=prefix_embs,
-                                                            # labels=labels,
+                                                            labels=labels,
                                                                 output_hidden_states=True)
         output_hidden_states = output.hidden_states # num_layers + 1
-        # lg_loss = output.loss
-        lg_loss = torch.tensor(0.0, device=prefix_embs.device)
+        lg_loss = output.loss
+        # lg_loss = torch.tensor(0.0, device=prefix_embs.device)
 
         last_hidden_states = output_hidden_states[-1] # torch.Size([1, 304, 2048])
         last_hidden_states = self.model.paligemma_with_expert.paligemma.language_model.norm(last_hidden_states)

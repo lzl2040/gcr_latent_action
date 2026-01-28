@@ -154,13 +154,15 @@ fi
 FIXED_OUTPUT_DIR="/mnt/wangxiaofa/latent_action_exp"
 
 # 执行训练命令
-CUDA_LAUNCH_BLOCKING=1 torchrun \
-    --nnodes=$NNODES \
-    --nproc_per_node=$NPROC_PER_NODE \
-    --node_rank=$NODE_RANK \
-    --master_addr=$MASTER_ADDR \
-    --master_port=$MASTER_PORT \
+# CUDA_LAUNCH_BLOCKING=1 torchrun \
+#     --nnodes=$NNODES \
+#     --nproc_per_node=$NPROC_PER_NODE \
+#     --node_rank=$NODE_RANK \
+#     --master_addr=$MASTER_ADDR \
+#     --master_port=$MASTER_PORT \
+python \
     -m lerobot.scripts.distill_latent_action \
+    --deepspeed="./ds_zero2.json" \
     --policy.type="latent_act" \
     --policy2.type="pi05" \
     --policy.use_state=$USE_STATE \
