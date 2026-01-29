@@ -108,12 +108,12 @@ class DistillModel(nn.Module):
         kl = kl_loss_fn(log_p, q)
 
         # ---------- 合并 ----------
-        loss = mse + alpha * kl
+        # loss = mse + alpha * kl
         # loss = mse
-        # loss = kl
-        return loss, {"mse": mse.item(), "kl": kl.item()}
+        loss = kl
+        # return loss, {"mse": mse.item(), "kl": kl.item()}
         # return loss, {"mse": mse.item(), "kl": 0.0}
-        # return loss, {"mse": 0.0, "kl": kl.item()}
+        return loss, {"mse": 0.0, "kl": kl.item()}
 
     def get_optim_params(self) -> dict:
         return self.parameters()
