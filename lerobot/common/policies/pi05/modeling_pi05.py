@@ -351,7 +351,7 @@ class PI05Policy(PreTrainedPolicy):
         # batch = self.normalize_targets(batch)
 
         images, img_masks = self._preprocess_images(batch)
-        batch = self.normalize_inputs(batch)
+        # batch = self.normalize_inputs(batch)
 
         # follow lerobot pi05: https://github.com/huggingface/lerobot/blob/main/src/lerobot/policies/pi05/processor_pi05.py#L79
         batch[OBS_ROBOT] = batch[OBS_ROBOT].to(dtype=torch.float32)
