@@ -285,9 +285,9 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("viola", 2.0),
         ("berkeley_autolab_ur5", 2.0),
         ("toto", 1.0),
-        ("berkeley_cable_routing", 1.0),
+        # ("berkeley_cable_routing", 1.0),
         ("roboturk", 2.0),
-        ("stanford_hydra_dataset_converted_externally_to_rlds", 2.0),
+        # ("stanford_hydra_dataset_converted_externally_to_rlds", 2.0),
         ("taco_play", 2.0),
      ],
      "fractal_only": [
