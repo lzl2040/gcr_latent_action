@@ -18,6 +18,7 @@ from lerobot.common.policies.latent_action.uni_decoder import UniDecoder as UniD
 from lerobot.common.policies.latent_action.image_decoder_sana_ip_adapter import ImagePredictionModel as SANAModel
 from lerobot.common.policies.latent_action.vlm_wrapper import InternVLModelWrapper
 from lerobot.common.constants import COMPRESS_ACTION_TOKEN, COMPRESS_SC_TOKEN
+import matplotlib.pyplot as plt
 
 import numpy as np
 import cv2
@@ -100,6 +101,123 @@ def make_att_2d_masks(pad_masks, att_masks):
     att_2d_masks = att_2d_masks & pad_2d_masks
     return att_2d_masks
 
+import os
+def save_attention_overlay_cv2(
+    original_image,      # H×W×3, RGB, np.uint8 or float
+    attention_map,       # h×w, torch.Tensor
+    output_path,
+    alpha=0.4,           # attention 权重
+    colormap=cv2.COLORMAP_JET,
+    top_ratio=0.2,
+    save_original=True
+):
+    # ---------- 原图处理 ----------
+    if original_image.dtype != np.uint8:
+        original_image = (original_image * 255).astype(np.uint8)
+
+    # RGB -> BGR (cv2 用 BGR)
+    original_bgr = cv2.cvtColor(original_image, cv2.COLOR_RGB2BGR)
+
+    h, w = original_bgr.shape[:2]
+    
+    
+    # ---------- 保存原图 ----------
+    if save_original:
+        data_root = "vis/img"
+        filename = os.path.basename(output_path)
+        original_path = os.path.join(data_root, filename)
+        cv2.imwrite(original_path, original_bgr)
+
+    # ---------- attention resize ----------
+    att = F.interpolate(
+        attention_map.unsqueeze(0).unsqueeze(0).float(),
+        size=(h, w),
+        mode='bilinear',
+        align_corners=False
+    ).squeeze().cpu().numpy()
+
+    # ---------- normalize ----------
+    att = att - att.min()
+    att = att / (att.max() + 1e-8)
+    
+    thr = np.percentile(att, 100 * (1 - top_ratio))
+    mask = att >= thr
+    # att = att * mask
+    
+    # ---------- keep component containing max value ----------
+    # 1. 找最大值位置
+    max_idx = np.unravel_index(np.argmax(att), att.shape)
+
+    # 2. 连通区域标记（8-connectivity）
+    num_labels, labels = cv2.connectedComponents(
+        mask.astype(np.uint8), connectivity=8
+    )
+
+    # 3. 找最大值所在的 label
+    max_label = labels[max_idx]
+
+    # 4. 只保留该连通区域
+    mask_cc = labels == max_label
+
+    # 5. 应用 mask
+    att = att * mask_cc
+    
+    att = (att * 255).astype(np.uint8)
+    
+
+    # ---------- colormap ----------
+    att_color = cv2.applyColorMap(att, colormap)
+
+    # ---------- overlay ----------
+    overlay = cv2.addWeighted(
+        original_bgr, 1 - alpha,
+        att_color, alpha,
+        0
+    )
+
+    # ---------- save ----------
+    cv2.imwrite(output_path, overlay)
+    print(f"Overlay saved to: {output_path}")
+    
+
+
+
+
+
+def create_attention_visualization(original_image, attention_map, output_path):
+    """Create and save attention map visualization."""
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # Original image
+    axes[0].imshow(original_image)
+    axes[0].set_title('Original Image')
+    axes[0].axis('off')
+
+    # Attention map
+    attention_resized = F.interpolate(
+        attention_map.unsqueeze(0).unsqueeze(0).to(torch.float32),
+        size=original_image.shape[:2],
+        mode='bilinear',
+        align_corners=False
+    ).squeeze().cpu().numpy()
+
+    im1 = axes[1].imshow(attention_resized, cmap='hot', alpha=0.8)
+    axes[1].set_title('Attention Map')
+    axes[1].axis('off')
+    plt.colorbar(im1, ax=axes[1])
+
+    # Overlay
+    axes[2].imshow(original_image)
+    axes[2].imshow(attention_resized, cmap='hot', alpha=0.8)
+    axes[2].set_title('Attention Overlay')
+    axes[2].axis('off')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"Attention visualization saved to: {output_path}")
+
 class LatentActionModel(PreTrainedPolicy):
     """Wrapper class around PI0FlowMatching model to train and run inference within LeRobot."""
 
@@ -123,9 +241,17 @@ class LatentActionModel(PreTrainedPolicy):
         self.vlm = InternVLForConditionalGeneration.from_pretrained(self.config.vlm_path,
                                                                     # config=vlm_config,
                                                                     local_files_only=True,
-                                                                    trust_remote_code=True)
+                                                                    trust_remote_code=True,
+                                                                    attn_implementation="eager"
+                                                                    )
         
         # self.vlm.lm_head = nn.Identity()
+        # output attention for visualization
+        self.vlm.config.output_attentions = True
+        if hasattr(self.vlm, "text_model"):
+            self.vlm.text_model.config.output_attentions = True
+        if hasattr(self.vlm, "vision_model"):
+            self.vlm.vision_model.config.output_attentions = True
         
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.vlm_path,
                                                                     # config=vlm_config,
@@ -154,9 +280,10 @@ class LatentActionModel(PreTrainedPolicy):
 
         self.sc_token_idx = config.sc_token_idx
         self.action_token_idx = config.action_token_idx
+        self.img_token_id = self.vlm.config.image_token_id
         if config.is_distill == False:
-            self.uni_decoder = UniDecoder(config)
-            # self.uni_decoder = UniDecoder2(config)
+            # self.uni_decoder = UniDecoder(config)
+            self.uni_decoder = UniDecoder2(config)
 
         self.dtype = torch.bfloat16
 
@@ -199,6 +326,144 @@ class LatentActionModel(PreTrainedPolicy):
         # sc_token_mask = torch.cat([sc_token_mask, pad], dim=1)
         # print(sc_token_mask.sum().item(), act_token_mask.sum().item())
         return sc_token_mask, act_token_mask
+    
+    def process_attn_map(self, att):
+        th = torch.quantile(att, 0.7)
+        att = torch.where(att >= th, att, torch.zeros_like(att))
+        att = att / (att.sum() + 1e-8)
+        return att
+    
+    def visualize_attn_map(self,batch: dict[str, Tensor], step) -> tuple[Tensor, dict[str, Tensor]]:
+        device = "cuda"
+        pixel_values = batch["pixel_values"].to(device=device)
+        input_ids = batch["input_ids"].to(device=device) # 对于224分辨率图像，每个image占64个token
+        labels = batch["labels"]
+        attention_mask = batch["attention_mask"].to(device=device)
+        video_len = batch["video_len"]
+        first_image = batch["first_image"].to(device=device)
+        last_image = batch["last_image"].to(device=device)
+        num_frames = pixel_values.shape[0]
+        # print(pixel_values.shape) # 16(batch size * T) 3 224 224
+        img1 = pixel_values[-1].detach().cpu().numpy()
+        img1 = img1.transpose(1, 2, 0)
+        mean = np.array([0.485, 0.456, 0.406])
+        std  = np.array([0.229, 0.224, 0.225])
+
+        img1 = img1 * std + mean
+        img1 = np.clip(img1, 0, 1)
+        img1 = (img1 * 255).astype(np.uint8)
+        # cv2.imwrite("debug.png", img1)
+        with torch.no_grad():
+            outputs = self.vlm(
+                input_ids=input_ids,
+                # labels=labels,
+                pixel_values=pixel_values,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                output_attentions=True,
+                attn_implementation="eager",
+            )
+        all_attentions = outputs.attentions
+        # print(all_attentions)
+        # print(self.img_token_id, self.action_token_idx)
+        image_token_indicies = (input_ids == self.img_token_id).nonzero(as_tuple=True)[1]
+        motion_token_indicies = (input_ids == self.action_token_idx[0]).nonzero(as_tuple=True)[1]
+        scene_token_indicies = (input_ids == self.sc_token_idx[0]).nonzero(as_tuple=True)[1]
+        start_idx = image_token_indicies[0]
+        end_idx = image_token_indicies[-1]
+        # 1024 64
+        # print(len(image_token_indicies), len(motion_token_indicies), end_idx - start_idx + 1)
+        start_idx_motion = motion_token_indicies[0]
+        start_idx_scene = scene_token_indicies[0]
+        n_layer_to_collect = 27
+        n_layer_to_collect = min(n_layer_to_collect, len(all_attentions))
+        attn_maps_all_layers_motion = []
+        attn_maps_all_layers_scene = []
+        for layer_idx, layer_attn in enumerate(all_attentions[n_layer_to_collect-1:n_layer_to_collect]):
+            # layer_attn shape: (batch_size, num_heads, seq_len, seq_len)
+            # Average across heads
+            layer_attn_avg_head = layer_attn.mean(dim=1)
+            
+            # Extract attention from text tokens to vision tokens
+            # Text tokens are after the image tokens (end_idx+1:)
+            # Vision tokens are from start_idx to end_idx+1
+            layer_attn_text_to_vis_motion = layer_attn_avg_head[:, start_idx_motion:start_idx_motion + 64, image_token_indicies]
+            layer_attn_text_to_vis_scene = layer_attn_avg_head[:, start_idx_scene:start_idx_scene + 64, image_token_indicies]
+            
+            # Average over all text query positions
+            layer_attn_vis_avg_motion = layer_attn_text_to_vis_motion.mean(dim=1)
+            layer_attn_vis_avg_scene = layer_attn_text_to_vis_scene.mean(dim=1)
+            
+            # layer_attn_text_to_vis_motion = layer_attn_avg_head[:, image_token_indicies, start_idx_motion: start_idx_motion + 64]
+            # layer_attn_text_to_vis_scene = layer_attn_avg_head[:, image_token_indicies, start_idx_scene: start_idx_scene + 64]
+            # layer_attn_text_to_vis_scene = layer_attn_text_to_vis_scene.transpose(-1, -2)
+            # layer_attn_text_to_vis_motion = layer_attn_text_to_vis_motion.transpose(-1, -2)
+            
+            # Average over all text query positions
+            layer_attn_vis_avg_motion = layer_attn_text_to_vis_motion.mean(dim=1)
+            layer_attn_vis_avg_scene = layer_attn_text_to_vis_scene.mean(dim=1)
+            
+            attn_maps_all_layers_motion.append(layer_attn_vis_avg_motion)
+            attn_maps_all_layers_scene.append(layer_attn_vis_avg_scene)
+            # print(layer_attn_vis_avg.shape) # 1 1024
+        
+        attention_map_motion = torch.stack(attn_maps_all_layers_motion, dim=0).mean(dim=0)
+        attention_map_scene = torch.stack(attn_maps_all_layers_scene, dim=0).mean(dim=0)
+        selected_frame = pixel_values.shape[0] - 1
+        attention_map_motion = attention_map_motion[:, selected_frame * 64: (selected_frame + 1) * 64]
+        attention_map_scene = attention_map_scene[:, selected_frame * 64: (selected_frame + 1) * 64]
+        # print(attention_map.shape) # 1 64
+        # Handle batch dimension
+        if attention_map_motion.dim() > 1:
+            attention_map_motion = attention_map_motion.squeeze(0)  # Remove batch dimension
+            attention_map_scene = attention_map_scene.squeeze(0)  # Remove batch dimension
+
+        # print(f"Final attention map shape: {attention_map.shape}")
+
+        # Calculate grid size for spatial arrangement
+        num_patches = attention_map_motion.shape[0]
+        grid_size = math.ceil(math.sqrt(num_patches))
+
+        print(f"Number of vision tokens: {num_patches}")
+        print(f"Grid size: {grid_size}x{grid_size}")
+
+        # Pad at the END, not the beginning
+        if grid_size * grid_size != num_patches:
+            pad_size = grid_size * grid_size - num_patches
+            print(f"Padding with {pad_size} zeros at the END")
+            
+            zero_pad = torch.zeros(pad_size, dtype=attention_map_motion.dtype, device=attention_map_motion.device)
+            attention_map_motion = torch.cat([attention_map_motion, zero_pad], dim=0)
+            attention_map_scene = torch.cat([attention_map_scene, zero_pad], dim=0)
+
+        # Normalize attention map
+        # attention_map_motion = attention_map_motion.view(grid_size, grid_size)
+        # attention_map_motion = self.process_attn_map(attention_map_motion)
+        # attention_map_scene = attention_map_scene.view(grid_size, grid_size)
+        # attention_map_scene = self.process_attn_map(attention_map_scene)
+        
+        attention_map_motion = attention_map_motion.view(grid_size, grid_size)
+        attention_map_motion = attention_map_motion / (attention_map_motion.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        attention_map_scene = attention_map_scene.view(grid_size, grid_size)
+        attention_map_scene = attention_map_scene / (attention_map_scene.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        # tau = 1
+        # attention_map_motion = attention_map_motion.view(-1)
+        # attention_map_motion = torch.softmax(attention_map_motion / tau, dim=0)
+        # attention_map_motion = attention_map_motion.view(grid_size, grid_size)
+        
+        # attention_map_scene = attention_map_scene.view(-1)
+        # attention_map_scene = torch.softmax(attention_map_scene / tau, dim=0)
+        # attention_map_scene = attention_map_scene.view(grid_size, grid_size)
+        
+        # save_attention_overlay_cv2, create_attention_visualization
+        top_ratio = 0.2
+        save_attention_overlay_cv2(img1, attention_map_motion, f"vis/motion/attention_visualization_{step}.png", top_ratio = top_ratio)
+        save_attention_overlay_cv2(img1, attention_map_scene, f"vis/scene/attention_visualization_{step}.png", top_ratio = top_ratio)
+        
+        
+        
     
     # def forward_pi0(self, batch)
 
@@ -789,4 +1054,3 @@ class UniDecoder(nn.Module):
             )
         image = self.image_decoder.image_processor.postprocess(image, output_type="np")
         return image
-
