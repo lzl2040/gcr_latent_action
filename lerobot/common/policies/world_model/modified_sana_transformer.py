@@ -13,6 +13,12 @@ from diffusers.utils import deprecate, logging
 from diffusers.models.activations import GEGLU, GELU, ApproximateGELU, FP32SiLU, LinearActivation, SwiGLU
 import copy
 
+def check_norm(name, tensor):
+    # 计算平均 L2 范数（在 embedding 维度上）
+    l2_norm = tensor.norm(p=2, dim=-1).mean().item()
+    # 计算标准差，看分布是否过大
+    std = tensor.std().item()
+    print(f"[{name}] L2 Norm: {l2_norm:.4f} | Std: {std:.4f} | Shape: {list(tensor.shape)}")
 
 class Modified_ExpertQKV_SanaAttnProcessor2_0:
     r"""
@@ -57,7 +63,21 @@ class Modified_ExpertQKV_SanaAttnProcessor2_0:
             encoder_hidden_states = hidden_states
 
         encoder_hidden_states_video, encoder_hidden_states_action = encoder_hidden_states[:, :num_image_token], encoder_hidden_states[:, num_image_token:hidden_len]
+        # encoder_hidden_states_action = torch.zeros_like(encoder_hidden_states_action) # add this become normal
         encoder_hidden_condition = encoder_hidden_states[:, hidden_len:]
+        # 在你的逻辑中插入
+        # check_norm("Video Tokens ", encoder_hidden_states_video)
+        # check_norm("Action Tokens", encoder_hidden_states_action)
+        # check_norm("Condition Tkns", encoder_hidden_condition)
+        encoder_hidden_states_action = F.layer_norm(
+            encoder_hidden_states_action, 
+            (encoder_hidden_states_action.size(-1),)
+        )
+        encoder_hidden_states_video = F.layer_norm(
+            encoder_hidden_states_video, 
+            (encoder_hidden_states_video.size(-1),)
+        )
+        
         key = attn.to_k(encoder_hidden_condition)
         value = attn.to_v(encoder_hidden_condition)
         key_video = attn.to_k(encoder_hidden_states_video)
@@ -68,6 +88,8 @@ class Modified_ExpertQKV_SanaAttnProcessor2_0:
         # print(key_action.shape)
         key = torch.cat([key_video, key_action, key], dim=1)
         value = torch.cat([value_video, value_action, value], dim=1)
+        # key = attn.to_k(encoder_hidden_states)
+        # value = attn.to_v(encoder_hidden_states)
 
         if attn.norm_q is not None:
             query = attn.norm_q(query)
@@ -80,6 +102,18 @@ class Modified_ExpertQKV_SanaAttnProcessor2_0:
         query = query.view(batch_size, -1, attn.heads, head_dim)
         key = key.view(batch_size, -1, attn.heads, head_dim)
         value = value.view(batch_size, -1, attn.heads, head_dim)
+        
+        # # (B, H, Lq, D)
+        # q = query.permute(0, 2, 1, 3)
+
+        # # (B, H, Lk, D)
+        # k = key.permute(0, 2, 1, 3)
+
+        # # (B, H, Lq, Lk)
+        # attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(head_dim)
+        # # 对每个 query，取 top-10 key
+        # topv, topk_idx = torch.topk(attn_scores, k=10, dim=-1)
+        # print(topk_idx[0, 0, 0], num_image_token) # 784
 
         # the output of sdp = (batch, num_heads, seq_len, head_dim)
         hidden_states = dispatch_attention_fn(
@@ -641,7 +675,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         #     nn.Linear(cross_attention_dim // 2, cross_attention_dim),
         # )
         # self.linear_attn_fusion = nn.Linear(cross_attention_dim * 2, cross_attention_dim)
-        # self.gate_ca = nn.Parameter(torch.zeros(1, dim) / dim**0.5) 
+        # self.gate_ca = nn.Parameter(torch.ones(1, dim) / dim**0.5) 
         self.attn2 = Attention(
             query_dim=kwargs.get("dim", 2240),
             qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
@@ -756,7 +790,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         batch_size = hidden_states.shape[0]
         
         num_image_token = rotary_emb[0].shape[1]
-        encoder_hidden_states = torch.cat([img_encoder_hidden_states, encoder_hidden_states], dim = 1)
+        # encoder_hidden_states = torch.cat([img_encoder_hidden_states, encoder_hidden_states], dim = 1)
 
         # 1. Modulation
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
@@ -797,6 +831,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         if self.attn2 is not None:
             # if self.action_video_fusion:
             #     encoder_attention_mask[:, :, :hidden_states.shape[1]] = float("-inf")
+            # print(torch.max(hidden_states[:, :num_image_token]), torch.min(hidden_states[:, :num_image_token]), torch.max(hidden_states[:, num_image_token:]), torch.min(hidden_states[:, num_image_token:]))
             encoder_hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim = 1)
             attn_output = self.attn2(
                 hidden_states,
@@ -804,8 +839,18 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
                 attention_mask=encoder_attention_mask,
                 num_image_token=num_image_token
             ) # very large lead to nan: maybe action tend to fuse video
-            hidden_states = attn_output + hidden_states
+            # hidden_states = attn_output + hidden_states
+            # hidden_states = torch.sigmoid(attn_output) * hidden_states + hidden_states
             # hidden_states = attn_output * gate_ca + hidden_states
+            # no sense: 2.3
+            # if self.attn3 is not None:
+            #     attn_output_2 = self.attn3(
+            #         hidden_states,
+            #         attention_mask=attention_mask,
+            #     )
+            #     attn_output_2 = self.zero_linear(attn_output_2)
+            #     attn_output = attn_output + attn_output_2
+            hidden_states = attn_output + hidden_states
 
         # 4. Feed-forward
         norm_hidden_states = self.norm2(hidden_states)

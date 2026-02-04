@@ -123,9 +123,8 @@ def prepare_encoder_attention_mask_text_condition(
             or (B, Q_len, K_len)             if batch_size is not None
         values = 0 (allowed) or -inf (masked)
     """
-
     Q_len = N_V + N_A
-    K_len = Q_len + M_H + M_L + M_LS + M_LM
+    K_len = N_V + N_A + M_LS + M_LM
 
     # initialize all masked
     attn_mask = torch.full(
@@ -142,18 +141,18 @@ def prepare_encoder_attention_mask_text_condition(
     # key
     video_k = slice(0, N_V)
     action_k = slice(N_V, N_V + N_A)
-    # Q_len = 0
     # M_H = 0
-    history_k = slice(Q_len, Q_len + M_H)
-    lan_k = slice(Q_len + M_H, Q_len + M_H + M_L)
-    scene_k = slice(Q_len + M_H + M_L, Q_len + M_H + M_L + M_LS)
-    motion_k = slice(Q_len + M_H + M_L + M_LS, Q_len + M_H + M_L + M_LS + M_LM)
+    # history_k = slice(Q_len, Q_len + M_H)
+    # lan_k = slice(Q_len + M_H, Q_len + M_H + M_L)
+    scene_k = slice(Q_len, Q_len + M_LS)
+    motion_k = slice(Q_len + M_LS, Q_len + M_LS + M_LM)
 
     # print(f"Lan:{lan_k}")
+    # attn_mask[video_q, video_k] = 0.0
     attn_mask[video_q, action_k] = 0.0 # add 0 make nan
     # attn_mask[video_q, action_k] = -10000.0
-    attn_mask[video_q, history_k] = 0.0
-    attn_mask[video_q, lan_k] = 0.0
+    # attn_mask[video_q, history_k] = 0.0
+    # attn_mask[video_q, lan_k] = 0.0
     attn_mask[video_q, scene_k] = 0.0
     attn_mask[video_q, motion_k] = 0.0
 
@@ -162,12 +161,13 @@ def prepare_encoder_attention_mask_text_condition(
     
     
     attn_mask[action_q, video_k] = 0.0
+    # attn_mask[action_q, action_k] = 0.0
     if is_video_pad:
         attn_mask[action_q, video_k] = -10000.0
     # attn_mask[action_q, video_k] = -10000.0
-    attn_mask[action_q, history_k] = 0.0
-    attn_mask[action_q, lan_k] = 0.0
-    # attn_mask[video_q, scene_k] = 0.0
+    # attn_mask[action_q, history_k] = 0.0
+    # attn_mask[action_q, lan_k] = 0.0
+    attn_mask[video_q, scene_k] = 0.0
     attn_mask[action_q, motion_k] = 0.0
 
     if batch_size is not None:
@@ -199,7 +199,7 @@ def prepare_attention_mask(
     # action can attentd video
     attn_mask[action_q, video_q] = 0.0
     # action attend self
-    attn_mask[action_q, action_q] = 0.0
+    # attn_mask[action_q, action_q] = 0.0
     if batch_size is not None:
         attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
 
@@ -413,6 +413,16 @@ class VideoWorldModel(nn.Module):
         # for action
         self.action_in_proj = nn.Linear(self.config.max_action_dim, self.inner_dim)
         self.action_out_proj = nn.Linear(self.inner_dim, self.config.max_action_dim)
+        # self.action_in_proj = nn.Sequential(
+        #     nn.Linear(self.config.max_action_dim, self.inner_dim),
+        #     nn.LayerNorm(self.inner_dim), # 强制限制分布
+        #     nn.SiLU() # 或者 ReLU
+        # )
+        # self.action_out_proj = nn.Sequential(
+        #     nn.Linear(self.inner_dim, self.inner_dim),
+        #     nn.SiLU(),
+        #     nn.Linear(self.inner_dim, self.config.max_action_dim),
+        # )
         
         # 梯度检查点
         self.transformer.enable_gradient_checkpointing()
@@ -420,7 +430,7 @@ class VideoWorldModel(nn.Module):
         self.prepare_modules()
         self.dtype = torch.bfloat16
         
-        print(f"Freeze transformer FFN weights")
+        # print(f"Freeze transformer FFN weights")
         for name, param in self.transformer.named_parameters():
             if "ff" in name and "action" not in name:
                 param.requires_grad = False
@@ -541,6 +551,7 @@ class VideoWorldModel(nn.Module):
         # sigmas = self.sample_action_time(actions.shape[0], device)[:, None, None]
         x_t = (1.0 - sigmas) * actions + sigmas * action_noise
         noise_action_embeds = self.embed_action(x_t)
+        # print(torch.max(noise_action_embeds), torch.min(noise_action_embeds))
         target_action = action_noise - actions
         return noise_action_embeds, target_action, action_noise
     
@@ -575,7 +586,8 @@ class VideoWorldModel(nn.Module):
             task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
         task_embeds = task_info_dict["embeds"]
         # task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
-        prompt_embeds = torch.cat([task_embeds, sc_embeds, act_embeds], dim = 1)
+        # prompt_embeds = torch.cat([task_embeds, sc_embeds, act_embeds], dim = 1)
+        prompt_embeds = torch.cat([sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
         img_prompt_embeds = self.img_prompt_proj(img_embeds)
         device = prompt_embeds.device
@@ -625,7 +637,8 @@ class VideoWorldModel(nn.Module):
             # mask_index = mask_index
         )
         video_pred, action_pred = model_output
-        # print(action_pred)
+        # print(torch.max(video_pred), torch.min(video_pred)) # after adding action, it become very small (-0.3-0.3, before is -3-3)
+        # print(torch.max(action_pred), torch.min(action_pred))
         action_pred = self.action_out_proj(action_pred)
         # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         # calculate loss

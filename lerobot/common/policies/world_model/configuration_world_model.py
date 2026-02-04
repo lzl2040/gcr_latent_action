@@ -72,14 +72,14 @@ class LatentWorldModelConfig(PreTrainedConfig):
     freeze_vision_encoder: bool = True
     img_decoder_part_train: bool = True
     is_distill: bool = False
-    norm_type: str = "mean_std"
+    norm_type: str = "quantile"
 
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.IDENTITY,
-            "STATE": NormalizationMode.MEAN_STD,
-            "ACTION": NormalizationMode.MEAN_STD,
+            "STATE": NormalizationMode.QUANTILES,
+            "ACTION": NormalizationMode.QUANTILES,
         }
     )
 
