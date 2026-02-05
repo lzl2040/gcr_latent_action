@@ -924,6 +924,17 @@ class LeRobotDataset(torch.utils.data.Dataset):
             item = {**item, **padding}
             for key, val in query_result.items():
                 item[key] = val
+            # ---- action padding: set to zero (no-op) ----
+            if "action" in item and "action_is_pad" in item:
+                action = item["action"]
+                action_is_pad = item["action_is_pad"]
+                # print(action.shape, action_is_pad.shape)
+
+                # 确保不改原 tensor 的 view / shared storage
+                action = action.clone()
+                action[action_is_pad] = 0.0
+
+                item["action"] = action
         
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
@@ -1638,7 +1649,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         self.max_action_dim = cfg.policy.max_action_dim
         self.max_state_dim = cfg.policy.max_state_dim
         # self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
-        self.stats = aggregate_stats_with_game([dataset.meta.stats for dataset in self.datasets], self.max_action_dim)
+        self.stats = aggregate_stats_with_game({"stats": [dataset.meta.stats for dataset in self.datasets], 
+                                                "dataset_names": self.dataset_names}, self.max_action_dim)
         save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
         # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
         
@@ -1895,18 +1907,31 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         
         # Pad the action and observation vectors
         if "game" in item["dataset_name"]:
+            
             item["action"] = F.pad(
                     item["action"],
-                    (44, 0),   # 对最后一维：左 pad 44个0，右 pad 0个0
+                    (44 + 6, 0),   # 对最后一维：左 pad 44个0，右 pad 0个0
                     mode="constant",
                     value=0
                 )
             item["observation.state"] = F.pad(
                     item["observation.state"],
-                    (46, 0),   # 对最后一维：左 pad 46个0，右 pad 0个0
+                    (46 + 6, 0),   # 对最后一维：左 pad 46个0，右 pad 0个0
                     mode="constant",
                     value=0
                 )
+        if "rh20t" in item["dataset_name"]:
+            chunk_len = item["action"].shape[0]
+            new_action = torch.ones((chunk_len, self.max_action_dim))
+            new_action[:, :6] = item["action"][:, :6]
+            new_action[:, 6:6 + 1] = item["action"][:, -2:-1]
+            new_action[:, 44:44 + 6] = item["action"][:, 6:6 + 6]
+            new_state = torch.ones(self.max_state_dim)
+            new_state[:7] = item["observation.state"][:7]
+            new_state[7:7 + 1] = item["observation.state"][-2:-1]
+            new_state[46:46 + 6] = item["observation.state"][7:7 + 6]
+            item["action"] = new_action
+            item["observation.state"] = new_state
         # print(item["dataset_name"], item["action"].shape)
         item["action"] = self.pad_vector(item["action"], self.max_action_dim)
         item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)

@@ -634,8 +634,29 @@ def aggregate_stats(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str
     return aggregated_stats
 
 
+def update_rh20t_stats(stats, max_dim, key, stat_key, constant_v):
+    if key == "action":
+        prefix = 6
+        force_start = 44
+        force_end = 44 + 6
+    else:
+        prefix = 7
+        force_start = 46
+        force_end = 46 + 6
+    stats_value = stats[stat_key]
+    xyz_rpy_mean = stats_value[:prefix]
+    gripper_mean = stats_value[-2:-1]
+    force_mean = stats_value[prefix:prefix + 6]
+    new_stats = np.ones(max_dim) * constant_v
+    # print(new_stats.shape, force_mean.shape, stats_value.shape)
+    new_stats[:prefix] = xyz_rpy_mean
+    new_stats[prefix:prefix + 1] = gripper_mean
+    new_stats[force_start:force_end] = force_mean
+    return new_stats
+    
+    
 
-def aggregate_stats_with_game(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str, dict[str, np.ndarray]]:
+def aggregate_stats_with_game(stats_list_with_name, max_dim = 32) -> dict[str, dict[str, np.ndarray]]:
     """Aggregate stats from multiple compute_stats outputs into a single set of stats.
 
     The final stats will have the union of all data keys from each of the stats dicts.
@@ -647,10 +668,55 @@ def aggregate_stats_with_game(stats_list: list[dict[str, dict]], max_dim = 32) -
     - new_std = (std of all data)
     """
 
+    stats_list = stats_list_with_name["stats"]
+    dataset_names = stats_list_with_name["dataset_names"]
     _assert_type_and_shape(stats_list)
 
     data_keys = {key for stats in stats_list for key in stats} # action, state, timestamp
     aggregated_stats = {key: {} for key in data_keys}
+    
+    process_keys = ["action", "observation.state"]
+    
+    for i in range(len(stats_list)):
+        stats_with_key = stats_list[i] # dataset stats from all keys
+        dataset_name = dataset_names[i]
+        for key in process_keys:
+            stats = stats_with_key[key] # key stats
+            if "game" in dataset_name:
+                if key == "action":
+                    pad_len = 44 + 6 # dual robot arm + force(single arm)
+                else:
+                    pad_len = 46 + 6
+                stats["mean"] = np.pad(stats["mean"], (pad_len, 0),  # 前面补 44 个，后面不补
+                    mode="constant",constant_values=0)
+                stats["std"] = np.pad(stats["std"], (pad_len, 0),  # 前面补 44 个，后面不补
+                    mode="constant",constant_values=1)
+                stats["max"] = np.pad(stats["max"], (pad_len, 0),  # 前面补 44 个，后面不补
+                    mode="constant",constant_values=0)
+                stats["min"] = np.pad(stats["min"], (pad_len, 0),  # 前面补 44 个，后面不补
+                    mode="constant",constant_values=0)
+                stats["q01"] = np.pad(stats["q01"], (pad_len, 0),  # 前面补 44 个，后面不补
+                    mode="constant",constant_values=-1)
+                stats["q10"] = np.pad(stats["q10"], (pad_len, 0),  # 前面补 44 个，后面不补
+                    mode="constant",constant_values=-0.5)
+                stats["q50"] = np.pad(stats["q50"], (pad_len, 0),  # 前面补 44 个，后面不补
+                    mode="constant",constant_values=0)
+                stats["q90"] = np.pad(stats["q90"], (pad_len, 0),  # 前面补 44 个，后面不补
+                    mode="constant",constant_values=0.5)
+                stats["q99"] = np.pad(stats["q99"], (pad_len, 0),  # 前面补 44 个，后面不补
+                    mode="constant",constant_values=1)
+            elif "rh20t" in dataset_name:
+                stats["mean"] = update_rh20t_stats(stats, max_dim, key, "mean", constant_v = 0)
+                stats["std"] = update_rh20t_stats(stats, max_dim, key, "std", constant_v = 1)
+                stats["max"] = update_rh20t_stats(stats, max_dim, key, "max", constant_v = 0)
+                stats["min"] = update_rh20t_stats(stats, max_dim, key, "min", constant_v = 0)
+                stats["q01"] = update_rh20t_stats(stats, max_dim, key, "q01", constant_v = -1)
+                stats["q10"] = update_rh20t_stats(stats, max_dim, key, "q10", constant_v = -0.5)
+                stats["q50"] = update_rh20t_stats(stats, max_dim, key, "q50", constant_v = 0)
+                stats["q90"] = update_rh20t_stats(stats, max_dim, key, "q90", constant_v = 0.5)
+                stats["q99"] = update_rh20t_stats(stats, max_dim, key, "q99", constant_v = 1)
+            
+            stats_list[i][key] = stats
 
     for key in data_keys:
         # stats: ["action":["mean":, "std": , ], "state":["mean":, "std":, ]]
@@ -660,46 +726,6 @@ def aggregate_stats_with_game(stats_list: list[dict[str, dict]], max_dim = 32) -
         if key in ["action", "observation.state"]:
             pad_stats_with_key = []
             for stats in stats_with_key:
-                if len(stats["mean"]) == 50: # this is action stats
-                    print("Processing game data")
-                    if key == "observation.state":
-                        stats["mean"] = np.pad(stats["mean"], (46, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=0)
-                        stats["std"] = np.pad(stats["std"], (46, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=1)
-                        stats["max"] = np.pad(stats["max"], (46, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=1)
-                        stats["min"] = np.pad(stats["min"], (46, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=1)
-                        stats["q01"] = np.pad(stats["q01"], (46, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=-1)
-                        stats["q10"] = np.pad(stats["q10"], (46, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=-0.5)
-                        stats["q50"] = np.pad(stats["q50"], (46, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=0)
-                        stats["q90"] = np.pad(stats["q90"], (46, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=0.5)
-                        stats["q99"] = np.pad(stats["q99"], (46, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=1)
-                    elif key == "action":
-                        stats["mean"] = np.pad(stats["mean"], (44, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=0)
-                        stats["std"] = np.pad(stats["std"], (44, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=1)
-                        stats["max"] = np.pad(stats["max"], (44, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=1)
-                        stats["min"] = np.pad(stats["min"], (44, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=1)
-                        stats["q01"] = np.pad(stats["q01"], (44, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=-1)
-                        stats["q10"] = np.pad(stats["q10"], (44, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=-0.5)
-                        stats["q50"] = np.pad(stats["q50"], (44, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=0)
-                        stats["q90"] = np.pad(stats["q90"], (44, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=0.5)
-                        stats["q99"] = np.pad(stats["q99"], (44, 0),  # 前面补 44 个，后面不补
-                            mode="constant",constant_values=1)
                 pad_stats = {}
                 pad_len = max_dim - len(stats["mean"])
                 # np.pad(数组, (左补数量, 右补数量), mode="constant", constant_values=填充值)

@@ -622,11 +622,22 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.JOINT,
         "action_encoding": ActionEncoding.JOINT_POS,
     },
-    "rh20t": {
+    # "rh20t": {
+    #     "image_obs_keys": {
+    #         "primary": "image_front",
+    #         "secondary": "image_side_right",
+    #         "wrist": "image_wrist",
+    #     },
+    #     "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+    #     "state_obs_keys": ["proprio"],
+    #     "state_encoding": StateEncoding.POS_EULER,
+    #     "action_encoding": ActionEncoding.EEF_POS,
+    # },
+     "rh20t": {
         "image_obs_keys": {
-            "primary": "image_front",
-            "secondary": "image_side_right",
-            "wrist": "image_wrist",
+            "primary": "primary",
+            "secondary": None,
+            "wrist": None,
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],

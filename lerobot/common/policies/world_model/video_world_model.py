@@ -175,6 +175,119 @@ def prepare_encoder_attention_mask_text_condition(
 
     return attn_mask
 
+def prepare_encoder_physical_attention_mask(
+    N_V: int,
+    N_A: int,
+    M_LS: int,
+    M_LM: int,
+    *,
+    T_V: int,
+    batch_size: int | None = None,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+    is_video_pad: bool = False,
+):
+    """
+    Target (Q): [Video | Action]
+    Source (K): [Video | Action | Latent Scene | Latent Motion]
+
+    Time rules:
+    - Video sees: history video + future action
+    - Action sees: history action + future video
+    """
+    T = N_A
+    assert N_A == T
+    HW = N_V // T_V
+    # print(T, T_V)
+
+    Q_len = N_V + N_A
+    K_len = N_V + N_A + M_LS + M_LM
+
+    attn_mask = torch.full(
+        (Q_len, K_len),
+        float("-inf"),
+        device=device,
+        dtype=dtype,
+    )
+
+    # --------------------------------------------------
+    # slices
+    # --------------------------------------------------
+    video_q  = slice(0, N_V)
+    action_q = slice(N_V, N_V + N_A)
+
+    video_k  = slice(0, N_V)
+    action_k = slice(N_V, N_V + N_A)
+
+    scene_k  = slice(Q_len, Q_len + M_LS)
+    motion_k = slice(Q_len + M_LS, Q_len + M_LS + M_LM)
+
+    # ==================================================
+    # 1. Video → Video (history only, causal in tau)
+    # ==================================================
+    for tau_q in range(T_V):
+        q_start = tau_q * HW
+        q_end   = q_start + HW
+
+        k_end = (tau_q + 1) * HW
+        attn_mask[q_start:q_end, video_k.start : k_end] = 0.0
+
+    # ==================================================
+    # 2. Action → Action (history only)
+    # ==================================================
+    for t_q in range(T):
+        attn_mask[
+            N_V + t_q,
+            N_V : N_V + t_q + 1
+        ] = 0.0
+
+    # ==================================================
+    # 3. Action → Video (future video)
+    #    tau >= floor(t / r)
+    # ==================================================
+    for t_q in range(T):
+        tau_min = (t_q * T_V) // T
+        v_start = tau_min * HW
+        attn_mask[
+            N_V + t_q,
+            v_start : N_V
+        ] = 0.0
+
+    # ==================================================
+    # 4. Video → Action (current action + future)
+    #    t >= (tau + 1) * r
+    # ==================================================
+    for tau_q in range(T_V):
+        q_start = tau_q * HW
+        q_end   = q_start + HW
+
+        t_min = (tau_q * T) // T_V
+        if t_min < T:
+            attn_mask[
+                q_start:q_end,
+                N_V + t_min : N_V + T
+            ] = 0.0
+
+    # ==================================================
+    # 5. Extra conditions（保持你原来的语义）
+    # ==================================================
+    # Video queries
+    attn_mask[video_q, scene_k]  = 0.0
+    attn_mask[video_q, motion_k] = 0.0
+
+    # Action queries
+    attn_mask[action_q, scene_k] = 0.0
+    attn_mask[action_q, motion_k] = 0.0
+
+    if is_video_pad:
+        attn_mask[action_q, video_k] = float("-inf")
+
+    # --------------------------------------------------
+    if batch_size is not None:
+        attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
+
+    return attn_mask
+
 def prepare_attention_mask(
     N_V, 
     N_A,
@@ -264,9 +377,15 @@ def forward_c(
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
         if encoder_attention_mask is None:
-            encoder_attention_mask = prepare_encoder_attention_mask_text_condition(
-                N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
-                M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
+            # encoder_attention_mask = prepare_encoder_attention_mask_text_condition(
+            #     N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
+            #     M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
+            #     batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
+            #     device=hidden_states.device, is_video_pad = is_video_pad
+            # )
+            encoder_attention_mask = prepare_encoder_physical_attention_mask(
+                N_V=hidden_states.shape[1], N_A=action_hidden_states.shape[1], 
+                M_LS = condition_len[2], M_LM = condition_len[3], T_V=num_frames,
                 batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
                 device=hidden_states.device, is_video_pad = is_video_pad
             )

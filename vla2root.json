@@ -26,6 +26,7 @@
     "fmb_dataset": "fmb_dataset_lerobot",
     "dobbe": "dobbe_lerobot",
     "droid": "droid",
+    "rh20t": "rh20t",
     "agibot_alpha": "agibotworld_v2",
     "libero_goal_no_noops": "libero_goal_no_noops_lerobot",
     "libero_spatial_no_noops": "libero_spatial_no_noops_lerobot",
