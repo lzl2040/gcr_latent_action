@@ -377,18 +377,18 @@ def forward_c(
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
         if encoder_attention_mask is None:
-            # encoder_attention_mask = prepare_encoder_attention_mask_text_condition(
-            #     N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
-            #     M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
-            #     batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
-            #     device=hidden_states.device, is_video_pad = is_video_pad
-            # )
-            encoder_attention_mask = prepare_encoder_physical_attention_mask(
-                N_V=hidden_states.shape[1], N_A=action_hidden_states.shape[1], 
-                M_LS = condition_len[2], M_LM = condition_len[3], T_V=num_frames,
+            encoder_attention_mask = prepare_encoder_attention_mask_text_condition(
+                N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
+                M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
                 batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
                 device=hidden_states.device, is_video_pad = is_video_pad
             )
+            # encoder_attention_mask = prepare_encoder_physical_attention_mask(
+            #     N_V=hidden_states.shape[1], N_A=action_hidden_states.shape[1], 
+            #     M_LS = condition_len[2], M_LM = condition_len[3], T_V=num_frames,
+            #     batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
+            #     device=hidden_states.device, is_video_pad = is_video_pad
+            # )
         if attention_mask is None:
             attention_mask = prepare_attention_mask(
                 N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
