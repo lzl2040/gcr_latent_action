@@ -1651,8 +1651,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
         self.stats = aggregate_stats_with_game({"stats": [dataset.meta.stats for dataset in self.datasets], 
                                                 "dataset_names": self.dataset_names}, self.max_action_dim)
-        save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
-        # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/latent_action_exp", f"{cfg.data_mix}_stats.json"))
+        # save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
+        save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/world_model_exp", f"{cfg.data_mix}_stats.json"))
         
         print(f"Aggregated stats:{self.stats}")
         # update meta_features
