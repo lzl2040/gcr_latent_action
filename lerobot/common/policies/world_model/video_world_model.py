@@ -673,7 +673,14 @@ class VideoWorldModel(nn.Module):
         # print(torch.max(noise_action_embeds), torch.min(noise_action_embeds))
         target_action = action_noise - actions
         return noise_action_embeds, target_action, action_noise
-    
+
+    def prepare_noise_action_v2(self, actions, sigmas, device="cuda"):
+        action_noise = torch.randn_like(actions)
+        x_t = (1.0 - sigmas) * actions + sigmas * action_noise
+        noise_action_embeds = self.embed_action(x_t)
+        target_action = action_noise - actions
+        return noise_action_embeds, target_action, action_noise
+
     def save_video(self, video_latents, save_name):
         latents_mean = (
             torch.tensor(self.vae.config.latents_mean)
@@ -714,12 +721,16 @@ class VideoWorldModel(nn.Module):
         # print(target_imgs.shape) # 224 * 224
         target_z = self.vae.encode(target_imgs).latent_dist.mode().to(device)
         bs = target_z.shape[0]
-        # for logit_normal
-        u = torch.normal(mean=0.0, std=1.0, size=(bs,), device=device)
-        u = torch.nn.functional.sigmoid(u)
-        indices = (u * self.noise_scheduler.config.num_train_timesteps).long().to(device=device)
-        sch_timesteps = self.noise_scheduler.timesteps.to(device=device)
-        timesteps = sch_timesteps[indices].to(device=device)
+        # # for logit_normal: for image
+        # u = torch.normal(mean=0.0, std=1.0, size=(bs,), device=device)
+        # u = torch.nn.functional.sigmoid(u)
+        # indices = (u * self.noise_scheduler.config.num_train_timesteps).long().to(device=device)
+        # sch_timesteps = self.noise_scheduler.timesteps.to(device=device)
+        # timesteps = sch_timesteps[indices].to(device=device)
+        # for action sample
+        sigmas = self.sample_action_time(bs, device)
+        timesteps = (sigmas * (self.noise_scheduler.config.num_train_timesteps)).long()
+        
         # print(train_step)
         if train_step > self.config.action_warm_up_step:
             # target_z = self.vae.encode(target_imgs).latent_dist.mode().to(device)
@@ -731,16 +742,17 @@ class VideoWorldModel(nn.Module):
             # print(target_z.shape) # [10, 16, 8, 28, 28]
             clean_images = target_z
             noise = torch.randn_like(clean_images)
-            sigmas = self.get_sigmas(timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype, device=device)
-            # noisy_model_input = (1.0 - sigmas) * clean_images + sigmas * noise
-            # noisy_model_input = self.noise_scheduler.add_noise(clean_images, noise, timesteps)
-            noisy_video_input = (1.0 - sigmas) * clean_images + sigmas * noise
+            vide_sigmas = sigmas[:, None, None, None, None]
+            # sigmas = self.get_sigmas(timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype, device=device)
+            # noisy_video_input = (1.0 - sigmas) * clean_images + sigmas * noise
+            noisy_video_input = (1.0 - vide_sigmas) * clean_images + vide_sigmas * noise
             is_video_pad = False
         else:
             noisy_video_input = torch.zeros_like(target_z).to(dtype=target_z.dtype, device=target_z.device)
             is_video_pad = True
 
-        noisy_action_input, action_target, action_noise = self.prepare_noise_action(actions, timesteps)
+        # noisy_action_input, action_target, action_noise = self.prepare_noise_action(actions, timesteps)
+        noisy_action_input, action_target, action_noise = self.prepare_noise_action_v2(actions, sigmas[:, None, None], device)
         # print(torch.max(noisy_action_input), torch.min(noisy_action_input))
         # print(noisy_video_input.shape, noisy_action_input.shape) # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         model_output = self.transformer(
@@ -786,8 +798,8 @@ class VideoWorldModel(nn.Module):
         
         # action_pred_gt = action_noise - action_pred
         # action_gt = actions
-        # print("Action GT:", action_gt[0, 0, :8], "Action Pred:", action_pred_gt[0, 0, :8], "Loss")
-        # print("Action Pred:", action_pred_gt[0, 0, :8])
+        # print(f"Action GT: {action_gt[0, 0, :16]}, Action Pred: {action_pred_gt[0, 0, :16]}, Loss: {action_loss.mean()}")
+        # # print("Action Pred:", action_pred_gt[0, 0, :8])
         # time.sleep(5)
         return loss
         
