@@ -729,6 +729,7 @@ class VideoWorldModel(nn.Module):
         # timesteps = sch_timesteps[indices].to(device=device)
         # for action sample
         sigmas = self.sample_action_time(bs, device)
+        vide_sigmas = sigmas[:, None, None, None, None]
         timesteps = (sigmas * (self.noise_scheduler.config.num_train_timesteps)).long()
         
         # print(train_step)
@@ -742,7 +743,6 @@ class VideoWorldModel(nn.Module):
             # print(target_z.shape) # [10, 16, 8, 28, 28]
             clean_images = target_z
             noise = torch.randn_like(clean_images)
-            vide_sigmas = sigmas[:, None, None, None, None]
             # sigmas = self.get_sigmas(timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype, device=device)
             # noisy_video_input = (1.0 - sigmas) * clean_images + sigmas * noise
             noisy_video_input = (1.0 - vide_sigmas) * clean_images + vide_sigmas * noise
@@ -774,7 +774,7 @@ class VideoWorldModel(nn.Module):
         # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         # calculate loss
         if train_step > self.config.action_warm_up_step:
-            weighting = torch.ones_like(sigmas)
+            weighting = torch.ones_like(vide_sigmas)
             video_target = noise - clean_images
             # Compute regular loss.
             video_loss = torch.mean(
