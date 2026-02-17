@@ -124,7 +124,7 @@ def prepare_encoder_attention_mask_text_condition(
         values = 0 (allowed) or -inf (masked)
     """
     Q_len = N_V + N_A
-    K_len = N_V + N_A + M_LS + M_LM
+    K_len = N_V + N_A + M_L + M_LS + M_LM
 
     # initialize all masked
     attn_mask = torch.full(
@@ -144,15 +144,16 @@ def prepare_encoder_attention_mask_text_condition(
     # M_H = 0
     # history_k = slice(Q_len, Q_len + M_H)
     # lan_k = slice(Q_len + M_H, Q_len + M_H + M_L)
-    scene_k = slice(Q_len, Q_len + M_LS)
-    motion_k = slice(Q_len + M_LS, Q_len + M_LS + M_LM)
+    lan_k = slice(Q_len, Q_len + M_L)
+    scene_k = slice(Q_len + M_L, Q_len + M_LS + M_L)
+    motion_k = slice(Q_len + M_LS + M_L, Q_len + M_LS + M_LM + M_L)
 
     # print(f"Lan:{lan_k}")
     # attn_mask[video_q, video_k] = 0.0
     attn_mask[video_q, action_k] = 0.0 # add 0 make nan
     # attn_mask[video_q, action_k] = -10000.0
     # attn_mask[video_q, history_k] = 0.0
-    # attn_mask[video_q, lan_k] = 0.0
+    attn_mask[video_q, lan_k] = 0.0
     attn_mask[video_q, scene_k] = 0.0
     attn_mask[video_q, motion_k] = 0.0
 
@@ -166,8 +167,8 @@ def prepare_encoder_attention_mask_text_condition(
         attn_mask[action_q, video_k] = -10000.0
     # attn_mask[action_q, video_k] = -10000.0
     # attn_mask[action_q, history_k] = 0.0
-    # attn_mask[action_q, lan_k] = 0.0
-    attn_mask[video_q, scene_k] = 0.0
+    attn_mask[action_q, lan_k] = 0.0
+    attn_mask[action_q, scene_k] = 0.0
     attn_mask[action_q, motion_k] = 0.0
 
     if batch_size is not None:
@@ -712,8 +713,8 @@ class VideoWorldModel(nn.Module):
             task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
         task_embeds = task_info_dict["embeds"]
         # task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
-        # prompt_embeds = torch.cat([task_embeds, sc_embeds, act_embeds], dim = 1)
-        prompt_embeds = torch.cat([sc_embeds, act_embeds], dim = 1)
+        prompt_embeds = torch.cat([task_embeds, sc_embeds, act_embeds], dim = 1)
+        # prompt_embeds = torch.cat([sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
         img_prompt_embeds = self.img_prompt_proj(img_embeds)
         device = prompt_embeds.device
