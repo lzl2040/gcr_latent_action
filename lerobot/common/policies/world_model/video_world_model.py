@@ -181,6 +181,7 @@ def prepare_encoder_physical_attention_mask(
     N_A: int,
     M_LS: int,
     M_LM: int,
+    M_L: int, 
     *,
     T_V: int,
     batch_size: int | None = None,
@@ -202,7 +203,7 @@ def prepare_encoder_physical_attention_mask(
     # print(T, T_V)
 
     Q_len = N_V + N_A
-    K_len = N_V + N_A + M_LS + M_LM
+    K_len = N_V + N_A + M_L + M_LS + M_LM
 
     attn_mask = torch.full(
         (Q_len, K_len),
@@ -219,9 +220,10 @@ def prepare_encoder_physical_attention_mask(
 
     video_k  = slice(0, N_V)
     action_k = slice(N_V, N_V + N_A)
+    lan_k    = slice(N_V + N_A, N_V + N_A + M_L)
 
-    scene_k  = slice(Q_len, Q_len + M_LS)
-    motion_k = slice(Q_len + M_LS, Q_len + M_LS + M_LM)
+    scene_k  = slice(Q_len + M_L, Q_len + M_L + M_LS)
+    motion_k = slice(Q_len + M_L + M_LS, Q_len + M_L + M_LS + M_LM)
 
     # ==================================================
     # 1. Video → Video (history only, causal in tau)
@@ -273,10 +275,12 @@ def prepare_encoder_physical_attention_mask(
     # 5. Extra conditions（保持你原来的语义）
     # ==================================================
     # Video queries
+    attn_mask[video_q, lan_k] = 0.0
     attn_mask[video_q, scene_k]  = 0.0
     attn_mask[video_q, motion_k] = 0.0
 
     # Action queries
+    attn_mask[action_q, lan_k] = 0.0
     attn_mask[action_q, scene_k] = 0.0
     attn_mask[action_q, motion_k] = 0.0
 
@@ -378,18 +382,19 @@ def forward_c(
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
         if encoder_attention_mask is None:
-            encoder_attention_mask = prepare_encoder_attention_mask_text_condition(
-                N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
-                M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
-                batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
-                device=hidden_states.device, is_video_pad = is_video_pad
-            )
-            # encoder_attention_mask = prepare_encoder_physical_attention_mask(
-            #     N_V=hidden_states.shape[1], N_A=action_hidden_states.shape[1], 
-            #     M_LS = condition_len[2], M_LM = condition_len[3], T_V=num_frames,
+            # encoder_attention_mask = prepare_encoder_attention_mask_text_condition(
+            #     N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
+            #     M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
             #     batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
             #     device=hidden_states.device, is_video_pad = is_video_pad
             # )
+            encoder_attention_mask = prepare_encoder_physical_attention_mask(
+                N_V=hidden_states.shape[1], N_A=action_hidden_states.shape[1], 
+                M_LS = condition_len[2], M_LM = condition_len[3], T_V=num_frames,
+                M_L = condition_len[1],
+                batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
+                device=hidden_states.device, is_video_pad = is_video_pad
+            )
         if attention_mask is None:
             attention_mask = prepare_attention_mask(
                 N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
@@ -732,6 +737,7 @@ class VideoWorldModel(nn.Module):
         sigmas = self.sample_action_time(bs, device)
         vide_sigmas = sigmas[:, None, None, None, None]
         timesteps = (sigmas * (self.noise_scheduler.config.num_train_timesteps)).long()
+        # print(timesteps)
         
         # print(train_step)
         if train_step > self.config.action_warm_up_step:
