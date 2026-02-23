@@ -382,19 +382,19 @@ def forward_c(
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
         if encoder_attention_mask is None:
-            # encoder_attention_mask = prepare_encoder_attention_mask_text_condition(
-            #     N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
-            #     M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
-            #     batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
-            #     device=hidden_states.device, is_video_pad = is_video_pad
-            # )
-            encoder_attention_mask = prepare_encoder_physical_attention_mask(
-                N_V=hidden_states.shape[1], N_A=action_hidden_states.shape[1], 
-                M_LS = condition_len[2], M_LM = condition_len[3], T_V=num_frames,
-                M_L = condition_len[1],
+            encoder_attention_mask = prepare_encoder_attention_mask_text_condition(
+                N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
+                M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
                 batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
                 device=hidden_states.device, is_video_pad = is_video_pad
             )
+            # encoder_attention_mask = prepare_encoder_physical_attention_mask(
+            #     N_V=hidden_states.shape[1], N_A=action_hidden_states.shape[1], 
+            #     M_LS = condition_len[2], M_LM = condition_len[3], T_V=num_frames,
+            #     M_L = condition_len[1],
+            #     batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
+            #     device=hidden_states.device, is_video_pad = is_video_pad
+            # )
         if attention_mask is None:
             attention_mask = prepare_attention_mask(
                 N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
@@ -805,7 +805,7 @@ class VideoWorldModel(nn.Module):
         
         # action_pred_gt = action_noise - action_pred
         # action_gt = actions
-        # print(f"Action GT: {action_gt[0, 0, :16]}, Action Pred: {action_pred_gt[0, 0, :16]}, Loss: {action_loss.mean()}")
+        # print(f"Action Delta: {action_pred_gt[0, 0, :16] - action_gt[0, 0, :16]}, Loss: {action_loss.mean()}")
         # # print("Action Pred:", action_pred_gt[0, 0, :8])
         # time.sleep(5)
         return loss
