@@ -1841,7 +1841,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # item["observation.state"] = (item["observation.state"] + 1.0) * denom / 2.0 + self.stats["observation.state"][key1]
         action_mask[action_start_dim:action_end_dim] = 1
         item["action_mask"] = action_mask
-        item["action"] = torch.clamp(item["action"], -1.0, 1.0)
+        # item["action"] = torch.clamp(item["action"], -1.0, 1.0)
 
         return item
 

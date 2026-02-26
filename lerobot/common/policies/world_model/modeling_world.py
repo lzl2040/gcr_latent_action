@@ -85,6 +85,11 @@ class LatentWorldModel(PreTrainedPolicy):
         """Pad action"""
         actions = pad_vector(batch[ACTION], self.config.max_action_dim)
         return actions
+
+    def prepare_state(self, batch):
+        """Pad states"""
+        states = pad_vector(batch[OBS_ROBOT], self.config.max_action_dim)
+        return states
     
     def convert_to_dtype(self, vector:torch.Tensor):
         if not isinstance(vector, type(None)):
@@ -128,6 +133,8 @@ class LatentWorldModel(PreTrainedPolicy):
         tasks = batch["task"]
         actions = self.prepare_action(batch)
         actions = self.convert_to_dtype(actions)
+        states = self.prepare_state(batch)
+        states = self.convert_to_dtype(batch["observation.state"])
         train_step = batch["step"]
         device = pixel_values.device
         action_is_pad = batch.get("action_is_pad")
@@ -163,11 +170,12 @@ class LatentWorldModel(PreTrainedPolicy):
         # prompt_embeds = torch.cat([img_embeds, sc_embeds, act_embeds], dim=1)
         future_imgs = future_imgs.permute(0, 2, 1, 3, 4)
         # print(future_imgs.shape)
-        losses = self.world_decoder_model(img_embeds, sc_embeds, act_embeds, task_dict, future_imgs, actions, train_step)
+        losses = self.world_decoder_model(img_embeds, sc_embeds, act_embeds, task_dict, future_imgs, actions, states, train_step)
         # print(sc_embeds.shape, act_embeds.shape, img_embeds.shape)
         # print(img_embeds.shape) # 640 2048
         # print(losses["action_loss"].shape, batch["action_mask"].shape)
         # print(batch["action_mask"])
+        # print(torch.max(batch["action"]), torch.min(batch["action"]))
         if self.config.use_action_mask:
             action_mask = batch["action_mask"].unsqueeze(1)
             valid_len = action_mask.sum() * self.config.n_action_steps

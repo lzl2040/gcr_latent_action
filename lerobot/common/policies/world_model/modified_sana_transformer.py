@@ -616,7 +616,6 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
 
     def __init__(
         self,
-        action_video_fusion,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -692,8 +691,8 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         self.attn2.to_q_action = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
         self.attn2.to_k_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
         self.attn2.to_v_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
-        self.action_adaln = nn.Linear(dim, 6 * dim, bias=True)
-        self.silu = nn.SiLU()
+        # self.action_adaln = nn.Linear(dim, 6 * dim, bias=True)
+        # self.silu = nn.SiLU()
         
     # wo action adaln params
     # def forward(
@@ -797,9 +796,9 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
             self.scale_shift_table[None, None] + timestep.reshape(batch_size, timestep.shape[1], 6, -1)
         ).unbind(dim=2)
         
-        action_ada_params = self.silu(self.action_adaln(embedded_timestep).reshape(batch_size, timestep.shape[1], 6, -1))
-        # print(action_ada_params.shape) # 4 1 6 2240
-        shift_msa_action, scale_msa_action, gate_msa_action, shift_mlp_action, scale_mlp_action, gate_mlp_action = action_ada_params.unbind(dim = 2)
+        # action_ada_params = self.silu(self.action_adaln(embedded_timestep).reshape(batch_size, timestep.shape[1], 6, -1))
+        # # print(action_ada_params.shape) # 4 1 6 2240
+        # shift_msa_action, scale_msa_action, gate_msa_action, shift_mlp_action, scale_mlp_action, gate_mlp_action = action_ada_params.unbind(dim = 2)
         # print(self.scale_shift_table[0, :10])
         # gate_ca = self.gate_ca.unsqueeze(0).repeat(batch_size, 1, 1)
 
@@ -809,7 +808,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
         norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
         
-        norm_action_hidden_states = norm_action_hidden_states * (1 + scale_msa_action) + shift_msa_action
+        # norm_action_hidden_states = norm_action_hidden_states * (1 + scale_msa_action) + shift_msa_action
         norm_action_hidden_states = norm_action_hidden_states.to(hidden_states.dtype)
         
         attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
@@ -822,7 +821,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         # attn_output_action = (attn_output_action_1 + attn_output_action_2) / 2.0
         # attn_output_action = self.linear_attn_fusion(attn_output_action)
         attn_output = gate_msa * attn_output
-        attn_output_action = gate_msa_action * attn_output_action
+        # attn_output_action = gate_msa_action * attn_output_action
         
         attn_output = torch.cat([attn_output, attn_output_action], dim = 1)
         hidden_states = hidden_states + attn_output
@@ -857,7 +856,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         norm_hidden_states, norm_action_hidden_states = norm_hidden_states[:, :num_image_token], norm_hidden_states[:, num_image_token:]
         norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
         
-        norm_action_hidden_states = norm_action_hidden_states * (1 + scale_mlp_action) + shift_mlp_action
+        # norm_action_hidden_states = norm_action_hidden_states * (1 + scale_mlp_action) + shift_mlp_action
         
         # print(norm_hidden_states.shape)
         norm_hidden_states = norm_hidden_states.unflatten(1, (frames, height, width))
@@ -868,7 +867,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         ff_output = ff_output.flatten(1, 3)
         
         ff_output = ff_output * gate_mlp
-        ff_action_output = ff_action_output * gate_mlp_action
+        # ff_action_output = ff_action_output * gate_mlp_action
         
         ff_output = torch.cat([ff_output, ff_action_output], dim = 1)
         
@@ -1088,3 +1087,4 @@ class AdaLNTime(nn.Module):
         shift, scale = self.act(self.linear(temb)).reshape(batch_size, temb.shape[1], 2, -1).unbind(dim=2)
         hidden_states = hidden_states * (1 + scale) + shift
         return hidden_states
+    

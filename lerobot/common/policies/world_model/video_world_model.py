@@ -20,6 +20,7 @@ import numpy as np
 import time
 
 
+
 latents_mean =  [
     -0.7571,
     -0.7089,
@@ -162,11 +163,8 @@ def prepare_encoder_attention_mask_text_condition(
     
     
     attn_mask[action_q, video_k] = 0.0
-    # attn_mask[action_q, action_k] = 0.0
     if is_video_pad:
-        attn_mask[action_q, video_k] = -10000.0
-    # attn_mask[action_q, video_k] = -10000.0
-    # attn_mask[action_q, history_k] = 0.0
+        attn_mask[action_q, video_k] = float("-inf")
     attn_mask[action_q, lan_k] = 0.0
     attn_mask[action_q, scene_k] = 0.0
     attn_mask[action_q, motion_k] = 0.0
@@ -536,8 +534,10 @@ class VideoWorldModel(nn.Module):
         self.img_prompt_proj = nn.Linear(self.config.vlm_token_dim, self.inner_dim)
         
         # for action
-        self.action_in_proj = nn.Linear(self.config.max_action_dim, self.inner_dim)
+        self.action_in_proj = nn.Linear(self.config.max_action_dim * 2, self.inner_dim)
         self.action_out_proj = nn.Linear(self.inner_dim, self.config.max_action_dim)
+        self.action_time_mlp_in = nn.Linear(self.inner_dim * 2, self.inner_dim)
+        self.action_time_mlp_out = nn.Linear(self.inner_dim, self.inner_dim)
         # self.action_in_proj = nn.Sequential(
         #     nn.Linear(self.config.max_action_dim, self.inner_dim),
         #     nn.LayerNorm(self.inner_dim), # 强制限制分布
@@ -603,14 +603,8 @@ class VideoWorldModel(nn.Module):
             rope_max_seq_len=self.transformer.config.rope_max_seq_len,
         )
         # mid_layer = self.transformer.config.num_layers // 2
-        mid_layer = 0
         for i in range(self.transformer.config.num_layers):
-            if i >= mid_layer:
-                action_video_fusion = True
-            else:
-                action_video_fusion = False
-            self.transformer.transformer_blocks[i] = Modified_SanaVideoTransformerBlock_V2(action_video_fusion,
-                **block_kwargs)
+            self.transformer.transformer_blocks[i] = Modified_SanaVideoTransformerBlock_V2(**block_kwargs)
 
         self.transformer.forward = forward_c.__get__(self.transformer)
         missing_keys, unexpected_key = self.transformer.load_state_dict(old_transformer_weights, strict=False)
@@ -680,12 +674,30 @@ class VideoWorldModel(nn.Module):
         target_action = action_noise - actions
         return noise_action_embeds, target_action, action_noise
 
-    def prepare_noise_action_v2(self, actions, sigmas, device="cuda"):
+    def prepare_noise_action_v2(self, actions, sigmas, states, device="cuda"):
         action_noise = torch.randn_like(actions)
         x_t = (1.0 - sigmas) * actions + sigmas * action_noise
-        noise_action_embeds = self.embed_action(x_t)
+        
+        # print(sigmas.shape, actions.shape, states.shape)
+        time_emb = create_sinusoidal_pos_embedding(
+            sigmas[:, 0, 0], self.inner_dim, min_period=4e-3, max_period=4.0, device=device
+        )
+        time_emb = time_emb.type(dtype=actions.dtype)
+        
+        B, num_actions = actions.shape[:2]
+        states = states.unsqueeze(1).expand(B, num_actions, states.shape[-1])
+        actions_and_states = torch.cat([x_t, states], dim = -1)
+        noise_action_embeds = self.action_in_proj(actions_and_states)
+        # concat with time embedding
+        time_emb = time_emb[:, None, :].expand_as(noise_action_embeds)
+        action_time_emb = torch.cat([noise_action_embeds, time_emb], dim=2)
+
+        action_time_emb = self.action_time_mlp_in(action_time_emb)
+        action_time_emb = F.silu(action_time_emb)  # swish == silu
+        action_time_emb = self.action_time_mlp_out(action_time_emb)
+        
         target_action = action_noise - actions
-        return noise_action_embeds, target_action, action_noise
+        return action_time_emb, target_action, action_noise
 
     def save_video(self, video_latents, save_name):
         latents_mean = (
@@ -710,14 +722,12 @@ class VideoWorldModel(nn.Module):
             video = (video * 255).clip(0, 255).astype(np.uint8)
         imageio.mimsave(save_name, video, fps=10)
     
-    def forward(self, img_embeds, sc_embeds, act_embeds, task_info_dict, target_imgs, actions, train_step):
+    def forward(self, img_embeds, sc_embeds, act_embeds, task_info_dict, target_imgs, actions, states, train_step):
         # prepare image
         if task_info_dict:
             task_embeds = task_info_dict["embeds"]
         else:
             task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
-        task_embeds = task_info_dict["embeds"]
-        # task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
         prompt_embeds = torch.cat([task_embeds, sc_embeds, act_embeds], dim = 1)
         # prompt_embeds = torch.cat([sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
@@ -735,7 +745,7 @@ class VideoWorldModel(nn.Module):
         # timesteps = sch_timesteps[indices].to(device=device)
         # for action sample
         sigmas = self.sample_action_time(bs, device)
-        vide_sigmas = sigmas[:, None, None, None, None]
+        video_sigmas = sigmas[:, None, None, None, None]
         timesteps = (sigmas * (self.noise_scheduler.config.num_train_timesteps)).long()
         # print(timesteps)
         
@@ -752,20 +762,21 @@ class VideoWorldModel(nn.Module):
             noise = torch.randn_like(clean_images)
             # sigmas = self.get_sigmas(timesteps, n_dim=clean_images.ndim, dtype=clean_images.dtype, device=device)
             # noisy_video_input = (1.0 - sigmas) * clean_images + sigmas * noise
-            noisy_video_input = (1.0 - vide_sigmas) * clean_images + vide_sigmas * noise
+            noisy_video_input = (1.0 - video_sigmas) * clean_images + video_sigmas * noise
             is_video_pad = False
         else:
-            noisy_video_input = torch.zeros_like(target_z).to(dtype=target_z.dtype, device=target_z.device)
+            # noisy_video_input = torch.zeros_like(target_z).to(dtype=target_z.dtype, device=target_z.device)
+            noisy_video_input = torch.ones_like(target_z).to(dtype=target_z.dtype, device=target_z.device) * 1e-6
             is_video_pad = True
 
         # noisy_action_input, action_target, action_noise = self.prepare_noise_action(actions, timesteps)
-        noisy_action_input, action_target, action_noise = self.prepare_noise_action_v2(actions, sigmas[:, None, None], device)
+        noisy_action_input, action_target, action_noise = self.prepare_noise_action_v2(actions, sigmas[:, None, None], 
+                                                                                       states, device)
         # print(torch.max(noisy_action_input), torch.min(noisy_action_input))
         # print(noisy_video_input.shape, noisy_action_input.shape) # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         model_output = self.transformer(
             hidden_states=noisy_video_input,
             action_hidden_states=noisy_action_input,
-            # encoder_attention_mask=prompt_attention_mask,
             encoder_hidden_states=prompt_embeds,
             img_encoder_hidden_states=img_prompt_embeds,
             condition_len = [img_embeds.shape[1], task_embeds.shape[1], sc_embeds.shape[1], act_embeds.shape[1]],
@@ -781,7 +792,7 @@ class VideoWorldModel(nn.Module):
         # torch.Size([10, 16, 8, 28, 28]) torch.Size([10, 30, 2240])
         # calculate loss
         if train_step > self.config.action_warm_up_step:
-            weighting = torch.ones_like(vide_sigmas)
+            weighting = torch.ones_like(video_sigmas)
             video_target = noise - clean_images
             # Compute regular loss.
             video_loss = torch.mean(
