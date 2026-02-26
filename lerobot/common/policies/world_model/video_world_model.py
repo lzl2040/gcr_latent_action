@@ -747,7 +747,7 @@ class VideoWorldModel(nn.Module):
         # https://github.com/dreamzero0/dreamzero/blob/main/groot/vla/model/dreamzero/action_head/wan_flow_matching_action_tf.py
         sigmas = self.sample_action_time(bs, device) # high simas corresponds to low timestep
         video_sigmas = sigmas[:, None, None, None, None]
-        indices = ((1 - sigmas) * (self.noise_scheduler.config.num_train_timesteps)).long()
+        indices = (sigmas * (self.noise_scheduler.config.num_train_timesteps)).long()
         indices = torch.clamp(indices, 0, self.noise_scheduler.config.num_train_timesteps - 1)
         sch_timesteps = self.noise_scheduler.timesteps.to(device=device)
         timesteps = sch_timesteps[indices].to(device=device)
