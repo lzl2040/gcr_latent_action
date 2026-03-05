@@ -110,15 +110,18 @@ class LatentWorldModel(PreTrainedPolicy):
         """Tokenize task language instructions."""
         encoding = self.tokenizer(
             tasks,
-            padding="longest",
+            # padding="longest",
+            padding="max_length",
             padding_side="right",
             truncation=True,
-            max_length=300,
+            max_length=200,
             return_tensors="pt",
         )
         lan_input_ids = encoding["input_ids"].to(device=device)
         lan_attention_mask = encoding["attention_mask"].to(device=device)
-        lan_embeds = self.future_latent_encoder.model.get_input_embeddings()(lan_input_ids)
+        lan_embeds = self.future_latent_encoder.model.get_decoder()(lan_input_ids, attention_mask=lan_attention_mask)[0] 
+        # lan_embeds = self.future_latent_encoder.model.get_input_embeddings()(lan_input_ids)
+        # print("lan_embeds", lan_embeds.shape) # task_embeds torch.Size([2, 16, 2048])
         return {
             "input_ids": lan_input_ids,
             "attention_mask": lan_attention_mask,

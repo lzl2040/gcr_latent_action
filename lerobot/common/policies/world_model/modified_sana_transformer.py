@@ -691,8 +691,8 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         self.attn2.to_q_action = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
         self.attn2.to_k_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
         self.attn2.to_v_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
-        # self.action_adaln = nn.Linear(dim, 6 * dim, bias=True)
-        # self.silu = nn.SiLU()
+        self.action_adaln = nn.Linear(dim, 6 * dim, bias=True)
+        self.silu = nn.SiLU()
         
     # wo action adaln params
     # def forward(
@@ -796,9 +796,9 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
             self.scale_shift_table[None, None] + timestep.reshape(batch_size, timestep.shape[1], 6, -1)
         ).unbind(dim=2)
         
-        # action_ada_params = self.silu(self.action_adaln(embedded_timestep).reshape(batch_size, timestep.shape[1], 6, -1))
-        # # print(action_ada_params.shape) # 4 1 6 2240
-        # shift_msa_action, scale_msa_action, gate_msa_action, shift_mlp_action, scale_mlp_action, gate_mlp_action = action_ada_params.unbind(dim = 2)
+        action_ada_params = self.silu(self.action_adaln(embedded_timestep).reshape(batch_size, timestep.shape[1], 6, -1))
+        # print(action_ada_params.shape) # 4 1 6 2240
+        shift_msa_action, scale_msa_action, gate_msa_action, shift_mlp_action, scale_mlp_action, gate_mlp_action = action_ada_params.unbind(dim = 2)
         # print(self.scale_shift_table[0, :10])
         # gate_ca = self.gate_ca.unsqueeze(0).repeat(batch_size, 1, 1)
 
@@ -808,7 +808,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
         norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
         
-        # norm_action_hidden_states = norm_action_hidden_states * (1 + scale_msa_action) + shift_msa_action
+        norm_action_hidden_states = norm_action_hidden_states * (1 + scale_msa_action) + shift_msa_action
         norm_action_hidden_states = norm_action_hidden_states.to(hidden_states.dtype)
         
         attn_output = self.attn1(norm_hidden_states, rotary_emb=rotary_emb)
@@ -821,7 +821,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         # attn_output_action = (attn_output_action_1 + attn_output_action_2) / 2.0
         # attn_output_action = self.linear_attn_fusion(attn_output_action)
         attn_output = gate_msa * attn_output
-        # attn_output_action = gate_msa_action * attn_output_action
+        attn_output_action = gate_msa_action * attn_output_action
         
         attn_output = torch.cat([attn_output, attn_output_action], dim = 1)
         hidden_states = hidden_states + attn_output
@@ -856,7 +856,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         norm_hidden_states, norm_action_hidden_states = norm_hidden_states[:, :num_image_token], norm_hidden_states[:, num_image_token:]
         norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
         
-        # norm_action_hidden_states = norm_action_hidden_states * (1 + scale_mlp_action) + shift_mlp_action
+        norm_action_hidden_states = norm_action_hidden_states * (1 + scale_mlp_action) + shift_mlp_action
         
         # print(norm_hidden_states.shape)
         norm_hidden_states = norm_hidden_states.unflatten(1, (frames, height, width))
@@ -867,7 +867,7 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
         ff_output = ff_output.flatten(1, 3)
         
         ff_output = ff_output * gate_mlp
-        # ff_action_output = ff_action_output * gate_mlp_action
+        ff_action_output = ff_action_output * gate_mlp_action
         
         ff_output = torch.cat([ff_output, ff_action_output], dim = 1)
         
@@ -896,13 +896,6 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
             cross_attention_dim=None,
             processor=Modified_SanaLinearAttnProcessor3_0_Action(),
         )
-        # self.ff = GLUMBTempConv(
-        #     kwargs.get("dim", 2240), 
-        #     kwargs.get("dim", 2240), 
-        #     kwargs.get("mlp_ratio", 3.0), 
-        #     norm_type=None, 
-        #     residual_connection=False
-        # )
         self.ff_action = FeedForward(
             dim=kwargs.get("dim", 2240),
             dropout=0.0,
@@ -910,27 +903,6 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
             activation_fn="geglu",
             bias=True
         )
-        # our design: cross attention between image latents, noised action
-        # self.norm3 = nn.LayerNorm(kwargs.get("dim", 2240), 
-        #                           elementwise_affine=kwargs.get("norm_elementwise_affine", False), 
-        #                           eps=kwargs.get("norm_eps", 1e-6)
-        #                           )
-        
-        
-        self.attn3 = Attention(
-                query_dim=kwargs.get("dim", 2240),
-                qk_norm=kwargs.get("qk_norm", "rms_norm_across_heads"),
-                kv_heads=kwargs.get("num_cross_attention_heads", 20),
-                cross_attention_dim=kwargs.get("cross_attention_dim", 2240),
-                heads=kwargs.get("num_attention_heads", 20),
-                dim_head=kwargs.get("attention_head_dim", 112),
-                dropout=kwargs.get("dropout", 0.0),
-                bias=True,
-                out_bias=kwargs.get("attention_out_bias", True),
-                processor=Modified_SanaAttnProcessor2_0(),
-        )
-        self.attn2_action = copy.deepcopy(self.attn2)
-        
         
     def forward(
         self,
@@ -960,16 +932,9 @@ class Modified_SanaVideoTransformerBlock_Action(SanaVideoTransformerBlock):
         # attn_output = self.attn1(norm_hidden_states) # no rotary for action
         # hidden_states = hidden_states + gate_msa * attn_output
 
-        # 3. Cross Attention
-        if self.attn3 is not None:
-            attn_output = self.attn3(
-                hidden_states=norm_hidden_states,
-                attention_mask=attention_mask
-            )
-            hidden_states = attn_output + hidden_states
         
-        if self.attn2_action is not None:
-            attn_output = self.attn2_action(
+        if self.attn2 is not None:
+            attn_output = self.attn2(
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=encoder_attention_mask,

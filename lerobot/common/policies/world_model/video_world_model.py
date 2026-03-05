@@ -19,45 +19,6 @@ import imageio.v2 as imageio
 import numpy as np
 import time
 
-
-
-latents_mean =  [
-    -0.7571,
-    -0.7089,
-    -0.9113,
-    0.1075,
-    -0.1745,
-    0.9653,
-    -0.1517,
-    1.5508,
-    0.4134,
-    -0.0715,
-    0.5517,
-    -0.3632,
-    -0.1922,
-    -0.9497,
-    0.2503,
-    -0.2921,
-]
-latents_std = [
-    2.8184,
-    1.4541,
-    2.3275,
-    2.6558,
-    1.2196,
-    1.7708,
-    2.6052,
-    2.0743,
-    3.2687,
-    2.1526,
-    2.8652,
-    1.5579,
-    1.6382,
-    1.1253,
-    2.8251,
-    1.9160,
-]
-
 def create_sinusoidal_pos_embedding(
     time: torch.tensor, dimension: int, min_period: float, max_period: float, device="cpu"
 ) -> Tensor:
@@ -107,7 +68,8 @@ def prepare_encoder_attention_mask_text_condition(
     batch_size: int | None = None,
     device: torch.device | None = None,
     dtype: torch.dtype = torch.float32,
-    is_video_pad: bool = False
+    is_video_pad: bool = False,
+    lan_mask = None
 ):
     """
     Build cross-attention mask for:
@@ -170,8 +132,28 @@ def prepare_encoder_attention_mask_text_condition(
     attn_mask[action_q, motion_k] = 0.0
 
     if batch_size is not None:
-        attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
+        attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1).clone()
 
+    if lan_mask is not None:
+        # print(lan_mask)
+        # lan_mask: (B, M_L) -> (B, 1, M_L)
+        lan_pad = torch.zeros(
+            (lan_mask.shape[0], 1, lan_mask.shape[1]),
+            device=device,
+            dtype=dtype
+        )
+
+        lan_pad = lan_pad.masked_fill(
+            lan_mask.eq(0).unsqueeze(1),
+            float("-inf")
+        )
+
+        # language key 在 K 里的位置
+        lan_k = slice(Q_len, Q_len + M_L)
+
+        # broadcast 到所有 query
+        attn_mask[:, :, lan_k] = attn_mask[:, :, lan_k] + lan_pad
+    
     return attn_mask
 
 def prepare_encoder_physical_attention_mask(
@@ -335,36 +317,14 @@ def forward_c(
         attention_kwargs: Optional[Dict[str, Any]] = None,
         controlnet_block_samples: Optional[Tuple[torch.Tensor]] = None,
         return_dict: bool = True,
-        is_video_pad = False
+        is_video_pad = False,
+        lan_mask = None
     ) -> Union[Tuple[torch.Tensor, ...], Transformer2DModelOutput]:
         if attention_kwargs is not None:
             attention_kwargs = attention_kwargs.copy()
             lora_scale = attention_kwargs.pop("scale", 1.0)
         else:
             lora_scale = 1.0
-
-        # ensure attention_mask is a bias, and give it a singleton query_tokens dimension.
-        #   we may have done this conversion already, e.g. if we came here via UNet2DConditionModel#forward.
-        #   we can tell by counting dims; if ndim == 2: it's a mask rather than a bias.
-        # expects mask of shape:
-        #   [batch, key_tokens]
-        # adds singleton query_tokens dimension:
-        #   [batch,                    1, key_tokens]
-        # this helps to broadcast it as a bias over attention scores, which will be in one of the following shapes:
-        #   [batch,  heads, query_tokens, key_tokens] (e.g. torch sdp attn)
-        #   [batch * heads, query_tokens, key_tokens] (e.g. xformers or classic attn)
-        if attention_mask is not None and attention_mask.ndim == 2:
-            # assume that mask is expressed as:
-            #   (1 = keep,      0 = discard)
-            # convert mask into a bias that can be added to attention scores:
-            #       (keep = +0,     discard = -10000.0)
-            attention_mask = (1 - attention_mask.to(hidden_states.dtype)) * -10000.0
-            attention_mask = attention_mask.unsqueeze(1)
-
-        # convert encoder_attention_mask to a bias the same way we do for attention_mask
-        if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
-            encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         # 1. Input
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
@@ -384,7 +344,8 @@ def forward_c(
                 N_V = hidden_states.shape[1], N_A = action_hidden_states.shape[1],
                 M_H=condition_len[0], M_L = condition_len[1], M_LS = condition_len[2], M_LM = condition_len[3],
                 batch_size=hidden_states.shape[0], dtype=hidden_states.dtype,
-                device=hidden_states.device, is_video_pad = is_video_pad
+                device=hidden_states.device, is_video_pad = is_video_pad, 
+                lan_mask = lan_mask
             )
             # encoder_attention_mask = prepare_encoder_physical_attention_mask(
             #     N_V=hidden_states.shape[1], N_A=action_hidden_states.shape[1], 
@@ -492,8 +453,9 @@ class VideoWorldModel(nn.Module):
         )
         self.vae_scale_factor_temporal = self.vae.config.scale_factor_temporal
         self.vae_scale_factor_spatial = self.vae.config.scale_factor_spatial
-        self.vae_mean = torch.tensor(latents_mean)
-        self.vae_std = torch.tensor(latents_std)
+        self.vae_mean = torch.tensor(self.vae.config.latents_mean)
+        self.vae_std = torch.tensor(self.vae.config.latents_std)
+        # self.vae_std = torch.tensor(latents_std)
         self.z_dim = self.vae.z_dim
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
@@ -726,8 +688,13 @@ class VideoWorldModel(nn.Module):
         # prepare image
         if task_info_dict:
             task_embeds = task_info_dict["embeds"]
+            #print(torch.max(task_embeds), torch.min(task_embeds))
+            lan_mask = task_info_dict["attention_mask"]
+            # lan_mask = None
+            # print(lan_mask.shape)
         else:
             task_embeds = torch.zeros((img_embeds.shape[0], 0, img_embeds.shape[2]), dtype=img_embeds.dtype, device=img_embeds.device)
+            lan_mask = None
         prompt_embeds = torch.cat([task_embeds, sc_embeds, act_embeds], dim = 1)
         # prompt_embeds = torch.cat([sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
@@ -749,7 +716,7 @@ class VideoWorldModel(nn.Module):
         video_sigmas = sigmas[:, None, None, None, None]
         indices = (sigmas * (self.noise_scheduler.config.num_train_timesteps)).long()
         indices = torch.clamp(indices, 0, self.noise_scheduler.config.num_train_timesteps - 1)
-        sch_timesteps = self.noise_scheduler.timesteps.to(device=device)
+        sch_timesteps = self.noise_scheduler.timesteps.to(device=device) # 0-num_train_timesteps
         timesteps = sch_timesteps[indices].to(device=device)
         # print(timesteps)
         
@@ -786,9 +753,11 @@ class VideoWorldModel(nn.Module):
             condition_len = [img_embeds.shape[1], task_embeds.shape[1], sc_embeds.shape[1], act_embeds.shape[1]],
             timestep=timesteps,
             return_dict=False,
-            is_video_pad = is_video_pad
+            is_video_pad = is_video_pad,
+            lan_mask = lan_mask
             # mask_index = mask_index
         )
+        # print(torch.max(model_output[1]), torch.min(model_output[1]))
         video_pred, action_pred = model_output
         # print(torch.max(video_pred), torch.min(video_pred)) # after adding action, it become very small (-0.3-0.3, before is -3-3)
         # print(torch.max(action_pred), torch.min(action_pred))
@@ -820,7 +789,7 @@ class VideoWorldModel(nn.Module):
         
         # action_pred_gt = action_noise - action_pred
         # action_gt = actions
-        # print(f"Action Delta: {action_pred_gt[0, 0, :16] - action_gt[0, 0, :16]}, Loss: {action_loss.mean()}")
+        # print(f"Action Delta: {action_pred_gt[0, 0, :16] - action_gt[0, 0, :16]}, GT:{action_gt[0, 0, :16]} Loss: {action_loss.mean()}")
         # # print("Action Pred:", action_pred_gt[0, 0, :8])
         # time.sleep(5)
         return loss
