@@ -49,7 +49,7 @@ from torch.distributed.fsdp.api import StateDictType, FullStateDictConfig
 
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.transforms import ImageTransforms
-from lerobot.common.datasets.world_dataset import MultiDatasetforDistTraining, extra_collate_fn
+from lerobot.common.datasets.world_dataset_v2 import MultiDatasetforDistTraining, extra_collate_fn
 from lerobot.common.datasets.sampler import EpisodeAwareSampler, DistEpisodeAwareSampler
 from lerobot.common.datasets.utils import cycle
 from lerobot.common.envs.factory import make_env
