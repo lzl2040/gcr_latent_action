@@ -685,12 +685,12 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
             dropout=kwargs.get("dropout", 0.0),
             bias=True,
             out_bias=kwargs.get("attention_out_bias", True),
-            processor=Modified_ExpertQKV_SanaAttnProcessor2_0(),
-            # processor=Modified_SanaAttnProcessor2_0()
+            # processor=Modified_ExpertQKV_SanaAttnProcessor2_0(),
+            processor=Modified_SanaAttnProcessor2_0()
         )
-        self.attn2.to_q_action = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
-        self.attn2.to_k_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
-        self.attn2.to_v_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
+        # self.attn2.to_q_action = nn.Linear(self.attn2.query_dim, self.attn2.inner_dim, bias=True)
+        # self.attn2.to_k_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
+        # self.attn2.to_v_action = nn.Linear(self.attn2.cross_attention_dim, self.attn2.inner_kv_dim, bias=True)
         self.action_adaln = nn.Linear(dim, 6 * dim, bias=True)
         self.silu = nn.SiLU()
         
@@ -831,12 +831,12 @@ class Modified_SanaVideoTransformerBlock_V2(SanaVideoTransformerBlock):
             # if self.action_video_fusion:
             #     encoder_attention_mask[:, :, :hidden_states.shape[1]] = float("-inf")
             # print(torch.max(hidden_states[:, :num_image_token]), torch.min(hidden_states[:, :num_image_token]), torch.max(hidden_states[:, num_image_token:]), torch.min(hidden_states[:, num_image_token:]))
-            encoder_hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim = 1)
+            # encoder_hidden_states = torch.cat([hidden_states, encoder_hidden_states], dim = 1)
             attn_output = self.attn2(
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=encoder_attention_mask,
-                num_image_token=num_image_token
+                # num_image_token=num_image_token
             ) # very large lead to nan: maybe action tend to fuse video
             # hidden_states = attn_output + hidden_states
             # hidden_states = torch.sigmoid(attn_output) * hidden_states + hidden_states

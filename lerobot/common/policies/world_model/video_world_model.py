@@ -87,7 +87,8 @@ def prepare_encoder_attention_mask_text_condition(
         values = 0 (allowed) or -inf (masked)
     """
     Q_len = N_V + N_A
-    K_len = N_V + N_A + M_L + M_LS + M_LM
+    # K_len = N_V + N_A + M_L + M_LS + M_LM
+    K_len = M_L + M_LS + M_LM
 
     # initialize all masked
     attn_mask = torch.full(
@@ -96,14 +97,14 @@ def prepare_encoder_attention_mask_text_condition(
         device=device,
         dtype=dtype,
     )
-    # Q_len = 0
+    Q_len = 0
 
     # ----- Video queries -----
     video_q = slice(0, N_V)
     
     # key
-    video_k = slice(0, N_V)
-    action_k = slice(N_V, N_V + N_A)
+    # video_k = slice(0, N_V)
+    # action_k = slice(N_V, N_V + N_A)
     # M_H = 0
     # history_k = slice(Q_len, Q_len + M_H)
     # lan_k = slice(Q_len + M_H, Q_len + M_H + M_L)
@@ -113,7 +114,7 @@ def prepare_encoder_attention_mask_text_condition(
 
     # print(f"Lan:{lan_k}")
     # attn_mask[video_q, video_k] = 0.0
-    attn_mask[video_q, action_k] = 0.0 # add 0 make nan
+    # attn_mask[video_q, action_k] = 0.0 # add 0 make nan
     # attn_mask[video_q, action_k] = -10000.0
     # attn_mask[video_q, history_k] = 0.0
     attn_mask[video_q, lan_k] = 0.0
@@ -124,9 +125,9 @@ def prepare_encoder_attention_mask_text_condition(
     action_q = slice(N_V, N_V + N_A)
     
     
-    attn_mask[action_q, video_k] = 0.0
-    if is_video_pad:
-        attn_mask[action_q, video_k] = float("-inf")
+    # attn_mask[action_q, video_k] = 0.0
+    # if is_video_pad:
+    #     attn_mask[action_q, video_k] = float("-inf")
     attn_mask[action_q, lan_k] = 0.0
     attn_mask[action_q, scene_k] = 0.0
     attn_mask[action_q, motion_k] = 0.0
