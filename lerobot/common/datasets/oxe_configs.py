@@ -88,13 +88,84 @@ class ActionEncoding(IntEnum):
 
 # === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
-    "agibot_alpha":{
-        "image_obs_keys": {"primary": "top_head", "secondary": "hand_left", "wrist": "hand_right"},
+    "robomind_franka_dual_arm":{
+        "image_obs_keys": {"primary": "camera_front", "secondary": "camera_top", "wrist": "camera_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
         "state_encoding": StateEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS
     },
+    "robomind_ur_1gb":{
+        "image_obs_keys": {"primary": "top", "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+    "robomind_franka_3rgb":{
+        "image_obs_keys": {"primary": "camera_top", "secondary": "camera_left", "wrist": "camera_right"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+    "robomind_franka_1rgb":{
+        "image_obs_keys": {"primary": "camera_top", "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+    "robomind_agilex_3rgb":{
+        "image_obs_keys": {"primary": "camera_front", "secondary": "camera_left_wrist", "wrist": "camera_right_wrist"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+     "interna1_single_arm":{
+        "image_obs_keys": {"primary": "head", "secondary": None, "wrist": "hand"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+    "interna1_dual_arm_0":{
+        "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+    "interna1_dual_arm_1":{
+        "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+    "interna1_dual_arm_2":{
+        "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+    "interna1_dual_arm_3":{
+        "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+    "interna1_dual_arm_4":{
+        "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["all"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS
+    },
+    
     "fractal20220817_data": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},

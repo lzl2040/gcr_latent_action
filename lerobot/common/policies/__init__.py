@@ -7,3 +7,5 @@ from .latent_action.configuration_latent_action import LatentActionConfig as Lat
 from .world_model.configuration_world_model import LatentWorldModelConfig as LatentWorldModelConfig
 from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
 from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig
+# from .cosmos_policy.configuration_cosmos_policy import CosmosPolicyConfig as CosmosPolicyConfig
+from .ace.configuration_robo_clip import RobotCLIPConfig as RobotCLIPConfig

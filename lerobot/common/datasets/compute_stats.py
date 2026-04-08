@@ -616,11 +616,11 @@ def aggregate_stats(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str
                 pad_stats["std"] = np.pad(stats["std"], (0, pad_len), mode="constant", constant_values=1)
                 pad_stats["max"] = np.pad(stats["max"], (0, pad_len), mode="constant", constant_values=0)
                 pad_stats["min"] = np.pad(stats["min"], (0, pad_len), mode="constant", constant_values=0)
-                pad_stats["q01"] = np.pad(stats["q01"], (0, pad_len), mode="constant", constant_values=-1)
-                pad_stats["q10"] = np.pad(stats["q10"], (0, pad_len), mode="constant", constant_values=-0.5)
-                pad_stats["q50"] = np.pad(stats["q50"], (0, pad_len), mode="constant", constant_values=0)
-                pad_stats["q90"] = np.pad(stats["q90"], (0, pad_len), mode="constant", constant_values=0.5)
-                pad_stats["q99"] = np.pad(stats["q99"], (0, pad_len), mode="constant", constant_values=1)
+                # pad_stats["q01"] = np.pad(stats["q01"], (0, pad_len), mode="constant", constant_values=-1)
+                # pad_stats["q10"] = np.pad(stats["q10"], (0, pad_len), mode="constant", constant_values=-0.5)
+                # pad_stats["q50"] = np.pad(stats["q50"], (0, pad_len), mode="constant", constant_values=0)
+                # pad_stats["q90"] = np.pad(stats["q90"], (0, pad_len), mode="constant", constant_values=0.5)
+                # pad_stats["q99"] = np.pad(stats["q99"], (0, pad_len), mode="constant", constant_values=1)
                 pad_stats["count"] = stats["count"]
                 pad_stats_with_key.append(pad_stats)
         else:
@@ -934,3 +934,11 @@ def aggregate_multi_stats(ls_datasets: list, data_names: list, max_dim: int) -> 
         #         stats[data_key]["max"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["max"][start_dim:start_dim+d_len]
         #         stats[data_key]["min"][start_dim:start_dim+d_len] = agi_d.meta.stats[data_key]["min"][start_dim:start_dim+d_len]
     return stats
+
+
+# for cosmos policy
+
+def update_meta(stats_list, cached_statistics_path = None):
+    if cached_statistics_path is not None:
+        print(f"load")
+    

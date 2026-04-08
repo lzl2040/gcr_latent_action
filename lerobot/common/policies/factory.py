@@ -30,6 +30,7 @@ from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.common.policies.vqbet.configuration_vqbet import VQBeTConfig
+from lerobot.common.policies.ace.configuration_robo_clip import RobotCLIPConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 
@@ -66,6 +67,12 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
     elif name == "latent_wm":
         from lerobot.common.policies.world_model.modeling_world import LatentWorldModel
         return LatentWorldModel
+    # elif name == "cosmos_policy":
+    #     from lerobot.common.policies.cosmos_policy.cosmos_policy import CosmosPolicyModel
+    #     return CosmosPolicyModel
+    elif name == "robo_clip":
+        from lerobot.common.policies.ace.modeling_robo_clip import RobotCLIP
+        return RobotCLIP
     elif name == "pi05":
         from lerobot.common.policies.pi05.modeling_pi05 import PI05Policy
         return PI05Policy
@@ -86,6 +93,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return PI0Config(**kwargs)
     elif policy_type == "pi05":
         return PI05Config(**kwargs)
+    elif policy_type == "robo_clip":
+        return RobotCLIPConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 
