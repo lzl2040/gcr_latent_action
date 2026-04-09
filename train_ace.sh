@@ -110,7 +110,7 @@ fi
 FIXED_OUTPUT_DIR="/mnt/wangxiaofa/action_chunk_encoder_exp"
 
 # 执行训练命令
-python -m lerobot.scripts.dps_train_ace \
+python lerobot/scripts/dps_train_ace.py \
     --deepspeed="./ds_zero2.json" \
     --policy.type="robo_clip" \
     --policy.chunk_size=$CHUNK_SIZE \
