@@ -233,15 +233,18 @@ def train(cfg: TrainPipelineConfig):
     if cfg.weight_resume:
         logger.info(f"Resuming training from {cfg.output_dir}")
         ckpt_path = cfg.output_dir
-        ckpt_list = os.listdir(ckpt_path)
-        latest_ckpt = sorted(ckpt_list, key=lambda x: int(x.split("step")[-1]))[-1]
-        checkpoint_path = os.path.join(ckpt_path, latest_ckpt)
-        step = int(latest_ckpt.split("step")[-1])
-        
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
-        policy.load_state_dict(state_dict, strict=True)
-        
-        logger.info(f"Resumed training from step {step}")
+        ckpt_list = [x for x in os.listdir(ckpt_path) if "step" in x]
+        if len(ckpt_list) > 0:
+            latest_ckpt = sorted(ckpt_list, key=lambda x: int(x.split("step")[-1]))[-1]
+            checkpoint_path = os.path.join(ckpt_path, latest_ckpt)
+            step = int(latest_ckpt.split("step")[-1])
+            
+            state_dict = torch.load(checkpoint_path, map_location="cpu")
+            policy.load_state_dict(state_dict, strict=True)
+            
+            logger.info(f"Resumed training from step {step}")
+        else:
+            logger.info(f"No checkpoint found")
     else:
         client_state = {
             'step': step

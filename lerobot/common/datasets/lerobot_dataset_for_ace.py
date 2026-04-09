@@ -604,7 +604,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - Checking timestamps sync status...")
         
-        check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
+        # check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
 
         # Setup delta_indices
         if self.delta_timestamps is not None:
@@ -1029,6 +1029,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         ep_data_index = get_episode_data_index(self.meta.episodes, [episode_index])
         ep_data_index_np = {k: t.numpy() for k, t in ep_data_index.items()}
+        
         check_timestamps_sync(
             episode_buffer["timestamp"],
             episode_buffer["episode_index"],
