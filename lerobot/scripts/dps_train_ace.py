@@ -228,42 +228,21 @@ def train(cfg: TrainPipelineConfig):
                             collate_fn=extra_collate_fn,
                             )
     
-    # Resume training state
-    step = 0
-    if cfg.weight_resume:
-        logger.info(f"Resuming training from {cfg.output_dir}")
-        ckpt_path = cfg.output_dir
-        ckpt_list = [x for x in os.listdir(ckpt_path) if "step" in x]
-        if len(ckpt_list) > 0:
-            latest_ckpt = sorted(ckpt_list, key=lambda x: int(x.split("step")[-1]))[-1]
-            checkpoint_path = os.path.join(ckpt_path, latest_ckpt)
-            step = int(latest_ckpt.split("step")[-1])
-            
-            state_dict = torch.load(checkpoint_path, map_location="cpu")
-            policy.load_state_dict(state_dict, strict=True)
-            
-            logger.info(f"Resumed training from step {step}")
-        else:
-            logger.info(f"No checkpoint found")
-    else:
-        client_state = {
-            'step': step
-        }
-    
     model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
         model=policy,
-        config=cfg.deepspeed,
         optimizer=optimizer,
-        lr_scheduler=lr_scheduler
+        lr_scheduler=lr_scheduler,
+        config=cfg.deepspeed,
+        model_parameters=policy.parameters(),
     )
     
     logger.info(f"Training batch size:{model_engine.train_batch_size()}") # micro_size * gradient_cum_size * gpu_num
         
     dl_iter = cycle(dataloader)
     
-    for i in range(5):
-        batch = next(dl_iter)
-        rank_dataloader_check(model_engine, batch)
+    # for i in range(5):
+    #     batch = next(dl_iter)
+    #     rank_dataloader_check(model_engine, batch)
 
     # Metrics setup
     train_metrics = {
@@ -281,6 +260,31 @@ def train(cfg: TrainPipelineConfig):
         train_metrics,
         initial_step=int(step/model_engine.gradient_accumulation_steps())
     )
+    
+    
+    if cfg.weight_resume:
+        logger.info(f"Resuming training from {cfg.output_dir}")
+        ckpt_path = cfg.output_dir
+        # ckpt_list = os.listdir(ckpt_path)
+        # latest_ckpt = sorted(ckpt_list, key=lambda x: int(x.split("step")[-1]))[-1]
+        # checkpoint_path = os.path.join(ckpt_path, latest_ckpt)
+        load_path, client_state = model_engine.load_checkpoint(
+            ckpt_path,
+            load_optimizer_states=True,
+            load_lr_scheduler_states=True
+        )
+        if load_path is not None:
+            step = client_state['step']
+            logger.info(f"Resumed training from step {step}")
+    else:
+        client_state = {
+            'step': step
+        }
+    
+    if client_state is None:
+        client_state = {
+            'step': step
+        }
 
     # Main training loop
     logger.info(f"Start training on {int(os.environ.get('WORLD_SIZE', 1))} devices")

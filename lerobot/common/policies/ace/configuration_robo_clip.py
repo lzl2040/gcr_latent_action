@@ -70,7 +70,7 @@ class RobotCLIPConfig(PreTrainedConfig):
     pretrained_path: str = ""
     
     action_dim: int = 7
-    chunk_size: int = 16
+    chunk_size: int = 32
     group_size: int = 4
     hidden_dim: int = 768
     num_attention_heads: int = 12
@@ -78,9 +78,12 @@ class RobotCLIPConfig(PreTrainedConfig):
     output_dim: int = None
     # vision_model_name: str = "/Data/lzl/huggingface/siglip2-base-patch16-224"
     vision_model_name: str = "/mnt/wangxiaofa/pt_weights/siglip2-base-patch16-224"
-    projection_dim: int = 768
+    projection_dim: int = 768 # siglip2 output dim
     temperature: float = 1.0
     freeze_vision_encoder: bool = True
+    # Shorter state and action vectors will be padded
+    max_state_dim: int = 32
+    max_action_dim: int = 32
     
     
     normalization_mapping: dict[str, NormalizationMode] = field(
@@ -91,9 +94,6 @@ class RobotCLIPConfig(PreTrainedConfig):
         }
     )
 
-    # Shorter state and action vectors will be padded
-    max_state_dim: int = 32
-    max_action_dim: int = 32
     
     n_action_steps: int = 16
 

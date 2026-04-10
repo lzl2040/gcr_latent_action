@@ -133,14 +133,14 @@ class RobotCLIP(PreTrainedPolicy):
         
         # Projection layers to align embeddings
         self.image_projection = nn.Linear(config.projection_dim, config.projection_dim)
-        self.action_projection = nn.Linear(config.output_dim, config.projection_dim)
+        self.action_projection = nn.Linear(config.hidden_dim, config.projection_dim)
         
         # Temperature for contrastive loss
         self.logit_scale = nn.Parameter(torch.tensor(1.0 / config.temperature))
         
         # Layer norm for stability
         self.image_ln = nn.LayerNorm(config.projection_dim)
-        self.action_ln = nn.LayerNorm(config.projection_dim)
+        self.action_ln = nn.LayerNorm(config.hidden_dim)
     
     def get_optim_params(self) -> dict:
         return self.parameters()
@@ -166,6 +166,7 @@ class RobotCLIP(PreTrainedPolicy):
         """
         image_embeddings = self.vision_model(images)  # (B, projection_dim)
         image_embeddings = self.image_ln(image_embeddings)
+        # print(f"Image embeddings shape after vision model: {image_embeddings.shape}")
         image_embeddings = self.image_projection(image_embeddings)
         image_embeddings = F.normalize(image_embeddings, dim=-1)
         # print(image_embeddings.shape)
@@ -216,7 +217,7 @@ class RobotCLIP(PreTrainedPolicy):
         # Symmetric cross-entropy loss
         loss_i2a = F.cross_entropy(logits, labels)
         loss_a2i = F.cross_entropy(logits.T, labels)
-        # print(F"loss_i2a: {loss_i2a.item():.4f}, loss_a2i: {loss_a2i.item():.4f}")
+        print(F"loss_i2a: {loss_i2a.item():.4f}, loss_a2i: {loss_a2i.item():.4f} logits:{logits[0].item()}")
         
         # Average both directions
         loss = (loss_i2a + loss_a2i) / 2
