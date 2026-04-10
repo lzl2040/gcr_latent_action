@@ -217,7 +217,7 @@ class RobotCLIP(PreTrainedPolicy):
         # Symmetric cross-entropy loss
         loss_i2a = F.cross_entropy(logits, labels)
         loss_a2i = F.cross_entropy(logits.T, labels)
-        print(F"loss_i2a: {loss_i2a.item():.4f}, loss_a2i: {loss_a2i.item():.4f} logits:{logits[0].item()}")
+        print(F"loss_i2a: {loss_i2a.item():.4f}, loss_a2i: {loss_a2i.item():.4f}")
         
         # Average both directions
         loss = (loss_i2a + loss_a2i) / 2
