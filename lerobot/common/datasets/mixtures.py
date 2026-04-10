@@ -287,10 +287,10 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("robomind_agilex_3rgb", 0.1),
         ("robomind_ur_1rgb", 0.5),
         # ("interna1_dual_arm_0", 0.05),
-        # ("interna1_dual_arm_1", 0.05),
-        # ("interna1_dual_arm_2", 0.05),
-        # ("interna1_dual_arm_3", 0.05),
-        # ("interna1_dual_arm_4", 0.1),
+        ("interna1_dual_arm_1", 0.05),
+        ("interna1_dual_arm_2", 0.05),
+        ("interna1_dual_arm_3", 0.05),
+        ("interna1_dual_arm_4", 0.1),
         ("interna1_single_arm", 0.05),
     ],
     
@@ -299,9 +299,10 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("austin_sirius_dataset_converted_externally_to_rlds", 1.0),
         ("stanford_hydra_dataset_converted_externally_to_rlds", 2.0),
         ("taco_play", 1.0),
-        ("jaco_play", 1.0),
+        # ("jaco_play", 1.0),
         ("robomind_franka_dual_arm", 1.0),
-        # ("interna1_dual_arm_4", 1.0)
+        ("fractal20220817_data", 0.54087122203),
+        ("interna1_dual_arm_1", 1.0)
     ],
 
     # === T-DROID Dataset ===

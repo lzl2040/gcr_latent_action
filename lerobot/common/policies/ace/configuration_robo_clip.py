@@ -1,7 +1,7 @@
 """Configuration for Action Chunk Encoder (ACE)."""
 from dataclasses import dataclass, field
 
-from lerobot.common.optim.optimizers import AdamWConfig
+from lerobot.common.optim.optimizers import AdamWNormConfig
 from lerobot.common.optim.schedulers import (
     CosineDecayWithWarmupSchedulerConfig,
 )
@@ -181,9 +181,9 @@ class RobotCLIPConfig(PreTrainedConfig):
             )
             self.input_features[key] = empty_camera
 
-    def get_optimizer_preset(self) -> AdamWConfig:
+    def get_optimizer_preset(self) -> AdamWNormConfig:
         
-        return AdamWConfig(
+        return AdamWNormConfig(
             lr=self.optimizer_lr,
             betas=self.optimizer_betas,
             eps=self.optimizer_eps,

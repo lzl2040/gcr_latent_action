@@ -1,11 +1,23 @@
-"""Action Chunk Encoder (ACE) Model.
+"""Action Chunk Encoder (ACE) Model with Axial RoPE.
 
 This module encodes action chunks into compact embeddings using:
-1. Padding action dimensions to 32
-2. Grouping actions (G actions per group)
-3. Projecting to hidden dimension
-4. Bidirectional self-attention with RoPE (similar to BERT)
-5. Output compact embedding
+1. Grouping actions (G actions per group)
+2. Projecting to hidden dimension
+3. Bidirectional self-attention with axial RoPE:
+   - type-axis RoPE: distinguishes sample-rate token vs action tokens
+   - time-axis RoPE: models temporal order of action tokens only
+4. Output compact embedding
+
+Sequence layout:
+    [sample_rate_token, action_group_1, action_group_2, ..., action_group_N]
+
+Axial RoPE design:
+- type-axis:
+    sample_rate_token -> type_id = 0
+    action_tokens     -> type_id = 1
+- time-axis:
+    sample_rate_token -> no time rotation
+    action_tokens     -> time_id = 0, 1, 2, ..., N-1
 """
 
 import math
@@ -22,153 +34,235 @@ except ImportError:
 
 
 class RotaryPositionEmbedding(nn.Module):
-    """Rotary Position Embedding (RoPE)."""
-    
+    """Rotary Position Embedding (RoPE) cache.
+
+    This module precomputes sin/cos tables for positions [0, max_position).
+    """
+
     def __init__(self, dim: int, max_position: int = 512, base: float = 10000.0):
         super().__init__()
         self.dim = dim
         self.max_position = max_position
         self.base = base
-        
-        # Compute inverse frequencies
+
+        if dim % 2 != 0:
+            raise ValueError(f"RoPE dim must be even, got {dim}")
+
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        
-        # Precompute cos and sin
         self._set_cos_sin_cache(max_position)
-    
+
     def _set_cos_sin_cache(self, seq_len: int):
         t = torch.arange(seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-        # Different from paper but similar implementation
-        emb = torch.cat((freqs, freqs), dim=-1)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # (seq_len, dim/2)
+        emb = torch.cat((freqs, freqs), dim=-1)  # (seq_len, dim)
         self.register_buffer("cos_cached", emb.cos(), persistent=False)
         self.register_buffer("sin_cached", emb.sin(), persistent=False)
-    
-    def forward(self, x: torch.Tensor, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get RoPE embeddings for given sequence length.
-        
+
+    def get_cos_sin_by_position_ids(
+        self, position_ids: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Gather cos/sin by explicit position ids.
+
         Args:
-            x: Input tensor (unused, kept for API compatibility)
-            seq_len: Sequence length
-            
+            position_ids: Tensor of shape (batch, seq_len) or (seq_len,)
+
         Returns:
-            Tuple of (cos, sin) embeddings of shape (seq_len, dim)
+            cos, sin: shape (batch, seq_len, dim) if input is 2D,
+                      shape (1, seq_len, dim) if input is 1D
         """
-        return (
-            self.cos_cached[:seq_len].unsqueeze(0),
-            self.sin_cached[:seq_len].unsqueeze(0)
-        )
+        if position_ids.dim() == 1:
+            cos = self.cos_cached[position_ids].unsqueeze(0)
+            sin = self.sin_cached[position_ids].unsqueeze(0)
+        elif position_ids.dim() == 2:
+            cos = self.cos_cached[position_ids]
+            sin = self.sin_cached[position_ids]
+        else:
+            raise ValueError(
+                f"position_ids must have dim 1 or 2, got shape {position_ids.shape}"
+            )
+        return cos, sin
 
 
-def apply_rotary_pos_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Apply rotary position embeddings to input tensor.
-    
-    Args:
-        x: Input tensor of shape (batch, seq_len, num_heads, head_dim)
-        cos: Cosine embeddings of shape (1, seq_len, head_dim)
-        sin: Sine embeddings of shape (1, seq_len, head_dim)
-        
-    Returns:
-        Tensor with rotary embeddings applied
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotate the last dimension by half.
+
+    [x1, x2] -> [-x2, x1]
     """
-    # x: (batch, seq_len, num_heads, head_dim)
-    # cos, sin: (1, seq_len, head_dim)
-    
-    # Split x into two halves
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    
-    # Rotate
-    # For the rotation: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
-    cos = cos.unsqueeze(2)  # (1, seq_len, 1, head_dim)
-    sin = sin.unsqueeze(2)  # (1, seq_len, 1, head_dim)
-    
-    # Need to match dimensions
-    cos_half = cos[..., : x1.shape[-1]]
-    sin_half = sin[..., : x2.shape[-1]]
-    
-    rotated_x1 = x1 * cos_half - x2 * sin_half
-    rotated_x2 = x1 * sin_half + x2 * cos_half
-    
-    return torch.cat([rotated_x1, rotated_x2], dim=-1)
+    half = x.shape[-1] // 2
+    x1 = x[..., :half]
+    x2 = x[..., half:]
+    return torch.cat([-x2, x1], dim=-1)
+
+
+def apply_rotary_pos_emb(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """Apply RoPE to x.
+
+    Args:
+        x:   (batch, seq_len, num_heads, dim)
+        cos: (batch_or_1, seq_len, dim)
+        sin: (batch_or_1, seq_len, dim)
+
+    Returns:
+        rotated x with same shape as input
+    """
+    cos = cos.unsqueeze(2)  # (batch_or_1, seq_len, 1, dim)
+    sin = sin.unsqueeze(2)  # (batch_or_1, seq_len, 1, dim)
+    return (x * cos) + (rotate_half(x) * sin)
 
 
 class ACEAttention(nn.Module):
-    """Multi-head self-attention with RoPE."""
-    
+    """Multi-head self-attention with axial RoPE.
+
+    Head dimension is split into:
+    - type_dim: rotary over token type axis
+    - time_dim: rotary over time axis
+    """
+
     def __init__(self, config: ACEConfig):
         super().__init__()
         self.num_heads = config.num_attention_heads
         self.head_dim = config.hidden_dim // config.num_attention_heads
         self.hidden_dim = config.hidden_dim
-        
+
+        if config.hidden_dim % config.num_attention_heads != 0:
+            raise ValueError(
+                f"hidden_dim ({config.hidden_dim}) must be divisible by "
+                f"num_attention_heads ({config.num_attention_heads})"
+            )
+
+        # Split one head into type-axis part and time-axis part
+        # Both RoPE dims must be even, so enforce even split.
+        self.type_dim = self.head_dim // 2
+        if self.type_dim % 2 != 0:
+            self.type_dim -= 1
+        self.time_dim = self.head_dim - self.type_dim
+        if self.time_dim % 2 != 0:
+            self.time_dim -= 1
+            self.type_dim += 1
+
+        if self.type_dim <= 0 or self.time_dim <= 0:
+            raise ValueError(
+                f"Invalid axial split: head_dim={self.head_dim}, "
+                f"type_dim={self.type_dim}, time_dim={self.time_dim}"
+            )
+        if self.type_dim % 2 != 0 or self.time_dim % 2 != 0:
+            raise ValueError(
+                f"Both type_dim and time_dim must be even, got "
+                f"type_dim={self.type_dim}, time_dim={self.time_dim}"
+            )
+        if self.type_dim + self.time_dim != self.head_dim:
+            raise ValueError(
+                f"type_dim + time_dim must equal head_dim, got "
+                f"{self.type_dim} + {self.time_dim} != {self.head_dim}"
+            )
+
         self.q_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
         self.k_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
         self.v_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
         self.o_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
-        
+
         self.dropout = nn.Dropout(config.dropout)
-        
+
+    def _apply_axial_rope(
+        self,
+        x: torch.Tensor,
+        cos_type: torch.Tensor,
+        sin_type: torch.Tensor,
+        cos_time: torch.Tensor,
+        sin_time: torch.Tensor,
+        time_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply type-axis and time-axis RoPE to q or k.
+
+        Args:
+            x:         (B, S, H, D)
+            cos_type:  (B, S, type_dim)
+            sin_type:  (B, S, type_dim)
+            cos_time:  (B, S, time_dim)
+            sin_time:  (B, S, time_dim)
+            time_mask: (B, S), bool. True means this token uses time-axis RoPE.
+
+        Returns:
+            x_rotated: (B, S, H, D)
+        """
+        x_type = x[..., : self.type_dim]
+        x_time = x[..., self.type_dim : self.type_dim + self.time_dim]
+
+        # Always apply type-axis RoPE to all tokens
+        x_type = apply_rotary_pos_emb(x_type, cos_type, sin_type)
+
+        # Apply time-axis RoPE only to tokens where time_mask == True
+        x_time_rot = apply_rotary_pos_emb(x_time, cos_time, sin_time)
+
+        time_mask_expanded = time_mask.unsqueeze(-1).unsqueeze(-1)  # (B, S, 1, 1)
+        x_time = torch.where(time_mask_expanded, x_time_rot, x_time)
+
+        return torch.cat([x_type, x_time], dim=-1)
+
     def forward(
-        self, 
+        self,
         hidden_states: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
+        cos_type: torch.Tensor,
+        sin_type: torch.Tensor,
+        cos_time: torch.Tensor,
+        sin_time: torch.Tensor,
+        time_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
-        
+
         # Project Q, K, V
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
-        
-        # Reshape for multi-head attention
+
+        # (B, S, H, D)
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        
-        # Apply RoPE to Q and K
-        q = apply_rotary_pos_emb(q, cos, sin)
-        k = apply_rotary_pos_emb(k, cos, sin)
-        
-        # Transpose for attention: (batch, num_heads, seq_len, head_dim)
+
+        # Apply axial RoPE to Q and K
+        q = self._apply_axial_rope(q, cos_type, sin_type, cos_time, sin_time, time_mask)
+        k = self._apply_axial_rope(k, cos_type, sin_type, cos_time, sin_time, time_mask)
+
+        # (B, H, S, D)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-        
-        # Compute attention scores
+
+        # Attention
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        
+
         if attention_mask is not None:
             scores = scores + attention_mask
-        
-        # Softmax and dropout
+
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
-        
-        # Apply attention to values
+
         attn_output = torch.matmul(attn_weights, v)
-        
-        # Reshape back
+
+        # Back to (B, S, hidden_dim)
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_dim)
-        
-        # Output projection
+
         return self.o_proj(attn_output)
 
 
 class ACEMLP(nn.Module):
     """Feed-forward network."""
-    
+
     def __init__(self, config: ACEConfig):
         super().__init__()
         self.fc1 = nn.Linear(config.hidden_dim, config.intermediate_dim)
         self.fc2 = nn.Linear(config.intermediate_dim, config.hidden_dim)
         self.dropout = nn.Dropout(config.dropout)
         self.act = nn.GELU()
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
         x = self.act(x)
@@ -180,7 +274,7 @@ class ACEMLP(nn.Module):
 
 class ACELayer(nn.Module):
     """Single transformer layer with self-attention and FFN."""
-    
+
     def __init__(self, config: ACEConfig):
         super().__init__()
         self.attention = ACEAttention(config)
@@ -188,162 +282,259 @@ class ACELayer(nn.Module):
         self.norm1 = nn.LayerNorm(config.hidden_dim)
         self.norm2 = nn.LayerNorm(config.hidden_dim)
         self.dropout = nn.Dropout(config.dropout)
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
+        cos_type: torch.Tensor,
+        sin_type: torch.Tensor,
+        cos_time: torch.Tensor,
+        sin_time: torch.Tensor,
+        time_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # Self-attention with residual
+        # Self-attention
         residual = hidden_states
         hidden_states = self.norm1(hidden_states)
-        hidden_states = self.attention(hidden_states, cos, sin, attention_mask)
+        hidden_states = self.attention(
+            hidden_states=hidden_states,
+            cos_type=cos_type,
+            sin_type=sin_type,
+            cos_time=cos_time,
+            sin_time=sin_time,
+            time_mask=time_mask,
+            attention_mask=attention_mask,
+        )
         hidden_states = self.dropout(hidden_states)
         hidden_states = residual + hidden_states
-        
-        # MLP with residual
+
+        # FFN
         residual = hidden_states
         hidden_states = self.norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-        
+
         return hidden_states
 
 
 class ActionChunkEncoder(nn.Module):
-    """Action Chunk Encoder (ACE) model.
-    
-    Encodes action chunks into compact embeddings using a transformer architecture
-    with rotary position embeddings.
-    
+    """Action Chunk Encoder (ACE) with axial RoPE.
+
+    Encodes action chunks into compact embeddings using:
+    - grouped action tokens
+    - one sample-rate token at position 0
+    - axial RoPE over type-axis and time-axis
+
     Args:
         config: ACEConfig object containing model hyperparameters
     """
-    
+
     def __init__(self, config: ACEConfig):
         super().__init__()
         self.config = config
-        
-        # Action dimension padding
+
         self.action_dim = config.action_dim
         self.action_dim_padded = config.max_action_dim
         self.chunk_size = config.chunk_size
         self.group_size = config.group_size
         self.hidden_dim = config.hidden_dim
-        
-        # Calculate grouped dimensions
-        # After grouping G actions: (chunk_size / G) groups, each with G * action_dim_padded dims
-        assert config.chunk_size % config.group_size == 0, \
-            f"chunk_size ({config.chunk_size}) must be divisible by group_size ({config.group_size})"
-        
+
+        assert config.chunk_size % config.group_size == 0, (
+            f"chunk_size ({config.chunk_size}) must be divisible by "
+            f"group_size ({config.group_size})"
+        )
+
         self.num_groups = config.chunk_size // config.group_size
         self.group_dim = config.group_size * config.max_action_dim
-        
-        # Input projection: from group_dim to hidden_dim
+
+        # Input projection
         self.input_proj = nn.Linear(self.group_dim, config.hidden_dim)
-        
-        # RoPE
-        self.rope = RotaryPositionEmbedding(
-            config.hidden_dim // config.num_attention_heads,
-            config.max_position_embeddings
+
+        # Use the same split logic as attention
+        head_dim = config.hidden_dim // config.num_attention_heads
+        type_dim = head_dim // 2
+        if type_dim % 2 != 0:
+            type_dim -= 1
+        time_dim = head_dim - type_dim
+        if time_dim % 2 != 0:
+            time_dim -= 1
+            type_dim += 1
+
+        if type_dim <= 0 or time_dim <= 0:
+            raise ValueError(
+                f"Invalid RoPE split derived from head_dim={head_dim}: "
+                f"type_dim={type_dim}, time_dim={time_dim}"
+            )
+
+        self.type_dim = type_dim
+        self.time_dim = time_dim
+
+        # Axial RoPE
+        # type ids only need 2 positions: {0: sample token, 1: action token}
+        self.type_rope = RotaryPositionEmbedding(
+            dim=self.type_dim,
+            max_position=2,
+            base=10000.0,
         )
-        
+        # time ids cover action token order
+        self.time_rope = RotaryPositionEmbedding(
+            dim=self.time_dim,
+            max_position=max(config.max_position_embeddings, self.num_groups),
+            base=10000.0,
+        )
+
         # Transformer layers
         self.layers = nn.ModuleList([ACELayer(config) for _ in range(config.num_hidden_layers)])
-        
+
         # Output projection
         self.output_norm = nn.LayerNorm(config.hidden_dim)
         self.output_proj = nn.Linear(config.hidden_dim, config.output_dim)
-        
-        # Sample rate embedding (optional positional info)
+
+        # Token embeddings
         self.sample_rate_embed = nn.Embedding(50, config.hidden_dim)
-        
+        self.token_type_embed = nn.Embedding(2, config.hidden_dim)  # 0=sample, 1=action
+
     def _pad_actions(self, actions: torch.Tensor) -> torch.Tensor:
         """Pad action dimensions to action_dim_padded.
-        
+
         Args:
-            actions: Action tensor of shape (batch, chunk_size, action_dim)
-            
+            actions: (B, chunk_size, action_dim)
+
         Returns:
-            Padded actions of shape (batch, chunk_size, action_dim_padded)
+            (B, chunk_size, action_dim_padded)
         """
-        if self.action_dim >= self.action_dim_padded:
-            return actions[..., :self.action_dim_padded]
-        
+        current_dim = actions.shape[-1]
+        if current_dim >= self.action_dim_padded:
+            return actions[..., : self.action_dim_padded]
+
         padding = torch.zeros(
             *actions.shape[:-1],
-            self.action_dim_padded - self.action_dim,
+            self.action_dim_padded - current_dim,
             device=actions.device,
-            dtype=actions.dtype
+            dtype=actions.dtype,
         )
         return torch.cat([actions, padding], dim=-1)
-    
+
     def _group_actions(self, actions: torch.Tensor) -> torch.Tensor:
         """Group actions along chunk dimension.
-        
+
         Args:
-            actions: Padded actions of shape (batch, chunk_size, action_dim_padded)
-            
+            actions: (B, chunk_size, action_dim_padded)
+
         Returns:
-            Grouped actions of shape (batch, num_groups, group_size * action_dim_padded)
+            (B, num_groups, group_dim)
         """
         batch_size = actions.shape[0]
-        
-        # Reshape: (batch, chunk_size, action_dim_padded) -> 
-        #          (batch, num_groups, group_size, action_dim_padded)
-        # print(actions.shape)
-        actions = actions.view(batch_size, self.num_groups, self.group_size, self.action_dim_padded)
-        
-        # Flatten last two dims: (batch, num_groups, group_size * action_dim_padded)
+        actions = actions.view(
+            batch_size,
+            self.num_groups,
+            self.group_size,
+            self.action_dim_padded,
+        )
         actions = actions.view(batch_size, self.num_groups, self.group_dim)
-        
         return actions
-    
+
+    def _build_position_ids(
+        self,
+        batch_size: int,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build type ids, time ids, and time mask.
+
+        Sequence:
+            [sample_token, action_0, action_1, ..., action_{N-1}]
+
+        Returns:
+            type_ids:  (B, N+1)
+            time_ids:  (B, N+1)
+            time_mask: (B, N+1), bool
+        """
+        seq_len = self.num_groups + 1
+
+        # type ids: 0 for sample token, 1 for action tokens
+        type_ids = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
+        type_ids[:, 1:] = 1
+
+        # time ids: sample token gets 0 placeholder, action tokens get 0..N-1
+        time_ids = torch.zeros(batch_size, seq_len, dtype=torch.long, device=device)
+        action_time_ids = torch.arange(self.num_groups, dtype=torch.long, device=device)
+        time_ids[:, 1:] = action_time_ids.unsqueeze(0)
+
+        # time mask: sample token does NOT use time-axis RoPE
+        time_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+        time_mask[:, 1:] = True
+
+        return type_ids, time_ids, time_mask
+
     def forward(
         self,
         actions: torch.Tensor,
-        sample_rate: int = 0,
-        attention_mask: Optional[torch.Tensor] = None
+        sample_rate: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Encode action chunks into compact embeddings.
-        
+
         Args:
-            actions: Action chunk tensor of shape (batch, chunk_size, action_dim)
-            sample_rate: Sample rate index for positional embedding (0-9)
-            attention_mask: Optional attention mask
-            
+            actions: (B, chunk_size, action_dim) or already padded to max_action_dim
+            sample_rate: (B,) integer ids, or scalar tensor / python int
+            attention_mask: optional attention mask broadcastable to (B, H, S, S)
+
         Returns:
-            Compact embedding of shape (batch, output_dim)
+            embedding: (B, output_dim)
         """
-        batch_size = actions.shape[0] # (B, chunk_size, action_dim), has pad
-        
-        # Step 2: Group actions along chunk dimension
-        actions = self._group_actions(actions)  # (B, num_groups, group_dim)
-        
-        # Step 3: Concatenate sample rate embedding at the beginning (position 0)
-        sample_rate_embed = self.sample_rate_embed(sample_rate.long())
-        
-        # Step 4: Project actions to hidden dimension
-        hidden_states = self.input_proj(actions)  # (B, num_groups, hidden_dim)
-        
-        # Step 5: Concatenate sample rate embedding at the beginning along chunk dimension
-        # (B, num_groups + 1, hidden_dim), where position 0 is sample_rate_embed
-        hidden_states = torch.cat([sample_rate_embed.unsqueeze(1), hidden_states], dim=1)
-        
-        # Step 6: Get RoPE embeddings
-        cos, sin = self.rope(hidden_states, hidden_states.shape[1])
-        
-        # Step 7: Pass through transformer layers
+        if not torch.is_tensor(sample_rate):
+            sample_rate = torch.tensor(sample_rate, device=actions.device)
+
+        if sample_rate.dim() == 0:
+            sample_rate = sample_rate.unsqueeze(0).expand(actions.shape[0])
+        elif sample_rate.dim() == 1 and sample_rate.shape[0] == 1 and actions.shape[0] > 1:
+            sample_rate = sample_rate.expand(actions.shape[0])
+
+        batch_size = actions.shape[0]
+
+        # Pad action dim if needed
+        if actions.shape[-1] != self.action_dim_padded:
+            actions = self._pad_actions(actions)
+
+        # Group actions -> (B, num_groups, group_dim)
+        actions = self._group_actions(actions)
+
+        # Project action groups -> (B, num_groups, hidden_dim)
+        action_hidden = self.input_proj(actions)
+
+        # Sample-rate token -> (B, 1, hidden_dim)
+        sample_token = self.sample_rate_embed(sample_rate.long()).unsqueeze(1)
+
+        # Concat sequence: [sample_token, action_tokens]
+        hidden_states = torch.cat([sample_token, action_hidden], dim=1)
+
+        # Token type embedding
+        type_ids, time_ids, time_mask = self._build_position_ids(
+            batch_size=batch_size,
+            device=actions.device,
+        )
+        hidden_states = hidden_states + self.token_type_embed(type_ids)
+
+        # Build axial RoPE tables
+        cos_type, sin_type = self.type_rope.get_cos_sin_by_position_ids(type_ids)
+        cos_time, sin_time = self.time_rope.get_cos_sin_by_position_ids(time_ids)
+
+        # Transformer
         for layer in self.layers:
-            hidden_states = layer(hidden_states, cos, sin, attention_mask)
-        
-        # Step 8: Output projection
+            hidden_states = layer(
+                hidden_states=hidden_states,
+                cos_type=cos_type,
+                sin_type=sin_type,
+                cos_time=cos_time,
+                sin_time=sin_time,
+                time_mask=time_mask,
+                attention_mask=attention_mask,
+            )
+
+        # Output projection
         hidden_states = self.output_norm(hidden_states)
         hidden_states = self.output_proj(hidden_states)
-        
-        # Step 9: Take the output at sample_rate_embed position (position 0)
+
+        # Use sample token output as final embedding
         embedding = hidden_states[:, 0, :]  # (B, output_dim)
-        
         return embedding

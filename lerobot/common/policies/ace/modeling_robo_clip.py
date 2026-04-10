@@ -243,7 +243,9 @@ class RobotCLIP(PreTrainedPolicy):
         sample_rate = batch.get('sample_rate', 0)
         # print(sample_rate)
         # print(torch.max(images), torch.min(images))
+        images = images.squeeze()
         pil_images = [
+            # in lerobot dataset, images are already in [0, 1] range, so we can directly convert to PIL without scaling
             Image.fromarray((image.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8"))
             for image in images
         ]
