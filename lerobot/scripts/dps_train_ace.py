@@ -121,9 +121,17 @@ def train(cfg: TrainPipelineConfig):
     deepspeed.init_distributed()
     logger = init_logger(cfg)
     
+    # image_transforms = (
+    #     ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
+    # )
     image_transforms = (
         ImageTransforms(cfg.dataset.image_transforms)
     )
+    # wrist_image_transforms = (
+    #     ImageTransforms(cfg.dataset.wrist_image_transforms) if cfg.dataset.image_transforms.enable else None
+    # )
+    print(f"Image transforms:{image_transforms}")
+    # print(wrist_image_transforms)
     
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(pformat(cfg.to_dict()))
@@ -139,7 +147,6 @@ def train(cfg: TrainPipelineConfig):
         rank = int(os.environ.get('RANK', 0))
         set_seed(cfg.seed + rank)
 
-    step = 1
     seed = cfg.seed + rank
     # Dataset setup
     image_transforms = ImageTransforms(cfg.dataset.image_transforms)
@@ -169,11 +176,6 @@ def train(cfg: TrainPipelineConfig):
         ds_meta=dataset.meta,
     )
     logger.info("Policy model created...")
-
-    # Environment setup (only in main process)
-    eval_env = None
-    if int(os.environ.get('RANK', 0)) == 0 and cfg.eval_freq > 0 and cfg.env is not None:
-        eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size)
 
     # Optimizer and scheduler
     logger.info("Creating optimizer and scheduler")
@@ -220,12 +222,14 @@ def train(cfg: TrainPipelineConfig):
     with open(cfg.deepspeed, 'r') as f:
         deepspeed_configs_in_dict = json.load(f)
     batch_size = deepspeed_configs_in_dict['train_micro_batch_size_per_gpu']
+    
     dataloader = DataLoader(dataset=dataset,
                             batch_size=batch_size,
                             sampler=sampler,
-                            num_workers=4,
+                            num_workers=8,
                             pin_memory=True,
-                            collate_fn=extra_collate_fn,
+                            persistent_workers=True,
+                            prefetch_factor=4
                             )
     
     model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
@@ -238,28 +242,38 @@ def train(cfg: TrainPipelineConfig):
     
     logger.info(f"Training batch size:{model_engine.train_batch_size()}") # micro_size * gradient_cum_size * gpu_num
         
+    # Resume training state
+    step = 0
+    # cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
+    if cfg.weight_resume:
+        logger.info(f"Resuming training from {cfg.output_dir}")
+        ckpt_path = cfg.output_dir
+        # ckpt_list = os.listdir(ckpt_path)
+        # latest_ckpt = sorted(ckpt_list, key=lambda x: int(x.split("step")[-1]))[-1]
+        # checkpoint_path = os.path.join(ckpt_path, latest_ckpt)
+        load_path, client_state = model_engine.load_checkpoint(
+            ckpt_path,
+            load_optimizer_states=True,
+            load_lr_scheduler_states=True
+        )
+        if load_path is not None:
+            step = client_state['step']
+            logger.info(f"Resumed training from step {step}")
+    else:
+        client_state = {
+            'step': step
+        }
+    
+    if client_state is None:
+        client_state = {
+            'step': step
+        }
+        
     dl_iter = cycle(dataloader)
     
     # for i in range(5):
     #     batch = next(dl_iter)
     #     rank_dataloader_check(model_engine, batch)
-
-    # Metrics setup
-    train_metrics = {
-        "loss": AverageMeter("loss", ":.3f"),
-        "grad_norm": AverageMeter("grdn", ":.3f"),
-        "lr": AverageMeter("lr", ":0.1e"),
-        "update_s": AverageMeter("updt_s", ":.3f"),
-        "dataloading_s": AverageMeter("data_s", ":.3f"),
-        "optim_s": AverageMeter("optim_s", ":.3f"),
-    }
-    train_tracker = MetricsTracker(
-        model_engine.train_batch_size(),
-        dataset.num_frames,
-        dataset.num_episodes,
-        train_metrics,
-        initial_step=int(step/model_engine.gradient_accumulation_steps())
-    )
     
     
     if cfg.weight_resume:
@@ -285,6 +299,23 @@ def train(cfg: TrainPipelineConfig):
         client_state = {
             'step': step
         }
+    
+    # Metrics setup
+    train_metrics = {
+        "loss": AverageMeter("loss", ":.3f"),
+        "grad_norm": AverageMeter("grdn", ":.3f"),
+        "lr": AverageMeter("lr", ":0.1e"),
+        "update_s": AverageMeter("updt_s", ":.3f"),
+        "dataloading_s": AverageMeter("data_s", ":.3f"),
+        "optim_s": AverageMeter("optim_s", ":.3f"),
+    }
+    train_tracker = MetricsTracker(
+        model_engine.train_batch_size(),
+        dataset.num_frames,
+        dataset.num_episodes,
+        train_metrics,
+        initial_step=int(step/model_engine.gradient_accumulation_steps())
+    )
 
     # Main training loop
     logger.info(f"Start training on {int(os.environ.get('WORLD_SIZE', 1))} devices")
@@ -356,8 +387,6 @@ def train(cfg: TrainPipelineConfig):
         if step_idx % dist_step == 0:
             dist.barrier(device_ids=[model_engine.local_rank])
     # Cleanup
-    if int(os.environ.get('RANK', 0)) == 0 and eval_env:
-        eval_env.close()
     logger.info("Training finished")
 
 
