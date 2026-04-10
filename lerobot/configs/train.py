@@ -24,6 +24,7 @@ TRAIN_CONFIG_NAME = "train_config.json"
 @dataclass
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
+    stage: str = "finetune"
     env: envs.EnvConfig | None = None
     policy: PreTrainedConfig | None = None
     policy2: PreTrainedConfig | None = None
@@ -56,7 +57,7 @@ class TrainPipelineConfig(HubMixin):
     data_mix: str = "oxe_magic_soup_plus"
     steps: int = 2000_000
     eval_freq: int = 2000
-    log_freq: int = 100
+    log_freq: int = 20
     save_checkpoint: bool = True
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
     save_freq: int = 5000
