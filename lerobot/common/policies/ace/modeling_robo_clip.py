@@ -260,7 +260,7 @@ class RobotCLIP(PreTrainedPolicy):
         
         # Compute contrastive loss
         loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
-        print(F"Contrastive loss: {loss.item():.4f}")
+        # print(F"Contrastive loss: {loss.item():.4f}")
         loss_dict = {"contrastive_loss": loss.item()}
         return loss, loss_dict
     
