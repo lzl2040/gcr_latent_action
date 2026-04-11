@@ -82,13 +82,14 @@ class VisionEncoder(nn.Module):
         inputs = {k: v.to(dtype=self.dtype, device="cuda") for k, v in inputs.items()}
         # Get vision embeddings - use only the vision model
         vision_outputs = self.model.vision_model(**inputs)
+        embeddings = vision_outputs.pooler_output
         
-        # Use pooler output or last hidden state's [CLS] token
-        if hasattr(vision_outputs, 'pooler_output') and vision_outputs.pooler_output is not None:
-            embeddings = vision_outputs.pooler_output
-        else:
-            # Use mean pooling over all patches
-            embeddings = vision_outputs.last_hidden_state.mean(dim=1)
+        # # Use pooler output or last hidden state's [CLS] token
+        # if hasattr(vision_outputs, 'pooler_output') and vision_outputs.pooler_output is not None:
+        #     embeddings = vision_outputs.pooler_output
+        # else:
+        #     # Use mean pooling over all patches
+        #     embeddings = vision_outputs.last_hidden_state.mean(dim=1)
         
         # Project to output dimension
         embeddings = self.projection(embeddings)
@@ -209,7 +210,10 @@ class RobotCLIP(PreTrainedPolicy):
         
         # Compute similarity matrix
         # logits: (B, B)
+        # print("image", torch.max(image_embeddings), torch.min(image_embeddings))
+        # print("action", torch.max(action_embeddings), torch.min(action_embeddings))
         logits = (image_embeddings @ action_embeddings.T) * self.logit_scale.exp()
+        # print(torch.max(logits), torch.min(logits))
         
         # Labels: diagonal elements are positive pairs
         labels = torch.arange(batch_size, device=image_embeddings.device)
@@ -242,7 +246,7 @@ class RobotCLIP(PreTrainedPolicy):
         states = batch['observation.state']
         sample_rate = batch.get('sample_rate', 0)
         # print(sample_rate)
-        # print(torch.max(images), torch.min(images))
+        # print(torch.max(images), torch.min(images)) # 0-1
         images = images.squeeze()
         pil_images = [
             # in lerobot dataset, images are already in [0, 1] range, so we can directly convert to PIL without scaling
@@ -250,6 +254,7 @@ class RobotCLIP(PreTrainedPolicy):
             for image in images
         ]
         # Encode images and actions
+        # print(torch.max(actions), torch.min(actions), torch.max(sample_rate), torch.min(sample_rate))
         image_embeddings = self.encode_images(pil_images)  # (B, D)
         action_embeddings = self.encode_actions(actions, sample_rate)  # (B, D)
         

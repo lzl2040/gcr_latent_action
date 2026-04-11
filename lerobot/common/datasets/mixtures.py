@@ -296,13 +296,14 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     
     "debug":[
         # ("berkeley_autolab_ur5", 1.0),
-        ("austin_sirius_dataset_converted_externally_to_rlds", 1.0),
-        ("stanford_hydra_dataset_converted_externally_to_rlds", 2.0),
-        ("taco_play", 1.0),
-        # ("jaco_play", 1.0),
-        ("robomind_franka_dual_arm", 1.0),
-        ("fractal20220817_data", 0.54087122203),
-        ("interna1_dual_arm_1", 1.0)
+        # ("austin_sirius_dataset_converted_externally_to_rlds", 1.0),
+        # ("stanford_hydra_dataset_converted_externally_to_rlds", 2.0),
+        # ("taco_play", 1.0),
+        # # ("jaco_play", 1.0),
+        # ("robomind_franka_dual_arm", 1.0),
+        # # ("fractal20220817_data", 0.54087122203),
+        ("bridge_orig", 1.0),   
+        # ("interna1_dual_arm_1", 1.0),
     ],
 
     # === T-DROID Dataset ===

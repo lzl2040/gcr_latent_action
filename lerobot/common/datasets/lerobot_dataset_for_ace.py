@@ -1539,8 +1539,10 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         all_new_obs_image_keys = ["observation.images.primary", 
                                   "observation.images.secondary", 
                                   "observation.images.wrist"] # follow https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/rlds/oxe/configs.py
+        
+        # print(self.datasets[0].meta.stats)
         self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
-        save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
+        # save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
         # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/original_qw", f"{cfg.data_mix}_stats.json"))
         # remove state
         
@@ -1594,52 +1596,75 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         return self.dataset_len
 
     def __getitem__(self, index):
+        
+        if self.is_ft:
+            dataset_id, data_id = self.id2dataset[index]
+            dataset = self.datasets[dataset_id]
+            item = dataset[data_id]
+            dataset_name = item["dataset_name"]
+            data_config = OXE_DATASET_CONFIGS[dataset_name]
+            image_obs_keys = data_config["image_obs_keys"]
+        else:
+            selected_dataset = random.choices(self.datasets, weights=self.sample_weights, k=1)[0]
+            dataset_index = self.datasets.index(selected_dataset)
+            dataset_name = self.dataset_names[dataset_index]
+            data_config = OXE_DATASET_CONFIGS[dataset_name]
+            indices = self.selected_indices[dataset_index] # the selected indices of this dataset
+            selected_id = random.choice(indices) # equal prob
+            
+            image_obs_keys = data_config["image_obs_keys"]
+        
+            item = selected_dataset[selected_id]
+            item['dataset_name'] = dataset_name
+        
+        data_dict = self._fetch_data_dict(item, image_obs_keys)
+        
         # v2
-        none_flag = True
-        max_retry = 100
-        retry = 0
-        while none_flag:
-            if retry > max_retry:
-                break
-            retry += 1
-            if self.is_ft:
-                dataset_id, data_id = self.id2dataset[index]
-                dataset = self.datasets[dataset_id]
-                item = dataset[data_id]
-                dataset_name = item["dataset_name"]
-                data_config = OXE_DATASET_CONFIGS[dataset_name]
-                image_obs_keys = data_config["image_obs_keys"]
-            else:
-                selected_dataset = random.choices(self.datasets, weights=self.sample_weights, k=1)[0]
-                dataset_index = self.datasets.index(selected_dataset)
-                dataset_name = self.dataset_names[dataset_index]
-                data_config = OXE_DATASET_CONFIGS[dataset_name]
-                indices = self.selected_indices[dataset_index] # the selected indices of this dataset
-                selected_id = random.choice(indices) # equal prob
+        # none_flag = True
+        # max_retry = 100
+        # retry = 0
+        # while none_flag:
+        #     if retry > max_retry:
+        #         break
+        #     retry += 1
+        #     if self.is_ft:
+        #         dataset_id, data_id = self.id2dataset[index]
+        #         dataset = self.datasets[dataset_id]
+        #         item = dataset[data_id]
+        #         dataset_name = item["dataset_name"]
+        #         data_config = OXE_DATASET_CONFIGS[dataset_name]
+        #         image_obs_keys = data_config["image_obs_keys"]
+        #     else:
+        #         selected_dataset = random.choices(self.datasets, weights=self.sample_weights, k=1)[0]
+        #         dataset_index = self.datasets.index(selected_dataset)
+        #         dataset_name = self.dataset_names[dataset_index]
+        #         data_config = OXE_DATASET_CONFIGS[dataset_name]
+        #         indices = self.selected_indices[dataset_index] # the selected indices of this dataset
+        #         selected_id = random.choice(indices) # equal prob
                 
-                image_obs_keys = data_config["image_obs_keys"]
+        #         image_obs_keys = data_config["image_obs_keys"]
             
-                item = selected_dataset[selected_id]
-                item['dataset_name'] = dataset_name
+        #         item = selected_dataset[selected_id]
+        #         item['dataset_name'] = dataset_name
             
-            data_dict = self._fetch_data_dict(item, image_obs_keys)
+        #     data_dict = self._fetch_data_dict(item, image_obs_keys)
             
-            none_flag = False
-            for key, value in data_dict.items():
-                if value is None:
-                    logging.warning(f"Found NoneType Value at key: {key}, from {data_dict['source']}, refetch data")
-                    none_flag = True
+        #     none_flag = False
+        #     for key, value in data_dict.items():
+        #         if value is None:
+        #             logging.warning(f"Found NoneType Value at key: {key}, from {data_dict['source']}, refetch data")
+        #             none_flag = True
                     
-                elif isinstance(value, list):
-                    if len(value) == 0:
-                        logging.warning(f"Found Empty List at key: {key}, from {data_dict['source']}, refetch data")
-                        none_flag = True
+        #         elif isinstance(value, list):
+        #             if len(value) == 0:
+        #                 logging.warning(f"Found Empty List at key: {key}, from {data_dict['source']}, refetch data")
+        #                 none_flag = True
                         
-                    else:
-                        for v in value:
-                            if v is None:
-                                logging.warning(f"Found NoneType Value in List at key: {key}, from {data_dict['source']}, refetch data")
-                                none_flag = True
+        #             else:
+        #                 for v in value:
+        #                     if v is None:
+        #                         logging.warning(f"Found NoneType Value in List at key: {key}, from {data_dict['source']}, refetch data")
+        #                         none_flag = True
                                 
         
         return data_dict
@@ -1711,21 +1736,23 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
         
         # Normlize the action and observation vectors
-        if "agi" in item['dataset_name']:
-            item["action"] = (item["action"] - self.stats["action"]["mean"]) / (self.stats["action"]["std"] + 1e-8)
-            item["observation.state"] = (item["observation.state"] - self.stats["observation.state"]["mean"]) / (self.stats["observation.state"]["std"] + 1e-8)
+        if "agi" in item["dataset_name"]:
+            xyz_idx = [0, 1, 2, 10, 11, 12]   # 双臂 xyz
         else:
-            state_mean = torch.zeros(self.max_state_dim)
-            state_mean[:8] = self.stats["observation.state"]["mean"][:8]
-            state_std = torch.ones(self.max_state_dim)
-            state_std[:8] = self.stats["observation.state"]["std"][:8]
-            item["observation.state"] = (item["observation.state"] - state_mean) / (state_std + 1e-8)
-            
-            action_mean = torch.zeros(self.max_action_dim)
-            action_mean[:7] = self.stats["action"]["mean"][:7]
-            action_std = torch.ones(self.max_action_dim)
-            action_std[:7] = self.stats["action"]["std"][:7]
-            item["action"] = (item["action"] - action_mean) / (action_std + 1e-8)
+            xyz_idx = [0, 1, 2]               # 单臂 xyz
+
+        # print(t/orch.max(item["action"]), torch.min(item["action"]))
+        # action
+        mean = self.stats["action"]["mean"].to(item["action"].dtype).to(item["action"].device)
+        std = self.stats["action"]["std"].to(item["action"].dtype).to(item["action"].device)
+        item["action"][..., xyz_idx] = (item["action"][..., xyz_idx] - mean[xyz_idx]) / (std[xyz_idx] + 1e-8)
+
+        # state
+        mean = self.stats["observation.state"]["mean"].to(item["observation.state"].dtype).to(item["observation.state"].device)
+        std = self.stats["observation.state"]["std"].to(item["observation.state"].dtype).to(item["observation.state"].device)
+        item["observation.state"][..., xyz_idx] = (
+            item["observation.state"][..., xyz_idx] - mean[xyz_idx]
+        ) / (std[xyz_idx] + 1e-8)
         
         item["timestamp"] = item["timestamp"].unsqueeze(0) # make it (1,) for later processing
         # print(item["timestamp"].shape)
