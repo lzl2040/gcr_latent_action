@@ -255,10 +255,10 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("berkeley_cable_routing", 1.0),
         ("fractal20220817_data", 0.54087122203),                # Google RT-1 Robot Data (Large-Scale)
         ("kuka", 0.8341046294),
-        ("bridge_orig", 1.0),                                   # Original Version of Bridge V2 from Project Website
+        # ("bridge_orig", 1.0),                                   # Original Version of Bridge V2 from Project Website
         ("taco_play", 2.0),
         ("jaco_play", 1.0),
-        ("roboturk", 2.0),
+        # ("roboturk", 2.0),
         ("viola", 2.0),
         ("berkeley_autolab_ur5", 2.0),
         ("toto", 1.0),
@@ -279,13 +279,13 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("bc_z", 0.2),                                          # Note: use v0.1.0 --> later versions broken
         ("fmb_dataset", 1.0),
         ("dobbe", 0.2),
-        ("droid", 0.01),
+        # ("droid", 0.01),
         ("agibot_alpha", 0.1),
-        # ("robomind_franka_dual_arm", 1.0),
-        # ("robomind_franka_3rgb", 1.0),
-        # ("robomind_franka_1rgb", 1.0),
-        # ("robomind_agilex_3rgb", 0.5),
-        # ("robomind_ur_1rgb", 0.5),
+        ("robomind_franka_dual_arm", 1.0),
+        ("robomind_franka_3rgb", 1.0),
+        ("robomind_franka_1rgb", 1.0),
+        ("robomind_agilex_3rgb", 0.5),
+        ("robomind_ur_1rgb", 0.5),
         # ("interna1_dual_arm_0", 0.05),
         # ("interna1_dual_arm_1", 0.05),
         # ("interna1_dual_arm_2", 0.05),
