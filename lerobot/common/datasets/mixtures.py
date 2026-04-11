@@ -293,6 +293,21 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("interna1_dual_arm_4", 0.1),
         # ("interna1_single_arm", 0.1),
     ],
+    "robomind":[
+        ("robomind_franka_dual_arm", 1.0),
+        ("robomind_franka_3rgb", 1.0),
+        ("robomind_franka_1rgb", 1.0),
+        ("robomind_agilex_3rgb", 0.5),
+        ("robomind_ur_1rgb", 0.5),
+    ],
+    "interna1":[
+        # ("interna1_dual_arm_0", 0.05),
+        ("interna1_dual_arm_1", 0.5),
+        ("interna1_dual_arm_2", 0.5),
+        ("interna1_dual_arm_3", 0.5),
+        ("interna1_dual_arm_4", 0.5),
+        ("interna1_single_arm", 0.5),
+    ],
     
     "debug":[
         # ("berkeley_autolab_ur5", 1.0),
