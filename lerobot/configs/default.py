@@ -36,10 +36,12 @@ class DatasetConfig:
     wrist_image_transforms: ImageTransformsConfig = field(default_factory=ImageTransformsConfig)
     revision: str | None = None
     use_imagenet_stats: bool = True
+    balance_dataset_weights: bool = True
     video_backend: str = "pyav"
     default_image_size: int = 224
     default_channel_size: int = 3
     sample_ratio: float = 1.0
+    dataset_size_one_epoch: int = 1000_0000
     processor: str = "/mnt/wangxiaofa/qwen_params/Qwen2.5-VL-7B-Instruct/"
     parent_dir: str = "/mnt/wangxiaofa/robot_dataset/lerobot-format/"
     calvin_sub_task: int | None = 0
