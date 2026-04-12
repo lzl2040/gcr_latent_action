@@ -160,6 +160,7 @@ def train(cfg: TrainPipelineConfig):
         seed=seed,
         data_mix=cfg.data_mix,
         vla2root_json="vla2root.json",
+        dataset_size_one_epoch=cfg.dataset.dataset_size_one_epoch
     )
     logger.info(f"Dataset: {dataset}")
 
@@ -275,8 +276,9 @@ def train(cfg: TrainPipelineConfig):
     #     print(f"Testing Data:{try_num}")
     #     if try_num > 1000:
     #         break
-    dl_iter = cycle(dataloader)
-    first_batch = next(dl_iter)
+    
+    # dl_iter = cycle(dataloader)
+    # first_batch = next(dl_iter)
     
     # for i in range(5):
     #     batch = next(dl_iter)
@@ -330,70 +332,74 @@ def train(cfg: TrainPipelineConfig):
     completed_steps = step
     fwd_bwd_time = 0
     dataloading_s = 0
-    dist_step=10
+    dist_step = 10
 
     cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
     # first_batch = None
-    for step_idx in range(completed_steps, total_steps):
+    # for step_idx in range(completed_steps, total_steps):
+    for epoch in range(100000):
+        print(f"Epoch {epoch} start...")
+        dataloader.sampler.set_epoch(epoch)
+        dataloader.dataset.set_epoch(epoch)
+        for batch in dataloader:
         
-        
-        start_time = time.perf_counter()
-        batch = next(dl_iter)
-        dataloading_time = time.perf_counter() - start_time
-        dataloading_s += dataloading_time
-        
-        fwd_bwd_start = time.perf_counter()
-        loss, output_dict = update_policy(
-            model_engine,
-            batch,
-            # first_batch,
-            logger
-        )
-        step += 1
-        fwd_bwd_time += time.perf_counter() - fwd_bwd_start
-        
-        if model_engine.is_gradient_accumulation_boundary():
-            train_tracker.dataloading_s = dataloading_s
-            train_tracker.update_s = fwd_bwd_time
+            start_time = time.perf_counter()
+            # batch = next(dl_iter)
+            dataloading_time = time.perf_counter() - start_time
+            dataloading_s += dataloading_time
             
-
-            loss_value = loss.detach().mean().item()
-            grad_norm_value = 0.0
-            
-            train_tracker.loss = loss_value
-            train_tracker.grad_norm = grad_norm_value
-            train_tracker.lr = optimizer.param_groups[0]["lr"]
-            train_tracker.step()
-            
-            fwd_bwd_time=0
-            dataloading_s=0
-        
-        is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0
-        is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
-        
-        if cfg.save_checkpoint and is_saving_step:
-            logger.info(f"Checkpoint policy after step {step}")
-            # checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
-            os.makedirs(cfg.output_dir, exist_ok=True)
-            client_state['step'] = step
-            model_engine.save_checkpoint(
-                save_dir=cfg.output_dir,
-                client_state=client_state
+            fwd_bwd_start = time.perf_counter()
+            loss, output_dict = update_policy(
+                model_engine,
+                batch,
+                # first_batch,
+                logger
             )
-            logger.info(f"Checkpoint policy after step {step} completed.")
-        
-        if int(os.environ.get('RANK', 0)) == 0:
-            if is_log_step:
-                logger.info(train_tracker)
-                if wandb_logger:
-                    wandb_log_dict = train_tracker.to_dict()
-                    if output_dict:
-                        wandb_log_dict.update(output_dict)
-                    wandb_logger.log_dict(wandb_log_dict, step)
-                train_tracker.reset_averages()
+            step += 1
+            fwd_bwd_time += time.perf_counter() - fwd_bwd_start
+            
+            if model_engine.is_gradient_accumulation_boundary():
+                train_tracker.dataloading_s = dataloading_s
+                train_tracker.update_s = fwd_bwd_time
+                
 
-        if step_idx % dist_step == 0:
-            dist.barrier(device_ids=[model_engine.local_rank])
+                loss_value = loss.detach().mean().item()
+                grad_norm_value = 0.0
+                
+                train_tracker.loss = loss_value
+                train_tracker.grad_norm = grad_norm_value
+                train_tracker.lr = optimizer.param_groups[0]["lr"]
+                train_tracker.step()
+                
+                fwd_bwd_time=0
+                dataloading_s=0
+            
+            is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0
+            is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
+            
+            if cfg.save_checkpoint and is_saving_step:
+                logger.info(f"Checkpoint policy after step {step}")
+                # checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+                os.makedirs(cfg.output_dir, exist_ok=True)
+                client_state['step'] = step
+                model_engine.save_checkpoint(
+                    save_dir=cfg.output_dir,
+                    client_state=client_state
+                )
+                logger.info(f"Checkpoint policy after step {step} completed.")
+            
+            if int(os.environ.get('RANK', 0)) == 0:
+                if is_log_step:
+                    logger.info(train_tracker)
+                    if wandb_logger:
+                        wandb_log_dict = train_tracker.to_dict()
+                        if output_dict:
+                            wandb_log_dict.update(output_dict)
+                        wandb_logger.log_dict(wandb_log_dict, step)
+                    train_tracker.reset_averages()
+
+            if step % dist_step == 0:
+                dist.barrier(device_ids=[model_engine.local_rank])
     # Cleanup
     logger.info("Training finished")
 

@@ -17,6 +17,7 @@ BATCH_SIZE=10
 SAVE_FREQ=5000
 IS_FT=true
 CHUNK_SIZE=16
+DATASET_SIZE_ONE_EPOCH=1000_0000
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -93,6 +94,10 @@ while [[ $# -gt 0 ]]; do
             CHUNK_SIZE="$2"
             shift 2
             ;;
+        --dataset_len)
+            DATASET_SIZE_ONE_EPOCH="$2"
+            shift 2
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -120,6 +125,7 @@ python lerobot/scripts/dps_train_ace.py \
     --dataset.image_transforms.enable=false \
     --dataset.wrist_image_transforms.enable=false \
     --dataset.wrist_image_transforms.is_primary=false \
+    --dataset.dataset_size_one_epoch=$DATASET_SIZE_ONE_EPOCH \
     --batch_size=16 \
     --gradient_accumulation_steps=$GRADIENT_ACCUMULATION_STEPS \
     --data_mix=$DATA_MIX \

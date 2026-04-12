@@ -1373,7 +1373,9 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
 class MultiDatasetforDistTraining(torch.utils.data.Dataset):
     def __init__(self, cfg, image_transforms, wrist_image_transforms = None, seed: int = 1000, 
-                 data_mix: str = "toy", vla2root_json: str = None, banlance_weight=True, is_ft = False):
+                 data_mix: str = "toy", vla2root_json: str = None, 
+                 banlance_weight=True, is_ft = False,
+                 dataset_size_one_epoch = 1000_0000):
         """
         参数:
             cfg (TrainPipelineConfig): 训练配置文件
@@ -1405,6 +1407,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         super().__init__()
         self.episodes = None
         self.cfg = cfg
+        self.seed = seed
         # set seed
         set_seed(seed)
         # specific process
@@ -1510,7 +1513,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             print(f"Final weights:{sample_weights}")
             # self.dataset_len = sum(self.dataset_sizes)
             raw_dataset_len = sum(self.dataset_sizes)
-            dataset_sample_counts = (self.sample_weights * raw_dataset_len).astype(int)  # 计算子集大小
+            self.dataset_sample_counts = (self.sample_weights * dataset_size_one_epoch).astype(int)  # 计算子集大小
             
             print(f"Not sampled: Dataset len:{raw_dataset_len}")
             print("Final sampling info:")
@@ -1520,29 +1523,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             ]
             print(tabulate(table_data, headers=["Dataset", "Samples", "Ratio"], tablefmt="grid"))
             # sample and use NamedSubset to contain dataset_name
-            self.id2dataset = []
-            self.selected_indices = []
-            episode_count = 0
-            for dataset_idx, (dataset, num_samples, dataset_name) in enumerate(
-                zip(self.datasets, dataset_sample_counts, self.dataset_names)
-            ):
-                indices = list(range(len(dataset)))
-            
-                # 全采样（允许重复）
-                sampled_indices = random.choices(indices, k=num_samples)
-            
-                episode_this_dataset = int(
-                    dataset.num_episodes * (len(sampled_indices) / len(dataset))
-                )
-                episode_count += episode_this_dataset
-            
-                # self.selected_indices.append(sampled_indices)
-            
-                # ⭐ 构建 id -> (dataset_idx, data_id)
-                for data_id in sampled_indices:
-                    self.id2dataset.append((dataset_idx, data_id))
-            
-            self.num_episodes = episode_count
+            self.id2dataset, self.num_episodes, self.dataset_len = self.build_pretrain_id2dataset(seed=seed)
             self.dataset = None
             self.dataset_len = len(self.id2dataset)
 
@@ -1593,6 +1574,33 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         self.meta = LeRobotDatasetMetadata.create_with_stats_feats(stats=self.stats, features=meta_features) # Note: I added a class function
         self.meta.repo_id = "Prometheus"
         # self.dataset = None
+    
+    def build_pretrain_id2dataset(self, seed: int = 1000):
+        random.seed(seed)
+        id2dataset = []
+        episode_count = 0
+        for dataset_idx, (dataset, num_samples, dataset_name) in enumerate(
+            zip(self.datasets, self.dataset_sample_counts, self.dataset_names)
+        ):
+            indices = list(range(len(dataset)))
+        
+            # 全采样（允许重复）
+            sampled_indices = random.choices(indices, k=num_samples)
+        
+            episode_this_dataset = int(
+                dataset.num_episodes * (len(sampled_indices) / len(dataset))
+            )
+            episode_count += episode_this_dataset
+        
+            # self.selected_indices.append(sampled_indices)
+        
+            # ⭐ 构建 id -> (dataset_idx, data_id)
+            for data_id in sampled_indices:
+                id2dataset.append((dataset_idx, data_id))
+        return id2dataset, episode_count, len(id2dataset)
+    
+    def set_epoch(self, epoch):
+        self.id2dataset, self.num_episodes, self.dataset_len = self.build_pretrain_id2dataset(seed=epoch + self.seed)    
     
     def pad_vector(self, vector, new_dim):
         """Can be (batch_size x sequence_length x features_dimension)
