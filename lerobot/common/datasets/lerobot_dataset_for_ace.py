@@ -1499,10 +1499,11 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 print(f"Banlanced:{sample_weights}")
             self.sample_weights = np.array(sample_weights) / np.sum(sample_weights)
             print(f"Final weights:{sample_weights}")
-            self.dataset_len = sum(self.dataset_sizes)
-            dataset_sample_counts = (self.sample_weights * self.dataset_len).astype(int)  # 计算子集大小
+            # self.dataset_len = sum(self.dataset_sizes)
+            raw_dataset_len = sum(self.dataset_sizes)
+            dataset_sample_counts = (self.sample_weights * raw_dataset_len).astype(int)  # 计算子集大小
             
-            print(f"Not sampled: Dataset len:{self.dataset_len}")
+            print(f"Not sampled: Dataset len:{raw_dataset_len}")
             print("Final sampling info:")
             table_data = [
                 [self.dataset_names[i], len(self.datasets[i]), f"{self.sample_weights[i]:.4f}"]
@@ -1510,25 +1511,31 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             ]
             print(tabulate(table_data, headers=["Dataset", "Samples", "Ratio"], tablefmt="grid"))
             # sample and use NamedSubset to contain dataset_name
+            self.id2dataset = []
             self.selected_indices = []
             episode_count = 0
-            for dataset, num_samples, dataset_name in zip(self.datasets, dataset_sample_counts, self.dataset_names):
+            for dataset_idx, (dataset, num_samples, dataset_name) in enumerate(
+                zip(self.datasets, dataset_sample_counts, self.dataset_names)
+            ):
                 indices = list(range(len(dataset)))
-                # 这个不允许重复采样
-                # sampled_indices = random.sample(indices, min(num_samples, len(dataset)))  # 采样
-                # episode_this_dataset = int(dataset.num_episodes * (min(num_samples, len(dataset))/len(dataset)))
-                # 允许重复采样，当num_samples>len(dataset)时
-                # 部分采样
-                # sampled_indices = random.choices(indices, k=num_samples)
-                # 全采样
-                sampled_indices = random.choices(indices, k=len(indices))
-                episode_this_dataset = int(dataset.num_episodes * (len(sampled_indices) / len(dataset)))
+            
+                # 全采样（允许重复）
+                sampled_indices = random.choices(indices, k=num_samples)
+            
+                episode_this_dataset = int(
+                    dataset.num_episodes * (len(sampled_indices) / len(dataset))
+                )
                 episode_count += episode_this_dataset
-                self.selected_indices.append(sampled_indices)
-                # selected_subsets.append(NamedSubset(dataset, sampled_indices, dataset_name))
+            
+                # self.selected_indices.append(sampled_indices)
+            
+                # ⭐ 构建 id -> (dataset_idx, data_id)
+                for data_id in sampled_indices:
+                    self.id2dataset.append((dataset_idx, data_id))
             
             self.num_episodes = episode_count
             self.dataset = None
+            self.dataset_len = len(self.id2dataset)
 
         # concat the selected dataset
         # self.dataset = ConcatDataset(selected_subsets)
@@ -1597,28 +1604,28 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         
-        if self.is_ft:
-            dataset_id, data_id = self.id2dataset[index]
-            dataset = self.datasets[dataset_id]
-            item = dataset[data_id]
-            dataset_name = item["dataset_name"]
-            data_config = OXE_DATASET_CONFIGS[dataset_name]
-            image_obs_keys = data_config["image_obs_keys"]
-        else:
-            selected_dataset = random.choices(self.datasets, weights=self.sample_weights, k=1)[0]
-            dataset_index = self.datasets.index(selected_dataset)
-            dataset_name = self.dataset_names[dataset_index]
-            data_config = OXE_DATASET_CONFIGS[dataset_name]
-            indices = self.selected_indices[dataset_index] # the selected indices of this dataset
-            selected_id = random.choice(indices) # equal prob
+        # if self.is_ft:
+        dataset_id, data_id = self.id2dataset[index]
+        dataset = self.datasets[dataset_id]
+        item = dataset[data_id]
+        dataset_name = item["dataset_name"]
+        data_config = OXE_DATASET_CONFIGS[dataset_name]
+        image_obs_keys = data_config["image_obs_keys"]
+        # else:
+        #     selected_dataset = random.choices(self.datasets, weights=self.sample_weights, k=1)[0]
+        #     dataset_index = self.datasets.index(selected_dataset)
+        #     dataset_name = self.dataset_names[dataset_index]
+        #     data_config = OXE_DATASET_CONFIGS[dataset_name]
+        #     indices = self.selected_indices[dataset_index] # the selected indices of this dataset
+        #     selected_id = random.choice(indices) # equal prob
             
-            image_obs_keys = data_config["image_obs_keys"]
+        #     image_obs_keys = data_config["image_obs_keys"]
         
-            item = selected_dataset[selected_id]
-            item['dataset_name'] = dataset_name
+        #     item = selected_dataset[selected_id]
+        #     item['dataset_name'] = dataset_name
         
         data_dict = self._fetch_data_dict(item, image_obs_keys)
-        
+        data_dict["action"] = torch.nan_to_num(data_dict["action"], nan=0.0)
         # v2
         # none_flag = True
         # max_retry = 100
