@@ -269,12 +269,12 @@ def train(cfg: TrainPipelineConfig):
             'step': step
         }
     
-    # try_num = 0
-    # for data in dataloader:
-    #     try_num += 1
-    #     print(f"Testing Data:{try_num}")
-    #     if try_num > 400:
-    #         break
+    try_num = 0
+    for data in dataloader:
+        try_num += 1
+        print(f"Testing Data:{try_num}")
+        if try_num > 1000:
+            break
     dl_iter = cycle(dataloader)
     first_batch = next(dl_iter)
     
