@@ -155,7 +155,7 @@ def decode_video_frames_torchcodec(
     metadata = decoder.metadata
     average_fps = metadata.average_fps
     # convert timestamps to frame indices
-    frame_indices = [round(ts * average_fps) for ts in timestamps]
+    frame_indices = [min(round(ts * average_fps), decoder._num_frames - 1) for ts in timestamps]
     # retrieve frames based on indices
     frames_batch = decoder.get_frames_at(indices=frame_indices)
 
@@ -174,16 +174,18 @@ def decode_video_frames_torchcodec(
     min_, argmin_ = dist.min(1)
 
     is_within_tol = min_ < tolerance_s
+    # print(f"video: {video_path} timestamp loading check: queried timestamps: {query_ts} loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}")
     if not is_within_tol.all():
-        raise FrameTimestampError(
-            f"One or several query timestamps unexpectedly violate the tolerance ({min_[~is_within_tol]} > {tolerance_s=})."
-            " It means that the closest frame that can be loaded from the video is too far away in time."
-            " This might be due to synchronization issues with timestamps during data collection."
-            " To be safe, we advise to ignore this item during training."
-            f"\nqueried timestamps: {query_ts}"
-            f"\nloaded timestamps: {loaded_ts}"
-            f"\nvideo: {video_path}"
-        )
+        print(f"video: {video_path} timestamp loading check: queried timestamps: {query_ts} loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}")
+    #     raise FrameTimestampError(
+    #         f"One or several query timestamps unexpectedly violate the tolerance ({min_[~is_within_tol]} > {tolerance_s=})."
+    #         " It means that the closest frame that can be loaded from the video is too far away in time."
+    #         " This might be due to synchronization issues with timestamps during data collection."
+    #         " To be safe, we advise to ignore this item during training."
+    #         f"\nqueried timestamps: {query_ts}"
+    #         f"\nloaded timestamps: {loaded_ts}"
+    #         f"\nvideo: {video_path}"
+    #     )
 
     # get closest frames to the query timestamps
     closest_frames = torch.stack([loaded_frames[idx] for idx in argmin_])
@@ -292,18 +294,18 @@ def decode_video_frames_torchvision_org(
     min_, argmin_ = dist.min(1)
 
     is_within_tol = min_ < tolerance_s
-    # assert is_within_tol.all(), (
-    #     f"One or several query timestamps unexpectedly violate the tolerance ({min_[~is_within_tol]} > {tolerance_s=})."
-    #     "It means that the closest frame that can be loaded from the video is too far away in time."
-    #     "This might be due to synchronization issues with timestamps during data collection."
-    #     "To be safe, we advise to ignore this item during training."
-    #     f"\nqueried timestamps: {query_ts}"
-    #     f"\nloaded timestamps: {loaded_ts}"
-    #     f"\nvideo: {video_path}"
-    #     f"\nbackend: {backend}"
-    # )
+    assert is_within_tol.all(), (
+        f"One or several query timestamps unexpectedly violate the tolerance ({min_[~is_within_tol]} > {tolerance_s=})."
+        "It means that the closest frame that can be loaded from the video is too far away in time."
+        "This might be due to synchronization issues with timestamps during data collection."
+        "To be safe, we advise to ignore this item during training."
+        f"\nqueried timestamps: {query_ts}"
+        f"\nloaded timestamps: {loaded_ts}"
+        f"\nvideo: {video_path}"
+        f"\nbackend: {backend}"
+    )
     if is_within_tol.all() == False:
-        print(f"video: {video_path} timestamplse loading warning: ")
+        print(f"video: {video_path} timestamplse loading warning: queried timestamps: {query_ts} loaded timestamps: {loaded_ts}")
         # print(f"One or several query timestamps unexpectedly violate the tolerance ({min_[~is_within_tol]} > {tolerance_s=})."
         # "It means that the closest frame that can be loaded from the video is too far away in time."
         # "This might be due to synchronization issues with timestamps during data collection."

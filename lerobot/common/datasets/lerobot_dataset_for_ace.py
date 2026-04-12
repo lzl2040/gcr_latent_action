@@ -89,6 +89,7 @@ from lerobot.common.datasets.video_utils import (
     VideoFrame,
     decode_video_frames_torchvision,
     decode_video_frames_torchvision_org,
+    decode_video_frames_torchcodec,
     encode_video_frames,
     get_video_info,
 )
@@ -601,10 +602,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
         timestamps = torch.stack(list(self.hf_dataset["timestamp"])).numpy()
         episode_indices = torch.stack(list(self.hf_dataset["episode_index"])).numpy()
         ep_data_index_np = {k: t.numpy() for k, t in self.episode_data_index.items()}
+        # print(timestamps[:1000])
         
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - Checking timestamps sync status...")
         
-        # check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
+        _, self.outside_tolerance_indices = check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
 
         # Setup delta_indices
         if self.delta_timestamps is not None:
@@ -764,7 +766,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
     def _get_query_indices(self, idx: int, ep_idx: int) -> tuple[dict[str, list[int | bool]]]:
         ep_start = self.episode_data_index["from"][ep_idx]
-        ep_end = self.episode_data_index["to"][ep_idx]
+        if "interna1" in self.dataset_name:
+            ep_end = self.episode_data_index["to"][ep_idx] - 2
+        else:
+            ep_end = self.episode_data_index["to"][ep_idx]
         query_indices = {
             key: [max(ep_start.item(), min(ep_end.item() - 1, idx + delta)) for delta in delta_idx]
             for key, delta_idx in self.delta_indices.items()
@@ -808,9 +813,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
         item = {}
         for vid_key, query_ts in query_timestamps.items():
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
-            frames = decode_video_frames_torchvision_org(
-                    video_path, query_ts, self.tolerance_s, self.video_backend, 
-            )
+            # frames = decode_video_frames_torchvision_org(
+            #         video_path, query_ts, self.tolerance_s, self.video_backend, 
+            # )
+            frames = decode_video_frames_torchcodec(video_path, query_ts, 
+                                                    self.tolerance_s, 
+                                                    return_type="tensor")
             # print(vid_key, frames.shape)
             # item[vid_key] = frames.squeeze(0)
             item[vid_key] = frames
@@ -853,6 +861,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx) -> dict:
         item = self.hf_dataset[idx]
         ep_idx = item["episode_index"].item()
+        # print(ep_idx, item["timestamp"].item())
         if OXE_DATASET_CONFIGS[self.dataset_name]["image_obs_keys"]["primary"] is not None:
             primary_obs_key = f"""observation.images.{OXE_DATASET_CONFIGS[self.dataset_name]["image_obs_keys"]["primary"]}"""
         else:
@@ -1743,7 +1752,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
         
         # Normlize the action and observation vectors
-        if "agi" in item["dataset_name"]:
+        if "agi" in item["dataset_name"] or "dual" in item["dataset_name"] or "agilex" in item["dataset_name"]:
             xyz_idx = [0, 1, 2, 10, 11, 12]   # 双臂 xyz
         else:
             xyz_idx = [0, 1, 2]               # 单臂 xyz

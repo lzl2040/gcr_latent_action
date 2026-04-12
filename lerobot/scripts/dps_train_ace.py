@@ -226,7 +226,7 @@ def train(cfg: TrainPipelineConfig):
     dataloader = DataLoader(dataset=dataset,
                             batch_size=batch_size,
                             sampler=sampler,
-                            num_workers=8,
+                            num_workers=4,
                             pin_memory=True,
                             persistent_workers=True,
                             prefetch_factor=4
@@ -268,8 +268,15 @@ def train(cfg: TrainPipelineConfig):
         client_state = {
             'step': step
         }
-        
+    
+    # try_num = 0
+    # for data in dataloader:
+    #     try_num += 1
+    #     print(f"Testing Data:{try_num}")
+    #     if try_num > 400:
+    #         break
     dl_iter = cycle(dataloader)
+    first_batch = next(dl_iter)
     
     # for i in range(5):
     #     batch = next(dl_iter)
@@ -326,7 +333,7 @@ def train(cfg: TrainPipelineConfig):
     dist_step=10
 
     cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
-    
+    # first_batch = None
     for step_idx in range(completed_steps, total_steps):
         
         
@@ -338,7 +345,8 @@ def train(cfg: TrainPipelineConfig):
         fwd_bwd_start = time.perf_counter()
         loss, output_dict = update_policy(
             model_engine,
-            batch,
+            # batch,
+            first_batch,
             logger
         )
         step += 1

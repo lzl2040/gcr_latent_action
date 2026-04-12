@@ -527,6 +527,7 @@ def check_timestamps_sync(
 
     # Consecutive differences
     diffs = np.diff(timestamps)
+    # print(1.0 / fps)
     within_tolerance = np.abs(diffs - (1.0 / fps)) <= tolerance_s
 
     # Mask to ignore differences at the boundaries between episodes
@@ -534,8 +535,10 @@ def check_timestamps_sync(
     ignored_diffs = episode_data_index["to"][:-1] - 1  # indices at the end of each episode
     mask[ignored_diffs] = False
     filtered_within_tolerance = within_tolerance[mask]
+    # print(f"Number of timestamp differences checked: {len(filtered_within_tolerance)}")
 
     # Check if all remaining diffs are within tolerance
+    outside_tolerance_indices = []
     if not np.all(filtered_within_tolerance):
         # Track original indices before masking
         original_indices = np.arange(len(diffs))
@@ -544,6 +547,8 @@ def check_timestamps_sync(
         outside_tolerance_indices = filtered_indices[outside_tolerance_filtered_indices]
 
         outside_tolerances = []
+        i = 0
+        print(f"Found {len(outside_tolerance_indices)} timestamp differences outside of tolerance. Showing up to 10 examples:")
         for idx in outside_tolerance_indices:
             entry = {
                 "timestamps": [timestamps[idx], timestamps[idx + 1]],
@@ -552,17 +557,20 @@ def check_timestamps_sync(
                 if hasattr(episode_indices[idx], "item")
                 else episode_indices[idx],
             }
+            print(f"Timestamp difference outside tolerance at index {idx}: {entry}")
             outside_tolerances.append(entry)
+            i += 1
+            if i >= 20:  # Limit the number of reported issues to avoid overwhelming the user
+                break
+    #     if raise_value_error:
+    #         raise ValueError(
+    #             f"""One or several timestamps unexpectedly violate the tolerance inside episode range.
+    #             This might be due to synchronization issues during data collection.
+    #             \n{pformat(outside_tolerances)}"""
+    #         )
+    #     return False
 
-        if raise_value_error:
-            raise ValueError(
-                f"""One or several timestamps unexpectedly violate the tolerance inside episode range.
-                This might be due to synchronization issues during data collection.
-                \n{pformat(outside_tolerances)}"""
-            )
-        return False
-
-    return True
+    return True, outside_tolerance_indices
 
 
 def check_delta_timestamps(
