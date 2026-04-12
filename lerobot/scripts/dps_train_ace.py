@@ -345,8 +345,8 @@ def train(cfg: TrainPipelineConfig):
         fwd_bwd_start = time.perf_counter()
         loss, output_dict = update_policy(
             model_engine,
-            # batch,
-            first_batch,
+            batch,
+            # first_batch,
             logger
         )
         step += 1
