@@ -295,7 +295,8 @@ def train(cfg: TrainPipelineConfig):
         load_path, client_state = model_engine.load_checkpoint(
             ckpt_path,
             load_optimizer_states=True,
-            load_lr_scheduler_states=True
+            load_lr_scheduler_states=True,
+            load_module_strict=False
         )
         if load_path is not None:
             step = client_state['step']
