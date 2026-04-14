@@ -148,7 +148,8 @@ def train(cfg: TrainPipelineConfig):
         rank = int(os.environ.get('RANK', 0))
         set_seed(cfg.seed + rank)
 
-    seed = cfg.seed + rank
+    # seed = cfg.seed + rank
+    seed = int(time.time()) + rank + cfg.seed
     # Dataset setup
     image_transforms = ImageTransforms(cfg.dataset.image_transforms)
     wrist_image_transforms = ImageTransforms(cfg.dataset.wrist_image_transforms)
@@ -241,6 +242,7 @@ def train(cfg: TrainPipelineConfig):
         config=cfg.deepspeed,
         model_parameters=policy.parameters(),
     )
+    
     
     logger.info(f"Training batch size:{model_engine.train_batch_size()}") # micro_size * gradient_cum_size * gpu_num
         
@@ -335,6 +337,8 @@ def train(cfg: TrainPipelineConfig):
     fwd_bwd_time = 0
     dataloading_s = 0
     dist_step = 10
+    # start_epoch = (step * model_engine.train_batch_size()) // cfg.dataset.dataset_size_one_epoch
+    # print(f"Start epoch from {start_epoch}")
 
     cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
     # first_batch = None
@@ -384,6 +388,7 @@ def train(cfg: TrainPipelineConfig):
                 # checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
                 os.makedirs(cfg.output_dir, exist_ok=True)
                 client_state['step'] = step
+                client_state["epoch"] = epoch
                 model_engine.save_checkpoint(
                     save_dir=cfg.output_dir,
                     client_state=client_state
