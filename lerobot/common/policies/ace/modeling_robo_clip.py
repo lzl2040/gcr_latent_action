@@ -90,7 +90,7 @@ class VisionEncoder(nn.Module):
         self,
         model_name: str = "google/siglip2-base-patch16-224",
         output_dim: int = 768,
-        vae_shape: Tuple[int, int, int] = (18, 28, 28),   # (C_out, H_out, W_out) # for image_size=224, wan 2.1 vae
+        vae_shape: Tuple[int, int, int] = (16, 28, 28),   # (C_out, H_out, W_out) # for image_size=224, wan 2.1 vae
         bottleneck_mid: int = 256,
         dtype=torch.bfloat16,
     ):
