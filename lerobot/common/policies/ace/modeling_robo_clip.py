@@ -398,30 +398,30 @@ class RobotCLIP(PreTrainedPolicy):
         action_embeddings = self.encode_actions(actions, sample_rate)  # (B, D)
         
         # Compute contrastive loss
-        loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
+        # loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
         
-        # local_bs = image_embeddings.size(0)
-        # rank = dist.get_rank()
+        local_bs = image_embeddings.size(0)
+        rank = dist.get_rank()
         
-        # # gather 全局特征
-        # all_image_embeddings = concat_all_gather(image_embeddings)    # [global_bs, D]
-        # all_action_embeddings = concat_all_gather(action_embeddings)  # [global_bs, D]
-        # # print(torch.max(all_image_embeddings), torch.min(all_image_embeddings))
+        # gather 全局特征
+        all_image_embeddings = concat_all_gather(image_embeddings)    # [global_bs, D]
+        all_action_embeddings = concat_all_gather(action_embeddings)  # [global_bs, D]
+        # print(torch.max(all_image_embeddings), torch.min(all_image_embeddings))
         
-        # # 本卡 query，对全局 candidates 做分类
-        # logits_i2a = self.logit_scale.exp() * image_embeddings @ all_action_embeddings.t()  # [local_bs, global_bs]
-        # logits_a2i = self.logit_scale.exp() * action_embeddings @ all_image_embeddings.t()   # [local_bs, global_bs]
+        # 本卡 query，对全局 candidates 做分类
+        logits_i2a = self.logit_scale.exp() * image_embeddings @ all_action_embeddings.t()  # [local_bs, global_bs]
+        logits_a2i = self.logit_scale.exp() * action_embeddings @ all_image_embeddings.t()   # [local_bs, global_bs]
 
-        # # 本地样本在全局中的正样本位置
-        # labels = torch.arange(local_bs, device=image_embeddings.device) + rank * local_bs
-        # # print(labels)
-        # # print(logits_i2a.shape, labels.shape)
+        # 本地样本在全局中的正样本位置
+        labels = torch.arange(local_bs, device=image_embeddings.device) + rank * local_bs
+        # print(labels)
+        # print(logits_i2a.shape, labels.shape)
 
-        # loss_i2a = F.cross_entropy(logits_i2a, labels)
-        # loss_a2i = F.cross_entropy(logits_a2i, labels)
-        # # print(all_image_embeddings.shape, all_action_embeddings.shape)
+        loss_i2a = F.cross_entropy(logits_i2a, labels)
+        loss_a2i = F.cross_entropy(logits_a2i, labels)
+        # print(all_image_embeddings.shape, all_action_embeddings.shape)
 
-        # loss = 0.5 * (loss_i2a + loss_a2i)
+        loss = 0.5 * (loss_i2a + loss_a2i)
         
         # print(F"Contrastive loss: {loss.item():.4f}")
         loss_dict = {"contrastive_loss": loss.item()}
