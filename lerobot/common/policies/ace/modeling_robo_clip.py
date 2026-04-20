@@ -334,6 +334,7 @@ class RobotCLIP(PreTrainedPolicy):
         # print("action", torch.max(action_embeddings), torch.min(action_embeddings))
         logits = (image_embeddings @ action_embeddings.T) * self.logit_scale.exp()
         # print(torch.max(logits), torch.min(logits))
+        # print(logits.shape)
         
         # Labels: diagonal elements are positive pairs
         labels = torch.arange(batch_size, device=image_embeddings.device)
@@ -379,10 +380,11 @@ class RobotCLIP(PreTrainedPolicy):
         action_embeddings = self.encode_actions(actions, sample_rate)  # (B, D)
         
         # Compute contrastive loss
-        loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
+        # loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
         # print(F"Contrastive loss: {loss.item():.4f}")
-        loss_dict = {"contrastive_loss": loss.item()}
-        return loss, loss_dict
+        # loss_dict = {"contrastive_loss": loss.item()}
+        # return loss, loss_dict
+        return image_embeddings, action_embeddings, self.logit_scale
     
     def get_similarity(
         self,

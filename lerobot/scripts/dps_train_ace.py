@@ -30,6 +30,7 @@ from deepspeed import get_accelerator
 import torch
 from termcolor import colored
 from torch import distributed as dist
+import torch.nn.functional as F
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 
@@ -90,7 +91,19 @@ def rank_dataloader_check(model_engine, batch):
             print(f"{key}: {len(value)}, example: {value[0]}")
         else:
             print(f"{key}: {value}")
-            
+           
+
+def concat_all_gather(tensor):
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+
+    tensors_gather = [torch.zeros_like(tensor) for _ in range(world_size)]
+    dist.all_gather(tensors_gather, tensor)
+
+    # 保留当前卡自己的 tensor，避免数值上不一致
+    tensors_gather[rank] = tensor
+    return torch.cat(tensors_gather, dim=0)
+ 
 def update_policy(
     model_engine,
     batch: Any,
@@ -100,7 +113,30 @@ def update_policy(
     batch = {k: v.to(model_engine.device, dtype=torch.bfloat16) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
     
     # torch.cuda.empty_cache()
-    loss, output_dict = model_engine(batch)
+    # loss, output_dict = model_engine(batch)
+    action_embeddings, image_embeddings, logit_scale = model_engine(batch)
+    
+    local_bs = image_embeddings.size(0)
+    rank = dist.get_rank()
+    
+    # gather 全局特征
+    all_image_embeddings = concat_all_gather(image_embeddings)    # [global_bs, D]
+    all_action_embeddings = concat_all_gather(action_embeddings)  # [global_bs, D]
+    
+    # 本卡 query，对全局 candidates 做分类
+    logits_i2a = logit_scale.exp() * image_embeddings @ all_action_embeddings.t()  # [local_bs, global_bs]
+    logits_a2i = logit_scale.exp() * action_embeddings @ all_image_embeddings.t()   # [local_bs, global_bs]
+
+    # 本地样本在全局中的正样本位置
+    labels = torch.arange(local_bs, device=image_embeddings.device) + rank * local_bs
+
+    loss_i2a = F.cross_entropy(logits_i2a, labels)
+    loss_a2i = F.cross_entropy(logits_a2i, labels)
+    # print(all_image_embeddings.shape, all_action_embeddings.shape)
+
+    loss = 0.5 * (loss_i2a + loss_a2i)
+    output_dict = {}
+    output_dict["contra_loss"] = loss
 
     model_engine.backward(loss)
     
