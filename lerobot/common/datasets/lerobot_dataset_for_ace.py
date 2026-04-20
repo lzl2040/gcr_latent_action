@@ -32,6 +32,7 @@ import packaging.version
 import PIL.Image as Image
 import torch
 import torch.utils
+import gc
 
 from torch.utils.data import ConcatDataset, Subset
 from torch.utils.data.dataloader import default_collate
@@ -1692,7 +1693,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         #                         logging.warning(f"Found NoneType Value in List at key: {key}, from {data_dict['source']}, refetch data")
         #                         none_flag = True
                                 
-        
+        gc.collect()
         return data_dict
     
     def _fetch_data_dict(self, item, image_obs_keys):

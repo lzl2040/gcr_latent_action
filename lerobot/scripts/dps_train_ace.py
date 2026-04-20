@@ -113,30 +113,30 @@ def update_policy(
     batch = {k: v.to(model_engine.device, dtype=torch.bfloat16) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
     
     # torch.cuda.empty_cache()
-    # loss, output_dict = model_engine(batch)
-    action_embeddings, image_embeddings, logit_scale = model_engine(batch)
+    loss, output_dict = model_engine(batch)
+    # action_embeddings, image_embeddings, logit_scale = model_engine(batch)
     
-    local_bs = image_embeddings.size(0)
-    rank = dist.get_rank()
+    # local_bs = image_embeddings.size(0)
+    # rank = dist.get_rank()
     
-    # gather 全局特征
-    all_image_embeddings = concat_all_gather(image_embeddings)    # [global_bs, D]
-    all_action_embeddings = concat_all_gather(action_embeddings)  # [global_bs, D]
+    # # gather 全局特征
+    # all_image_embeddings = concat_all_gather(image_embeddings)    # [global_bs, D]
+    # all_action_embeddings = concat_all_gather(action_embeddings)  # [global_bs, D]
     
-    # 本卡 query，对全局 candidates 做分类
-    logits_i2a = logit_scale.exp() * image_embeddings @ all_action_embeddings.t()  # [local_bs, global_bs]
-    logits_a2i = logit_scale.exp() * action_embeddings @ all_image_embeddings.t()   # [local_bs, global_bs]
+    # # 本卡 query，对全局 candidates 做分类
+    # logits_i2a = logit_scale.exp() * image_embeddings @ all_action_embeddings.t()  # [local_bs, global_bs]
+    # logits_a2i = logit_scale.exp() * action_embeddings @ all_image_embeddings.t()   # [local_bs, global_bs]
 
-    # 本地样本在全局中的正样本位置
-    labels = torch.arange(local_bs, device=image_embeddings.device) + rank * local_bs
+    # # 本地样本在全局中的正样本位置
+    # labels = torch.arange(local_bs, device=image_embeddings.device) + rank * local_bs
 
-    loss_i2a = F.cross_entropy(logits_i2a, labels)
-    loss_a2i = F.cross_entropy(logits_a2i, labels)
-    # print(all_image_embeddings.shape, all_action_embeddings.shape)
+    # loss_i2a = F.cross_entropy(logits_i2a, labels)
+    # loss_a2i = F.cross_entropy(logits_a2i, labels)
+    # # print(all_image_embeddings.shape, all_action_embeddings.shape)
 
-    loss = 0.5 * (loss_i2a + loss_a2i)
-    output_dict = {}
-    output_dict["contra_loss"] = loss
+    # loss = 0.5 * (loss_i2a + loss_a2i)
+    # output_dict = {}
+    # output_dict["contra_loss"] = loss
 
     model_engine.backward(loss)
     
@@ -324,6 +324,7 @@ def train(cfg: TrainPipelineConfig):
     #     rank_dataloader_check(model_engine, batch)
     
     
+    cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
     if cfg.weight_resume:
         logger.info(f"Resuming training from {cfg.output_dir}")
         ckpt_path = cfg.output_dir
@@ -376,7 +377,6 @@ def train(cfg: TrainPipelineConfig):
     # start_epoch = (step * model_engine.train_batch_size()) // cfg.dataset.dataset_size_one_epoch
     # print(f"Start epoch from {start_epoch}")
 
-    cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
     # first_batch = None
     # for step_idx in range(completed_steps, total_steps):
     for epoch in range(100000):

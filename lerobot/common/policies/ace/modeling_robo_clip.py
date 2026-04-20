@@ -12,6 +12,7 @@ from lerobot.common.policies.ace.modeling_ace import ActionChunkEncoder
 from collections import deque
 from PIL import Image
 import math
+from torch import distributed as dist
 from lerobot.common.constants import (
     ACTION,
     OBS_LANGUAGE_ATTENTION_MASK,
@@ -20,6 +21,17 @@ from lerobot.common.constants import (
     OBS_ROBOT
 )
 
+
+def concat_all_gather(tensor):
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+
+    tensors_gather = [torch.zeros_like(tensor) for _ in range(world_size)]
+    dist.all_gather(tensors_gather, tensor)
+
+    # 保留当前卡自己的 tensor，避免数值上不一致
+    tensors_gather[rank] = tensor
+    return torch.cat(tensors_gather, dim=0)
 
 class SmallConvBottleneck(nn.Module):
     """
@@ -137,11 +149,13 @@ class VisionEncoder(nn.Module):
         )
 
         # fuse [original cls] + [pooled dense token]
-        self.fusion_head = TokenFusionHead(
-            cls_dim=output_dim,
-            pooled_dim=self.vae_channels,
-            output_dim=output_dim,
-        )
+        # self.fusion_head = TokenFusionHead(
+        #     cls_dim=output_dim,
+        #     pooled_dim=self.vae_channels,
+        #     output_dim=output_dim,
+        # )
+        self.vae_proj = nn.Linear(self.vae_channels, output_dim)
+        self.tanh = nn.Tanh()
 
     def _infer_patch_grid(self, num_patch_tokens: int) -> Tuple[int, int]:
         """
@@ -201,12 +215,14 @@ class VisionEncoder(nn.Module):
 
         # bottleneck -> VAE-like feature
         vae_feature = self.bottleneck(patch_tokens_2d)  # [B, C_out, H_out, W_out]
+        vae_feature = self.tanh(vae_feature)
 
         # average pool -> token
         pooled_token = F.adaptive_avg_pool2d(vae_feature, output_size=1).flatten(1)  # [B, C_out]
 
-        # fuse pooled token with original cls token
-        final_token = self.fusion_head(cls_token, pooled_token)  # [B, output_dim]
+        # # fuse pooled token with original cls token
+        # final_token = self.fusion_head(cls_token, pooled_token)  # [B, output_dim]
+        final_token = self.vae_proj(pooled_token)
 
         return {
             "final_token": final_token,
@@ -262,6 +278,7 @@ class RobotCLIP(PreTrainedPolicy):
         # Layer norm for stability
         self.image_ln = nn.LayerNorm(config.projection_dim)
         self.action_ln = nn.LayerNorm(config.hidden_dim)
+        self.tanh = nn.Tanh()
     
     def get_optim_params(self) -> dict:
         return self.parameters()
@@ -307,6 +324,7 @@ class RobotCLIP(PreTrainedPolicy):
         action_embeddings = self.action_ln(action_embeddings)
         action_embeddings = self.action_projection(action_embeddings)
         action_embeddings = F.normalize(action_embeddings, dim=-1)
+        # action_embeddings = self.tanh(action_embeddings)
         return action_embeddings
     
     def compute_contrastive_loss(
@@ -380,11 +398,35 @@ class RobotCLIP(PreTrainedPolicy):
         action_embeddings = self.encode_actions(actions, sample_rate)  # (B, D)
         
         # Compute contrastive loss
-        # loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
+        loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
+        
+        # local_bs = image_embeddings.size(0)
+        # rank = dist.get_rank()
+        
+        # # gather 全局特征
+        # all_image_embeddings = concat_all_gather(image_embeddings)    # [global_bs, D]
+        # all_action_embeddings = concat_all_gather(action_embeddings)  # [global_bs, D]
+        # # print(torch.max(all_image_embeddings), torch.min(all_image_embeddings))
+        
+        # # 本卡 query，对全局 candidates 做分类
+        # logits_i2a = self.logit_scale.exp() * image_embeddings @ all_action_embeddings.t()  # [local_bs, global_bs]
+        # logits_a2i = self.logit_scale.exp() * action_embeddings @ all_image_embeddings.t()   # [local_bs, global_bs]
+
+        # # 本地样本在全局中的正样本位置
+        # labels = torch.arange(local_bs, device=image_embeddings.device) + rank * local_bs
+        # # print(labels)
+        # # print(logits_i2a.shape, labels.shape)
+
+        # loss_i2a = F.cross_entropy(logits_i2a, labels)
+        # loss_a2i = F.cross_entropy(logits_a2i, labels)
+        # # print(all_image_embeddings.shape, all_action_embeddings.shape)
+
+        # loss = 0.5 * (loss_i2a + loss_a2i)
+        
         # print(F"Contrastive loss: {loss.item():.4f}")
-        # loss_dict = {"contrastive_loss": loss.item()}
-        # return loss, loss_dict
-        return image_embeddings, action_embeddings, self.logit_scale
+        loss_dict = {"contrastive_loss": loss.item()}
+        return loss, loss_dict
+        # return image_embeddings, action_embeddings, self.logit_scale
     
     def get_similarity(
         self,

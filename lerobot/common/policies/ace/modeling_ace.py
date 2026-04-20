@@ -393,6 +393,7 @@ class ActionChunkEncoder(nn.Module):
         # Token embeddings
         self.sample_rate_embed = nn.Embedding(50, config.hidden_dim)
         self.token_type_embed = nn.Embedding(2, config.hidden_dim)  # 0=sample, 1=action
+        self.tanh = nn.Tanh()
 
     def _pad_actions(self, actions: torch.Tensor) -> torch.Tensor:
         """Pad action dimensions to action_dim_padded.
@@ -536,5 +537,6 @@ class ActionChunkEncoder(nn.Module):
         # hidden_states = self.output_proj(hidden_states)
 
         # Use sample token output as final embedding
-        embedding = hidden_states[:, 0, :]  # (B, output_dim)
+        # embedding = hidden_states[:, 0, :]  # (B, output_dim)
+        embedding = torch.mean(self.tanh(hidden_states), dim = 1)
         return embedding
