@@ -286,29 +286,8 @@ def train(cfg: TrainPipelineConfig):
     # Resume training state
     step = 0
     # cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
-    if cfg.weight_resume:
-        logger.info(f"Resuming training from {cfg.output_dir}")
-        ckpt_path = cfg.output_dir
-        # ckpt_list = os.listdir(ckpt_path)
-        # latest_ckpt = sorted(ckpt_list, key=lambda x: int(x.split("step")[-1]))[-1]
-        # checkpoint_path = os.path.join(ckpt_path, latest_ckpt)
-        load_path, client_state = model_engine.load_checkpoint(
-            ckpt_path,
-            load_optimizer_states=True,
-            load_lr_scheduler_states=True
-        )
-        if load_path is not None:
-            step = client_state['step']
-            logger.info(f"Resumed training from step {step}")
-    else:
-        client_state = {
-            'step': step
-        }
+    # 
     
-    if client_state is None:
-        client_state = {
-            'step': step
-        }
     
     # try_num = 0
     # for data in dataloader:
