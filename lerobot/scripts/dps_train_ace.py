@@ -267,6 +267,7 @@ def train(cfg: TrainPipelineConfig):
                             sampler=sampler,
                             num_workers=4,
                             pin_memory=True,
+                            drop_last=True
                             # persistent_workers=True,
                             # prefetch_factor=4
                             )

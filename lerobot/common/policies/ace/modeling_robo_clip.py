@@ -23,21 +23,28 @@ from lerobot.common.constants import (
 import torch.distributed.nn.functional as dist_nn
 
 
-def concat_all_gather(tensor):
+@torch.no_grad()
+def all_gather_with_detach(tensor):
     """
-    这是一个既稳定又支持梯度的 gather 方式。
+    收集所有GPU上的张量，并断开来自其他GPU张量的计算图。
+    这是解决分布式对比学习中梯度重复计算问题的关键。
     """
-    with torch.no_grad():
-        world_size = dist.get_world_size()
-        tensors_gather = [torch.zeros_like(tensor) for _ in range(world_size)]
-        dist.all_gather(tensors_gather, tensor)
+    world_size = dist.get_world_size()
+    if world_size == 1:
+        return [tensor]
+
+    # 1. 执行 all_gather，得到所有卡的张量列表
+    tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
+    dist.all_gather(tensor_list, tensor)
     
-    # 关键点：将本卡的 tensor 替换回去，保留本卡的梯度链条
+    # 2. 关键步骤：除了当前GPU的张量，其他所有张量都 detach
+    # 这样反向传播时，梯度只会流向当前GPU的参数，不会流向其他GPU的参数
     rank = dist.get_rank()
-    tensors_gather[rank] = tensor
-    
-    # 返回拼接后的结果
-    return torch.cat(tensors_gather, dim=0)
+    for i in range(world_size):
+        if i != rank:
+            tensor_list[i] = tensor_list[i].detach()
+     
+    return torch.cat(tensor_list, dim = 0)
 
 class SmallConvBottleneck(nn.Module):
     """
@@ -404,31 +411,34 @@ class RobotCLIP(PreTrainedPolicy):
         action_embeddings = self.encode_actions(actions, sample_rate)  # (B, D)
         
         # Compute contrastive loss
-        loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
+        # loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
         
-        # local_bs = image_embeddings.size(0)
-        # rank = dist.get_rank()
+        local_bs = image_embeddings.size(0)
+        rank = dist.get_rank()
         
-        # # gather 全局特征
-        # all_image_embeddings = concat_all_gather(image_embeddings)    # [global_bs, D]
-        # all_action_embeddings = concat_all_gather(action_embeddings)  # [global_bs, D]
-        # # print(all_action_embeddings.shape)
-        # # print(torch.max(all_image_embeddings), torch.min(all_image_embeddings))
+        # gather 全局特征
+        all_image_embeddings = all_gather_with_detach(image_embeddings)    # [global_bs, D]
+        all_action_embeddings = all_gather_with_detach(action_embeddings)  # [global_bs, D]
+        # print(all_action_embeddings.shape)
+        # print(torch.max(all_image_embeddings), torch.min(all_image_embeddings))
         
-        # # 本卡 query，对全局 candidates 做分类
-        # logits_i2a = self.logit_scale.exp() * image_embeddings @ all_action_embeddings.t()  # [local_bs, global_bs]
-        # logits_a2i = self.logit_scale.exp() * action_embeddings @ all_image_embeddings.t()   # [local_bs, global_bs]
+        # 本卡 query，对全局 candidates 做分类
+        logits_i2a = self.logit_scale.exp() * image_embeddings @ all_action_embeddings.t()  # [local_bs, global_bs]
+        logits_a2i = self.logit_scale.exp() * action_embeddings @ all_image_embeddings.t()   # [local_bs, global_bs]
 
-        # # 本地样本在全局中的正样本位置
-        # labels = torch.arange(local_bs, device=image_embeddings.device) + rank * local_bs
-        # # print(labels)
-        # # print(logits_i2a.shape, labels.shape)
+        # 本地样本在全局中的正样本位置
+        labels = torch.arange(local_bs, device=image_embeddings.device) + rank * local_bs
+        # print(labels)
+        # print(logits_i2a.shape, labels.shape)
+        # print(f"Image grad: {image_embeddings.requires_grad}")
+        # print(f"Action grad: {action_embeddings.requires_grad}")
+        # print(f"Scale grad: {self.logit_scale.requires_grad}")
 
-        # loss_i2a = F.cross_entropy(logits_i2a, labels)
-        # loss_a2i = F.cross_entropy(logits_a2i, labels)
-        # # print(all_image_embeddings.shape, all_action_embeddings.shape)
+        loss_i2a = F.cross_entropy(logits_i2a, labels)
+        loss_a2i = F.cross_entropy(logits_a2i, labels)
+        # print(all_image_embeddings.shape, all_action_embeddings.shape)
 
-        # loss = 0.5 * (loss_i2a + loss_a2i)
+        loss = 0.5 * (loss_i2a + loss_a2i)
         
         # print(F"Contrastive loss: {loss.item():.4f}")
         loss_dict = {"contrastive_loss": loss.item()}
