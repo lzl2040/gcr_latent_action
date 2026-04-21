@@ -178,14 +178,20 @@ class LeRobotDatasetMetadata:
         check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)
         self.tasks, self.task_to_task_index = load_tasks(self.root)
         self.episodes = load_episodes(self.root)
-        if self._version < packaging.version.parse("v2.1"):
-            self.stats = load_stats(self.root)
-            self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
-        else:
+        self.stats = load_stats(self.root)
+        if self.stats is None:
             episodes_stats = load_episodes_stats(self.root)
             self.stats = aggregate_stats(list(episodes_stats.values()))
             episodes_stats.clear()
             del episodes_stats
+        # if self._version < packaging.version.parse("v2.1"):
+        #     self.stats = load_stats(self.root)
+        #     self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
+        # else:
+        #     episodes_stats = load_episodes_stats(self.root)
+        #     self.stats = aggregate_stats(list(episodes_stats.values()))
+        #     episodes_stats.clear()
+        #     del episodes_stats
 
     def pull_from_repo(
         self,
@@ -1693,7 +1699,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         #                         logging.warning(f"Found NoneType Value in List at key: {key}, from {data_dict['source']}, refetch data")
         #                         none_flag = True
                                 
-        gc.collect()
+        # gc.collect()
         return data_dict
     
     def _fetch_data_dict(self, item, image_obs_keys):
