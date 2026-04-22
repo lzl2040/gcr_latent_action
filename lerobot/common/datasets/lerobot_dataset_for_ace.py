@@ -1446,7 +1446,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         #     # self.processor.tokenizer.padding_side = "left"
         # else:
         #     self.processor = None
-        self.processor = AutoProcessor.from_pretrained(cfg.policy.vision_model_name)
+        # self.processor = AutoProcessor.from_pretrained(cfg.policy.vision_model_name)
         
         self.datasets = []
         self.dataset_sizes = []
@@ -1476,6 +1476,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 self.datasets.append(dataset)
                 self.dataset_sizes.append(len(dataset))
                 self.dataset_names.append(dataset_name)
+                # del 
             else:
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - {dataset_name} not found in vla2root.json, skipping...")
         

@@ -12,6 +12,7 @@ from lerobot.common.policies.ace.modeling_ace import ActionChunkEncoder
 from collections import deque
 from PIL import Image
 import math
+import time
 from torch import distributed as dist
 from lerobot.common.constants import (
     ACTION,
@@ -227,8 +228,9 @@ class VisionEncoder(nn.Module):
         patch_tokens_2d = patch_tokens_2d.permute(0, 3, 1, 2).contiguous()  # [B, D, H_patch, W_patch]
 
         # bottleneck -> VAE-like feature
-        vae_feature = self.bottleneck(patch_tokens_2d)  # [B, C_out, H_out, W_out]
-        vae_feature = self.tanh(vae_feature)
+        vae_feature_raw = self.bottleneck(patch_tokens_2d)  # [B, C_out, H_out, W_out]
+        # vae_feature = self.tanh(vae_feature)
+        vae_feature = vae_feature_raw / (vae_feature_raw.abs().max(dim=-1, keepdim=True)[0] + 1e-8)
 
         # average pool -> token
         pooled_token = F.adaptive_avg_pool2d(vae_feature, output_size=1).flatten(1)  # [B, C_out]
@@ -289,8 +291,6 @@ class RobotCLIP(PreTrainedPolicy):
         self.logit_scale = nn.Parameter(torch.tensor(1.0 / config.temperature))
         
         # Layer norm for stability
-        self.image_ln = nn.LayerNorm(config.projection_dim)
-        self.action_ln = nn.LayerNorm(config.hidden_dim)
         self.tanh = nn.Tanh()
     
     def get_optim_params(self) -> dict:
@@ -316,11 +316,9 @@ class RobotCLIP(PreTrainedPolicy):
             Normalized image embeddings of shape (B, projection_dim)
         """
         image_embeddings = self.vision_model(images)["final_token"]  # (B, projection_dim)
-        image_embeddings = self.image_ln(image_embeddings)
         # print(f"Image embeddings shape after vision model: {image_embeddings.shape}")
         image_embeddings = self.image_projection(image_embeddings)
-        image_embeddings = F.normalize(image_embeddings, dim=-1)
-        # print(image_embeddings.shape)
+        # image_embeddings = F.normalize(image_embeddings, dim=-1)
         return image_embeddings
     
     def encode_actions(self, actions: torch.Tensor, sample_rate: int = 0) -> torch.Tensor:
@@ -334,9 +332,8 @@ class RobotCLIP(PreTrainedPolicy):
             Normalized action embeddings of shape (B, projection_dim)
         """
         action_embeddings = self.action_encoder(actions, sample_rate)  # (B, output_dim)
-        action_embeddings = self.action_ln(action_embeddings)
         action_embeddings = self.action_projection(action_embeddings)
-        action_embeddings = F.normalize(action_embeddings, dim=-1)
+        # action_embeddings = F.normalize(action_embeddings, dim=-1)
         # action_embeddings = self.tanh(action_embeddings)
         return action_embeddings
     
@@ -417,10 +414,12 @@ class RobotCLIP(PreTrainedPolicy):
         rank = dist.get_rank()
         
         # gather 全局特征
+        # start_time = time.time()
         all_image_embeddings = all_gather_with_detach(image_embeddings)    # [global_bs, D]
         all_action_embeddings = all_gather_with_detach(action_embeddings)  # [global_bs, D]
-        # print(all_action_embeddings.shape)
-        # print(torch.max(all_image_embeddings), torch.min(all_image_embeddings))
+        # end_time = time.time()
+        
+        # print(f"Consume time:{end_time - start_time}")
         
         # 本卡 query，对全局 candidates 做分类
         logits_i2a = self.logit_scale.exp() * image_embeddings @ all_action_embeddings.t()  # [local_bs, global_bs]
