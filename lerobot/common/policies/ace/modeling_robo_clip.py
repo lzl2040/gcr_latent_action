@@ -163,11 +163,11 @@ class VisionEncoder(nn.Module):
         )
 
         # fuse [original cls] + [pooled dense token]
-        # self.fusion_head = TokenFusionHead(
-        #     cls_dim=output_dim,
-        #     pooled_dim=self.vae_channels,
-        #     output_dim=output_dim,
-        # )
+        self.fusion_head = TokenFusionHead(
+            cls_dim=output_dim,
+            pooled_dim=self.vae_channels,
+            output_dim=output_dim,
+        )
         self.vae_proj = nn.Linear(self.vae_channels, output_dim)
         self.tanh = nn.Tanh()
 
@@ -236,8 +236,8 @@ class VisionEncoder(nn.Module):
         pooled_token = F.adaptive_avg_pool2d(vae_feature, output_size=1).flatten(1)  # [B, C_out]
 
         # # fuse pooled token with original cls token
-        # final_token = self.fusion_head(cls_token, pooled_token)  # [B, output_dim]
-        final_token = self.vae_proj(pooled_token)
+        final_token = self.fusion_head(cls_token, pooled_token)  # [B, output_dim]
+        # final_token = self.vae_proj(pooled_token)
 
         return {
             "final_token": final_token,
@@ -334,7 +334,6 @@ class RobotCLIP(PreTrainedPolicy):
         action_embeddings = self.action_encoder(actions, sample_rate)  # (B, output_dim)
         action_embeddings = self.action_projection(action_embeddings)
         # action_embeddings = F.normalize(action_embeddings, dim=-1)
-        # action_embeddings = self.tanh(action_embeddings)
         return action_embeddings
     
     def compute_contrastive_loss(

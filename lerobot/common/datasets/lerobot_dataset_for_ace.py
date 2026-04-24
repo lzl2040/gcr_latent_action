@@ -1594,8 +1594,12 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         ):
             indices = list(range(len(dataset)))
         
-            # 全采样（允许重复）
-            sampled_indices = random.choices(indices, k=num_samples)
+            if num_samples <= len(indices):
+                # 不放回
+                sampled_indices = random.sample(indices, num_samples)
+            else:
+                # 放回
+                sampled_indices = random.choices(indices, k=num_samples)
         
             episode_this_dataset = int(
                 dataset.num_episodes * (len(sampled_indices) / len(dataset))

@@ -539,5 +539,6 @@ class ActionChunkEncoder(nn.Module):
         # Use sample token output as final embedding
         # embedding = hidden_states[:, 0, :]  # (B, output_dim) 
         hidden_states = hidden_states / (hidden_states.abs().max(dim=-1, keepdim=True)[0] + 1e-8)
-        embedding = torch.mean(hidden_states, dim = 1)
+        embedding = hidden_states[:, 0, :]
+        # embedding = torch.mean(hidden_states, dim = 1)
         return embedding
