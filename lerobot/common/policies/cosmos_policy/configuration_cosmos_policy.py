@@ -8,35 +8,23 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 
 
-@PreTrainedConfig.register_subclass("latent_act")
+
+
+@PreTrainedConfig.register_subclass("cosmos_policy")
 @dataclass
-class LatentActionConfig(PreTrainedConfig):
+class CosmosPolicyConfig(PreTrainedConfig):
 
-    # qwen_path: str = "/mnt/wangxiaofa/qwen_params/Qwen2.5-VL-7B-Instruct/"
-    # qwen_path = "/datassd_1T/qwen25vl/Qwen2.5-VL-7B-Instruct/"
-    # qwen_path: str = "/Data/lzl/qwen2.5_vl_7b/Qwen2.5-VL-7B-Instruct"
-    # img_pred_model: str = "/mnt/wangxiaofa/pt_weights/stable-diffusion-3.5-medium/"
-    
-    img_pred_model: str = "/mnt/wangxiaofa/pt_weights/Sana_1600M_512px_diffusers/"
-    vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/"
-    action_expert_path: str = "/mnt/wangxiaofa/pi0_pretrain/pi0_gemma_expert_only.pt"
-    img_encoder_model: str = "/mnt/wangxiaofa/pt_weights/CLIP-ViT-H-14-laion2B-s32B-b79K"
-
-    # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
-    # vlm_path: str = "/Data/lzl/huggingface/InternVL3_5-2B-HF"
-    # img_pred_model: str = "/Data/lzl/huggingface/Sana_1600M_512px_diffusers"
-    # action_expert_path: str = "/Data/lzl/weights/pi_zero_pt/pi0_gemma_expert_only.pt"
-    # img_encoder_model: str = "/Data/lzl/huggingface/CLIP-ViT-H-14-laion2B-s32B-b79K"
-    ip_skip_num: int = 2
-    ip_token_gen_type: str = "cls_proj"
-    ip_token_num: int = 8 # for image projection is 8
+    pretrained_path: str = ""
+    text_encoder_path: str = "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct"
+    vae_path: str = "/Data/lzl/huggingface/Cosmos-Predict2-2B-Video2World"
     
     # Input / output structure.
     n_obs_steps: int = 1
-    chunk_size: int = 15
-    n_action_steps: int = 15
+    chunk_size: int = 30
+    n_action_steps: int = 30
     
-    max_frame: int = 16
+    max_frame: int = 30
+    max_history_frame: int = 10
     use_state: bool = True
     
     topk: int = 8
@@ -47,38 +35,38 @@ class LatentActionConfig(PreTrainedConfig):
     # loss_type
     loss_type: str = "raw"
 
-    # token num
-    num_action_token: int = 64
-    num_sc_token: int = 64
-    action_token_idx: list = field(default_factory=list)
-    sc_token_idx: list = field(default_factory=list)
-    # vlm_token_dim: int = 1024 # 1B
-    vlm_token_dim: int = 2048 # 2B
-    # vlm_token_dim: int = 2560 # 4B
-    img_dim: int = 2048 # for simple linear layer 
-    # img_dim: int = 1024 # for gemma
-    
-    img_loss_weight: float = 0.6
-
-
     # model weights
     freeze_vision_encoder: bool = True
     img_decoder_part_train: bool = True
     is_distill: bool = False
-    norm_type: str = "mean_std"
+    norm_type: str = "quantile"
+    
+    # cosmos policy
+    use_proprio: bool = True
+    use_wrist_images: bool = True
+    use_third_person_images: bool = True
+    num_duplicates_per_image: int = 4
+    final_image_size: int = 256
+    normalize_images: bool = False # follow cosmos policy
+    use_image_aug: bool = True
+    use_stronger_image_aug: bool = True
+    state_t: int = 10 # # Latent temporal dim (blank, proprio, wrist, primary, secondary, action, future proprio, future wrist, future primary, future secondary)
 
+    min_num_conditional_frames: int = 5 # 1 blank, 4 conditioning (proprio, wrist, primary, secondary)
+    max_num_conditional_frames: int = 5 # 1 blank, 4 conditioning (proprio, wrist, primary, secondary)
+    conditional_frames_probs: float | None = None
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.IDENTITY,
-            "STATE": NormalizationMode.MEAN_STD,
-            "ACTION": NormalizationMode.MEAN_STD,
+            "STATE": NormalizationMode.QUANTILES,
+            "ACTION": NormalizationMode.QUANTILES,
         }
     )
 
     # Shorter state and action vectors will be padded
-    max_state_dim: int = 64
-    max_action_dim: int = 64
+    max_state_dim: int = 128
+    max_action_dim: int = 128
 
     # Image preprocessing
     resize_imgs_with_padding: tuple[int, int] = (224, 224)
@@ -144,10 +132,6 @@ class LatentActionConfig(PreTrainedConfig):
                 "`use_delta_joint_actions_aloha` is used by pi0 for aloha real models. It is not ported yet in LeRobot."
             )
 
-    def set_token_idx(self, action_token_idx, sc_token_idx):
-        self.action_token_idx = action_token_idx
-        self.sc_token_idx = sc_token_idx
-
     def validate_features(self) -> None:
         # TODO: implement value error
         # if not self.image_features and not self.env_state_feature:
@@ -188,7 +172,7 @@ class LatentActionConfig(PreTrainedConfig):
 
     @property
     def observation_delta_indices(self) -> None:
-        return None
+        return list(range(self.chunk_size))
 
     @property
     def action_delta_indices(self) -> list:

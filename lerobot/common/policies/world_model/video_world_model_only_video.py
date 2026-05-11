@@ -94,90 +94,6 @@ def sample_beta(alpha, beta, bsize, device):
     gamma2 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / beta)
     return gamma1 / (gamma1 + gamma2)
 
-
-def prepare_encoder_attention_mask(
-    N_V: int,
-    N_A: int,
-    M_H: int,
-    M_LS: int,
-    M_LM: int,
-    *,
-    batch_size: int | None = None,
-    device: torch.device | None = None,
-    dtype: torch.dtype = torch.float32,
-):
-    """
-    Build cross-attention mask for:
-    Target: [Video | Action]
-    Source: [History Video | Latent Scene | Latent Motion]
-
-    Rules:
-    - Video queries attend to History Video + Latent Scene
-    - Action queries attend to Latent Motion only
-
-    Returns:
-    attn_mask:
-        shape = (Q_len, K_len)                if batch_size is None
-            or (B, Q_len, K_len)             if batch_size is not None
-        values = 0 (allowed) or -inf (masked)
-    """
-
-    Q_len = N_V + N_A
-    K_len = M_H + M_LS + M_LM
-
-    # initialize all masked
-    attn_mask = torch.full(
-        (Q_len, K_len),
-        float("-inf"),
-        device=device,
-        dtype=dtype,
-    )
-
-    # ----- Video queries -----
-    video_q = slice(0, N_V)
-    history_k = slice(0, M_H)
-    scene_k = slice(M_H, M_H + M_LS)
-    motion_k = slice(M_H + M_LS, M_H + M_LS + M_LM)
-
-    attn_mask[video_q, history_k] = 0.0
-    attn_mask[video_q, scene_k] = 0.0
-    attn_mask[video_q, motion_k] = 0.0
-
-    # ----- Action queries -----
-    action_q = slice(N_V, N_V + N_A)
-    motion_k = slice(M_H + M_LS, M_H + M_LS + M_LM)
-
-    attn_mask[action_q, motion_k] = 0.0
-
-    if batch_size is not None:
-        attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
-
-    return attn_mask
-
-def prepare_attention_mask(
-    N_V, 
-    N_A,
-    batch_size: int | None = None,
-    device: torch.device | None = None,
-    dtype: torch.dtype = torch.float32
-):
-    Q_len = N_V + N_A
-    # initialize all masked
-    attn_mask = torch.full(
-        (Q_len, Q_len),
-        float("-inf"),
-        device=device,
-        dtype=dtype,
-    )
-    video_q = slice(0, N_V)
-    action_q = slice(N_V, N_V + N_A)
-    attn_mask[video_q, action_q] = 0.0
-    attn_mask[action_q, video_q] = 0.0
-    if batch_size is not None:
-        attn_mask = attn_mask.unsqueeze(0).expand(batch_size, -1, -1)
-
-    return attn_mask
-
 def forward_c(
         self,
         hidden_states: torch.Tensor,
@@ -386,7 +302,7 @@ class VideoWorldModel(nn.Module):
     
     def forward(self, img_embeds, sc_embeds, act_embeds, target_imgs, actions):
         # prepare image
-        prompt_embeds = torch.cat([img_embeds, sc_embeds, act_embeds], dim = 1)
+        prompt_embeds = torch.cat([sc_embeds, act_embeds], dim = 1)
         prompt_embeds = self.prompt_proj(prompt_embeds)
         device = prompt_embeds.device
         # target_imgs: 10 3 T H W

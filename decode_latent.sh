@@ -1,4 +1,5 @@
-python scripts/validate_latent_action.py \
+# conda activate lerobot_v2_1
+python scripts/vis_decode_frames.py \
     --policy.type="latent_act" \
     --policy.max_frame=16 \
     --policy.chunk_size=15 \
@@ -26,6 +27,6 @@ python scripts/validate_latent_action.py \
     --policy.train_from_scratch=true \
     --wandb.project="fsdp_qwen_pi0_ft" \
     --job_name="debug_simpler_bridge" \
-    --policy.pretrained_path="/Data/lzl/latent_action/0127_pretrain_latent_split_decoder/step180000.pt"
+    --policy.pretrained_path="/Data/lzl/latent_action/0124_pretrain_latent_unfied_decoder/step80000.pt"
     # --wandb.enable=true \
     

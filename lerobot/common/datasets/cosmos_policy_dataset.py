@@ -22,9 +22,8 @@ import os
 import shutil
 import polars as pl
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Dict
 from datetime import datetime
-import math
 
 import datasets
 import numpy as np
@@ -32,12 +31,17 @@ import packaging.version
 import PIL.Image as Image
 import torch
 import torch.utils
-import gc
 
 from torch.utils.data import ConcatDataset, Subset
 from torch.utils.data.dataloader import default_collate
+import torch.nn.functional as F
+from torchvision import transforms as T
 
-from transformers import Qwen2_5_VLProcessor, AutoProcessor
+import transformers
+from transformers import Qwen2_5_VLProcessor, AutoTokenizer, InternVLProcessor
+from transformers.trainer_pt_utils import LabelSmoother
+
+IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 from qwen_vl_utils import process_vision_info
 
 from datasets import concatenate_datasets, load_dataset, Dataset
@@ -46,21 +50,21 @@ from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.constants import REPOCARD_NAME
 from huggingface_hub.errors import RevisionNotFoundError
 
-from lerobot.common.constants import HF_LEROBOT_HOME
+from lerobot.common.constants import HF_LEROBOT_HOME, OBS_ROBOT
 from lerobot.common.datasets.oxe_configs import OXE_DATASET_CONFIGS
 from lerobot.common.datasets.mixtures import OXE_NAMED_MIXTURES
 from lerobot.common.datasets.utils import cycle, save_to_json
 # from lerobot.common.datasets.factory import resolve_delta_timestamps
-from lerobot.common.datasets.compute_stats import aggregate_stats, compute_episode_stats, aggregate_multi_stats
+from lerobot.common.datasets.compute_stats import aggregate_stats, compute_episode_stats
 from lerobot.common.datasets.transforms import ImageTransforms
 from lerobot.common.datasets.image_writer import AsyncImageWriter, write_image
+from lerobot.common.datasets.data_utils import preprocess_image
 from lerobot.common.datasets.utils import (
     DEFAULT_FEATURES,
     DEFAULT_IMAGE_PATH,
     INFO_PATH,
     TASKS_PATH,
     append_jsonlines,
-    backward_compatible_episodes_stats,
     check_delta_timestamps,
     check_timestamps_sync,
     check_version_compatibility,
@@ -88,20 +92,45 @@ from lerobot.common.datasets.utils import (
 )
 from lerobot.common.datasets.video_utils import (
     VideoFrame,
-    decode_video_frames_torchvision,
-    decode_video_frames_torchvision_org,
-    decode_video_frames_torchcodec,
     encode_video_frames,
+    decode_video_frames,
     get_video_info,
 )
 from lerobot.common.robot_devices.robots.utils import Robot
+
 from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.train import TrainPipelineConfig
 from tabulate import tabulate
+import hashlib
+
 
 CODEBASE_VERSION = "v2.1"
-PAD_VALUE = {"attention_mask": 0, "input_ids": 151643}
+PAD_VALUE = {"attention_mask": 0, "input_ids": 151643, "labels": IGNORE_TOKEN_ID}
+
+def duplicate_array(arr, total_num_copies):
+    """
+    Duplicates a NumPy array multiple times along a new first axis.
+
+    Args:
+        arr (numpy.ndarray): The input array to duplicate
+        total_num_copies (int): Total number of copies to have in the end
+
+    Returns:
+        numpy.ndarray: A new array with shape (total_num_copies, *arr.shape)
+    """
+    # Create a new array by stacking the original array multiple times
+    return np.stack([arr] * total_num_copies)
+
+def safe_hash(input_tuple):
+    # keep 128 bits of the hash
+    tuple_string = repr(input_tuple).encode("utf-8")
+    sha256 = hashlib.sha256()
+    sha256.update(tuple_string)
+
+    seed = int(sha256.hexdigest(), 16)
+
+    return seed & 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -111,7 +140,8 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
 
     print(f"Random seed set to: {seed}")
-    
+
+
 class NamedSubset(Subset):
     def __init__(self, dataset, indices, dataset_name):
         super().__init__(dataset, indices)
@@ -179,19 +209,15 @@ class LeRobotDatasetMetadata:
         self.tasks, self.task_to_task_index = load_tasks(self.root)
         self.episodes = load_episodes(self.root)
         self.stats = load_stats(self.root)
-        if self.stats is None:
-            episodes_stats = load_episodes_stats(self.root)
-            self.stats = aggregate_stats(list(episodes_stats.values()))
-            episodes_stats.clear()
-            del episodes_stats
+        if self.stats == None:
+            self.episodes_stats = load_episodes_stats(self.root)
+            self.stats = aggregate_stats(list(self.episodes_stats.values()))
         # if self._version < packaging.version.parse("v2.1"):
         #     self.stats = load_stats(self.root)
         #     self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
         # else:
-        #     episodes_stats = load_episodes_stats(self.root)
-        #     self.stats = aggregate_stats(list(episodes_stats.values()))
-        #     episodes_stats.clear()
-        #     del episodes_stats
+        #     self.episodes_stats = load_episodes_stats(self.root)
+        #     self.stats = aggregate_stats(list(self.episodes_stats.values()))
 
     def pull_from_repo(
         self,
@@ -459,7 +485,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         force_cache_sync: bool = False,
         download_videos: bool = True,
         video_backend: str | None = None,
-        dataset_name: str | None = None,
+        keep_img_keys: str | None = None,
+        dataset_name: str = "default",
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -563,16 +590,19 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 a single option which is the pyav decoder used by Torchvision. Defaults to pyav.
         """
         super().__init__()
+        # print("__init__ 方法被调用")
         self.repo_id = repo_id
         self.root = Path(root) if root else HF_LEROBOT_HOME / repo_id
         self.image_transforms = image_transforms
         self.wrist_image_transforms = wrist_image_transforms
+        print(self.image_transforms, self.wrist_image_transforms)
         self.delta_timestamps = delta_timestamps
         self.episodes = episodes
         self.tolerance_s = tolerance_s
         self.revision = revision if revision else CODEBASE_VERSION
         self.video_backend = video_backend if video_backend else "pyav"
         self.delta_indices = None
+        self.keep_img_keys = keep_img_keys
         self.dataset_name = dataset_name
 
         # Unused attributes
@@ -585,6 +615,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.meta = LeRobotDatasetMetadata(
             self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
         )
+        # print(f"Episodes in the dataset: {episodes}")
         if self.episodes is not None and self.meta._version >= packaging.version.parse("v2.1"):
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - Loading episodes stats...")
             episodes_stats = [self.meta.episodes_stats[ep_idx] for ep_idx in self.episodes]
@@ -607,15 +638,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
 
         # Check timestamps
-        # print(self.hf_dataset["timestamp"])
         timestamps = torch.stack(list(self.hf_dataset["timestamp"])).numpy()
         episode_indices = torch.stack(list(self.hf_dataset["episode_index"])).numpy()
         ep_data_index_np = {k: t.numpy() for k, t in self.episode_data_index.items()}
-        # print(timestamps[:1000])
         
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - Checking timestamps sync status...")
         
-        _, self.outside_tolerance_indices = check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
+        check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
 
         # Setup delta_indices
         if self.delta_timestamps is not None:
@@ -729,7 +758,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
             hf_dataset = load_dataset("parquet", data_files=path, split="train")
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - Dataset length is {len(hf_dataset)}")
             # hf_dataset = load_dataset("parquet", data_dir=path, split="train")
-            # print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - Dataset length is {len(hf_dataset)}")
         else:
             files = [str(self.root / self.meta.get_data_file_path(ep_idx)) for ep_idx in self.episodes]
             hf_dataset = load_dataset("parquet", data_files=files, split="train")
@@ -774,16 +802,25 @@ class LeRobotDataset(torch.utils.data.Dataset):
         else:
             return get_hf_features_from_features(self.features)
 
+    def expand_true(self, mask, k=2):
+        mask = mask.clone()
+        true_idx = mask.nonzero(as_tuple=True)[0]
+        if len(true_idx) > 0:
+            start = true_idx[0].item()
+            new_start = max(0, start - k)
+            mask[new_start:] = True   # 注意这里是从 new_start 到最后都置为 True
+        return mask
+
     def _get_query_indices(self, idx: int, ep_idx: int) -> tuple[dict[str, list[int | bool]]]:
         ep_start = self.episode_data_index["from"][ep_idx]
-        if "interna1" in self.dataset_name:
-            ep_end = self.episode_data_index["to"][ep_idx] - 2
-        else:
-            ep_end = self.episode_data_index["to"][ep_idx]
+        ep_end = self.episode_data_index["to"][ep_idx]
+        # delta_indices:{"action" : [1, 2, 3, 4, 5]}
         query_indices = {
             key: [max(ep_start.item(), min(ep_end.item() - 1, idx + delta)) for delta in delta_idx]
             for key, delta_idx in self.delta_indices.items()
         }
+        # query_indices["observation.images.image"] = query_indices["action"]
+        # print(query_indices)
         padding = {  # Pad values outside of current episode range
             f"{key}_is_pad": torch.BoolTensor(
                 [(idx + delta < ep_start.item()) | (idx + delta >= ep_end.item()) for delta in delta_idx]
@@ -801,10 +838,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
         for key in self.meta.video_keys:
             if query_indices is not None and key in query_indices:
                 timestamps = self.hf_dataset.select(query_indices[key])["timestamp"]
-                query_timestamps[key] = torch.stack(list(timestamps)).tolist()
+                query_timestamps[key] = torch.stack(timestamps).tolist()
             else:
                 query_timestamps[key] = [current_ts]
-
+        # for key, timestamps in query_timestamps.items():
+        #     print(key, timestamps)
         return query_timestamps
 
     def _query_hf_dataset(self, query_indices: dict[str, list[int]]) -> dict:
@@ -814,7 +852,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if key not in self.meta.video_keys
         }
 
-    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int, primary_obs_key = None) -> dict[str, torch.Tensor]:
+    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
         """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
         in the main process (e.g. by using a second Dataloader with num_workers=0). It will result in a
         Segmentation Fault. This probably happens because a memory reference to the video loader is created in
@@ -823,42 +861,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
         item = {}
         for vid_key, query_ts in query_timestamps.items():
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
-            # frames = decode_video_frames_torchvision_org(
-            #         video_path, query_ts, self.tolerance_s, self.video_backend, 
+            # frames = decode_video_frames_torchvision(
+            #     video_path, query_ts, self.tolerance_s, self.video_backend
             # )
-            frames = decode_video_frames_torchcodec(video_path, query_ts, 
-                                                    self.tolerance_s, 
-                                                    return_type="tensor")
+            frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend, return_type="numpy")
             # print(vid_key, frames.shape)
-            # item[vid_key] = frames.squeeze(0)
             item[vid_key] = frames
 
         return item
-
-    # def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int, primary_obs_key: str) -> dict[str, torch.Tensor]:
-    #     """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
-    #     in the main process (e.g. by using a second Dataloader with num_workers=0). It will result in a
-    #     Segmentation Fault. This probably happens because a memory reference to the video loader is created in
-    #     the main process and a subprocess fails to access it.
-    #     """
-    #     item = {}
-    #     for vid_key, query_ts in query_timestamps.items():
-    #         video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
-    #         if vid_key == primary_obs_key:
-    #             # print(vid_key)
-    #             frames = decode_video_frames_torchvision(
-    #                 video_path, query_ts, self.tolerance_s, self.video_backend, return_all=True, return_type="image"
-    #             )
-    #             # frames = [frame.resize((112, 112)) for frame in frames]
-    #             # item[vid_key] = frames
-    #         else:
-    #             frames = decode_video_frames_torchvision(
-    #                 video_path, query_ts, self.tolerance_s, self.video_backend, return_type="image"
-    #             )
-    #         # item[vid_key] = frames.squeeze(0)
-    #         item[vid_key] = frames
-
-    #     return item
 
     def _add_padding_keys(self, item: dict, padding: dict[str, list[bool]]) -> dict:
         for key, val in padding.items():
@@ -867,48 +877,60 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return self.num_frames
+    
+    def resize_with_pad(self, img, width, height, pad_value=-1):
+        # assume no-op when width height fits already
+        need_expand = False
+        if img.ndim != 4:
+            need_expand = True
+            img = img.unsqueeze(1)
+            # raise ValueError(f"(b,c,h,w) expected, but {img.shape}")
+
+        cur_height, cur_width = img.shape[2:]
+
+        ratio = max(cur_width / width, cur_height / height)
+        resized_height = int(cur_height / ratio)
+        resized_width = int(cur_width / ratio)
+        resized_img = F.interpolate(
+            img, size=(resized_height, resized_width), mode="bilinear", align_corners=False
+        )
+
+        pad_height = max(0, int(height - resized_height))
+        pad_width = max(0, int(width - resized_width))
+
+        # pad on left and top of image
+        padded_img = F.pad(resized_img, (pad_width, 0, pad_height, 0), value=pad_value)
+        if need_expand:
+            padded_img = padded_img.squeeze(1)
+        return padded_img
+    
 
     def __getitem__(self, idx) -> dict:
+        # print(f"Idx:{idx}")
         item = self.hf_dataset[idx]
         ep_idx = item["episode_index"].item()
-        # print(ep_idx, item["timestamp"].item())
-        if OXE_DATASET_CONFIGS[self.dataset_name]["image_obs_keys"]["primary"] is not None:
-            primary_obs_key = f"""observation.images.{OXE_DATASET_CONFIGS[self.dataset_name]["image_obs_keys"]["primary"]}"""
-        else:
-            primary_obs_key = "Zeus" #We can use any random key here,  as there will be no matching video
         
         query_indices = None
         if self.delta_indices is not None:
-            # query_indices only has action key
             query_indices, padding = self._get_query_indices(idx, ep_idx)
             query_result = self._query_hf_dataset(query_indices)
             item = {**item, **padding}
             for key, val in query_result.items():
                 item[key] = val
-        
+            
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
-            # query_timestamps: [current_ts] for image
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
-            if query_indices is not None:
-                video_frames = self._query_videos(query_timestamps, ep_idx, primary_obs_key=primary_obs_key)
-            else:
-                video_frames = self._query_videos(query_timestamps, ep_idx, primary_obs_key=primary_obs_key)
+            video_frames = self._query_videos(query_timestamps, ep_idx)
             item = {**video_frames, **item}
-
+        
         if self.image_transforms is not None:
             image_keys = self.meta.camera_keys
             for cam in image_keys:
-                if "wrist" in cam:
-                    item[cam] = self.wrist_image_transforms(item[cam])
-                else:
-                    item[cam] = self.image_transforms(item[cam])
-
+                item[cam] = self.image_transforms(item[cam])
         # Add task as a string
         task_idx = item["task_index"].item()
-        task = self.meta.tasks[task_idx]
-        item["task"] = task
-        item["fps"] = math.ceil(self.meta.info["fps"])
+        item["task"] = self.meta.tasks[task_idx]
         item["dataset_name"] = self.dataset_name
 
         return item
@@ -1048,7 +1070,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         ep_data_index = get_episode_data_index(self.meta.episodes, [episode_index])
         ep_data_index_np = {k: t.numpy() for k, t in ep_data_index.items()}
-        
         check_timestamps_sync(
             episode_buffer["timestamp"],
             episode_buffer["episode_index"],
@@ -1382,88 +1403,39 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
 
 class MultiDatasetforDistTraining(torch.utils.data.Dataset):
-    def __init__(self, cfg, image_transforms, wrist_image_transforms = None, seed: int = 1000, 
-                 data_mix: str = "toy", vla2root_json: str = None, 
-                 banlance_weight=True, is_ft = False,
-                 dataset_size_one_epoch = 1000_0000):
-        """
-        参数:
-            cfg (TrainPipelineConfig): 训练配置文件
-            image_transforms (ImageTransforms): 对图像进行的变化，因为不同数据集图像size不一样，
-                所以先将其resize成224。我对ImageTransforms进行了修改, 
-                代码在：lerobot/common/datasets/transforms.py，具体修改的点是：
-                - ImageTransformsConfig：增加一个变量img_size
-                - make_transform_from_config函数增加Resize
-                - ImageTransforms：默认的变化改为Resize而不是Identity()
-            seed (int): 随机数种子，保证从各个数据集采样的数据在多次实验中是一样的
-            data_mix (str): 对应scripts/mixtures.py文件中的key值
-            vla2root_json (str): scripts/mixtures.py的数据集对应的本地数据集的root路径
-            banlance_weight: 是否均衡权重，默认为True, 参考：https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/datasets.py#L115
-        其他修改点：
-            - aggregate_stats：增加了一个参数，主要用于图像key的选择
-            - LeRobotDatasetMetadata：增加一个create_with_stats_feats，主要用于创建meta
-        使用：
-            python scripts/openx_dataset.py \
-            --policy.path=lerobot/pi0 \
-            --dataset.repo_id=openx/1 \
-            --dataset.image_transforms.img_size=384
-        __getitem__返回：
-            - action: 机器人的动作，跟单数据集一样
-            - observation.state: 机器人的状态，跟单数据集一样
-            - source: 内容是：{dataset_name}_{episode_idx}，表明它来自哪个数据集的哪个视频
-            - observation.images.{view}: 3个视角，参考https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/rlds/oxe/configs.py
-                如果某个数据集没有某个视觉的图像，将其值设置为0：item[f"observation.images.{new_key}"] = torch.zeros_like(exist_image)
-        """
+    def __init__(self, cfg, data_mix, vla2root_json, seed, image_transforms = None, wrist_image_transforms = None):
         super().__init__()
-        self.episodes = None
-        self.cfg = cfg
         self.seed = seed
-        # set seed
-        set_seed(seed)
-        # specific process
-        # get sample weights
-        mixture_spec = OXE_NAMED_MIXTURES[data_mix]
-        included_datasets, sample_weights = [], []
-        for d_name, d_weight in mixture_spec:
-            if d_name in included_datasets:
+        self.stage = cfg.stage
+        self.cfg = cfg
+        # 1. prepare mixture dataset
+        data_mixture = OXE_NAMED_MIXTURES[data_mix]
+        included_d_names = []
+        dataset_sampling_weights = []
+        for d_name, d_weight in data_mixture:
+            if d_name in included_d_names:
                 print(f"Skipping Duplicate Dataset: `{(d_name, d_weight)}`")
                 continue
 
-            included_datasets.append(d_name)
-            sample_weights.append(d_weight)
+            included_d_names.append(d_name)
+            dataset_sampling_weights.append(d_weight)
         
-        print(included_datasets, sample_weights)
-        # get dataset and dataset length
-        
-        default_parent_dir = "/data_16T/lerobot_openx/"
-        parent_dir = self.cfg.dataset.parent_dir
-        if self.cfg.dataset.parent_dir is None:
-            parent_dir = default_parent_dir
-        print(parent_dir)
-        # parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format/"
-        
-        # if self.cfg.dataset.processor is not None:
-        #     # self.processor = Qwen2_5_VLProcessor.from_pretrained(self.cfg.dataset.processor)
-        #     # self.processor.tokenizer.padding_side = "left"
-        # else:
-        #     self.processor = None
-        # self.processor = AutoProcessor.from_pretrained(cfg.policy.vision_model_name)
-        
+        # make dataset
         self.datasets = []
         self.dataset_sizes = []
         self.dataset_names = []
-        meta_features = None
+        self.num_episodes = 0
+        self.num_frames = 0
+        parent_dir = cfg.dataset.parent_dir
         with open(vla2root_json, "r") as f:
             vla2data_root = json.load(f)
-        for dataset_name in included_datasets:
+        for dataset_name in included_d_names:
             if dataset_name in vla2data_root.keys():
                 data_root = vla2data_root[dataset_name]
                 data_root = os.path.join(parent_dir, data_root)
                 print(f"Load data from {data_root}")
                 repo_id = f"bulldog-{dataset_name}" # any
                 ds_meta = LeRobotDatasetMetadata(repo_id, root=data_root)
-                if meta_features == None:
-                    meta_features = ds_meta.features
                 delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
                 dataset = LeRobotDataset(
                     repo_id, 
@@ -1474,149 +1446,78 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                     video_backend=cfg.dataset.video_backend,
                     dataset_name=dataset_name,
                 )
+                self.num_episodes += dataset.num_episodes
+                self.num_frames += dataset.num_frames
                 self.datasets.append(dataset)
                 self.dataset_sizes.append(len(dataset))
                 self.dataset_names.append(dataset_name)
-                # del 
             else:
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - {dataset_name} not found in vla2root.json, skipping...")
-        
-        self.is_ft = is_ft
-        if is_ft:
-            self.id2dataset = {}
-            self.num_episodes = 0
-            self.dataset_len = 0
-            dataset_id = 0
-            for i in range(len(self.datasets)):
-                dataset = self.datasets[i]
-                num_frames = dataset.num_frames
-                print(f"Dataset {dataset.dataset_name} has {num_frames} frames.")
-                self.dataset_len += num_frames
-                num_episodes = dataset.num_episodes
-                self.num_episodes += num_episodes
-                start_id = self.dataset_len - num_frames
-                end_id = self.dataset_len
-                data_id = 0
-                for index in range(start_id, end_id):
-                    self.id2dataset[index] = (dataset_id, data_id)
-                    data_id += 1
-                dataset_id += 1
-                assert data_id == num_frames
-                # print(self.id2dataset)
-            # assert data_id == self.dataset_len
-            # self.dataset = ConcatDataset(self.datasets)
-            # for dataset in self.datasets:
-            #     self.num_episodes += dataset.num_episodes
-            #     self.dataset_len += dataset.num_frames
-            # self.dataset_len = self.dataset.num_frames
-            print(f"data mix:{data_mix} has {self.num_episodes} episodes, {self.dataset_len} frames.")
-        else:
-            if banlance_weight:
-                # filter out the datasets not in vla2root.json
-                new_sample_weights = [
-                    sw 
-                    for sw, dataset in zip(sample_weights, included_datasets) 
-                    if dataset in vla2data_root.keys()
-                ]
-                sample_weights = np.array(new_sample_weights) * np.array(self.dataset_sizes)
-                print(f"Banlanced:{sample_weights}")
-            self.sample_weights = np.array(sample_weights) / np.sum(sample_weights)
-            print(f"Final weights:{sample_weights}")
-            # self.dataset_len = sum(self.dataset_sizes)
-            raw_dataset_len = sum(self.dataset_sizes)
-            self.dataset_sample_counts = (self.sample_weights * dataset_size_one_epoch).astype(int)  # 计算子集大小
-            
-            print(f"Not sampled: Dataset len:{raw_dataset_len}")
-            print("Final sampling info:")
-            table_data = [
-                [self.dataset_names[i], len(self.datasets[i]), f"{self.sample_weights[i]:.4f}"]
-                for i in range(len(self.datasets))
-            ]
-            print(tabulate(table_data, headers=["Dataset", "Samples", "Ratio"], tablefmt="grid"))
-            # sample and use NamedSubset to contain dataset_name
-            self.id2dataset, self.num_episodes, self.dataset_len = self.build_pretrain_id2dataset(seed=seed)
-            self.dataset = None
-            self.dataset_len = len(self.id2dataset)
 
-        # concat the selected dataset
-        # self.dataset = ConcatDataset(selected_subsets)
+        # 2. Set properties for sampling
+        self.set_epoch(0)
+        self.balance_dataset_weights = cfg.dataset.balance_dataset_weights
+        self._dataset_lengths = np.array([len(dataset) for dataset in self.datasets])
         
-        # calculate stats
+        print(f"Dataset lengths: {self._dataset_lengths} Num episodes:{self.num_episodes}")
+
+        # Dataset sampling weights
+        self._dataset_sampling_weights = np.array(dataset_sampling_weights)
+        
+        if self.balance_dataset_weights:
+            self._dataset_sampling_weights *= self._dataset_lengths
+        
+        # Normalize weights
+        weights_sum = self._dataset_sampling_weights.sum()
+        if weights_sum == 0 or np.isnan(weights_sum):
+            print(f"Error: Invalid weights sum: {weights_sum}")
+            # Fallback to equal weights
+            self._dataset_sampling_weights = np.ones(len(self.datasets)) / len(self.datasets)
+            print(f"Fallback to equal weights")
+        else:
+            self._dataset_sampling_weights /= weights_sum
+        
+        table_data = [
+            [self.dataset_names[i], len(self.datasets[i]), f"{self._dataset_sampling_weights[i]:.4f}"]
+                for i in range(len(self.datasets))
+        ]
+        print(tabulate(table_data, headers=["Dataset", "Frames", "Ratio"], tablefmt="grid"))
+        print(f"Total frames: {self._dataset_lengths.sum()}")
+        
+        if self.stage == "pretrain":
+            # 4. prepare dataset indicies for sampling
+            self._step_order: list[np.ndarray] = []
+            self._step_pos: list[int] = []
+            for dataset in self.datasets:
+                self._step_order.append(np.arange(len(dataset)))
+                rng = np.random.default_rng(self.seed)
+                rng.shuffle(self._step_order[-1])
+                self._step_pos.append(0)
+            self.dataset_len = np.max(self._dataset_lengths)
+        else:
+            self.full_dataset = ConcatDataset(self.datasets)
+            self.dataset_len = len(self.full_dataset)
+        
+        # 4. Aggregate dataset stats from all datasets
+        self.stats = aggregate_stats([dataset.meta.stats for dataset in self.datasets], 
+                                     max_dim = cfg.policy.max_action_dim)
+        
+        # in fact, we do not use it, so just simply copy
+        self.meta = ds_meta
+        
+        # other property
+        self.use_proprio = cfg.policy.use_proprio
+        self.use_wrist_images = cfg.policy.use_wrist_images
+        self.use_third_person_images = cfg.policy.use_third_person_images
+        self.num_duplicates_per_image = cfg.policy.num_duplicates_per_image
+        self.final_image_size = cfg.policy.final_image_size
+        self.normalize_images = cfg.policy.normalize_images
+        self.use_image_aug = cfg.policy.use_image_aug
+        self.use_stronger_image_aug = cfg.policy.use_stronger_image_aug
         self.max_action_dim = cfg.policy.max_action_dim
         self.max_state_dim = cfg.policy.max_state_dim
-        all_new_obs_image_keys = ["observation.images.primary", 
-                                  "observation.images.secondary", 
-                                  "observation.images.wrist"] # follow https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/rlds/oxe/configs.py
         
-        # print(self.datasets[0].meta.stats)
-        self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
-        # save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
-        # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/original_qw", f"{cfg.data_mix}_stats.json"))
-        # remove state
         
-        print(f"Aggregated stats:{self.stats}")
-        # update meta_features
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - meta features: {meta_features}")
-        new_obs_image_keys = []
-        for key in self.stats.keys():
-            if key in all_new_obs_image_keys:
-                new_obs_image_keys.append(key)
-        self.new_obs_image_keys = new_obs_image_keys
-        img_feats = {}
-        # first remove keys contaning images
-        old_keys = list(meta_features.keys())
-        print("\n\n")
-        for key in old_keys:
-            # print(key, meta_features[key])
-            if meta_features[key]["dtype"] in ["image", "video"]:
-                img_feats = meta_features[key]
-                del meta_features[key]
-        # update the size of image feats
-        # print(f"Old image features:{img_feats}")
-        img_size = cfg.dataset.image_transforms.img_size
-        img_feats["shape"] = (img_size, img_size, 3)
-        img_feats["info"]["video.height"] = img_size
-        img_feats["info"]["video.width"] = img_size
-        # then use the new image keys
-        for new_key in new_obs_image_keys:
-            meta_features[new_key] = img_feats
-        print(f"Unified input features:{meta_features}")
-        # finally create the meta class
-        self.meta = LeRobotDatasetMetadata.create_with_stats_feats(stats=self.stats, features=meta_features) # Note: I added a class function
-        self.meta.repo_id = "Prometheus"
-        # self.dataset = None
-    
-    def build_pretrain_id2dataset(self, seed: int = 1000):
-        random.seed(seed)
-        id2dataset = []
-        episode_count = 0
-        for dataset_idx, (dataset, num_samples, dataset_name) in enumerate(
-            zip(self.datasets, self.dataset_sample_counts, self.dataset_names)
-        ):
-            indices = list(range(len(dataset)))
-        
-            if num_samples <= len(indices):
-                # 不放回
-                sampled_indices = random.sample(indices, num_samples)
-            else:
-                # 放回
-                sampled_indices = random.choices(indices, k=num_samples)
-        
-            episode_this_dataset = int(
-                dataset.num_episodes * (len(sampled_indices) / len(dataset))
-            )
-            episode_count += episode_this_dataset
-        
-            # self.selected_indices.append(sampled_indices)
-        
-            # ⭐ 构建 id -> (dataset_idx, data_id)
-            for data_id in sampled_indices:
-                id2dataset.append((dataset_idx, data_id))
-        return id2dataset, episode_count, len(id2dataset)
-    
-    def set_epoch(self, epoch):
-        self.id2dataset, self.num_episodes, self.dataset_len = self.build_pretrain_id2dataset(seed=epoch + self.seed)    
-    
     def pad_vector(self, vector, new_dim):
         """Can be (batch_size x sequence_length x features_dimension)
         or (batch_size x features_dimension)
@@ -1634,197 +1535,292 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # return len(self.dataset)
         return self.dataset_len
 
-    def __getitem__(self, index):
+    def set_epoch(self, epoch: int):
+        """Set the epoch for the dataset.
+
+        Args:
+            epoch (int): The epoch to set.
+        """
+        self.epoch = epoch
+    
+    def sample_step(self, index: int):
+        seed = safe_hash((self.epoch, index, self.seed))
+        rng = np.random.default_rng(seed)
+
+        # Sample dataset
+        dataset_index = rng.choice(len(self.datasets), p=self._dataset_sampling_weights)
+        dataset = self.datasets[dataset_index]
+        step_pos = self._step_pos[dataset_index]
+        # re-update
+        if step_pos >= len(dataset):
+            order = np.arange(len(dataset))
+            seed = safe_hash((self.epoch, dataset_index, self.seed, step_pos))
+            rng = np.random.default_rng(seed)
+            rng.shuffle(order)
+            self._step_order[dataset_index] = order
+            step_pos = 0
+
+        single_step_index = self._step_order[dataset_index][step_pos]
+        # print(f"Single step:{single_step_index}")
+        self._step_pos[dataset_index] = step_pos + 1
+        return dataset[int(single_step_index)]
+    
+    def prepare_action_state(self, item):
+        if "game" in item["dataset_name"]:
+            item["action"] = F.pad(
+                    item["action"],
+                    (44 + 6, 0),   # 对最后一维：左 pad 44个0，右 pad 0个0
+                    mode="constant",
+                    value=0
+                )
+            item["observation.state"] = F.pad(
+                    item["observation.state"],
+                    (46 + 6, 0),   # 对最后一维：左 pad 46个0，右 pad 0个0
+                    mode="constant",
+                    value=0
+                )
+        if "rh20t" in item["dataset_name"]:
+            chunk_len = item["action"].shape[0]
+            new_action = torch.ones((chunk_len, self.max_action_dim))
+            new_action[:, :6] = item["action"][:, :6]
+            new_action[:, 6:6 + 1] = item["action"][:, -2:-1]
+            # force data
+            new_action[:, 44:44 + 6] = item["action"][:, 6:6 + 6]
+            new_state = torch.ones(self.max_state_dim)
+            new_state[:7] = item["observation.state"][:7]
+            new_state[7:7 + 1] = item["observation.state"][-2:-1]
+            # force data
+            new_state[46:46 + 6] = item["observation.state"][7:7 + 6]
+            item["action"] = new_action
+            item["observation.state"] = new_state
         
-        # if self.is_ft:
-        dataset_id, data_id = self.id2dataset[index]
-        dataset = self.datasets[dataset_id]
-        item = dataset[data_id]
+        item["action"] = self.pad_vector(item["action"], self.max_action_dim)
+        item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
+        return item
+    
+    def norm_data_with_quantile(self, item):
+        key1 = "q01"
+        key2 = "q99"
+        state_q01 = torch.ones(self.max_state_dim) * -1
+        state_q99 = torch.ones(self.max_state_dim)
+        action_q01 = torch.ones(self.max_action_dim) * -1
+        action_q99 = torch.ones(self.max_action_dim)
+        action_mask = torch.zeros(self.max_action_dim)
+        action_start_dim = 0
+        action_end_dim = 0
+        state_start_dim = 0
+        state_end_dim = 0
+        if "agi" in item['dataset_name']:
+            action_end_dim = 14
+            state_end_dim = 16
+        elif "ego_dex" in item['dataset_name']:
+            action_start_dim = 0
+            action_end_dim = 14 + 30
+            state_start_dim = 0
+            state_end_dim = 16 + 30
+        elif "game" in item["dataset_name"]:
+            action_start_dim = 14 + 30
+            action_end_dim = 14 + 30 + 50
+            state_start_dim = 16 + 30
+            state_end_dim = 16 + 30 + 50
+        else:
+            action_end_dim = 7
+            state_end_dim = 8
+        
+        state_q01[state_start_dim:state_end_dim] = self.stats["observation.state"][key1][state_start_dim:state_end_dim]
+        state_q99[state_start_dim:state_end_dim] = self.stats["observation.state"][key2][state_start_dim:state_end_dim]
+        action_q01[action_start_dim:action_end_dim] = self.stats["action"][key1][action_start_dim:action_end_dim]
+        action_q99[action_start_dim:action_end_dim] = self.stats["action"][key2][action_start_dim:action_end_dim]
+        # action
+        denom = action_q99 - action_q01
+        denom = torch.where(
+            denom == 0, torch.tensor(1e-8), denom
+        )
+        item["action"] = 2.0 * (item["action"] - action_q01) / denom - 1.0
+        
+        # state
+        denom = state_q99 - state_q01
+        denom = torch.where(
+            denom == 0, torch.tensor(1e-8), denom
+        )
+        item["observation.state"] = 2.0 * (item["observation.state"] - state_q01) / denom - 1.0
+        return item
+    
+    def __getitem__(self, index):
+        # every item key contains t-t+chunk_size elements (large than episode length use repeat last)
+        if self.stage == "pretrain":
+            item = self.sample_step(index)
+        else:
+            item = self.full_dataset[index]
+        
+        # prepare state and action
+        item = self.prepare_action_state(item)
+        item = self.norm_data_with_quantile(item) # follow cosmos policy
+        
+        # unified the image keys
         dataset_name = item["dataset_name"]
         data_config = OXE_DATASET_CONFIGS[dataset_name]
-        image_obs_keys = data_config["image_obs_keys"]
-        # else:
-        #     selected_dataset = random.choices(self.datasets, weights=self.sample_weights, k=1)[0]
-        #     dataset_index = self.datasets.index(selected_dataset)
-        #     dataset_name = self.dataset_names[dataset_index]
-        #     data_config = OXE_DATASET_CONFIGS[dataset_name]
-        #     indices = self.selected_indices[dataset_index] # the selected indices of this dataset
-        #     selected_id = random.choice(indices) # equal prob
-            
-        #     image_obs_keys = data_config["image_obs_keys"]
-        
-        #     item = selected_dataset[selected_id]
-        #     item['dataset_name'] = dataset_name
-        
-        data_dict = self._fetch_data_dict(item, image_obs_keys)
-        data_dict["action"] = torch.nan_to_num(data_dict["action"], nan=0.0)
-        # v2
-        # none_flag = True
-        # max_retry = 100
-        # retry = 0
-        # while none_flag:
-        #     if retry > max_retry:
-        #         break
-        #     retry += 1
-        #     if self.is_ft:
-        #         dataset_id, data_id = self.id2dataset[index]
-        #         dataset = self.datasets[dataset_id]
-        #         item = dataset[data_id]
-        #         dataset_name = item["dataset_name"]
-        #         data_config = OXE_DATASET_CONFIGS[dataset_name]
-        #         image_obs_keys = data_config["image_obs_keys"]
-        #     else:
-        #         selected_dataset = random.choices(self.datasets, weights=self.sample_weights, k=1)[0]
-        #         dataset_index = self.datasets.index(selected_dataset)
-        #         dataset_name = self.dataset_names[dataset_index]
-        #         data_config = OXE_DATASET_CONFIGS[dataset_name]
-        #         indices = self.selected_indices[dataset_index] # the selected indices of this dataset
-        #         selected_id = random.choice(indices) # equal prob
-                
-        #         image_obs_keys = data_config["image_obs_keys"]
-            
-        #         item = selected_dataset[selected_id]
-        #         item['dataset_name'] = dataset_name
-            
-        #     data_dict = self._fetch_data_dict(item, image_obs_keys)
-            
-        #     none_flag = False
-        #     for key, value in data_dict.items():
-        #         if value is None:
-        #             logging.warning(f"Found NoneType Value at key: {key}, from {data_dict['source']}, refetch data")
-        #             none_flag = True
-                    
-        #         elif isinstance(value, list):
-        #             if len(value) == 0:
-        #                 logging.warning(f"Found Empty List at key: {key}, from {data_dict['source']}, refetch data")
-        #                 none_flag = True
-                        
-        #             else:
-        #                 for v in value:
-        #                     if v is None:
-        #                         logging.warning(f"Found NoneType Value in List at key: {key}, from {data_dict['source']}, refetch data")
-        #                         none_flag = True
-                                
-        # gc.collect()
-        return data_dict
-    
-    def _fetch_data_dict(self, item, image_obs_keys):
-        
-        exist_image = None
+        image_obs_keys = data_config["image_obs_keys"] # contain new_key: old_key mapping, such as "primary": "image", ...
         key_to_pad = []
-        new_keys = []
         for new_key, old_key in image_obs_keys.items():
-            new_keys.append(f"observation.images.{new_key}")
-            # for interna1, its image key is images.rgb.{old_key} instead of observation.images.{old_key}
-            old_img_key = f"observation.images.{old_key}" if f"observation.images.{old_key}" in item else f"images.rgb.{old_key}"
             if old_key != None:
-                
-                if isinstance(item[old_img_key], list):
-                    if not len(item[old_img_key]):
-                        key_to_pad.append(new_key)
-                
-                item[f"observation.images.{new_key}"] = copy.deepcopy(item[old_img_key])
-                exist_image = item[old_img_key]
+                item[f"observation.images.{new_key}"] = copy.deepcopy(item[f"observation.images.{old_key}"])
+                exist_image = item[f"observation.images.{old_key}"]
                 if new_key != old_key:
-                    del item[old_img_key]
+                    del item[f"observation.images.{old_key}"]
             else:
                 # if missing, use zero image
                 key_to_pad.append(new_key)
         
-        exist_image_valide = False
-        if exist_image is not None:
-            if isinstance(exist_image, list):
-                if len(exist_image) > 0:
-                    height, width = exist_image[0].size
-                    channel = len(exist_image[0].split())
-                    sample_image = Image.fromarray(np.ones((height, width, channel), dtype=np.uint8))
-                    exist_image_valide = True
-            elif isinstance(exist_image, Image.Image):
-                height, width = exist_image.size
-                channel = len(exist_image.split())
-                sample_image = Image.fromarray(np.ones((height, width, channel), dtype=np.uint8))
-                exist_image_valide = True
-        
-        if not exist_image_valide:
-            sample_image = Image.fromarray(np.ones((self.cfg.dataset.default_image_size, self.cfg.dataset.default_image_size, self.cfg.dataset.default_channel_size), dtype=np.uint8))  
-        
-        # sample_image = Image.fromarray(np.ones((self.cfg.dataset.default_image_size, self.cfg.dataset.default_image_size, self.cfg.dataset.default_channel_size), dtype=np.uint8))  
-        # print(sample_image)
-        
         for new_key in key_to_pad:
-            item[f"observation.images.{new_key}"] = copy.deepcopy(sample_image)
-            if new_key == "primary":
-                item[f"observation.images.{new_key}"] = [item[f"observation.images.{new_key}"]]
+            item[f"observation.images.{new_key}"] = np.zeros_like(exist_image)
         
-        # remove other image keys
-        keys = list(item.keys())
-        for key in keys:
-            if "images" in key and key not in new_keys:
-                del item[key]
-                
-        # add the dataset source
-        if "episode_index" in item:
-            item["source"] = f"{item['dataset_name']}_episode_id_{item['episode_index']}"
-        elif "ep_idx" in item:
-            item["source"] = f"{item['dataset_name']}_episode_id_{item['ep_idx']}"
-        else:
-            item["source"] = f"{item['dataset_name']}_with_unknown_episode_id"
+        # Prepare data for cosmos policy
         
-        # Pad the action and observation vectors
-        item["action"] = self.pad_vector(item["action"], self.max_action_dim)
-        item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
+        # Initialize list to store all images
+        image_list = []
+        current_sequence_idx = 0  # Used to track which sequence of images we are on
+        # Get blank array for the first input frame (needed for the tokenizer)
+        # Do not duplicate this image
+        IMAGE_PRIMARY = "observation.images.primary"
+        IMAGE_SECOND = "observation.images.secondary"
+        IMAGE_WRIST = "observation.images.wrist"
+        CURRENT_IDX = 0
+        FUTURE_IDX = -1
+        first_input_image = np.expand_dims(np.zeros_like(item[IMAGE_PRIMARY][CURRENT_IDX]), axis=0)
+        image_list.append(first_input_image)
+        current_sequence_idx += 1
         
-        # Normlize the action and observation vectors
-        if "agi" in item["dataset_name"] or "dual" in item["dataset_name"] or "agilex" in item["dataset_name"]:
-            xyz_idx = [0, 1, 2, 10, 11, 12]   # 双臂 xyz
-        else:
-            xyz_idx = [0, 1, 2]               # 单臂 xyz
+        # current state
+        if self.use_proprio:
+            proprio = item[OBS_ROBOT][CURRENT_IDX]
+            # Proprio values will be injected into latent diffusion sequence later
+            # For now just add blank image
+            blank_image = np.zeros_like(item[IMAGE_PRIMARY][CURRENT_IDX])
+            blank_image = duplicate_array(blank_image, total_num_copies=self.num_duplicates_per_image)
+            image_list.append(blank_image)
+            current_proprio_latent_idx = current_sequence_idx
+            current_sequence_idx += 1
+        
+        if self.use_wrist_images:
+            wrist_image = item[IMAGE_WRIST][CURRENT_IDX]
+            # Duplicate wrist image
+            wrist_image = duplicate_array(wrist_image, total_num_copies=self.num_duplicates_per_image)
+            image_list.append(wrist_image)
+            current_wrist_image_latent_idx = current_sequence_idx
+            current_sequence_idx += 1
 
-        # print(t/orch.max(item["action"]), torch.min(item["action"]))
-        # action
-        mean = self.stats["action"]["mean"].to(item["action"].dtype).to(item["action"].device)
-        std = self.stats["action"]["std"].to(item["action"].dtype).to(item["action"].device)
-        item["action"][..., xyz_idx] = (item["action"][..., xyz_idx] - mean[xyz_idx]) / (std[xyz_idx] + 1e-8)
-
-        # state
-        mean = self.stats["observation.state"]["mean"].to(item["observation.state"].dtype).to(item["observation.state"].device)
-        std = self.stats["observation.state"]["std"].to(item["observation.state"].dtype).to(item["observation.state"].device)
-        item["observation.state"][..., xyz_idx] = (
-            item["observation.state"][..., xyz_idx] - mean[xyz_idx]
-        ) / (std[xyz_idx] + 1e-8)
+        # Add current third-person image
+        if self.use_third_person_images:
+            current_primary_image = item[IMAGE_PRIMARY][CURRENT_IDX]
+            current_primary_image = duplicate_array(current_primary_image, total_num_copies=self.num_duplicates_per_image)
+            image_list.append(current_primary_image)
+            current_image_latent_idx = current_sequence_idx
+            current_sequence_idx += 1
+            
+            current_secondary_image = item[IMAGE_SECOND][CURRENT_IDX]
+            current_secondary_image = duplicate_array(current_secondary_image, total_num_copies=self.num_duplicates_per_image)
+            image_list.append(current_secondary_image)
+            current_image2_latent_idx = current_sequence_idx
+            current_sequence_idx += 1
+            
+        # Add blank image for action chunk
+        blank_image = np.zeros_like(item[IMAGE_PRIMARY][CURRENT_IDX])
+        # Duplicate blank image
+        blank_image = duplicate_array(blank_image, total_num_copies=self.num_duplicates_per_image)
+        image_list.append(blank_image)
+        action_latent_idx = current_sequence_idx
+        current_sequence_idx += 1
         
-        item["timestamp"] = item["timestamp"].unsqueeze(0) # make it (1,) for later processing
-        # print(item["timestamp"].shape)
-        # pil_image = Image.fromarray(item["observation.images.primary"][0])
-        # print(item["observation.images.primary"].shape)
-        return_dict = {
-            "sample_rate": item["fps"],
-            "action": item["action"],
-            "observation.images.primary": item["observation.images.primary"],
-            "observation.state": item["observation.state"],
-            "source": item["source"],
-            "timestamp": item["timestamp"],
+        # future state
+        
+        # Add future proprio
+        if self.use_proprio:
+            future_proprio = item[OBS_ROBOT][FUTURE_IDX]
+            # Not using proprio image; proprio values will be injected into latent diffusion sequence later
+            # For now just add blank image
+            blank_image = np.zeros_like(item[IMAGE_PRIMARY][FUTURE_IDX])
+            blank_image = duplicate_array(blank_image, total_num_copies=self.num_duplicates_per_image)
+            image_list.append(blank_image)
+            future_proprio_latent_idx = current_sequence_idx
+            current_sequence_idx += 1
+
+        # Add future wrist image
+        if self.use_wrist_images:
+            future_wrist_image = item[IMAGE_WRIST][FUTURE_IDX]
+            future_wrist_image = duplicate_array(future_wrist_image, total_num_copies=self.num_duplicates_per_image)
+            image_list.append(future_wrist_image)
+            future_wrist_image_latent_idx = current_sequence_idx
+            current_sequence_idx += 1
+
+        # Add future third-person image
+        if self.use_third_person_images:
+            future_primary_image = item[IMAGE_PRIMARY][FUTURE_IDX]
+            future_primary_image = duplicate_array(future_primary_image, total_num_copies=self.num_duplicates_per_image)
+            image_list.append(future_primary_image)
+            future_image_latent_idx = current_sequence_idx
+            current_sequence_idx += 1
+            
+            future_secondary_image = item[IMAGE_SECOND][FUTURE_IDX]
+            future_secondary_image = duplicate_array(future_secondary_image, total_num_copies=self.num_duplicates_per_image)
+            image_list.append(future_secondary_image)
+            future_image2_latent_idx = current_sequence_idx
+            current_sequence_idx += 1
+        
+        # Stack images and preprocess
+        images = np.concatenate(image_list, axis=0)
+        # print(len(image_list), images.shape)
+        images = preprocess_image(
+            images,
+            final_image_size=self.final_image_size,
+            normalize_images=self.normalize_images,
+            use_image_aug=self.use_image_aug,
+            stronger_image_aug=self.use_stronger_image_aug,
+        )
+        # print(images.shape) # torch.Size([37, 3, 256, 256])
+        action_chunk = item["action"] # pad with last action
+        # print(proprio.shape, future_proprio.shape) # 128 128
+        
+        sample_dict = {
+            "video": images,
+            "actions": action_chunk,
+            "task": item["task"],
+            "t5_text_mask": torch.ones(512, dtype=torch.int64),  # Just copying what others have done in this codebase
+            "fps": 16,  # Just set to some fixed value since we aren't generating videos anyway
+            "padding_mask": torch.zeros(
+                1, self.final_image_size, self.final_image_size
+            ),  # Just copying what others have done in this codebase
+            "image_size": self.final_image_size
+            * torch.ones(
+                4
+            ),  # Just copying what others have done in this codebase; important because it shows up as model input
+            "proprio": proprio if self.use_proprio else torch.zeros_like(item[OBS_ROBOT][CURRENT_IDX]),
+            "future_proprio": future_proprio if self.use_proprio else torch.zeros_like(item[OBS_ROBOT][FUTURE_IDX]),
+            "__key__": index,  # Unique sample identifier (required for callbacks)
+            
+            # "rollout_data_mask": rollout_data_mask,
+            # "rollout_data_success_mask": rollout_data_success_mask,
+            # "world_model_sample_mask": 1 if is_world_model_sample else 0,
+            # "value_function_sample_mask": 1 if is_value_function_sample else 0,
+            # "global_rollout_idx": global_rollout_idx,
+            "action_latent_idx": action_latent_idx,
+            # "value_latent_idx": value_latent_idx if self.return_value_function_returns else -1,
+            "current_proprio_latent_idx": current_proprio_latent_idx if self.use_proprio else -1,
+            "current_wrist_image_latent_idx": current_wrist_image_latent_idx if self.use_wrist_images else -1,
+            "current_image_latent_idx": current_image_latent_idx if self.use_third_person_images else -1,
+            "current_image2_latent_idx": current_image2_latent_idx if self.use_third_person_images else -1,
+            "future_proprio_latent_idx": future_proprio_latent_idx if self.use_proprio else -1,
+            "future_wrist_image_latent_idx": future_wrist_image_latent_idx if self.use_wrist_images else -1,
+            "future_image_latent_idx": future_image_latent_idx if self.use_third_person_images else -1,
+            "future_image2_latent_idx": future_image2_latent_idx if self.use_third_person_images else -1,
+            # "value_function_return": value_function_return,
+            # "next_action_chunk": next_action_chunk,
+            # "next_value_function_return": next_value_function_return,
         }
-        return return_dict
-    
-    @property
-    def num_frames(self) -> int:
-        """Number of frames in selected episodes."""
-        # return len(self.dataset) if self.dataset is not None else self.meta.total_frames
-        return self.dataset_len if self.dataset_len is not None else self.meta.total_frames
+        
+        return sample_dict
 
-    @property
-    def features(self) -> dict[str, dict]:
-        return self.meta.features
 
-    @property
-    def hf_features(self) -> datasets.Features:
-        """Features of the hf_dataset."""
-        if self.dataset is not None:
-            return self.dataset.features
-        else:
-            return get_hf_features_from_features(self.features)
-    
 def resolve_delta_timestamps(
     cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetadata
 ) -> dict[str, list] | None:
@@ -1916,7 +1912,7 @@ def dataset_func_test(cfg: TrainPipelineConfig):
         
 def extra_collate_fn(batch):
     collated = {}
-    key_to_pad = ["input_ids", "attention_mask"]
+    key_to_pad = ["input_ids", "attention_mask", "labels"]
     key_to_default_collate = ["observation.state", "action"]
     key_to_append_to_list = ["second_per_grid_ts"]
     for key in batch[0].keys():
@@ -1934,8 +1930,6 @@ def extra_collate_fn(batch):
             item = torch.cat(padded_tensor, dim=0)
             collated[key] = item
         elif isinstance(items[0],torch.Tensor) and key not in key_to_default_collate:
-            # print(key, items)
-            # print(items.shape)
             item = torch.cat(items, dim=0)
             collated[key] = item
         elif key in key_to_append_to_list:
