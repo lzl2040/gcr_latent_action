@@ -38,6 +38,7 @@ class ACEConfig:
     dropout: float = 0.1
     max_position_embeddings: int = 512
     output_dim: int = None
+    frozen_ace: bool = False # true = train decoder
     
     def __post_init__(self):
         if self.output_dim is None:
@@ -84,6 +85,9 @@ class RobotCLIPConfig(PreTrainedConfig):
     # Shorter state and action vectors will be padded
     max_state_dim: int = 32
     max_action_dim: int = 32
+    # other setting
+    frozen_ace: bool = False # true = train decoder
+    ace_pretrained_path: str = ""
     
     
     normalization_mapping: dict[str, NormalizationMode] = field(

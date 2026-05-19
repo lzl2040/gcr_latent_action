@@ -235,9 +235,8 @@ class VisionEncoder(nn.Module):
         # average pool -> token
         pooled_token = F.adaptive_avg_pool2d(vae_feature, output_size=1).flatten(1)  # [B, C_out]
 
-        # # fuse pooled token with original cls token
+        # fuse pooled token with original cls token
         final_token = self.fusion_head(cls_token, pooled_token)  # [B, output_dim]
-        # final_token = self.vae_proj(pooled_token)
 
         return {
             "final_token": final_token,
@@ -280,6 +279,7 @@ class RobotCLIP(PreTrainedPolicy):
             num_hidden_layers=config.num_hidden_layers,
             output_dim=config.output_dim,
             max_action_dim=config.max_action_dim,
+            frozen_ace=config.frozen_ace
         )
         self.action_encoder = ActionChunkEncoder(action_config)
         
@@ -292,6 +292,14 @@ class RobotCLIP(PreTrainedPolicy):
         
         # Layer norm for stability
         self.tanh = nn.Tanh()
+        
+        # frozen weights
+        if config.frozen_ace:
+            for name, param in self.named_parameters():
+                if "action_decoder" in name:
+                    # print(f"Frozen parameter: {name}")
+                    continue
+                param.requires_grad = False
     
     def get_optim_params(self) -> dict:
         return self.parameters()
@@ -331,69 +339,16 @@ class RobotCLIP(PreTrainedPolicy):
         Returns:
             Normalized action embeddings of shape (B, projection_dim)
         """
-        action_embeddings = self.action_encoder(actions, sample_rate)  # (B, output_dim)
+        action_output = self.action_encoder(actions, sample_rate)
+        action_embeddings = action_output["embedding"]  # (B, output_dim)
+        recon_loss = action_output["recon_loss"]  # (B, chunk_size, action_dim)
         action_embeddings = self.action_projection(action_embeddings)
-        # action_embeddings = F.normalize(action_embeddings, dim=-1)
-        return action_embeddings
+        return action_embeddings, recon_loss
     
-    def compute_contrastive_loss(
-        self,
-        image_embeddings: torch.Tensor,
-        action_embeddings: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute contrastive loss between image and action embeddings.
-        
-        Uses symmetric InfoNCE loss similar to CLIP.
-        
-        Args:
-            image_embeddings: Normalized image embeddings of shape (B, D)
-            action_embeddings: Normalized action embeddings of shape (B, D)
-            
-        Returns:
-            Contrastive loss value
-        """
-        # print(f"Image embeddings shape: {image_embeddings.shape}, Action embeddings shape: {action_embeddings.shape}")
-        batch_size = image_embeddings.shape[0]
-        
-        # Compute similarity matrix
-        # logits: (B, B)
-        # print("image", torch.max(image_embeddings), torch.min(image_embeddings))
-        # print("action", torch.max(action_embeddings), torch.min(action_embeddings))
-        logits = (image_embeddings @ action_embeddings.T) * self.logit_scale.exp()
-        # print(torch.max(logits), torch.min(logits))
-        # print(logits.shape)
-        
-        # Labels: diagonal elements are positive pairs
-        labels = torch.arange(batch_size, device=image_embeddings.device)
-        
-        # Symmetric cross-entropy loss
-        loss_i2a = F.cross_entropy(logits, labels)
-        loss_a2i = F.cross_entropy(logits.T, labels)
-        # print(F"loss_i2a: {loss_i2a.item():.4f}, loss_a2i: {loss_a2i.item():.4f}")
-        
-        # Average both directions
-        loss = (loss_i2a + loss_a2i) / 2
-        
-        return loss
-    
-    def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Forward pass computing contrastive loss.
-        
-        Args:
-            batch: Dictionary containing:
-                - 'images': Image tensor of shape (B, C, H, W)
-                - 'actions': Action tensor of shape (B, chunk_size, action_dim)
-                - 'sample_rate': Optional sample rate index (default: 0)
-                
-        Returns:
-            Contrastive loss value
-        """
-        # print(batch.keys())
+    def forward_ace(self, batch):
         images = batch['observation.images.primary'].to(dtype=torch.float32)  # (B, C, H, W), [0, 1]
         actions = batch['action']
-        states = batch['observation.state']
         sample_rate = batch.get('sample_rate', 0)
-        # print(sample_rate)
         # print(torch.max(images), torch.min(images)) # 0-1
         images = images.squeeze()
         pil_images = [
@@ -404,14 +359,13 @@ class RobotCLIP(PreTrainedPolicy):
         # Encode images and actions
         # print(torch.max(actions), torch.min(actions), torch.max(sample_rate), torch.min(sample_rate))
         image_embeddings = self.encode_images(pil_images)  # (B, D)
-        action_embeddings = self.encode_actions(actions, sample_rate)  # (B, D)
+        action_embeddings, recon_loss = self.encode_actions(actions, sample_rate)  # (B, D), (B, chunk_size, action_dim)
         
         # Compute contrastive loss
         # loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
         
         local_bs = image_embeddings.size(0)
         rank = dist.get_rank()
-        
         # gather 全局特征
         # start_time = time.time()
         all_image_embeddings = all_gather_with_detach(image_embeddings)    # [global_bs, D]
@@ -436,12 +390,38 @@ class RobotCLIP(PreTrainedPolicy):
         loss_a2i = F.cross_entropy(logits_a2i, labels)
         # print(all_image_embeddings.shape, all_action_embeddings.shape)
 
-        loss = 0.5 * (loss_i2a + loss_a2i)
+        loss = 0.5 * (loss_i2a + loss_a2i) + recon_loss
         
         # print(F"Contrastive loss: {loss.item():.4f}")
-        loss_dict = {"contrastive_loss": loss.item()}
+        loss_dict = {"contrastive_loss": loss.item(), "recon_loss": recon_loss}
         return loss, loss_dict
-        # return image_embeddings, action_embeddings, self.logit_scale
+    
+    def forward_action_decoder(self, batch):
+        actions = batch['action']
+        sample_rate = batch.get('sample_rate', 0)
+        _, recon_loss = self.encode_actions(actions, sample_rate)
+        loss = recon_loss.mean()
+        loss_dict = {"recon_loss": recon_loss, "contrastive_loss":torch.tensor(0.0, device=loss.device)}
+        return loss, loss_dict
+    
+    def forward(self, batch: Dict[str, torch.Tensor], task_type="train_ace") -> torch.Tensor:
+        """Forward pass computing contrastive loss.
+        
+        Args:
+            batch: Dictionary containing:
+                - 'images': Image tensor of shape (B, C, H, W)
+                - 'actions': Action tensor of shape (B, chunk_size, action_dim)
+                - 'sample_rate': Optional sample rate index (default: 0)
+                
+        Returns:
+            Contrastive loss value
+        """
+        if task_type == "train_ace":
+            return self.forward_ace(batch)
+        elif task_type == "train_action_decoder":
+            return self.forward_action_decoder(batch)
+        else:
+            raise NotImplementedError(f"Task type {task_type} not implemented in RobotCLIP forward.")
     
     def get_similarity(
         self,

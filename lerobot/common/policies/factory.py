@@ -179,6 +179,8 @@ def make_policy(
 
     if weight_pt_path:
         weights = torch.load(weight_pt_path, map_location="cpu")
+        if "module" in weights:
+            weights = weights["module"]
         # for key, value in policy.named_parameters():
         #     if "paligemma_with_expert" in key and "language_model" in key:
         #         print(key, value.shape)
@@ -193,14 +195,8 @@ def make_policy(
         new_state_dict = {}
 
         for key, value in weights.items():
-            # 判断是否包含目标字段，并进行替换
-            if "compress_to_tgtdim_v2" in key:
-                new_key = key.replace("compress_to_tgtdim_v2", "compress_to_tgtdim")
-            else:
-                new_key = key
-            # if "paligemma_with_expert.paligemma" in key:
-            #     new_key = key.replace("paligemma_with_expert.paligemma", "paligemma_with_expert.paligemma.model")
-            #     # print(key)
+            new_key = key
+            
             new_state_dict[new_key] = value
         if "pi0" in cfg.pretrained_path:
             if "pi05" in cfg.pretrained_path:

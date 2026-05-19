@@ -25,6 +25,7 @@ TRAIN_CONFIG_NAME = "train_config.json"
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
     stage: str = "finetune"
+    task_type: str = "train_ace" # train_ace | train_action_decoder
     env: envs.EnvConfig | None = None
     policy: PreTrainedConfig | None = None
     policy2: PreTrainedConfig | None = None

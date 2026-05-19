@@ -107,13 +107,14 @@ def concat_all_gather(tensor):
 def update_policy(
     model_engine,
     batch: Any,
-    logger
+    logger,
+    task_type: str = "train_ace"
 ) -> tuple[MetricsTracker, dict]:
     
     batch = {k: v.to(model_engine.device, dtype=torch.bfloat16) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
     
     # torch.cuda.empty_cache()
-    loss, output_dict = model_engine(batch)
+    loss, output_dict = model_engine(batch, task_type=task_type)
     # action_embeddings, image_embeddings, logit_scale = model_engine(batch)
     
     # local_bs = image_embeddings.size(0)
@@ -155,6 +156,7 @@ def train(cfg: TrainPipelineConfig):
     cfg.validate()
     
     # Initialize DeepSpeed
+    os.environ["DECORD_LOG_LEVEL"] = "error"
     deepspeed.init_distributed()
     logger = init_logger(cfg)
     
@@ -213,6 +215,7 @@ def train(cfg: TrainPipelineConfig):
         cfg=cfg.policy,
         device='cpu',
         ds_meta=dataset.meta,
+        weight_pt_path=cfg.policy.pretrained_path
     )
     logger.info("Policy model created...")
 
@@ -221,9 +224,10 @@ def train(cfg: TrainPipelineConfig):
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
 
     logger.info("Setting model parameters to BF16...")
-    for params in policy.parameters():
-        params.requires_grad = True
-        params.data = params.data.bfloat16()
+    if cfg.policy.frozen_ace == False:
+        for params in policy.parameters():
+            params.requires_grad = True
+            params.data = params.data.bfloat16()
 
     # Logging setup (main process only)
     if rank == 0:
@@ -333,6 +337,8 @@ def train(cfg: TrainPipelineConfig):
     # Metrics setup
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
+        "recon_loss": AverageMeter("recon_loss", ":.3f"),
+        "contra_loss": AverageMeter("contra_loss", ":.3f"),
         "grad_norm": AverageMeter("grdn", ":.3f"),
         "lr": AverageMeter("lr", ":0.1e"),
         "update_s": AverageMeter("updt_s", ":.3f"),
@@ -359,6 +365,7 @@ def train(cfg: TrainPipelineConfig):
 
     # first_batch = None
     # for step_idx in range(completed_steps, total_steps):
+    # start_log_time = time.time()
     for epoch in range(100000):
         print(f"Epoch {epoch} start...")
         dataloader.sampler.set_epoch(epoch)
@@ -375,7 +382,8 @@ def train(cfg: TrainPipelineConfig):
                 model_engine,
                 batch,
                 # first_batch,
-                logger
+                logger,
+                cfg.task_type
             )
             step += 1
             fwd_bwd_time += time.perf_counter() - fwd_bwd_start
@@ -383,7 +391,8 @@ def train(cfg: TrainPipelineConfig):
             if model_engine.is_gradient_accumulation_boundary():
                 train_tracker.dataloading_s = dataloading_s
                 train_tracker.update_s = fwd_bwd_time
-                
+                train_tracker.contra_loss = output_dict.get("contrastive_loss", 0)
+                train_tracker.recon_loss = output_dict.get("recon_loss", 0)
 
                 loss_value = loss.detach().mean().item()
                 grad_norm_value = 0.0
@@ -413,6 +422,8 @@ def train(cfg: TrainPipelineConfig):
             
             if int(os.environ.get('RANK', 0)) == 0:
                 if is_log_step:
+                    # end_log_time = time.time()
+                    # print(f"Log time:{end_log_time - start_log_time}")
                     logger.info(train_tracker)
                     if wandb_logger:
                         wandb_log_dict = train_tracker.to_dict()
@@ -420,6 +431,7 @@ def train(cfg: TrainPipelineConfig):
                             wandb_log_dict.update(output_dict)
                         wandb_logger.log_dict(wandb_log_dict, step)
                     train_tracker.reset_averages()
+                    start_log_time = time.time()
 
             if step % dist_step == 0:
                 dist.barrier(device_ids=[model_engine.local_rank])

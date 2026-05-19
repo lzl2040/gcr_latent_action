@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # 默认参数值
 NNODES=1
 NPROC_PER_NODE=2
@@ -12,11 +11,13 @@ SCHEDULER_DECAY_STEPS=60000
 SCHEDULER_PLATFORM_STEPS=1
 WEIGHT_DECAY=1e-5
 PRETRAINED_PATH=""
+FROZEN_ACE=false
 GRADIENT_ACCUMULATION_STEPS=4
 BATCH_SIZE=10
 SAVE_FREQ=5000
 IS_FT=true
 CHUNK_SIZE=16
+TASK_TYPE="train_ace"
 DATASET_SIZE_ONE_EPOCH=1000_0000
 
 # 解析命令行参数
@@ -90,6 +91,14 @@ while [[ $# -gt 0 ]]; do
             PRETRAINED_PATH="$2"
             shift 2
             ;;
+        --frozen_ace)
+            FROZEN_ACE="$2"
+            shift 2
+            ;;
+        --task_type)
+            TASK_TYPE="$2"
+            shift 2
+            ;;
         --chunk_size)
             CHUNK_SIZE="$2"
             shift 2
@@ -140,6 +149,8 @@ python lerobot/scripts/dps_train_ace.py \
     --policy.optimizer_lr=$OPTIMIZER_LR \
     --policy.scheduler_decay_lr=$OPTIMIZER_DECAY_LR \
     --policy.pretrained_path=$PRETRAINED_PATH \
+    --policy.frozen_ace=$FROZEN_ACE \
+    --task_type=$TASK_TYPE \
     --wandb.enable=true \
     --wandb.project="ace" \
     --job_name="$JOB_NAME" \
