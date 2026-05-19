@@ -158,10 +158,14 @@ def decode_video_frames_torchcodec(
     # frame_indices = [min(round(ts * average_fps), decoder._num_frames - 1) for ts in timestamps]
     frame_indices = [round(ts * average_fps) for ts in timestamps]
     # retrieve frames based on indices
+    error_txt_path = "/mnt/wangxiaofa/action_chunk_encoder_exp/error_log.txt"
     try:
         frames_batch = decoder.get_frames_at(indices=frame_indices)
     except Exception as e:
-        print(video_path, e)
+        frame_indices = [min(round(ts * average_fps), decoder._num_frames - 1) for ts in timestamps]
+        frames_batch = decoder.get_frames_at(indices=frame_indices)
+        with open(error_txt_path, "a") as f:
+            f.write(f"Frame decode error: {e} from {video_path} using fallback ones tensor.\n")
     
     for frame, pts in zip(frames_batch.data, frames_batch.pts_seconds, strict=True):
         loaded_frames.append(frame)
@@ -180,7 +184,9 @@ def decode_video_frames_torchcodec(
     is_within_tol = min_ < tolerance_s
     # print(f"video: {video_path} timestamp loading check: queried timestamps: {query_ts} loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}")
     if not is_within_tol.all():
-        print(f"video: {video_path} timestamp loading check: queried timestamps: {query_ts} loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}")
+        with open(error_txt_path, "a") as f:
+            f.write(f"Video: {video_path} timestamp loading warning: queried timestamps: {query_ts} loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}\n")
+        # print(f"video: {video_path} timestamp loading check: queried timestamps: {query_ts} loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}")
     #     raise FrameTimestampError(
     #         f"One or several query timestamps unexpectedly violate the tolerance ({min_[~is_within_tol]} > {tolerance_s=})."
     #         " It means that the closest frame that can be loaded from the video is too far away in time."
