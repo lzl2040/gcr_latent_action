@@ -949,20 +949,21 @@ def aggregate_stats_new(stats_list: list[dict[str, dict]], max_dim = 32) -> dict
     - new_std = (std of all data)
     """
 
-    stats_list = _assert_type_and_shape(stats_list)
+    _assert_type_and_shape(stats_list)
 
-    # data_keys = {key for stats in stats_list for key in stats}
-    data_keys = set()
-    for i, stats in enumerate(stats_list):
-        if stats is None:
-            print(f"[WARN] stats_list[{i}] is None")
-            continue
+    data_keys = {key for stats in stats_list for key in stats}
+    # data_keys = set()
+    # for i, stats in enumerate(stats_list):
+    #     if stats is None:
+    #         print(f"[WARN] stats_list[{i}] is None")
+    #         continue
 
-        if not isinstance(stats, dict):
-            print(f"[WARN] stats_list[{i}] type={type(stats)}")
-            continue
+    #     if not isinstance(stats, dict):
+    #         print(f"[WARN] stats_list[{i}] type={type(stats)}")
+    #         continue
 
-        data_keys.update(stats.keys())
+    #     data_keys.update(stats.keys())
+    
     aggregated_stats = {key: {} for key in data_keys}
 
     for key in data_keys:
