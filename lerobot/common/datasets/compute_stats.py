@@ -810,9 +810,6 @@ def aggregate_multi_stats(ls_datasets: list, data_names: list, max_dim: int) -> 
         image_obs_keys = data_config["image_obs_keys"]
         # print(d_name, image_obs_keys)
         for new_key, old_key in image_obs_keys.items():
-            # if old_key != None:
-            #     dataset.meta.stats[f"observation.images.{new_key}"] = dataset.meta.stats[f"observation.images.{old_key}"]
-            #     del dataset.meta.stats[f"observation.images.{old_key}"]
             # in fact, the stats about image is not needed
             if f"observation.images.{old_key}" in dataset.meta.stats.keys():
                 del dataset.meta.stats[f"observation.images.{old_key}"]
@@ -940,4 +937,58 @@ def aggregate_multi_stats(ls_datasets: list, data_names: list, max_dim: int) -> 
 def update_meta(stats_list, cached_statistics_path = None):
     if cached_statistics_path is not None:
         print(f"load")
-    
+
+def aggregate_stats_new(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str, dict[str, np.ndarray]]:
+    """Aggregate stats from multiple compute_stats outputs into a single set of stats.
+
+    The final stats will have the union of all data keys from each of the stats dicts.
+
+    For instance:
+    - new_min = min(min_dataset_0, min_dataset_1, ...)
+    - new_max = max(max_dataset_0, max_dataset_1, ...)
+    - new_mean = (mean of all data, weighted by counts)
+    - new_std = (std of all data)
+    """
+
+    stats_list = _assert_type_and_shape(stats_list)
+
+    data_keys = {key for stats in stats_list for key in stats}
+    aggregated_stats = {key: {} for key in data_keys}
+
+    for key in data_keys:
+        stats_with_key = [stats[key] for stats in stats_list if key in stats]
+        # pad mean, std, q01, q99, max, min
+        # for dataset without ego_dex
+        if key in ["action", "observation.state"]:
+            pad_stats_with_key = []
+            # max_dim = max_dims[key]
+            for stats in stats_with_key: # for different dataset
+                if np.isnan(stats["mean"]).any() or np.isnan(stats["std"]).any() or np.isnan(stats["max"]).any() or np.isnan(stats["min"]).any():
+                    print(f"Warning: NaN values found in stats for key '{key}'. Skipping this dataset in aggregation.")
+                    continue
+                pad_stats = {}
+                pad_len = max_dim - len(stats["mean"])
+                if pad_len <= 0:
+                    pad_stats_with_key.append(stats)
+                    continue
+                # np.pad(数组, (左补数量, 右补数量), mode="constant", constant_values=填充值)
+                pad_stats["mean"] = np.pad(stats["mean"], (0, pad_len), mode="constant", constant_values=0)
+                pad_stats["std"] = np.pad(stats["std"], (0, pad_len), mode="constant", constant_values=1)
+                pad_stats["max"] = np.pad(stats["max"], (0, pad_len), mode="constant", constant_values=1)
+                pad_stats["min"] = np.pad(stats["min"], (0, pad_len), mode="constant", constant_values=-1)
+                # pad_stats["q01"] = np.pad(stats["q01"], (0, pad_len), mode="constant", constant_values=-1)
+                # pad_stats["q10"] = np.pad(stats["q10"], (0, pad_len), mode="constant", constant_values=-0.5)
+                # pad_stats["q50"] = np.pad(stats["q50"], (0, pad_len), mode="constant", constant_values=0)
+                # pad_stats["q90"] = np.pad(stats["q90"], (0, pad_len), mode="constant", constant_values=0.5)
+                # pad_stats["q99"] = np.pad(stats["q99"], (0, pad_len), mode="constant", constant_values=1)
+                pad_stats["count"] = stats["count"]
+                pad_stats_with_key.append(pad_stats)
+        else:
+            pad_stats_with_key = stats_with_key
+        aggregated_stats[key] = aggregate_feature_stats(pad_stats_with_key)
+        for k, v in aggregated_stats[key].items():
+            if isinstance(aggregated_stats[key][k], np.ndarray):
+                aggregated_stats[key][k] = torch.from_numpy(aggregated_stats[key][k])
+        # print(key, type(aggregated_stats[key]))
+
+    return aggregated_stats

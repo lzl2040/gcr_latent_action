@@ -51,7 +51,7 @@ from lerobot.common.datasets.oxe_configs import OXE_DATASET_CONFIGS
 from lerobot.common.datasets.mixtures import OXE_NAMED_MIXTURES
 from lerobot.common.datasets.utils import cycle, save_to_json
 # from lerobot.common.datasets.factory import resolve_delta_timestamps
-from lerobot.common.datasets.compute_stats import aggregate_stats, compute_episode_stats, aggregate_multi_stats
+from lerobot.common.datasets.compute_stats import aggregate_stats, compute_episode_stats, aggregate_stats_new
 from lerobot.common.datasets.transforms import ImageTransforms
 from lerobot.common.datasets.image_writer import AsyncImageWriter, write_image
 from lerobot.common.datasets.utils import (
@@ -1549,7 +1549,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                                   "observation.images.wrist"] # follow https://github.com/openvla/openvla/blob/main/prismatic/vla/datasets/rlds/oxe/configs.py
         
         # print(self.datasets[0].meta.stats)
-        self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
+        self.stats = aggregate_stats_new([dataset.meta.stats for dataset in self.datasets], 
+                                     max_dim = self.max_action_dim) # Note: I modified this function
         # save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
         # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/original_qw", f"{cfg.data_mix}_stats.json"))
         # remove state
@@ -1657,53 +1658,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         #     item['dataset_name'] = dataset_name
         
         data_dict = self._fetch_data_dict(item, image_obs_keys)
-        data_dict["action"] = torch.nan_to_num(data_dict["action"], nan=0.0)
-        # v2
-        # none_flag = True
-        # max_retry = 100
-        # retry = 0
-        # while none_flag:
-        #     if retry > max_retry:
-        #         break
-        #     retry += 1
-        #     if self.is_ft:
-        #         dataset_id, data_id = self.id2dataset[index]
-        #         dataset = self.datasets[dataset_id]
-        #         item = dataset[data_id]
-        #         dataset_name = item["dataset_name"]
-        #         data_config = OXE_DATASET_CONFIGS[dataset_name]
-        #         image_obs_keys = data_config["image_obs_keys"]
-        #     else:
-        #         selected_dataset = random.choices(self.datasets, weights=self.sample_weights, k=1)[0]
-        #         dataset_index = self.datasets.index(selected_dataset)
-        #         dataset_name = self.dataset_names[dataset_index]
-        #         data_config = OXE_DATASET_CONFIGS[dataset_name]
-        #         indices = self.selected_indices[dataset_index] # the selected indices of this dataset
-        #         selected_id = random.choice(indices) # equal prob
-                
-        #         image_obs_keys = data_config["image_obs_keys"]
-            
-        #         item = selected_dataset[selected_id]
-        #         item['dataset_name'] = dataset_name
-            
-        #     data_dict = self._fetch_data_dict(item, image_obs_keys)
-            
-        #     none_flag = False
-        #     for key, value in data_dict.items():
-        #         if value is None:
-        #             logging.warning(f"Found NoneType Value at key: {key}, from {data_dict['source']}, refetch data")
-        #             none_flag = True
-                    
-        #         elif isinstance(value, list):
-        #             if len(value) == 0:
-        #                 logging.warning(f"Found Empty List at key: {key}, from {data_dict['source']}, refetch data")
-        #                 none_flag = True
-                        
-        #             else:
-        #                 for v in value:
-        #                     if v is None:
-        #                         logging.warning(f"Found NoneType Value in List at key: {key}, from {data_dict['source']}, refetch data")
-        #                         none_flag = True
+        # data_dict["action"] = torch.nan_to_num(data_dict["action"], nan=0.0)
                                 
         # gc.collect()
         return data_dict
