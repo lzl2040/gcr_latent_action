@@ -734,7 +734,7 @@ class ActionChunkEncoder(nn.Module):
             )
         else:
             reconstructed_actions = None
-            recon_loss = None
+            recon_loss = torch.tensor(0.0, device=actions.device)
 
         return {
             "embedding": embedding,

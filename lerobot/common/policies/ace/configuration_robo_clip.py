@@ -35,7 +35,7 @@ class ACEConfig:
     num_attention_heads: int = 12
     num_hidden_layers: int = 12
     intermediate_dim: int = 3072
-    dropout: float = 0.1
+    dropout: float = 0.0
     max_position_embeddings: int = 512
     output_dim: int = None
     frozen_ace: bool = False # true = train decoder

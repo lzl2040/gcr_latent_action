@@ -237,6 +237,9 @@ class VisionEncoder(nn.Module):
 
         # fuse pooled token with original cls token
         final_token = self.fusion_head(cls_token, pooled_token)  # [B, output_dim]
+        final_token = final_token / (
+            final_token.abs().max(dim=-1, keepdim=True)[0] + 1e-8
+        )
 
         return {
             "final_token": final_token,
@@ -326,7 +329,6 @@ class RobotCLIP(PreTrainedPolicy):
         image_embeddings = self.vision_model(images)["final_token"]  # (B, projection_dim)
         # print(f"Image embeddings shape after vision model: {image_embeddings.shape}")
         image_embeddings = self.image_projection(image_embeddings)
-        # image_embeddings = F.normalize(image_embeddings, dim=-1)
         return image_embeddings
     
     def encode_actions(self, actions: torch.Tensor, sample_rate: int = 0) -> torch.Tensor:
@@ -359,7 +361,7 @@ class RobotCLIP(PreTrainedPolicy):
         # Encode images and actions
         # print(torch.max(actions), torch.min(actions), torch.max(sample_rate), torch.min(sample_rate))
         image_embeddings = self.encode_images(pil_images)  # (B, D)
-        action_embeddings, recon_loss = self.encode_actions(actions, sample_rate)  # (B, D), (B, chunk_size, action_dim)
+        action_embeddings, _ = self.encode_actions(actions, sample_rate)  # (B, D), (B, chunk_size, action_dim)
         
         # Compute contrastive loss
         # loss = self.compute_contrastive_loss(image_embeddings, action_embeddings)
@@ -390,10 +392,10 @@ class RobotCLIP(PreTrainedPolicy):
         loss_a2i = F.cross_entropy(logits_a2i, labels)
         # print(all_image_embeddings.shape, all_action_embeddings.shape)
 
-        loss = 0.5 * (loss_i2a + loss_a2i) + recon_loss
+        loss = 0.5 * (loss_i2a + loss_a2i)
         
         # print(F"Contrastive loss: {loss.item():.4f}")
-        loss_dict = {"contrastive_loss": loss.item(), "recon_loss": recon_loss}
+        loss_dict = {"contrastive_loss": loss.item(), "recon_loss": torch.tensor(0.0, device=loss.device).item()}
         return loss, loss_dict
     
     def forward_action_decoder(self, batch):
@@ -401,7 +403,7 @@ class RobotCLIP(PreTrainedPolicy):
         sample_rate = batch.get('sample_rate', 0)
         _, recon_loss = self.encode_actions(actions, sample_rate)
         loss = recon_loss.mean()
-        loss_dict = {"recon_loss": recon_loss, "contrastive_loss":torch.tensor(0.0, device=loss.device)}
+        loss_dict = {"recon_loss": recon_loss.mean().item(), "contrastive_loss":torch.tensor(0.0, device=loss.device).item()}
         return loss, loss_dict
     
     def forward(self, batch: Dict[str, torch.Tensor], task_type="train_ace") -> torch.Tensor:
