@@ -632,7 +632,6 @@ def aggregate_stats(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str
         for k, v in aggregated_stats[key].items():
             if isinstance(aggregated_stats[key][k], np.ndarray):
                 aggregated_stats[key][k] = torch.from_numpy(aggregated_stats[key][k])
-        # print(key, type(aggregated_stats[key]))
 
     return aggregated_stats
 
@@ -952,7 +951,18 @@ def aggregate_stats_new(stats_list: list[dict[str, dict]], max_dim = 32) -> dict
 
     stats_list = _assert_type_and_shape(stats_list)
 
-    data_keys = {key for stats in stats_list for key in stats}
+    # data_keys = {key for stats in stats_list for key in stats}
+    data_keys = set()
+    for i, stats in enumerate(stats_list):
+        if stats is None:
+            print(f"[WARN] stats_list[{i}] is None")
+            continue
+
+        if not isinstance(stats, dict):
+            print(f"[WARN] stats_list[{i}] type={type(stats)}")
+            continue
+
+        data_keys.update(stats.keys())
     aggregated_stats = {key: {} for key in data_keys}
 
     for key in data_keys:

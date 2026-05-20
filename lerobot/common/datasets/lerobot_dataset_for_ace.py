@@ -184,6 +184,7 @@ class LeRobotDatasetMetadata:
             self.stats = aggregate_stats(list(episodes_stats.values()))
             episodes_stats.clear()
             del episodes_stats
+        print(self.stats)
         # if self._version < packaging.version.parse("v2.1"):
         #     self.stats = load_stats(self.root)
         #     self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
@@ -1553,7 +1554,6 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                                      max_dim = self.max_action_dim) # Note: I modified this function
         # save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
         # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/original_qw", f"{cfg.data_mix}_stats.json"))
-        # remove state
         
         print(f"Aggregated stats:{self.stats}")
         # update meta_features
