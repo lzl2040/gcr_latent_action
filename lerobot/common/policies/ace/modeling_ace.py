@@ -644,7 +644,8 @@ class ActionChunkEncoder(nn.Module):
         batch_size = actions.shape[0]
 
         # Save GT before grouping
-        gt_actions = actions[..., : self.action_dim]
+        # gt_actions = actions[..., : self.action_dim]
+        gt_actions = actions
 
         # Pad action dim
         if actions.shape[-1] != self.action_dim_padded:
@@ -724,9 +725,9 @@ class ActionChunkEncoder(nn.Module):
                 self.action_dim_padded,
             )
 
-            reconstructed_actions = reconstructed_actions[
-                ..., : self.action_dim
-            ]
+            # reconstructed_actions = reconstructed_actions[
+            #     ..., : self.action_dim
+            # ]
 
             recon_loss = F.mse_loss(
                 reconstructed_actions,
