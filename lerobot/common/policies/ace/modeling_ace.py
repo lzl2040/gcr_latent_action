@@ -417,11 +417,11 @@ class ActionReconstructionHead(nn.Module):
         self.group_dim = config.group_size * config.max_action_dim
         self.hidden_dim = config.hidden_dim
 
-        self.global_fuse = nn.Sequential(
-            nn.Linear(config.hidden_dim * 2, config.hidden_dim),
-            nn.GELU(),
-            nn.LayerNorm(config.hidden_dim),
-        )
+        # self.global_fuse = nn.Sequential(
+        #     nn.Linear(config.hidden_dim * 2, config.hidden_dim),
+        #     nn.GELU(),
+        #     nn.LayerNorm(config.hidden_dim),
+        # )
 
         self.decoder_layers = nn.ModuleList(
             [
@@ -446,14 +446,15 @@ class ActionReconstructionHead(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        global_tokens = global_embedding.unsqueeze(1).expand_as(action_tokens)
+        # global_tokens = global_embedding.unsqueeze(1).expand_as(action_tokens)
 
-        x = torch.cat(
-            [action_tokens, global_tokens],
-            dim=-1,
-        )
+        # x = torch.cat(
+        #     [action_tokens, global_tokens],
+        #     dim=-1,
+        # )
+        x = action_tokens
 
-        x = self.global_fuse(x)
+        # x = self.global_fuse(x)
 
         for layer in self.decoder_layers:
             x = layer(
@@ -727,11 +728,13 @@ class ActionChunkEncoder(nn.Module):
             # reconstructed_actions = reconstructed_actions[
             #     ..., : self.action_dim
             # ]
+            # print("pred:", reconstructed_actions[0, 0, :5], "gt:", gt_actions[0, 0, :5])
 
             recon_loss = F.mse_loss(
                 reconstructed_actions,
                 gt_actions,
             )
+            # print(recon_loss)
         else:
             reconstructed_actions = None
             recon_loss = torch.tensor(0.0, device=actions.device)
