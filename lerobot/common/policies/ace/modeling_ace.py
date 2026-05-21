@@ -426,7 +426,7 @@ class ActionReconstructionHead(nn.Module):
         self.decoder_layers = nn.ModuleList(
             [
                 ACEDecoderLayer(config)
-                for _ in range(4)  # 先用 2 层，后面可以试 4 层
+                for _ in range(8)  # 先用 2 层，后面可以试 4 层
             ]
         )
 
