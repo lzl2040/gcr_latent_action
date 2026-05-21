@@ -474,8 +474,7 @@ class ActionChunkEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.frozen_ace = config.frozen_ace
-
-        self.action_dim = config.action_dim
+        
         self.action_dim_padded = config.max_action_dim
         self.chunk_size = config.chunk_size
         self.group_size = config.group_size
