@@ -287,14 +287,15 @@ class RobotCLIP(PreTrainedPolicy):
         self.action_encoder = ActionChunkEncoder(action_config)
         
         # Projection layers to align embeddings
-        self.image_projection = nn.Linear(config.projection_dim, config.projection_dim)
-        self.action_projection = nn.Linear(config.hidden_dim, config.projection_dim)
+        # self.image_projection = nn.Linear(config.projection_dim, config.projection_dim)
+        # self.action_projection = nn.Linear(config.hidden_dim, config.projection_dim)
         
         # Temperature for contrastive loss
         self.logit_scale = nn.Parameter(torch.tensor(1.0 / config.temperature))
         
         # Layer norm for stability
-        self.tanh = nn.Tanh()
+        self.image_ln = nn.LayerNorm(config.hidden_dim)
+        self.action_ln = nn.LayerNorm(config.hidden_dim)
         
         # frozen weights
         if config.frozen_ace:
@@ -327,8 +328,9 @@ class RobotCLIP(PreTrainedPolicy):
             Normalized image embeddings of shape (B, projection_dim)
         """
         image_embeddings = self.vision_model(images)["final_token"]  # (B, projection_dim)
-        # print(f"Image embeddings shape after vision model: {image_embeddings.shape}")
-        image_embeddings = self.image_projection(image_embeddings)
+        image_embeddings = self.action_ln(image_embeddings)
+        # image_embeddings = self.image_projection(image_embeddings)
+        image_embeddings = F.normalize(image_embeddings, dim = -1)
         return image_embeddings
     
     def encode_actions(self, actions: torch.Tensor, sample_rate: int = 0) -> torch.Tensor:
@@ -344,7 +346,9 @@ class RobotCLIP(PreTrainedPolicy):
         action_output = self.action_encoder(actions, sample_rate)
         action_embeddings = action_output["embedding"]  # (B, output_dim)
         recon_loss = action_output["recon_loss"]  # (B, chunk_size, action_dim)
-        action_embeddings = self.action_projection(action_embeddings)
+        # action_embeddings = self.action_projection(action_embeddings)
+        action_embeddings = self.action_ln(action_embeddings)
+        action_embeddings = F.normalize(action_embeddings, dim = -1)
         return action_embeddings, recon_loss
     
     def forward_ace(self, batch):
