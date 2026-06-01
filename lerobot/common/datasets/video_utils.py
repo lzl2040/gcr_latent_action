@@ -31,6 +31,20 @@ from PIL import Image
 import importlib
 from threading import Lock
 import fsspec
+import os
+import sys
+
+class SuppressStderr:
+    def __enter__(self):
+        self.stderr_fd = sys.stderr.fileno()
+        self.saved_stderr_fd = os.dup(self.stderr_fd)
+        self.devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(self.devnull_fd, self.stderr_fd)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        os.dup2(self.saved_stderr_fd, self.stderr_fd)
+        os.close(self.saved_stderr_fd)
+        os.close(self.devnull_fd)
 
 
 class VideoDecoderCache:
@@ -52,7 +66,8 @@ class VideoDecoderCache:
         with self._lock:
             if video_path not in self._cache:
                 # file_handle = fsspec.open(video_path).__enter__()
-                decoder = VideoDecoder(video_path, seek_mode="approximate")
+                with SuppressStderr():
+                    decoder = VideoDecoder(video_path, seek_mode="approximate")
                 self._cache[video_path] = (decoder, video_path)
 
             return self._cache[video_path][0]
@@ -158,7 +173,8 @@ def decode_video_frames_torchcodec(
     # frame_indices = [min(round(ts * average_fps), decoder._num_frames - 1) for ts in timestamps]
     frame_indices = [round(ts * average_fps) for ts in timestamps]
     # retrieve frames based on indices
-    error_txt_path = "/mnt/wangxiaofa/action_chunk_encoder_exp/error_log.txt"
+    # error_txt_path = "/mnt/wangxiaofa/action_chunk_encoder_exp/error_log.txt"
+    error_txt_path = "error_log.txt"
     try:
         frames_batch = decoder.get_frames_at(indices=frame_indices)
     except Exception as e:
@@ -423,41 +439,6 @@ def decode_video_frames_torchvision(
                 # print(current_ts, first_ts, len(loaded_frames))
         except Exception as e:
             print(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
-        
-        # reader_iter = iter(reader)
-
-        # for _ in range(max_frame_window):
-        #     try:
-        #         frame = next(reader_iter)   # 关键：显式 next 才能捕获异常
-        #         current_ts = frame['pts']
-        #         tensor = frame["data"]  # (C,H,W)
-
-        #         if log_loaded_timestamps:
-        #             logging.info(f"frame loaded at timestamp={current_ts:.4f}")
-
-        #         loaded_frames.append(frame["data"])
-        #         loaded_ts.append(current_ts)
-
-        #     except StopIteration:
-        #         # 视频已读完，直接退出，不补帧
-        #         logging.info("Video finished early. Stop reading.")
-        #         break
-
-        #     except Exception as e:
-        #         # 解码错误时：补一个全 1 tensor
-        #         logging.warning(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
-        #         print(f"Frame decode error: {e} from {video_path} using fallback ones tensor.")
-        #         if len(loaded_frames) > 0:
-        #             ones_frame = torch.ones_like(loaded_frames[0])
-        #         else:
-        #             # 如果第一帧就坏，必须给定 frame_shape
-        #             meta = reader.get_metadata()
-        #             w = meta["video"]["width"]
-        #             h = meta["video"]["height"]
-        #             ones_frame = torch.ones((3, h, w), dtype=torch.uint8)
-
-        #         loaded_frames.append(ones_frame)
-        #         loaded_ts.append(-1)
 
     if backend == "pyav":
         reader.container.close()

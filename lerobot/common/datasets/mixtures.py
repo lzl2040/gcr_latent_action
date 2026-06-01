@@ -412,8 +412,8 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("jaco_play", 1.0),
         # ("robomind_franka_dual_arm", 1.0),
         # # ("fractal20220817_data", 0.54087122203),
-        ("bridge_orig", 1.0),   
-        # ("interna1_dual_arm_4", 1.0),
+        # ("bridge_orig", 1.0),   
+        # ("interna1_single_arm", 1.0),
     ],
 
     # === T-DROID Dataset ===

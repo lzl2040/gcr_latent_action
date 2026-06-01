@@ -524,7 +524,7 @@ def check_timestamps_sync(
             "timestamps and episode_indices should have the same shape. "
             f"Found {timestamps.shape=} and {episode_indices.shape=}."
         )
-
+    
     # Consecutive differences
     diffs = np.diff(timestamps)
     # print(1.0 / fps)

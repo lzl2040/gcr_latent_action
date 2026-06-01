@@ -113,9 +113,9 @@ class AdamWConfig(OptimizerConfig):
     def build(self, params: dict) -> torch.optim.Optimizer:
         kwargs = asdict(self)
         kwargs.pop("grad_clip_norm")
-        adam8bit = bnb.optim.Adam8bit(params, **kwargs)
-        return adam8bit
-        # return torch.optim.AdamW(params, **kwargs)
+        # adam8bit = bnb.optim.Adam8bit(params, **kwargs)
+        # return adam8bit
+        return torch.optim.AdamW(params, **kwargs)
 
 
 @OptimizerConfig.register_subclass("sgd")

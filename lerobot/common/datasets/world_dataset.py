@@ -1651,8 +1651,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         # self.stats = aggregate_multi_stats(self.datasets, self.dataset_names, self.max_action_dim) # Note: I modified this function
         self.stats = aggregate_stats_with_game({"stats": [dataset.meta.stats for dataset in self.datasets], 
                                                 "dataset_names": self.dataset_names}, self.max_action_dim)
-        # save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
-        save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/world_model_exp", f"{cfg.data_mix}_stats.json"))
+        save_to_json(self.stats, os.path.join("lerobot/stats", f"{cfg.data_mix}_stats.json"))
+        # save_to_json(self.stats, os.path.join("/mnt/wangxiaofa/world_model_exp", f"{cfg.data_mix}_stats.json"))
         
         print(f"Aggregated stats:{self.stats}")
         # update meta_features
@@ -1925,10 +1925,12 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             new_action = torch.ones((chunk_len, self.max_action_dim))
             new_action[:, :6] = item["action"][:, :6]
             new_action[:, 6:6 + 1] = item["action"][:, -2:-1]
+            # force data
             new_action[:, 44:44 + 6] = item["action"][:, 6:6 + 6]
             new_state = torch.ones(self.max_state_dim)
             new_state[:7] = item["observation.state"][:7]
             new_state[7:7 + 1] = item["observation.state"][-2:-1]
+            # force data
             new_state[46:46 + 6] = item["observation.state"][7:7 + 6]
             item["action"] = new_action
             item["observation.state"] = new_state
