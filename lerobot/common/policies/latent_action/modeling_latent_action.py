@@ -242,7 +242,9 @@ class LatentActionModel(PreTrainedPolicy):
         self.action_token_idx = config.action_token_idx
         self.img_token_id = self.vlm.config.image_token_id
         if config.is_distill == False:
+            # not moe
             self.uni_decoder = UniDecoder(config)
+            # moe
             # self.uni_decoder = UniDecoder2(config)
 
         self.dtype = torch.bfloat16
