@@ -1922,6 +1922,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             "observation.state": item["observation.state"],
             "action": item["action"],
             "action_is_pad": item["action_is_pad"].unsqueeze(0),
+            "observation.images.primary": vl_item["first_image"],
             "task": task_text,
             **vl_item,
         }
@@ -1987,6 +1988,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             "attention_mask": attention_mask,
             "pixel_values": pixel_values,
             "video_len": frame_len,
+            "first_image": first_image,
+            "last_image": last_image
             # "image_grid_thw": image_grid_thw,
             # "pixel_values_videos": pixel_values_videos,
             # "video_grid_thw": video_grid_thw,
