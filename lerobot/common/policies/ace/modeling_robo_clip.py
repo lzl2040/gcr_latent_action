@@ -328,7 +328,7 @@ class RobotCLIP(PreTrainedPolicy):
             Normalized image embeddings of shape (B, projection_dim)
         """
         image_embeddings = self.vision_model(images)["final_token"]  # (B, projection_dim)
-        image_embeddings = self.action_ln(image_embeddings)
+        image_embeddings = self.image_ln(image_embeddings)
         # image_embeddings = self.image_projection(image_embeddings)
         image_embeddings = F.normalize(image_embeddings, dim = -1)
         return image_embeddings
