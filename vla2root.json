@@ -79,5 +79,9 @@
     "interna1_dual_arm_2": "InternA1/dual_arm_2",
     "interna1_dual_arm_3": "InternA1/dual_arm_3",
     "interna1_dual_arm_4": "InternA1/dual_arm_4",
-    "interna1_single_arm": "InternA1/single_arm"
+    "interna1_single_arm": "InternA1/single_arm",
+    "ms_data_scale": "Micro_data/Trossen_Stationary_AI_480x640_padded_MERGED",
+    "ms_data_xdof_1": "Micro_data/XMI_MERGED",
+    "ms_data_xdof_2": "Micro_data/YAM_Box_MERGED",
+    "ms_data_xdof_3": "Micro_data/YAM_Station_MERGED"
 }

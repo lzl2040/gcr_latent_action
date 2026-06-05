@@ -36,7 +36,8 @@ from torch.utils.data import DataLoader
 
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.transforms import ImageTransforms
-from lerobot.common.datasets.lerobot_dataset_for_ace import MultiDatasetforDistTraining, extra_collate_fn
+# from lerobot.common.datasets.lerobot_dataset_for_ace import MultiDatasetforDistTraining, extra_collate_fn
+from lerobot.common.datasets_v30.lerobot_dataset import MultiDatasetforDistTraining
 from lerobot.common.datasets.sampler import EpisodeAwareSampler, DistEpisodeAwareSampler
 from lerobot.common.datasets.utils import cycle
 from lerobot.common.envs.factory import make_env
@@ -196,7 +197,6 @@ def train(cfg: TrainPipelineConfig):
     dataset = MultiDatasetforDistTraining(
         cfg=cfg, 
         image_transforms=image_transforms,
-        wrist_image_transforms=wrist_image_transforms,
         seed=seed,
         data_mix=cfg.data_mix,
         vla2root_json="vla2root.json",
@@ -210,7 +210,7 @@ def train(cfg: TrainPipelineConfig):
         logger.info("Setting model's tokenizer_max_length to 100")
         cfg.policy.tokenizer_max_length=100
     logger.info("Still creating policy...")
-    # print(cfg.policy.pretrained_path)
+    
     policy = make_policy(
         cfg=cfg.policy,
         device='cpu',
@@ -371,7 +371,7 @@ def train(cfg: TrainPipelineConfig):
         dataloader.sampler.set_epoch(epoch)
         dataloader.dataset.set_epoch(epoch)
         for batch in dataloader:
-        
+            print(batch.keys())
             start_time = time.perf_counter()
             # batch = next(dl_iter)
             dataloading_time = time.perf_counter() - start_time
