@@ -19,6 +19,7 @@ IS_FT=true
 CHUNK_SIZE=16
 TASK_TYPE="train_ace"
 DATASET_SIZE_ONE_EPOCH=1000_0000
+PRRENT_DIR="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -99,6 +100,10 @@ while [[ $# -gt 0 ]]; do
             TASK_TYPE="$2"
             shift 2
             ;;
+        --parent_dir)
+            PARENT_DIR="$2"
+            shift 2
+            ;;
         --chunk_size)
             CHUNK_SIZE="$2"
             shift 2
@@ -141,7 +146,7 @@ python lerobot/scripts/dps_train_ace.py \
     --save_freq=$SAVE_FREQ \
     --is_ft=$IS_FT \
     --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/" \
-    --dataset.parent_dir="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/" \
+    --dataset.parent_dir=$PARENT_DIR \
     --policy.scheduler_warmup_steps=$SCHEDULER_WARMUP_STEPS \
     --policy.scheduler_decay_steps=$SCHEDULER_DECAY_STEPS \
     --policy.scheduler_platform_steps=$SCHEDULER_PLATFORM_STEPS \
