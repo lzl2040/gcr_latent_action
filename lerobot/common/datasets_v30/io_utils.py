@@ -71,7 +71,7 @@ def load_nested_dataset(
         features: Optional features schema to ensure consistent loading of complex types like images
         episodes: Optional list of episode indices to filter. Uses PyArrow predicate pushdown for efficiency.
     """
-    paths = sorted(pq_dir.glob("*/*.parquet"))
+    paths = sorted(pq_dir.glob("*/file*.parquet"))
     if len(paths) == 0:
         raise FileNotFoundError(f"Provided directory does not contain any parquet file: {pq_dir}")
 
