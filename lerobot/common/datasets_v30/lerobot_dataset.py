@@ -675,8 +675,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
         item["dataset_name"] = self.dataset_name
         
         if "action" not in item.keys():
+            if "observation.ee_ort6d_pos" not in item.keys():
+                item["observation.state"] = item["observations.ee_ort6d_pos"]
+            else:
+                item["observation.state"] = item["observation.ee_ort6d_pos"]
             item["action"] = item["action.ee_ort6d_pos"]
-            item["observation.state"] = item["observation.ee_ort6d_pos"]
+            # item["observation.state"] = item["observation.ee_ort6d_pos"]
         
         return item
 
