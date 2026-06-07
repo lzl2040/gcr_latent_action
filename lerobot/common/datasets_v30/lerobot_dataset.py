@@ -1386,8 +1386,10 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             print(f"Final weights:{sample_weights}")
             # self.dataset_len = sum(self.dataset_sizes)
             raw_dataset_len = sum(self.dataset_sizes)
-            self.dataset_sample_counts = (self.sample_weights * dataset_size_one_epoch).astype(int)  # 计算子集大小
-            
+            self.dataset_sample_counts = np.maximum(
+                (self.sample_weights * dataset_size_one_epoch).astype(int),
+                1
+            )
             print(f"Not sampled: Dataset len:{raw_dataset_len}")
             print("Final sampling info:")
             table_data = [
