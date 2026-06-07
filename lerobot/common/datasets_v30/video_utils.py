@@ -528,9 +528,11 @@ def decode_video_frames_torchvision(
 class VideoDecoderCache:
     """Thread-safe cache for video decoders to avoid expensive re-initialization."""
 
-    def __init__(self):
+    def __init__(self, max_size: int = 100):
         self._cache: dict[str, tuple[Any, Any]] = {}
         self._lock = Lock()
+        self._max_size = max_size  # 最大缓存数量，防止内存无限增长
+        self._access_order: list[str] = []  # 记录访问顺序，用于LRU清理
 
     def get_decoder(self, video_path: str):
         """Get a cached decoder or create a new one."""
@@ -542,10 +544,28 @@ class VideoDecoderCache:
         video_path = str(video_path)
 
         with self._lock:
-            if video_path not in self._cache:
-                file_handle = fsspec.open(video_path).__enter__()
-                decoder = VideoDecoder(file_handle, seek_mode="approximate")
-                self._cache[video_path] = (decoder, file_handle)
+            # 如果已缓存，更新访问顺序
+            if video_path in self._cache:
+                self._access_order.remove(video_path)
+                self._access_order.append(video_path)
+                return self._cache[video_path][0]
+            
+            # 检查是否需要清理旧缓存
+            if len(self._cache) >= self._max_size:
+                # 移除最久未使用的解码器
+                oldest_path = self._access_order.pop(0)
+                if oldest_path in self._cache:
+                    _, old_file_handle = self._cache.pop(oldest_path)
+                    try:
+                        old_file_handle.close()
+                    except Exception:
+                        pass
+            
+            # 创建新的解码器
+            file_handle = fsspec.open(video_path).__enter__()
+            decoder = VideoDecoder(file_handle, seek_mode="approximate")
+            self._cache[video_path] = (decoder, file_handle)
+            self._access_order.append(video_path)
 
             return self._cache[video_path][0]
 
@@ -553,8 +573,12 @@ class VideoDecoderCache:
         """Clear the cache and close file handles."""
         with self._lock:
             for _, file_handle in self._cache.values():
-                file_handle.close()
+                try:
+                    file_handle.close()
+                except Exception:
+                    pass
             self._cache.clear()
+            self._access_order.clear()
 
     def size(self) -> int:
         """Return the number of cached decoders."""
