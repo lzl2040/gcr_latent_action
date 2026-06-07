@@ -1515,6 +1515,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             new_keys.append(f"observation.images.{new_key}")
             # for interna1, its image key is images.rgb.{old_key} instead of observation.images.{old_key}
             old_img_key = f"observation.images.{old_key}" if f"observation.images.{old_key}" in item else f"images.rgb.{old_key}"
+            if old_img_key not in item:
+                old_img_key = f"observations.images.{old_key}" # for ms buy data
             if old_key != None:
                 
                 if isinstance(item[old_img_key], list):
