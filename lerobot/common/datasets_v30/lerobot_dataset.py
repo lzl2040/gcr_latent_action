@@ -28,6 +28,7 @@ import PIL.Image
 import pyarrow.parquet as pq
 import torch
 import torch.utils
+from torch.utils.data import ConcatDataset
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.errors import RevisionNotFoundError
 
@@ -569,7 +570,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         """
         Query dataset for indices across keys, skipping video keys.
 
-        Tries column-first [key][indices] for speed, falls back to row-first.
+        Query rows first. With HuggingFace Dataset, `dataset[key]` materializes
+        the full column, which is very expensive for large datasets.
 
         Args:
             query_indices: Dict mapping keys to index lists to retrieve
@@ -588,9 +590,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 else [self._absolute_to_relative_idx[idx] for idx in q_idx]
             )
             try:
-                result[key] = torch.stack(self.hf_dataset[key][relative_indices])
-            except (KeyError, TypeError, IndexError):
                 result[key] = torch.stack(self.hf_dataset[relative_indices][key])
+            except (KeyError, TypeError, IndexError):
+                result[key] = torch.stack([self.hf_dataset[i][key] for i in relative_indices])
         return result
 
     def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
@@ -681,7 +683,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 item["observation.state"] = item["observation.ee_ort6d_pos"]
             item["action"] = item["action.ee_ort6d_pos"]
             # item["observation.state"] = item["observation.ee_ort6d_pos"]
-        
         return item
 
     def __repr__(self):
@@ -1214,7 +1215,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         root: str | Path | None = None,
         robot_type: str | None = None,
         use_videos: bool = True,
-        tolerance_s: float = 1e-4,
+        tolerance_s: float = 2e-4,
         image_writer_processes: int = 0,
         image_writer_threads: int = 0,
         video_backend: str | None = None,
@@ -1401,7 +1402,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             self.id2dataset, self.num_episodes, self.dataset_len = self.build_pretrain_id2dataset(seed=seed)
             self.dataset = None
             self.dataset_len = len(self.id2dataset)
-
+            
         # calculate stats
         self.max_action_dim = cfg.policy.max_action_dim
         self.max_state_dim = cfg.policy.max_state_dim
@@ -1495,12 +1496,15 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         return self.dataset_len
 
     def __getitem__(self, index):
+        # NOTE: Removed print statement that was causing significant performance overhead!
+        # Each print in __getitem__ requires I/O operations and in DataLoader with 
+        # num_workers > 0, prints from workers are serialized, slowing down data loading.
         
         # if self.is_ft:
-        # print(index)
         dataset_id, data_id = self.id2dataset[index]
         dataset = self.datasets[dataset_id]
         item = dataset[data_id]
+        
         dataset_name = item["dataset_name"]
         data_config = OXE_DATASET_CONFIGS[dataset_name]
         image_obs_keys = data_config["image_obs_keys"]
@@ -1649,7 +1653,7 @@ def resolve_delta_timestamps(
     for key in ds_meta.features:
         if key == "next.reward" and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
-        if key == "action" and cfg.action_delta_indices is not None:
+        if "action" in key and cfg.action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
         if key.startswith("observation.") and cfg.observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
