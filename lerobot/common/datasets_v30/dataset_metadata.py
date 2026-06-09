@@ -136,6 +136,13 @@ class LeRobotDatasetMetadata:
         self.subtasks = load_subtasks(self.root)
         self.episodes = load_episodes(self.root)
         self.stats = load_stats(self.root)
+        if "observations.ee_ort6d_pos" in self.stats.keys():
+            self.stats["observation.state"] = self.stats["observations.ee_ort6d_pos"]
+        if "observation.ee_ort6d_pos" in self.stats.keys():
+            self.stats["observation.state"] = self.stats["observation.ee_ort6d_pos"]
+        
+        if "action.ee_ort6d_pos" in self.stats.keys():
+            self.stats["action"] = self.stats["action.ee_ort6d_pos"]
 
     def pull_from_repo(
         self,
