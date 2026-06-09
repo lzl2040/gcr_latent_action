@@ -20,7 +20,7 @@ CHUNK_SIZE=16
 TASK_TYPE="train_ace"
 DATASET_SIZE_ONE_EPOCH=1000_0000
 PRRENT_DIR="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
-
+export LEROBOT_VIDEO_DECODER_CACHE_SIZE=32
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
     case "$1" in
