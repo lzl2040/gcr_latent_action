@@ -371,7 +371,7 @@ def train(cfg: TrainPipelineConfig):
         dataloader.sampler.set_epoch(epoch)
         dataloader.dataset.set_epoch(epoch)
         for batch in dataloader:
-            print(batch.keys())
+            # print(batch.keys())
             start_time = time.perf_counter()
             # batch = next(dl_iter)
             dataloading_time = time.perf_counter() - start_time
