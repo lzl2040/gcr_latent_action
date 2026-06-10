@@ -362,31 +362,41 @@ def main():
     # v21_results = benchmark_v21()
     
     # Benchmark v3.0
+    
     print("\n" + "=" * 60)
-    V30_DATA_ROOT = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/Trossen_Stationary_AI_480x640_padded_MERGED"
-    DATASET_NAME = "Trossen_Stationary_AI_480x640_padded_MERGED"
-    print(f"\nBenchmarking dataset: {DATASET_NAME}")
-    v30_results = benchmark_v30(DATASET_NAME, V30_DATA_ROOT)
+    data_root = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/fractal20220817_data_lerobot"
+    d_name = "fractal20220817_data_lerobot"
+    print(f"\nBenchmarking dataset: {d_name}")
+    v30_results = benchmark_v30(d_name, data_root)
     print(v30_results)
     
     print("\n" + "=" * 60)
     
-    V30_DATA_ROOT = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/full/XMI_MERGED"
-    DATASET_NAME = "XMI_MERGED"
-    print(f"\nBenchmarking dataset: {DATASET_NAME}")
-    v30_results = benchmark_v30(DATASET_NAME, V30_DATA_ROOT)
+    print("\n" + "=" * 60)
+    data_root = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/Trossen_Stationary_AI_480x640_padded_MERGED"
+    d_name = "Trossen_Stationary_AI_480x640_padded_MERGED"
+    print(f"\nBenchmarking dataset: {d_name}")
+    v30_results = benchmark_v30(d_name, data_root)
+    print(v30_results)
+    
     print("\n" + "=" * 60)
     
-    V30_DATA_ROOT = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/full/YAM_Station_MERGED"
-    DATASET_NAME = "YAM_Station_MERGED"
-    print(f"\nBenchmarking dataset: {DATASET_NAME}")
-    v30_results = benchmark_v30(DATASET_NAME, V30_DATA_ROOT)
+    data_root = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/full/XMI_MERGED"
+    d_name = "XMI_MERGED"
+    print(f"\nBenchmarking dataset: {d_name}")
+    v30_results = benchmark_v30(d_name, data_root)
     print("\n" + "=" * 60)
     
-    V30_DATA_ROOT = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/full/YAM_Box_MERGED"
-    DATASET_NAME = "YAM_Box_MERGED"
-    print(f"\nBenchmarking dataset: {DATASET_NAME}")
-    v30_results = benchmark_v30(DATASET_NAME, V30_DATA_ROOT)
+    data_root = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/full/YAM_Station_MERGED"
+    d_name = "YAM_Station_MERGED"
+    print(f"\nBenchmarking dataset: {d_name}")
+    v30_results = benchmark_v30(d_name, data_root)
+    print("\n" + "=" * 60)
+    
+    data_root = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/full/YAM_Box_MERGED"
+    d_name = "YAM_Box_MERGED"
+    print(f"\nBenchmarking dataset: {d_name}")
+    v30_results = benchmark_v30(d_name, data_root)
     print("\n" + "=" * 60)
     
     # Print comparison
