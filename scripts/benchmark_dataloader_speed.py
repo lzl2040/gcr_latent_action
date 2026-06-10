@@ -127,7 +127,7 @@ def benchmark_v21():
     return results
 
 
-def benchmark_v30():
+def benchmark_v30(dataset_name, data_root):
     """Benchmark v3.0 dataloader."""
     print("\n" + "=" * 60)
     print("Benchmarking LeRobot v3.0 Dataset")
@@ -142,10 +142,10 @@ def benchmark_v30():
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Initializing v3.0 dataset...")
     start = time.time()
     dataset_v30 = LeRobotDatasetV30(
-        repo_id=DATASET_NAME,
-        root=V30_DATA_ROOT,
+        repo_id=dataset_name,
+        root=data_root,
         video_backend="pyav",  # Use pyav for consistency
-        dataset_name=DATASET_NAME,
+        dataset_name=dataset_name,
     )
     init_time = time.time() - start
     results['init_time'] = init_time
@@ -348,9 +348,9 @@ def main():
     print("=" * 60)
     print("LeRobot Dataloader Speed Benchmark")
     print("=" * 60)
-    print(f"Dataset: {DATASET_NAME}")
-    print(f"v2.1 Data: {V21_DATA_ROOT}")
-    print(f"v3.0 Data: {V30_DATA_ROOT}")
+    # print(f"Dataset: {DATASET_NAME}")
+    # print(f"v2.1 Data: {V21_DATA_ROOT}")
+    # print(f"v3.0 Data: {V30_DATA_ROOT}")
     print(f"Test samples: {NUM_SAMPLES}")
     print(f"Batch size: {BATCH_SIZE}")
     print(f"Num workers: {NUM_WORKERS}")
@@ -366,7 +366,7 @@ def main():
     V30_DATA_ROOT = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/Trossen_Stationary_AI_480x640_padded_MERGED"
     DATASET_NAME = "Trossen_Stationary_AI_480x640_padded_MERGED"
     print(f"\nBenchmarking dataset: {DATASET_NAME}")
-    v30_results = benchmark_v30()
+    v30_results = benchmark_v30(DATASET_NAME, V30_DATA_ROOT)
     print(v30_results)
     
     print("\n" + "=" * 60)
@@ -374,19 +374,19 @@ def main():
     V30_DATA_ROOT = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/full/XMI_MERGED"
     DATASET_NAME = "XMI_MERGED"
     print(f"\nBenchmarking dataset: {DATASET_NAME}")
-    v30_results = benchmark_v30()
+    v30_results = benchmark_v30(DATASET_NAME, V30_DATA_ROOT)
     print("\n" + "=" * 60)
     
     V30_DATA_ROOT = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/full/YAM_Station_MERGED"
     DATASET_NAME = "YAM_Station_MERGED"
     print(f"\nBenchmarking dataset: {DATASET_NAME}")
-    v30_results = benchmark_v30()
+    v30_results = benchmark_v30(DATASET_NAME, V30_DATA_ROOT)
     print("\n" + "=" * 60)
     
     V30_DATA_ROOT = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/Micro_data/full/YAM_Box_MERGED"
     DATASET_NAME = "YAM_Box_MERGED"
     print(f"\nBenchmarking dataset: {DATASET_NAME}")
-    v30_results = benchmark_v30()
+    v30_results = benchmark_v30(DATASET_NAME, V30_DATA_ROOT)
     print("\n" + "=" * 60)
     
     # Print comparison
