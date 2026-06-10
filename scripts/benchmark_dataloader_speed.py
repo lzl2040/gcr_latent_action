@@ -33,7 +33,7 @@ V30_DATA_ROOT = "/Data/lerobot_data_ort6d/v30/taco_play"
 DATASET_NAME = "taco_play"
 NUM_SAMPLES = 100  # Number of samples to test
 BATCH_SIZE = 512
-NUM_WORKERS = 0  # Set to 0 for simpler testing without multiprocessing issues
+NUM_WORKERS = 4  # Set to 0 for simpler testing without multiprocessing issues
 NUM_EPISODES_TEST = 5  # Test first N episodes
 
 
@@ -185,7 +185,7 @@ def benchmark_v30(dataset_name, data_root):
     )
     
     batch_times = []
-    num_batches = min(100, len(dataloader_v30))
+    num_batches = min(5, len(dataloader_v30))
     start = time.time()
     for i, batch in enumerate(dataloader_v30):
         if i >= num_batches:

@@ -296,39 +296,39 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     
     "ms_complete_data_franka":[
         # ("berkeley_cable_routing", 0.1),
-        ("fractal20220817_data", 2.0),                # Google RT-1 Robot Data (Large-Scale)
-        ("kuka", 0.1),
-        ("bridge_orig", 0.1),                                   # Original Version of Bridge V2 from Project Website
-        ("taco_play", 0.3),
-        ("jaco_play", 0.3),
-        ("roboturk", 0.3),
-        ("viola", 0.3),
-        ("berkeley_autolab_ur5", 0.3),
-        ("toto", 0.3),
-        ("language_table", 0.1),
-        ("stanford_hydra_dataset_converted_externally_to_rlds", 0.3),
-        # ("austin_buds_dataset_converted_externally_to_rlds", 1.0), # state is not quant or rpy
-        ("nyu_franka_play_dataset_converted_externally_to_rlds", 0.3),
-        ("furniture_bench_dataset_converted_externally_to_rlds", 0.3),
-        ("ucsd_kitchen_dataset_converted_externally_to_rlds", 0.3),
-        ("austin_sailor_dataset_converted_externally_to_rlds", 0.3),
-        ("austin_sirius_dataset_converted_externally_to_rlds", 0.3),
-        ("dlr_edan_shared_control_converted_externally_to_rlds", 0.3),
-        ("iamlab_cmu_pickup_insert_converted_externally_to_rlds", 0.3),
-        ("utaustin_mutex", 0.3),
-        # ("berkeley_fanuc_manipulation", 2.0), # state is not quant or rpy
-        ("cmu_stretch", 0.3),
-        ## New Datasets in MagicSoup++
-        ("bc_z", 0.3),                                          # Note: use v0.1.0 --> later versions broken
-        ("fmb_dataset", 0.3),
-        ("dobbe", 0.3),
-        # ("droid", 0.01),
-        # ("agibot_alpha", 0.1),
-        ("robomind_franka_dual_arm", 0.1),
-        ("robomind_franka_3rgb", 1.0),
-        ("robomind_franka_1rgb", 1.0),
-        ("robomind_agilex_3rgb", 0.1),
-        ("robomind_ur_1rgb", 0.1),
+        # ("fractal20220817_data", 2.0),                # Google RT-1 Robot Data (Large-Scale)
+        # ("kuka", 0.1),
+        # ("bridge_orig", 0.1),                                   # Original Version of Bridge V2 from Project Website
+        # ("taco_play", 0.3),
+        # ("jaco_play", 0.3),
+        # ("roboturk", 0.3),
+        # ("viola", 0.3),
+        # ("berkeley_autolab_ur5", 0.3),
+        # ("toto", 0.3),
+        # ("language_table", 0.1),
+        # ("stanford_hydra_dataset_converted_externally_to_rlds", 0.3),
+        # # ("austin_buds_dataset_converted_externally_to_rlds", 1.0), # state is not quant or rpy
+        # ("nyu_franka_play_dataset_converted_externally_to_rlds", 0.3),
+        # ("furniture_bench_dataset_converted_externally_to_rlds", 0.3),
+        # ("ucsd_kitchen_dataset_converted_externally_to_rlds", 0.3),
+        # ("austin_sailor_dataset_converted_externally_to_rlds", 0.3),
+        # ("austin_sirius_dataset_converted_externally_to_rlds", 0.3),
+        # ("dlr_edan_shared_control_converted_externally_to_rlds", 0.3),
+        # ("iamlab_cmu_pickup_insert_converted_externally_to_rlds", 0.3),
+        # ("utaustin_mutex", 0.3),
+        # # ("berkeley_fanuc_manipulation", 2.0), # state is not quant or rpy
+        # ("cmu_stretch", 0.3),
+        # ## New Datasets in MagicSoup++
+        # ("bc_z", 0.3),                                          # Note: use v0.1.0 --> later versions broken
+        # ("fmb_dataset", 0.3),
+        # ("dobbe", 0.3),
+        # # ("droid", 0.01),
+        # # ("agibot_alpha", 0.1),
+        # ("robomind_franka_dual_arm", 0.1),
+        # ("robomind_franka_3rgb", 1.0),
+        # ("robomind_franka_1rgb", 1.0),
+        # ("robomind_agilex_3rgb", 0.1),
+        # ("robomind_ur_1rgb", 0.1),
         # ("interna1_dual_arm_0", 0.05),
         # ("interna1_dual_arm_1", 0.05),
         # ("interna1_dual_arm_2", 0.05),
