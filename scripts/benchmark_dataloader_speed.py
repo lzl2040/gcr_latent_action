@@ -144,7 +144,7 @@ def benchmark_v30(dataset_name, data_root):
     dataset_v30 = LeRobotDatasetV30(
         repo_id=dataset_name,
         root=data_root,
-        video_backend="pyav",  # Use pyav for consistency
+        video_backend="torchcodec",  # Use pyav for consistency
         dataset_name=dataset_name,
     )
     init_time = time.time() - start
