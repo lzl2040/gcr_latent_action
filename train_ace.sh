@@ -147,6 +147,7 @@ python lerobot/scripts/dps_train_ace.py \
     --is_ft=$IS_FT \
     --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/" \
     --dataset.parent_dir=$PARENT_DIR \
+    --dataset.video_backend="torchcodec" \
     --policy.scheduler_warmup_steps=$SCHEDULER_WARMUP_STEPS \
     --policy.scheduler_decay_steps=$SCHEDULER_DECAY_STEPS \
     --policy.scheduler_platform_steps=$SCHEDULER_PLATFORM_STEPS \

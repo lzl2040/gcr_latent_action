@@ -337,8 +337,8 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("interna1_single_arm", 0.05),
         # ms_buy_data
         ("ms_data_scale", 0.1),
-        # ("ms_data_xdof_1", 0.03),
-        # ("ms_data_xdof_2", 0.02),
+        ("ms_data_xdof_1", 0.03),
+        ("ms_data_xdof_2", 0.02),
         ("ms_data_xdof_3", 0.01),
     ],
     
