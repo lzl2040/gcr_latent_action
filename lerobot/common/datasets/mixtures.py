@@ -334,7 +334,7 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("interna1_dual_arm_2", 0.05),
         # ("interna1_dual_arm_3", 0.05),
         # ("interna1_dual_arm_4", 0.1),
-        ("interna1_single_arm", 0.05),
+        # ("interna1_single_arm", 0.05),
         # ms_buy_data
         ("ms_data_scale", 0.1),
         ("ms_data_xdof_1", 0.03),
@@ -411,7 +411,7 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     
     "ms_buy_data":[
       ("ms_data_scale", 1.0),  
-      ("ms_data_xdof_3", 1.0),
+    #   ("ms_data_xdof_3", 1.0),
         ("toto", 1.0),
         ("taco_play", 1.0)
     ],
@@ -421,6 +421,7 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("austin_sirius_dataset_converted_externally_to_rlds", 1.0),
         # ("stanford_hydra_dataset_converted_externally_to_rlds", 2.0),
         ("taco_play", 1.0),
+        ("toto", 1.0),
         # ("jaco_play", 1.0),
         # ("robomind_franka_dual_arm", 1.0),
         # # ("fractal20220817_data", 0.54087122203),
