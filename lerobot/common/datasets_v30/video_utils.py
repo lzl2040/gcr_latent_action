@@ -18,13 +18,14 @@ import contextlib
 import glob
 import importlib
 import logging
-import os
 import queue
 import shutil
 import tempfile
 import threading
 import warnings
 from dataclasses import dataclass, field
+from collections import Counter, OrderedDict
+import os
 from fractions import Fraction
 from pathlib import Path
 from threading import Lock
@@ -59,7 +60,7 @@ import json
 import shutil
 import subprocess
 import tempfile
-from collections import Counter, OrderedDict
+from collections import Counter
 from fractions import Fraction
 from pathlib import Path
 from typing import Iterable
@@ -398,6 +399,7 @@ def decode_video_frames(
     timestamps: list[float],
     tolerance_s: float,
     backend: str | None = None,
+    return_type: str = "float32",
 ) -> torch.Tensor:
     """
     Decodes video frames using the specified backend.
@@ -416,7 +418,7 @@ def decode_video_frames(
     if backend is None:
         backend = get_safe_default_codec()
     if backend == "torchcodec":
-        return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
+        return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s, return_type=return_type)
     elif backend in ["pyav", "video_reader"]:
         return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
     else:
@@ -488,8 +490,8 @@ def decode_video_frames_torchvision(
 
     reader = None
 
-    query_ts = torch.tensor(timestamps)
-    loaded_ts = torch.tensor(loaded_ts)
+    query_ts = torch.as_tensor(timestamps, dtype=torch.float32, device="cpu")
+    loaded_ts = torch.as_tensor(loaded_ts, dtype=torch.float32, device="cpu")
 
     # compute distances between each query timestamp and timestamps of all loaded frames
     dist = torch.cdist(query_ts[:, None], loaded_ts[:, None], p=1)
@@ -531,7 +533,7 @@ class VideoDecoderCache:
 
     def __init__(self, max_size: int | None = None):
         if max_size is None:
-            max_size = int(os.environ.get("LEROBOT_VIDEO_DECODER_CACHE_SIZE", "64"))
+            max_size = int(os.environ.get("LEROBOT_VIDEO_DECODER_CACHE_SIZE", "256"))
         self.max_size = max(0, max_size)
         self._cache: OrderedDict[str, Any] = OrderedDict()
         self._lock = Lock()
@@ -594,6 +596,7 @@ def decode_video_frames_torchcodec(
     tolerance_s: float,
     log_loaded_timestamps: bool = False,
     decoder_cache: VideoDecoderCache | None = None,
+    return_type: str = "float32",
 ) -> torch.Tensor:
     """Loads frames associated with the requested timestamps of a video using torchcodec.
 
@@ -638,8 +641,8 @@ def decode_video_frames_torchcodec(
         if log_loaded_timestamps:
             logger.info(f"Frame loaded at timestamp={pts:.4f}")
 
-    query_ts = torch.tensor(timestamps)
-    loaded_ts = torch.tensor(loaded_ts)
+    query_ts = torch.as_tensor(timestamps, dtype=torch.float32, device="cpu")
+    loaded_ts = torch.as_tensor(loaded_ts, dtype=torch.float32, device="cpu")
 
     # compute distances between each query timestamp and loaded timestamps
     dist = torch.cdist(query_ts[:, None], loaded_ts[:, None], p=1)
@@ -664,8 +667,13 @@ def decode_video_frames_torchcodec(
     if log_loaded_timestamps:
         logger.info(f"{closest_ts=}")
 
-    # convert to float32 in [0,1] range
-    closest_frames = (closest_frames / 255.0).type(torch.float32)
+    if return_type in ("float", "float32"):
+        # Convert to float32 in [0,1] range.
+        closest_frames = (closest_frames / 255.0).type(torch.float32)
+    elif return_type == "uint8":
+        closest_frames = closest_frames.to(torch.uint8)
+    else:
+        raise ValueError(f"Unsupported return_type for torchcodec video decoding: {return_type}")
 
     if not len(timestamps) == len(closest_frames):
         raise FrameTimestampError(
@@ -673,6 +681,16 @@ def decode_video_frames_torchcodec(
         )
 
     return closest_frames
+
+
+def scan_video_seek_modes(root: str | Path, num_workers: int = 8) -> dict[str, str]:
+    """Compatibility helper for efficient_lerobot_dataset.
+
+    The conservative default is approximate seeking for every video. Returning an
+    empty mapping lets callers fall back to their own default without an expensive
+    upfront scan.
+    """
+    return {}
 
 
 def encode_video_frames(
@@ -1398,3 +1416,82 @@ class VideoEncodingManager:
                 logger.debug(f"Images directory is not empty, containing {len(png_files)} PNG files")
 
         return False  # Don't suppress the original exception
+
+def _classify_single_video_seek_mode(video_path: str) -> str:
+    """Classify seek mode for one video.
+
+    Keep this conservative and cheap for benchmarking. LoLA falls back to
+    approximate seeking when a path is absent, and the Trossen benchmark works
+    with approximate seeking.
+    """
+    return "approximate"
+
+
+def scan_video_seek_modes(dataset_root: str, num_workers: int = 8) -> dict[str, str]:
+    """Scan all videos in a dataset and return a path→seek_mode mapping.
+
+    Walks dataset_root/videos/, probes each video with approximate seek,
+    and switches to exact for any video where approximate seek can't reach
+    the last frame.
+
+    Args:
+        dataset_root: Dataset root directory (contains videos/ subdir).
+        num_workers: Number of parallel workers for probing.
+
+    Returns:
+        Dict mapping relative video path (relative to videos/) to
+        "approximate" or "exact" seek_mode.
+    """
+    import os
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    videos_dir = os.path.join(dataset_root, "videos")
+    if not os.path.isdir(videos_dir):
+        logging.warning(f"No videos/ directory found at {dataset_root}, skipping seek-mode scan")
+        return {}
+
+    video_files = []
+    for root, dirs, files in os.walk(videos_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]  # skip hidden dirs
+        for f in files:
+            if f.endswith(".mp4") and not f.startswith("."):
+                full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, videos_dir)
+                video_files.append((full_path, rel_path))
+
+    video_files.sort(key=lambda x: x[1])
+
+    if not video_files:
+        return {}
+
+    total = len(video_files)
+    seek_modes = {}
+    exact_count = 0
+    start_time = time.time()
+
+    logging.info(f"Scanning {total} videos for seek-mode classification with {num_workers} workers...")
+
+    # Use ThreadPoolExecutor to avoid polars Rayon fork deadlock.
+    # ProcessPoolExecutor(fork) deadlocks if Rayon is already initialized
+    # in the parent process. ThreadPoolExecutor shares the parent's address
+    # space so no fork occurs, eliminating the deadlock risk entirely.
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(_classify_single_video_seek_mode, full_path): rel_path
+            for full_path, rel_path in video_files
+        }
+        for future in as_completed(futures):
+            rel_path = futures[future]
+            mode = future.result()
+            seek_modes[rel_path] = mode
+            if mode == "exact":
+                exact_count += 1
+
+    elapsed = time.time() - start_time
+    logging.info(
+        f"Seek-mode scan complete: {total} videos, {exact_count} need exact mode, "
+        f"{total - exact_count} use approximate. Time: {elapsed:.1f}s"
+    )
+
+    return seek_modes

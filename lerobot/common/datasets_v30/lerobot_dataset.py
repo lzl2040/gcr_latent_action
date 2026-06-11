@@ -128,7 +128,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         streaming_encoding: bool = False,
         encoder_queue_maxsize: int = 30,
         encoder_threads: int | None = None,
-        dataset_name: str = None
+        dataset_name: str = None,
+        video_return_type: str = "float32",
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -262,6 +263,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.tolerance_s = tolerance_s
         self.revision = revision if revision else CODEBASE_VERSION
         self.video_backend = video_backend if video_backend else get_safe_default_codec()
+        self.video_return_type = video_return_type
         self.delta_indices = None
         self.batch_encoding_size = batch_encoding_size
         self.episodes_since_last_encoding = 0
@@ -608,19 +610,17 @@ class LeRobotDataset(torch.utils.data.Dataset):
             # Thus we load the start timestamp of the episode on this mp4 and,
             # shift the query timestamp accordingly.
             from_timestamp = ep[f"videos/{vid_key}/from_timestamp"]
-            # is_valid = ep[f"videos/{vid_key}/is_valid"]
-            # print(vid_key, is_valid)
             shifted_query_ts = [from_timestamp + ts for ts in query_ts]
 
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
-            frames = decode_video_frames(video_path, shifted_query_ts, self.tolerance_s, self.video_backend)
-            # try:
-            #     frames = decode_video_frames(video_path, shifted_query_ts, self.tolerance_s, self.video_backend)
-            # except Exception as e:
-            #     print(f"{video_path} has error:{e}")
-            #     frames = torch.zeros((1, 3, 224, 224))
+            frames = decode_video_frames(
+                video_path,
+                shifted_query_ts,
+                self.tolerance_s,
+                self.video_backend,
+                return_type=self.video_return_type,
+            )
             item[vid_key] = frames.squeeze(0)
-
         return item
 
     def _ensure_hf_dataset_loaded(self):
@@ -651,7 +651,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
             item = {**item, **padding}
             for key, val in query_result.items():
                 item[key] = val
-
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
@@ -667,7 +666,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
         task_idx = item["task_index"].item()
         # print(len(self.meta.tasks), task_idx)
         item["task"] = self.meta.tasks.iloc[task_idx].name
-
         # add subtask information if available
         if "subtask_index" in self.features and self.meta.subtasks is not None:
             subtask_idx = item["subtask_index"].item()
@@ -683,7 +681,15 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 item["observation.state"] = item["observation.ee_ort6d_pos"]
             item["action"] = item["action.ee_ort6d_pos"]
             # item["observation.state"] = item["observation.ee_ort6d_pos"]
+        
+        keys = list(item.keys())
+        for key in keys:
+            if item[key] is None:
+                del item[key]  # Remove keys with None values (e.g. video keys when videos are not downloaded)
+                # item[key] = torch.tensor([])  # Replace None with empty tensor for consistency
         return item
+        
+        # return self._finalize_item(item)
 
     def __repr__(self):
         feature_keys = list(self.features)
@@ -1343,6 +1349,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                     image_transforms=image_transforms,
                     video_backend=cfg.dataset.video_backend,
                     dataset_name=dataset_name,
+                    video_return_type="uint8"
                 )
                 self.datasets.append(dataset)
                 self.dataset_sizes.append(len(dataset))
@@ -1553,9 +1560,6 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         
         if not exist_image_valide:
             sample_image = Image.fromarray(np.ones((self.cfg.dataset.default_image_size, self.cfg.dataset.default_image_size, self.cfg.dataset.default_channel_size), dtype=np.uint8))  
-        
-        # sample_image = Image.fromarray(np.ones((self.cfg.dataset.default_image_size, self.cfg.dataset.default_image_size, self.cfg.dataset.default_channel_size), dtype=np.uint8))  
-        # print(sample_image)
         
         for new_key in key_to_pad:
             item[f"observation.images.{new_key}"] = copy.deepcopy(sample_image)
