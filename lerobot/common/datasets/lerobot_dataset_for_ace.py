@@ -186,7 +186,7 @@ class LeRobotDatasetMetadata:
             self.stats = aggregate_stats(list(episodes_stats.values()))
             episodes_stats.clear()
             del episodes_stats
-        print(self.stats)
+        # print(self.stats)
         # if self._version < packaging.version.parse("v2.1"):
         #     self.stats = load_stats(self.root)
         #     self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
@@ -1688,6 +1688,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             new_keys.append(f"observation.images.{new_key}")
             # for interna1, its image key is images.rgb.{old_key} instead of observation.images.{old_key}
             old_img_key = f"observation.images.{old_key}" if f"observation.images.{old_key}" in item else f"images.rgb.{old_key}"
+            if old_img_key not in item:
+                old_img_key = f"observations.images.{old_key}" # for ms buy data
             if old_key != None:
                 
                 if isinstance(item[old_img_key], list):
