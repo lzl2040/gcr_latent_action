@@ -633,7 +633,40 @@ def decode_video_frames_torchcodec(
     frame_indices = [round(ts * average_fps) for ts in timestamps]
     # retrieve frames based on indices
 
-    frames_batch = decoder.get_frames_at(indices=frame_indices)
+    # frames_batch = decoder.get_frames_at(indices=frame_indices)
+    error_txt_path = "/mnt/wangxiaofa/action_chunk_encoder_exp/error_log_2.txt"
+    try:
+        frames_batch = decoder.get_frames_at(indices=frame_indices)
+    except RuntimeError as e:
+        err_msg = str(e)
+
+        if (
+            "Expected pre-allocated tensor of shape" in err_msg
+            and "got" in err_msg
+        ):
+            logger.warning(
+                f"Video frame size mismatch, return black frames instead. "
+                f"video={video_path}, error={err_msg}"
+            )
+            with open(error_txt_path, "a") as f:
+                f.write(video_path + "\n")
+
+            black_frames = torch.zeros(
+                (len(timestamps), 224, 224, 3),
+                dtype=torch.uint8,
+                device="cpu",
+            )
+
+            if return_type in ("float", "float32"):
+                return black_frames.type(torch.float32) / 255.0
+            elif return_type == "uint8":
+                return black_frames
+            else:
+                raise ValueError(
+                    f"Unsupported return_type for torchcodec video decoding: {return_type}"
+                )
+
+        raise
 
     for frame, pts in zip(frames_batch.data, frames_batch.pts_seconds, strict=True):
         loaded_frames.append(frame)
