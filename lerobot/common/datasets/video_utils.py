@@ -31,13 +31,18 @@ from PIL import Image
 import importlib
 from threading import Lock
 import fsspec
+import os
+
 
 
 class VideoDecoderCache:
     """Thread-safe cache for video decoders to avoid expensive re-initialization."""
 
-    def __init__(self):
-        self._cache: dict[str, tuple[Any, Any]] = {}
+    def __init__(self, max_size: int | None = None):
+        if max_size is None:
+            max_size = int(os.environ.get("LEROBOT_VIDEO_DECODER_CACHE_SIZE", "256"))
+        self.max_size = max(0, max_size)
+        self._cache: OrderedDict[str, Any] = OrderedDict()
         self._lock = Lock()
 
     def get_decoder(self, video_path: str):
@@ -49,19 +54,32 @@ class VideoDecoderCache:
 
         video_path = str(video_path)
 
-        with self._lock:
-            if video_path not in self._cache:
-                # file_handle = fsspec.open(video_path).__enter__()
-                decoder = VideoDecoder(video_path, seek_mode="approximate")
-                self._cache[video_path] = (decoder, video_path)
+        if self.max_size == 0:
+            return VideoDecoder(video_path, seek_mode="approximate")
 
-            return self._cache[video_path][0]
+        with self._lock:
+            if video_path in self._cache:
+                self._cache.move_to_end(video_path)
+            else:
+                decoder = VideoDecoder(video_path, seek_mode="approximate")
+                self._cache[video_path] = decoder
+                while len(self._cache) > self.max_size:
+                    _, old_decoder = self._cache.popitem(last=False)
+                    self._release_decoder(old_decoder)
+
+            return self._cache[video_path]
+
+    @staticmethod
+    def _release_decoder(decoder):
+        close = getattr(decoder, "close", None)
+        if callable(close):
+            close()
 
     def clear(self):
         """Clear the cache and close file handles."""
         with self._lock:
-            for _, file_handle in self._cache.values():
-                file_handle.close()
+            for decoder in self._cache.values():
+                self._release_decoder(decoder)
             self._cache.clear()
 
     def size(self) -> int:
@@ -203,10 +221,9 @@ def decode_video_frames_torchcodec(
 
     if log_loaded_timestamps:
         logging.info(f"{closest_ts=}")
-
-    # convert to float32 in [0,1] range
-    # closest_frames = (closest_frames / 255.0).type(torch.float32)
-    closest_frames = closest_frames.type(torch.float32)
+    
+    # return 0-255
+    closest_frames = closest_frames.to(torch.uint8)
 
     if not len(timestamps) == len(closest_frames): 
         raise FrameTimestampError(

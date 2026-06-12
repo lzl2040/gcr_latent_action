@@ -36,8 +36,8 @@ from torch.utils.data import DataLoader
 
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.transforms import ImageTransforms
-# from lerobot.common.datasets.lerobot_dataset_for_ace import MultiDatasetforDistTraining, extra_collate_fn
-from lerobot.common.datasets_v30.lerobot_dataset import MultiDatasetforDistTraining, LeRobotDataset
+from lerobot.common.datasets.lerobot_dataset_for_ace import MultiDatasetforDistTraining, extra_collate_fn
+# from lerobot.common.datasets_v30.lerobot_dataset import MultiDatasetforDistTraining, LeRobotDataset
 from lerobot.common.datasets.sampler import EpisodeAwareSampler, DistEpisodeAwareSampler
 from lerobot.common.datasets.utils import cycle
 from lerobot.common.envs.factory import make_env

@@ -98,6 +98,8 @@ from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.train import TrainPipelineConfig
+from lerobot.common.datasets_v30.lerobot_dataset import LeRobotDataset as LeRobotDatasetV30
+from lerobot.common.datasets_v30.dataset_metadata import LeRobotDatasetMetadata as LeRobotDatasetMetadataV30
 from tabulate import tabulate
 
 CODEBASE_VERSION = "v2.1"
@@ -830,9 +832,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
             frames = decode_video_frames_torchcodec(video_path, query_ts, 
                                                     self.tolerance_s, 
                                                     return_type="tensor")
-            # print(vid_key, frames.shape)
-            # item[vid_key] = frames.squeeze(0)
-            item[vid_key] = frames
+            item[vid_key] = frames.squeeze(0)
+            # item[vid_key] = frames
 
         return item
 
@@ -900,10 +901,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if self.image_transforms is not None:
             image_keys = self.meta.camera_keys
             for cam in image_keys:
-                if "wrist" in cam:
-                    item[cam] = self.wrist_image_transforms(item[cam])
-                else:
-                    item[cam] = self.image_transforms(item[cam])
+                # if "wrist" in cam:
+                #     item[cam] = self.wrist_image_transforms(item[cam])
+                # else:
+                item[cam] = self.image_transforms(item[cam])
 
         # Add task as a string
         task_idx = item["task_index"].item()
@@ -1383,9 +1384,13 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
 
 
 class MultiDatasetforDistTraining(torch.utils.data.Dataset):
-    def __init__(self, cfg, image_transforms, wrist_image_transforms = None, seed: int = 1000, 
-                 data_mix: str = "toy", vla2root_json: str = None, 
-                 banlance_weight=True, is_ft = False,
+    def __init__(self, cfg, image_transforms, 
+                 wrist_image_transforms = None, 
+                 seed: int = 1000, 
+                 data_mix: str = "toy", 
+                 vla2root_json: str = None, 
+                 banlance_weight=True, 
+                 is_ft = False,
                  dataset_size_one_epoch = 1000_0000):
         """
         参数:
@@ -1441,14 +1446,6 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         if self.cfg.dataset.parent_dir is None:
             parent_dir = default_parent_dir
         print(parent_dir)
-        # parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format/"
-        
-        # if self.cfg.dataset.processor is not None:
-        #     # self.processor = Qwen2_5_VLProcessor.from_pretrained(self.cfg.dataset.processor)
-        #     # self.processor.tokenizer.padding_side = "left"
-        # else:
-        #     self.processor = None
-        # self.processor = AutoProcessor.from_pretrained(cfg.policy.vision_model_name)
         
         self.datasets = []
         self.dataset_sizes = []
@@ -1462,19 +1459,34 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 data_root = os.path.join(parent_dir, data_root)
                 print(f"Load data from {data_root}")
                 repo_id = f"bulldog-{dataset_name}" # any
-                ds_meta = LeRobotDatasetMetadata(repo_id, root=data_root)
-                if meta_features == None:
-                    meta_features = ds_meta.features
-                delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
-                dataset = LeRobotDataset(
-                    repo_id, 
-                    root=data_root,
-                    delta_timestamps=delta_timestamps,
-                    image_transforms=image_transforms,
-                    wrist_image_transforms=wrist_image_transforms,
-                    video_backend=cfg.dataset.video_backend,
-                    dataset_name=dataset_name,
-                )
+                if "ms_data" not in dataset_name:
+                    ds_meta = LeRobotDatasetMetadata(repo_id, root=data_root)
+                    if meta_features == None:
+                        meta_features = ds_meta.features
+                    delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
+                    dataset = LeRobotDataset(
+                        repo_id, 
+                        root=data_root,
+                        delta_timestamps=delta_timestamps,
+                        image_transforms=image_transforms,
+                        wrist_image_transforms=wrist_image_transforms,
+                        video_backend=cfg.dataset.video_backend,
+                        dataset_name=dataset_name,
+                    )
+                else:
+                    ds_meta = LeRobotDatasetMetadataV30(repo_id, root=data_root)
+                    if meta_features == None:
+                        meta_features = ds_meta.features
+                    delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
+                    dataset = LeRobotDatasetV30(
+                        repo_id, 
+                        root=data_root,
+                        delta_timestamps=delta_timestamps,
+                        image_transforms=image_transforms,
+                        video_backend=cfg.dataset.video_backend,
+                        dataset_name=dataset_name,
+                        video_return_type="uint8"
+                    )
                 self.datasets.append(dataset)
                 self.dataset_sizes.append(len(dataset))
                 self.dataset_names.append(dataset_name)
@@ -1699,12 +1711,13 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 channel = len(exist_image.split())
                 sample_image = Image.fromarray(np.ones((height, width, channel), dtype=np.uint8))
                 exist_image_valide = True
+            # tensor
+        
         
         if not exist_image_valide:
+            # print(exist_image_valide)
             sample_image = Image.fromarray(np.ones((self.cfg.dataset.default_image_size, self.cfg.dataset.default_image_size, self.cfg.dataset.default_channel_size), dtype=np.uint8))  
         
-        # sample_image = Image.fromarray(np.ones((self.cfg.dataset.default_image_size, self.cfg.dataset.default_image_size, self.cfg.dataset.default_channel_size), dtype=np.uint8))  
-        # print(sample_image)
         
         for new_key in key_to_pad:
             item[f"observation.images.{new_key}"] = copy.deepcopy(sample_image)
@@ -1802,7 +1815,7 @@ def resolve_delta_timestamps(
     for key in ds_meta.features:
         if key == "next.reward" and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
-        if key == "action" and cfg.action_delta_indices is not None:
+        if "action" in key and cfg.action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
         if key.startswith("observation.") and cfg.observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
