@@ -19,6 +19,7 @@ import json
 import logging
 from collections.abc import Iterator
 from typing import Any
+from pathlib import Path
 
 import datasets
 import numpy as np
@@ -410,6 +411,40 @@ def create_lerobot_dataset_card(
     )
 
 
+
+def item_to_torch(item: dict) -> dict:
+    """Convert all items in a dictionary to PyTorch tensors where appropriate.
+
+    This function is used to convert an item from a streaming dataset to PyTorch tensors.
+
+    Args:
+        item (dict): Dictionary of items from a dataset.
+
+    Returns:
+        dict: Dictionary with all tensor-like items converted to torch.Tensor.
+    """
+    for key, val in item.items():
+        if isinstance(val, (np.ndarray | list)) and key not in ["task"]:
+            # Convert numpy arrays and lists to torch tensors
+            item[key] = torch.tensor(val)
+    return item
+
+def get_delta_indices(delta_timestamps: dict[str, list[float]], fps: int) -> dict[str, list[int]]:
+    """Convert delta timestamps in seconds to delta indices in frames.
+
+    Args:
+        delta_timestamps (dict): A dictionary of time deltas in seconds.
+        fps (int): The frames per second of the dataset.
+
+    Returns:
+        dict: A dictionary of frame delta indices.
+    """
+    delta_indices = {}
+    for key, delta_ts in delta_timestamps.items():
+        delta_indices[key] = [round(d * fps) for d in delta_ts]
+
+    return delta_indices
+
 def is_float_in_list(target, float_list, threshold=1e-6):
     return any(abs(target - x) <= threshold for x in float_list)
 
@@ -420,6 +455,14 @@ def find_float_index(target, float_list, threshold=1e-6):
             return i
     return -1
 
+def find_float_index_or_none(target, float_list, threshold=1e-6):
+    """Single-pass: find index of target in float_list, or return -1 if not found.
+    Combines is_float_in_list + find_float_index into one scan.
+    """
+    for i, x in enumerate(float_list):
+        if abs(target - x) <= threshold:
+            return i
+    return -1
 
 def safe_shard(dataset: datasets.IterableDataset, index: int, num_shards: int) -> datasets.Dataset:
     """
