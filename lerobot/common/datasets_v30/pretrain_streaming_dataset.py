@@ -2373,3 +2373,896 @@ class AsyncDecodeDataLoader:
     @property
     def dataset(self):
         return self._loader.dataset
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SimpleStreamingDataset -- single-dataset, no-history streaming dataset
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class SimpleStreamingDataset(torch.utils.data.IterableDataset):
+    """Simplified streaming dataset for a single LeRobot dataset.
+
+    Compared to LoLAPretrainStreamingDataset:
+    - No history actions (hist_actions_full / hist_actions_mask / hist_actions_length)
+    - No tier system (tier_config_path / yield_tier)
+    - No sub-dataset normalization; uses the dataset's own meta/stats.json
+    - Handles ms-data key mapping (action.ee_ort6d_pos -> action, etc.)
+    - No multi-dataset episode mapping (dataset_to_episodes_path)
+    """
+
+    def __init__(
+        self,
+        repo_id: str,
+        root: str | None = None,
+        episodes: list[int] | None = None,
+        image_transforms=None,
+        delta_timestamps: dict[str, list[float]] | None = None,
+        tolerance_s: float = 1e-4,
+        tolerance_frames: int | None = None,
+        revision: str | None = None,
+        force_cache_sync: bool = False,
+        buffer_size: int = 5000,
+        seed: int = 42,
+        rng=None,
+        shuffle: bool = True,
+        deferred_video_decode: bool = True,
+        decode_device: str = "cpu",
+        decode_num_threads: int = 1,
+        episode_chunk_size: int = 8,
+        action_key: str | None = None,
+        state_key: str | None = None,
+    ):
+        super().__init__()
+
+        self.repo_id = repo_id
+        self.root = __import__("pathlib").Path(root) if root else HF_LEROBOT_HOME / repo_id
+        self.streaming_from_local = root is not None
+
+        self.image_transforms = image_transforms
+        self.episodes = episodes
+        self.tolerance_s = tolerance_s
+        self.tolerance_frames = tolerance_frames
+        self.revision = revision if revision else CODEBASE_VERSION
+        self.seed = seed
+        self.rng = rng if rng is not None else np.random.default_rng(seed)
+        self.shuffle = shuffle
+
+        self.buffer_size = buffer_size
+        self.video_decoder_cache = None
+        self.deferred_video_decode = deferred_video_decode
+        self.decode_device = decode_device
+        self.decode_num_threads = decode_num_threads
+        self._cuda_decoder_cache = None
+        self.episode_chunk_size = episode_chunk_size
+
+        # Explicit key overrides (for ms data)
+        self._action_key = action_key
+        self._state_key = state_key
+
+        # ── Build metadata ─────────────────────────────────────────────
+        self.meta = self._build_metadata(
+            self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
+        )
+        check_version_compatibility(self.repo_id, self.meta._version, CODEBASE_VERSION)
+
+        self.delta_timestamps = None
+        self.delta_indices = None
+        if delta_timestamps is not None:
+            self.delta_timestamps = delta_timestamps
+            self.delta_indices = get_delta_indices(self.delta_timestamps, self.fps)
+
+        # ── Determine action / state keys ──────────────────────────────
+        # Auto-detect ms-data keys if not explicitly provided
+        available_cols = set()
+        for ep in self.meta.episodes:
+            # We don't have parquet columns here; use info features instead
+            break
+        feature_keys = set(self.meta.info.get("features", {}).keys())
+
+        if self._action_key is None:
+            if "action" in feature_keys:
+                self._action_key = "action"
+            elif "action.ee_ort6d_pos" in feature_keys:
+                self._action_key = "action.ee_ort6d_pos"
+            else:
+                # Fallback: find any key starting with "action."
+                action_keys = [k for k in feature_keys if k.startswith("action.")]
+                self._action_key = action_keys[0] if action_keys else "action"
+
+        if self._state_key is None:
+            if "observation.state" in feature_keys:
+                self._state_key = "observation.state"
+            elif "observation.ee_ort6d_pos" in feature_keys:
+                self._state_key = "observation.ee_ort6d_pos"
+            else:
+                state_keys = [k for k in feature_keys if k.startswith("observation.") and k not in self.meta.video_keys and k not in self.meta.image_keys]
+                self._state_key = state_keys[0] if state_keys else "observation.state"
+
+        # ── Action dim ─────────────────────────────────────────────────
+        action_feat = self.meta.info.get("features", {}).get(self._action_key, {})
+        self.action_dim = action_feat.get("shape", [1])[0]
+
+        state_feat = self.meta.info.get("features", {}).get(self._state_key, {})
+        self.state_dim = state_feat.get("shape", [1])[0]
+
+        # ── Load normalization stats from meta/stats.json ──────────────
+        self._norm_stats = self._load_norm_stats()
+
+        # ── Parquet file discovery + episode boundaries ────────────────
+        self._parquet_files = _discover_parquet_files(str(self.root))
+
+        num_episodes = len(self.meta.episodes)
+        self._episode_starts = np.empty(num_episodes, dtype=np.int64)
+        self._episode_ends = np.empty(num_episodes, dtype=np.int64)
+        for ep_idx in range(num_episodes):
+            ep = self.meta.episodes[ep_idx]
+            self._episode_starts[ep_idx] = ep["dataset_from_index"]
+            self._episode_ends[ep_idx] = ep["dataset_to_index"]
+
+        self._file_cumsum = [0]
+        for path in self._parquet_files:
+            pf = pq.ParquetFile(path)
+            self._file_cumsum.append(self._file_cumsum[-1] + pf.metadata.num_rows)
+        self._total_rows = self._file_cumsum[-1]
+
+        self._episode_file_ranges: list[tuple[int, int]] = []
+        for ep_idx in range(num_episodes):
+            first_file = bisect.bisect_right(self._file_cumsum, self._episode_starts[ep_idx]) - 1
+            last_file = bisect.bisect_right(self._file_cumsum, self._episode_ends[ep_idx] - 1) - 1
+            self._episode_file_ranges.append((first_file, last_file))
+
+        # ── Chunk metadata ─────────────────────────────────────────────
+        chunk_size = self.episode_chunk_size
+        num_chunks = (num_episodes + chunk_size - 1) // chunk_size
+        self._chunk_primary_file = []
+        for c in range(num_chunks):
+            ep_start = c * chunk_size
+            self._chunk_primary_file.append(self._episode_file_ranges[ep_start][0])
+
+        # ── EpisodeChunkReader ─────────────────────────────────────────
+        self._chunk_reader = EpisodeChunkReader(
+            self._parquet_files, self._file_cumsum,
+            self._episode_starts, self._episode_ends,
+            self._episode_file_ranges,
+        )
+
+        # ── Fast membership sets ───────────────────────────────────────
+        self._video_keys_set = set(self.meta.video_keys)
+
+        # ── Task name lookup ───────────────────────────────────────────
+        self._task_names = [self.meta.tasks.iloc[i].name for i in range(len(self.meta.tasks))]
+
+        # ── Seek-mode mapping ──────────────────────────────────────────
+        self._video_seek_modes: dict[str, str] = {}
+        if self.streaming_from_local and os.path.isdir(os.path.join(str(self.root), "videos")):
+            self._video_seek_modes = scan_video_seek_modes(str(self.root), num_workers=8)
+            exact_count = sum(1 for v in self._video_seek_modes.values() if v == "exact")
+            print(f"[SimpleStreamingDataset] seek-mode scan: {len(self._video_seek_modes)} videos, "
+                  f"{exact_count} require exact mode")
+
+        # ── Filter episodes if specified ───────────────────────────────
+        self._episode_indices: list[int] | None = None
+        if self.episodes is not None:
+            self._episode_indices = sorted(self.episodes)
+
+        print(f"[SimpleStreamingDataset] action_key: {self._action_key}")
+        print(f"[SimpleStreamingDataset] state_key: {self._state_key}")
+        print(f"[SimpleStreamingDataset] action_dim: {self.action_dim}")
+        print(f"[SimpleStreamingDataset] state_dim: {self.state_dim}")
+        print(f"[SimpleStreamingDataset] parquet_files: {len(self._parquet_files)}")
+        print(f"[SimpleStreamingDataset] total_rows: {self._total_rows}")
+        print(f"[SimpleStreamingDataset] total_episodes: {num_episodes}")
+        print(f"[SimpleStreamingDataset] episode_chunk_size: {episode_chunk_size}")
+
+    # ── Metadata loading ───────────────────────────────────────────────
+
+    @staticmethod
+    def _build_metadata(repo_id, root, revision, force_cache_sync=False):
+        from pathlib import Path
+
+        meta_root = Path(root) if root is not None else HF_LEROBOT_HOME / repo_id
+        _revision = revision if revision else CODEBASE_VERSION
+
+        if force_cache_sync:
+            if is_valid_version(_revision):
+                _revision = get_safe_version(repo_id, _revision)
+            (meta_root / "meta").mkdir(exist_ok=True, parents=True)
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id, repo_type="dataset", revision=_revision,
+                local_dir=meta_root, allow_patterns="meta/",
+            )
+
+        meta = LeRobotDatasetMetadata.__new__(LeRobotDatasetMetadata)
+        meta.repo_id = repo_id
+        meta.revision = _revision
+        meta.root = meta_root
+        meta.writer = None
+        meta.latest_episode = None
+        meta.metadata_buffer = []
+        meta.metadata_buffer_size = 10
+
+        meta.info = load_info(meta_root)
+        meta.tasks = load_tasks(meta_root)
+        meta.stats = load_stats(meta_root)
+
+        episodes_list = _load_episodes_polars(meta_root)
+        meta.episodes = _EpisodeAccessor(episodes_list)
+
+        print(f"[SimpleStreamingDataset] Loaded {len(episodes_list)} episodes")
+        return meta
+
+    # ── Normalization stats ────────────────────────────────────────────
+
+    def _load_norm_stats(self):
+        """Load normalization stats from the dataset's meta/stats.json."""
+        stats_path = os.path.join(str(self.root), "meta", "stats.json")
+        if not os.path.exists(stats_path):
+            logger.warning(f"[SimpleStreamingDataset] stats.json not found at {stats_path}, skipping normalization")
+            return None
+
+        with open(stats_path, "r") as f:
+            raw_stats = json.load(f)
+
+        norm_stats = {}
+        for key in (self._action_key, self._state_key):
+            # Try original key first, then mapped standard key
+            if key in raw_stats:
+                norm_stats[key] = {
+                    "mean": torch.tensor(raw_stats[key]["mean"], dtype=torch.float32),
+                    "std": torch.tensor(raw_stats[key]["std"], dtype=torch.float32),
+                }
+            else:
+                # Also try the standard key names in stats.json
+                alt_key = key.replace("action.ee_ort6d_pos", "action").replace("observation.ee_ort6d_pos", "observation.state")
+                if alt_key in raw_stats:
+                    norm_stats[key] = {
+                        "mean": torch.tensor(raw_stats[alt_key]["mean"], dtype=torch.float32),
+                        "std": torch.tensor(raw_stats[alt_key]["std"], dtype=torch.float32),
+                    }
+
+        return norm_stats
+
+    @staticmethod
+    def _make_translation_norm_mask(dim: int) -> torch.Tensor:
+        """Create a mask that is True for translation dims (first 3 per arm)."""
+        mask = torch.zeros(dim, dtype=torch.bool)
+        arm_dim = 10  # xyz(3) + rot6d(6) + gripper(1)
+        num_arms = dim // arm_dim
+        for arm in range(num_arms):
+            offset = arm * arm_dim
+            mask[offset:offset + 3] = True
+        return mask
+
+    def _normalize_item(self, item):
+        """Apply z-score normalization to action and observation.state."""
+        if self._norm_stats is None:
+            return item
+
+        for target_key, source_key in [("action", self._action_key), ("observation.state", self._state_key)]:
+            if source_key not in self._norm_stats:
+                continue
+            if target_key not in item:
+                continue
+
+            mean = self._norm_stats[source_key]["mean"]
+            std = self._norm_stats[source_key]["std"]
+            val = item[target_key]
+
+            # Pad stats if needed
+            if mean.shape[0] != val.shape[-1]:
+                if mean.shape[0] < val.shape[-1]:
+                    pad_len = val.shape[-1] - mean.shape[0]
+                    mean = torch.cat([mean, torch.zeros(pad_len)])
+                    std = torch.cat([std, torch.ones(pad_len)])
+
+            # Only normalize translation dims
+            norm_mask = self._make_translation_norm_mask(mean.shape[0])
+            normalized = (val - mean) / (std + 1e-8)
+            item[target_key] = torch.where(norm_mask, normalized, val)
+
+        return item
+
+    # ── Properties ─────────────────────────────────────────────────────
+
+    @property
+    def num_frames(self):
+        return self.meta.total_frames
+
+    @property
+    def num_episodes(self):
+        return self.meta.total_episodes
+
+    @property
+    def fps(self):
+        return self.meta.fps
+
+    # ── Process one episode ────────────────────────────────────────────
+
+    def _process_episode_frames(self, ep_data: dict[str, np.ndarray], ep_idx: int) -> list[dict]:
+        """Process all frames of an episode into list of item dicts.
+
+        Simplified vs LoLAPretrainStreamingDataset:
+        - No history actions
+        - Key mapping for ms data
+        - Uses dataset's own stats.json for normalization
+        """
+        # Determine episode length from the action key
+        ep_length_key = self._action_key if self._action_key in ep_data else self._state_key
+        if ep_length_key not in ep_data:
+            # Fallback to any available list column
+            for k, v in ep_data.items():
+                if isinstance(v, np.ndarray) and v.ndim >= 1:
+                    ep_length_key = k
+                    break
+        ep_length = len(ep_data[ep_length_key])
+        ep_start = int(self._episode_starts[ep_idx])
+
+        # Pre-compute delta frame arrays (non-video keys only)
+        delta_arrays = {}
+        if self.delta_indices is not None:
+            for key, delta_indices in self.delta_indices.items():
+                if key in self._video_keys_set:
+                    continue
+                # Map standard key to parquet key for delta lookup
+                parquet_key = key
+                if key == "action" and self._action_key != "action" and self._action_key in ep_data:
+                    parquet_key = self._action_key
+                elif key == "observation.state" and self._state_key != "observation.state" and self._state_key in ep_data:
+                    parquet_key = self._state_key
+
+                if parquet_key not in ep_data:
+                    continue
+                arr = ep_data[parquet_key]
+                if arr.ndim == 1:
+                    arr = arr.reshape(-1, 1)
+                delta_arrays[key] = (arr, delta_indices, parquet_key)
+
+        items = []
+        for frame_in_ep in range(ep_length):
+            global_idx = ep_start + frame_in_ep
+
+            # Build base item from row data
+            item = {}
+            for key, arr in ep_data.items():
+                val = arr[frame_in_ep]
+                if isinstance(val, np.ndarray):
+                    item[key] = torch.tensor(val, dtype=torch.float32)
+                elif isinstance(val, (np.integer,)):
+                    item[key] = int(val)
+                elif isinstance(val, (np.floating,)):
+                    item[key] = float(val)
+                else:
+                    item[key] = val
+
+            # ── Key mapping (ms data) ────────────────────────────
+            if self._action_key != "action" and self._action_key in item:
+                item["action"] = item.pop(self._action_key)
+            if self._state_key != "observation.state" and self._state_key in item:
+                item["observation.state"] = item.pop(self._state_key)
+
+            # ── Delta frames (vectorized) ───────────────────────
+            if self.delta_indices is not None:
+                query_result = {}
+                padding = {}
+                for key, (arr, delta_indices, _parquet_key) in delta_arrays.items():
+                    target_frames = []
+                    is_pad = []
+                    for delta in delta_indices:
+                        target_pos = frame_in_ep + delta
+                        if 0 <= target_pos < ep_length:
+                            val = arr[target_pos]
+                            target_frames.append(torch.tensor(val, dtype=torch.float32))
+                            is_pad.append(False)
+                        else:
+                            target_frames.append(torch.zeros(arr.shape[1], dtype=torch.float32))
+                            is_pad.append(True)
+                    if target_frames:
+                        query_result[key] = torch.stack(target_frames)
+                        padding[f"{key}_is_pad"] = torch.BoolTensor(is_pad)
+                item.update(query_result)
+                item.update(padding)
+
+            # ── Task name ────────────────────────────────────────
+            task_index = item.get("task_index", 0)
+            if isinstance(task_index, torch.Tensor):
+                task_index = task_index.item()
+            item["task"] = self._task_names[task_index] if task_index < len(self._task_names) else ""
+
+            # ── Video lookup (deferred) or immediate decode ─────
+            ep_meta = self.meta.episodes[ep_idx]
+            current_ts = global_idx / self.fps
+
+            if len(self.meta.video_keys) > 0:
+                episode_boundaries_ts = {
+                    key: (
+                        ep_meta[f"videos/{key}/from_timestamp"],
+                        ep_meta[f"videos/{key}/to_timestamp"],
+                    )
+                    for key in self.meta.video_keys
+                }
+
+                original_timestamps = self._make_timestamps_from_indices(current_ts, self.delta_indices)
+                query_timestamps = self._get_query_timestamps(
+                    current_ts, self.delta_indices, episode_boundaries_ts
+                )
+
+                if self.deferred_video_decode:
+                    item["_video_lookup"] = {
+                        "ep_idx": ep_idx,
+                        "query_timestamps": query_timestamps,
+                        "original_timestamps": original_timestamps,
+                        "camera_valid_mask": {
+                            cam_key: ep_meta.get(f"videos/{cam_key}/is_valid", 1) == 1
+                            for cam_key in self.meta.video_keys
+                        },
+                    }
+                else:
+                    video_frames = self._query_videos(query_timestamps, ep_idx)
+                    item.update(video_frames)
+                    if self.delta_indices is not None:
+                        padding_mask = self._get_video_frame_padding_mask(
+                            video_frames, query_timestamps, original_timestamps
+                        )
+                        item.update(padding_mask)
+
+            # ── Normalization ────────────────────────────────────
+            item = self._normalize_item(item)
+
+            # ── Camera valid mask ────────────────────────────────
+            if not self.deferred_video_decode:
+                item = self._apply_camera_valid_mask(item, ep_idx)
+            else:
+                camera_valid_mask = {}
+                for cam_key in self.meta.camera_keys:
+                    is_valid_key = f"videos/{cam_key}/is_valid"
+                    is_valid = ep_meta.get(is_valid_key, 1)
+                    camera_valid_mask[cam_key] = (is_valid == 1)
+                item["camera_valid_mask"] = camera_valid_mask
+
+            items.append(item)
+
+        return items
+
+    # ── __iter__ ───────────────────────────────────────────────────────
+
+    def __iter__(self):
+        """Episode-aware streaming with chunk-level strided sharding."""
+        if self.video_decoder_cache is None:
+            n_cameras = max(1, len(self.meta.video_keys))
+            cache_size = max(4, n_cameras * self.episode_chunk_size)
+            self.video_decoder_cache = BoundedVideoDecoderCache(max_size=cache_size)
+
+        # Distributed info
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            world_size = torch.distributed.get_world_size()
+        else:
+            rank = 0
+            world_size = 1
+
+        worker_info = torch.utils.data.get_worker_info()
+        num_workers = worker_info.num_workers if worker_info is not None else 1
+        worker_id = worker_info.id if worker_info is not None else 0
+
+        total_parallel = world_size * num_workers
+        parallel_id = rank * num_workers + worker_id
+
+        # ── Chunk assignment ──────────────────────────────────────────
+        rng = np.random.default_rng(
+            self.seed + rank if not self.shuffle else self.rng.integers(0, 2**31) + rank
+        )
+
+        num_episodes = len(self.meta.episodes)
+        chunk_size = self.episode_chunk_size
+
+        # Build episode index list (optionally filtered)
+        if self._episode_indices is not None:
+            ep_indices = self._episode_indices
+        else:
+            ep_indices = list(range(num_episodes))
+
+        num_chunks = (len(ep_indices) + chunk_size - 1) // chunk_size
+
+        # Group chunks by primary parquet file for I/O locality
+        file_to_chunks: dict[int, list[int]] = {}
+        for c in range(num_chunks):
+            first_ep = ep_indices[c * chunk_size]
+            pf = self._episode_file_ranges[first_ep][0]
+            file_to_chunks.setdefault(pf, []).append(c)
+
+        # Sort file groups by size descending (rough balance)
+        file_groups = sorted(
+            file_to_chunks.values(),
+            key=lambda group: len(group),
+            reverse=True,
+        )
+
+        # Greedy round-robin with random tie-breaking
+        worker_indices: list[list[int]] = [[] for _ in range(total_parallel)]
+        worker_costs: list[float] = [0.0] * total_parallel
+        for group in file_groups:
+            min_cost = min(worker_costs)
+            candidates = [i for i, c in enumerate(worker_costs) if c == min_cost]
+            min_worker = int(rng.choice(candidates))
+            worker_indices[min_worker].extend(group)
+            for c in group:
+                worker_costs[min_worker] += len(ep_indices[c * chunk_size:min((c + 1) * chunk_size, len(ep_indices))])
+
+        worker_chunk_indices = worker_indices[parallel_id]
+
+        if not worker_chunk_indices:
+            print(f"[SimpleStreamingDataset] Worker {parallel_id} has no chunks assigned", flush=True)
+            return
+
+        # Shuffle chunk order
+        chunk_indices_shuffled = np.array(worker_chunk_indices)
+        if self.shuffle:
+            rng.shuffle(chunk_indices_shuffled)
+
+        print(f"[SimpleStreamingDataset] Worker {parallel_id} processing "
+              f"{len(worker_chunk_indices)} chunks", flush=True)
+
+        # ── Decode mode ──────────────────────────────────────────────
+        decode_on_yield = self.deferred_video_decode
+
+        # ── Shuffle buffer ───────────────────────────────────────────
+        buffer_indices_generator = self._iter_random_indices(rng, self.buffer_size)
+        frames_buffer = []
+        buffer_full = False
+
+        for chunk_idx in chunk_indices_shuffled:
+            ep_start_idx = int(chunk_idx) * chunk_size
+            ep_end_idx = min(ep_start_idx + chunk_size, len(ep_indices))
+            chunk_ep_indices = ep_indices[ep_start_idx:ep_end_idx]
+
+            # Load contiguous ranges efficiently
+            for rng_start, rng_end in _contiguous_ranges(chunk_ep_indices):
+                try:
+                    ep_data_list = self._chunk_reader.load_episode_range(rng_start, rng_end)
+                except Exception as e:
+                    logger.warning(f"Failed to load episodes [{rng_start}, {rng_end}): {e}")
+                    continue
+
+                # Map back from contiguous range to chunk's episode indices
+                for local_i, global_ep in enumerate(range(rng_start, rng_end)):
+                    if global_ep not in set(chunk_ep_indices):
+                        continue
+
+                    ep_data = ep_data_list[local_i]
+                    try:
+                        frame_items = self._process_episode_frames(ep_data, global_ep)
+                    except Exception as e:
+                        logger.warning(f"Failed to process episode {global_ep}: {e}")
+                        continue
+
+                    if self.shuffle and len(frame_items) > 1:
+                        rng.shuffle(frame_items)
+
+                    for frame in frame_items:
+                        if len(frames_buffer) == self.buffer_size:
+                            if not buffer_full:
+                                buffer_full = True
+                            i = next(buffer_indices_generator)
+                            to_yield = frames_buffer[i]
+                            if decode_on_yield and "_video_lookup" in to_yield:
+                                to_yield = self._decode_videos(to_yield)
+                            yield to_yield
+                            frames_buffer[i] = frame
+                        else:
+                            frames_buffer.append(frame)
+
+        # Flush remaining buffer
+        rng.shuffle(frames_buffer)
+        if decode_on_yield:
+            for frame in frames_buffer:
+                if "_video_lookup" in frame:
+                    frame = self._decode_videos(frame)
+                yield frame
+        else:
+            yield from frames_buffer
+
+        print(f"[SimpleStreamingDataset] Worker {parallel_id} finished", flush=True)
+
+    # ── Video decode ───────────────────────────────────────────────────
+
+    def _decode_videos(self, lightweight_frame):
+        video_lookup = lightweight_frame.pop("_video_lookup", None)
+
+        if video_lookup is None:
+            for cam_key in self.meta.camera_keys:
+                if cam_key not in lightweight_frame:
+                    lightweight_frame[cam_key] = self._make_padding_camera_frame(cam_key)
+                    lightweight_frame[f"{cam_key}_is_pad"] = torch.BoolTensor([True])
+            return lightweight_frame
+
+        ep_idx = video_lookup["ep_idx"]
+        query_timestamps = video_lookup["query_timestamps"]
+        original_timestamps = video_lookup["original_timestamps"]
+        camera_valid_mask = video_lookup.get("camera_valid_mask", {})
+
+        video_frames = self._query_videos(query_timestamps, ep_idx)
+        lightweight_frame.update(video_frames)
+
+        for cam_key in self.meta.camera_keys:
+            if not camera_valid_mask.get(cam_key, True):
+                lightweight_frame[cam_key] = None
+
+        if self.delta_indices is not None:
+            padding_mask = self._get_video_frame_padding_mask(
+                video_frames, query_timestamps, original_timestamps
+            )
+            lightweight_frame.update(padding_mask)
+
+        lightweight_frame = self._apply_camera_valid_mask(lightweight_frame, ep_idx)
+        return lightweight_frame
+
+    # ── Video helpers (same as LoLAPretrainStreamingDataset) ───────────
+
+    def _tensor_to_pil(self, tensor):
+        from PIL import Image
+        if isinstance(tensor, list):
+            return [self._tensor_to_pil(t) for t in tensor]
+        if tensor.dim() == 4:
+            tensor = tensor[0]
+        img = tensor.permute(1, 2, 0)
+        if img.dtype in [torch.float32, torch.float64]:
+            img = (img * 255).clamp(0, 255).to(torch.uint8)
+        return Image.fromarray(img.cpu().numpy())
+
+    def _apply_camera_valid_mask(self, item, ep_idx):
+        from PIL import Image
+        camera_valid_mask = {}
+        ep_meta = self.meta.episodes[ep_idx]
+        for cam_key in self.meta.camera_keys:
+            is_valid_key = f"videos/{cam_key}/is_valid"
+            is_valid = ep_meta.get(is_valid_key, 1)
+            camera_valid_mask[cam_key] = (is_valid == 1)
+            if cam_key in item:
+                if is_valid == 0:
+                    item[cam_key] = None
+                elif isinstance(item[cam_key], (torch.Tensor, list)):
+                    item[cam_key] = self._tensor_to_pil(item[cam_key])
+        item["camera_valid_mask"] = camera_valid_mask
+        return item
+
+    def _make_timestamps_from_indices(self, start_ts, indices=None):
+        if indices is not None:
+            return {
+                key: (start_ts + torch.tensor(indices[key]) / self.fps).tolist()
+                for key in self.delta_timestamps
+            }
+        else:
+            return dict.fromkeys(self.meta.video_keys, [start_ts])
+
+    def _make_padding_camera_frame(self, camera_key):
+        return torch.zeros(self.meta.info["features"][camera_key]["shape"]).permute(-1, 0, 1)
+
+    def _get_video_frame_padding_mask(self, video_frames, query_timestamps, original_timestamps):
+        padding_mask = {}
+        for video_key, timestamps in original_timestamps.items():
+            if video_key not in video_frames:
+                continue
+            mask = []
+            for ts in timestamps:
+                if is_float_in_list(ts, query_timestamps[video_key]):
+                    mask.append(False)
+                else:
+                    mask.append(True)
+            padding_mask[f"{video_key}_is_pad"] = torch.BoolTensor(mask)
+        return padding_mask
+
+    def _get_query_timestamps(self, current_ts, query_indices=None, episode_boundaries_ts=None):
+        query_timestamps = {}
+        keys_to_timestamps = self._make_timestamps_from_indices(current_ts, query_indices)
+        for key in self.meta.video_keys:
+            if query_indices is not None and key in query_indices:
+                timestamps = keys_to_timestamps[key]
+                query_timestamps[key] = torch.clamp(
+                    torch.tensor(timestamps), *episode_boundaries_ts[key]
+                ).tolist()
+            else:
+                query_timestamps[key] = [current_ts]
+        return query_timestamps
+
+    def _query_videos(self, query_timestamps, ep_idx, skip_invalid=True):
+        item = {}
+        ep_meta = self.meta.episodes[ep_idx]
+        for video_key, query_ts in query_timestamps.items():
+            is_valid_key = f"videos/{video_key}/is_valid"
+            is_valid = ep_meta.get(is_valid_key, 1)
+            if skip_invalid and is_valid == 0:
+                item[video_key] = self._make_padding_camera_frame(video_key)
+                continue
+
+            root = (
+                self.meta.url_root
+                if hasattr(self.meta, "url_root") and not self.streaming_from_local
+                else self.root
+            )
+            video_path = f"{root}/{self.meta.get_video_file_path(ep_idx, video_key)}"
+
+            video_rel = str(self.meta.get_video_file_path(ep_idx, video_key))
+            if video_rel.startswith("videos/"):
+                video_rel = video_rel[len("videos/"):]
+            seek_mode = self._video_seek_modes.get(video_rel, "approximate")
+
+            try:
+                if self.decode_device == "cuda":
+                    frames = self._decode_video_cuda(video_path, query_ts, seek_mode=seek_mode)
+                else:
+                    frames = decode_video_frames_torchcodec(
+                        video_path, query_ts, self.tolerance_s,
+                        tolerance_frames=self.tolerance_frames,
+                        decoder_cache=self.video_decoder_cache,
+                        seek_mode=seek_mode,
+                    )
+            except Exception as e:
+                logging.error(
+                    f"Video decode failed for ep_idx={ep_idx}, video_key={video_key}: "
+                    f"video_path={video_path}, query_ts={query_ts}, err={e}"
+                )
+                raise
+
+            item[video_key] = _maybe_squeeze(frames, len(query_ts))
+        return item
+
+    def _decode_video_cuda(self, video_path, timestamps, seek_mode="approximate"):
+        from torchcodec.decoders import VideoDecoder
+        video_path_str = str(video_path)
+
+        if self._cuda_decoder_cache is None:
+            self._cuda_decoder_cache = BoundedVideoDecoderCache(max_size=4)
+
+        decoder = self._cuda_decoder_cache.get_decoder(video_path_str, seek_mode)
+        metadata = decoder.metadata
+        average_fps = metadata.average_fps
+        num_frames = metadata.num_frames
+
+        effective_tol_s = self.tolerance_s
+        if self.tolerance_frames is not None:
+            effective_tol_s = (self.tolerance_frames + 0.5) / average_fps
+
+        frame_indices = [round(ts * average_fps) for ts in timestamps]
+        clamped_mask = [idx >= num_frames or idx < 0 for idx in frame_indices]
+        frame_indices = [max(0, min(idx, num_frames - 1)) for idx in frame_indices]
+
+        try:
+            frames_batch = decoder.get_frames_at(indices=frame_indices)
+        except RuntimeError as e:
+            if "Expected pre-allocated tensor" in str(e):
+                logging.warning(f"CUDA pre-allocated tensor mismatch for {video_path_str}. Evicting and rebuilding.")
+                decoder = self._cuda_decoder_cache.evict_and_rebuild(video_path_str, seek_mode)
+                frames_batch = decoder.get_frames_at(indices=frame_indices)
+            else:
+                raise
+
+        loaded_frames = [frame.cpu() for frame in frames_batch.data]
+        loaded_ts = [pts.item() for pts in frames_batch.pts_seconds]
+
+        query_ts_tensor = torch.tensor(timestamps)
+        loaded_ts_tensor = torch.tensor(loaded_ts)
+        dist = torch.cdist(query_ts_tensor[:, None], loaded_ts_tensor[:, None], p=1)
+        min_, argmin_ = dist.min(1)
+        clamped_mask_tensor = torch.tensor(clamped_mask)
+        is_within_tol = (min_ < effective_tol_s) | clamped_mask_tensor
+        assert is_within_tol.all(), (
+            f"Timestamp tolerance violated: {min_[~is_within_tol]} > {effective_tol_s=}. "
+            f"video: {video_path}"
+        )
+
+        closest_frames = _safe_stack_frames([loaded_frames[idx] for idx in argmin_])
+        if isinstance(closest_frames, torch.Tensor):
+            closest_frames = (closest_frames / 255.0).type(torch.float32)
+        else:
+            closest_frames = [(f / 255.0).type(torch.float32) for f in closest_frames]
+        return closest_frames
+
+    @staticmethod
+    def _iter_random_indices(rng: np.random.Generator, buffer_size: int, random_batch_size=100):
+        while True:
+            yield from (int(i) for i in rng.integers(0, buffer_size, size=random_batch_size))
+
+
+if __name__ == "__main__":
+    import sys
+
+    dataset_root = "/Data/lerobot_data_ort6d/Trossen_Stationary_AI_480x640_padded_MERGED"
+
+    print("=" * 60)
+    print("SimpleStreamingDataset Test")
+    print("=" * 60)
+
+    # ── Test 1: Basic iteration without video decode ──────────────────
+    print("\n--- Test 1: Basic iteration (deferred_video_decode=True) ---")
+    ds = SimpleStreamingDataset(
+        repo_id="Trossen_Stationary_AI_480x640_padded_MERGED",
+        root=dataset_root,
+        deferred_video_decode=True,
+        buffer_size=100,
+        episode_chunk_size=4,
+    )
+
+    count = 0
+    for item in ds:
+        count += 1
+        if count <= 3:
+            print(f"\n  Item {count}:")
+            for k, v in item.items():
+                if isinstance(v, torch.Tensor):
+                    print(f"    {k}: shape={v.shape}, dtype={v.dtype}, range=[{v.min():.4f}, {v.max():.4f}]")
+                elif isinstance(v, dict):
+                    print(f"    {k}: {v}")
+                elif isinstance(v, str):
+                    print(f"    {k}: {v[:80]}")
+                else:
+                    print(f"    {k}: {v}")
+        if count >= 5:
+            break
+
+    print(f"\n  Total items iterated: {count}")
+
+    # ── Test 2: With video decode ─────────────────────────────────────
+    print("\n--- Test 2: With video decode (deferred_video_decode=False) ---")
+    ds2 = SimpleStreamingDataset(
+        repo_id="Trossen_Stationary_AI_480x640_padded_MERGED",
+        root=dataset_root,
+        deferred_video_decode=False,
+        buffer_size=10,
+        episode_chunk_size=2,
+    )
+
+    count2 = 0
+    for item in ds2:
+        count2 += 1
+        if count2 <= 2:
+            print(f"\n  Item {count2}:")
+            for k, v in item.items():
+                if isinstance(v, torch.Tensor):
+                    print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
+                elif isinstance(v, dict):
+                    print(f"    {k}: { {ck: cv for ck, cv in v.items()} }")
+                elif v is None:
+                    print(f"    {k}: None")
+                else:
+                    print(f"    {k}: {str(v)[:80]}")
+        if count2 >= 3:
+            break
+
+    print(f"\n  Total items iterated: {count2}")
+
+    # ── Test 3: With delta_timestamps ─────────────────────────────────
+    print("\n--- Test 3: With delta_timestamps ---")
+    fps = ds.fps
+    ds3 = SimpleStreamingDataset(
+        repo_id="Trossen_Stationary_AI_480x640_padded_MERGED",
+        root=dataset_root,
+        deferred_video_decode=True,
+        buffer_size=10,
+        episode_chunk_size=2,
+        delta_timestamps={
+            "action": [-1/fps, 0, 1/fps],
+            "observation.state": [0],
+        },
+    )
+
+    count3 = 0
+    for item in ds3:
+        count3 += 1
+        if count3 <= 2:
+            print(f"\n  Item {count3}:")
+            for k, v in item.items():
+                if isinstance(v, torch.Tensor):
+                    print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
+                elif k == "camera_valid_mask":
+                    print(f"    {k}: {v}")
+                elif isinstance(v, str):
+                    print(f"    {k}: {v[:80]}")
+                else:
+                    print(f"    {k}: {v}")
+        if count3 >= 3:
+            break
+
+    print(f"\n  Total items iterated: {count3}")
+    print("\nAll tests passed!")
