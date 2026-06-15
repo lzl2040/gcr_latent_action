@@ -82,15 +82,16 @@ class BoundedVideoDecoderCache(VideoDecoderCache):
         self._max_size = max_size
         self._key_order: list[str] = []
 
-    def get_decoder(self, video_path: str):
+    def get_decoder(self, video_path: str, seek_mode: str = "approximate"):
         video_path = str(video_path)
 
         with self._lock:
             if video_path in self._cache:
-                decoder, file_handle, cached_res = self._cache[video_path]
+                decoder, file_handle, cached_res, cached_seek = self._cache[video_path]
+                # Evict if resolution or seek_mode changed
                 meta = decoder.metadata
                 current_res = (meta.height, meta.width)
-                if current_res != cached_res:
+                if current_res != cached_res or cached_seek != seek_mode:
                     try:
                         file_handle.close()
                     except Exception:
@@ -103,19 +104,25 @@ class BoundedVideoDecoderCache(VideoDecoderCache):
                 while len(self._cache) >= self._max_size and self._key_order:
                     oldest_key = self._key_order.pop(0)
                     if oldest_key in self._cache:
-                        _, old_handle, _ = self._cache.pop(oldest_key)
-                        old_handle.close()
+                        _, old_handle, _, _ = self._cache.pop(oldest_key)
+                        try:
+                            old_handle.close()
+                        except Exception:
+                            pass
 
-                decoder, file_handle, resolution = self._make_decoder(video_path)
-                self._cache[video_path] = (decoder, file_handle, resolution)
+                decoder, file_handle, resolution, actual_seek = self._make_decoder(video_path, seek_mode)
+                self._cache[video_path] = (decoder, file_handle, resolution, actual_seek)
                 self._key_order.append(video_path)
 
             return self._cache[video_path][0]
 
     def clear(self):
         with self._lock:
-            for _, file_handle, _ in self._cache.values():
-                file_handle.close()
+            for _, file_handle, _, _ in self._cache.values():
+                try:
+                    file_handle.close()
+                except Exception:
+                    pass
             self._cache.clear()
             self._key_order.clear()
 
@@ -325,7 +332,7 @@ def _decode_video_cuda_in_process(config, video_path, timestamps, get_cuda_cache
 
     with cache._lock:
         if video_path_str in cache._cache:
-            decoder, file_handle, cached_res = cache._cache[video_path_str]
+            decoder, file_handle, cached_res, cached_seek = cache._cache[video_path_str]
             meta = decoder.metadata
             current_res = (meta.height, meta.width)
             if current_res != cached_res:
@@ -341,13 +348,13 @@ def _decode_video_cuda_in_process(config, video_path, timestamps, get_cuda_cache
             decoder = VideoDecoder(file_handle, seek_mode="approximate", device="cuda")
             meta = decoder.metadata
             resolution = (meta.height, meta.width)
-            cache._cache[video_path_str] = (decoder, file_handle, resolution)
+            cache._cache[video_path_str] = (decoder, file_handle, resolution, "approximate")
             cache._key_order.append(video_path_str)
             # Evict if over capacity
             while len(cache._cache) > cache._max_size:
                 oldest_key = cache._key_order.pop(0)
                 if oldest_key in cache._cache:
-                    _, old_handle, _ = cache._cache.pop(oldest_key)
+                    _, old_handle, _, _ = cache._cache.pop(oldest_key)
                     try:
                         old_handle.close()
                     except Exception:
@@ -787,7 +794,6 @@ class LoLAStreamingDataset(torch.utils.data.IterableDataset):
 
     def _get_window_steps(self, delta_timestamps=None, dynamic_bounds=False):
         """计算 lookback/lookahead 窗口大小"""
-        from lerobot.utils.constants import LOOKAHEAD_BACKTRACKTABLE, LOOKBACK_BACKTRACKTABLE
 
         if delta_timestamps is None:
             return 1, 1
@@ -1464,7 +1470,7 @@ class LoLAStreamingDataset(torch.utils.data.IterableDataset):
 
         with cache._lock:
             if video_path_str in cache._cache:
-                decoder, file_handle, cached_res = cache._cache[video_path_str]
+                decoder, file_handle, cached_res, cached_seek = cache._cache[video_path_str]
                 meta = decoder.metadata
                 current_res = (meta.height, meta.width)
                 if current_res != cached_res:
@@ -1480,13 +1486,13 @@ class LoLAStreamingDataset(torch.utils.data.IterableDataset):
                 decoder = VideoDecoder(file_handle, seek_mode="approximate", device="cuda")
                 meta = decoder.metadata
                 resolution = (meta.height, meta.width)
-                cache._cache[video_path_str] = (decoder, file_handle, resolution)
+                cache._cache[video_path_str] = (decoder, file_handle, resolution, "approximate")
                 cache._key_order.append(video_path_str)
                 # 淘汰超出容量的解码器
                 while len(cache._cache) > cache._max_size:
                     oldest_key = cache._key_order.pop(0)
                     if oldest_key in cache._cache:
-                        _, old_handle, _ = cache._cache.pop(oldest_key)
+                        _, old_handle, _, _ = cache._cache.pop(oldest_key)
                         try:
                             old_handle.close()
                         except Exception:
@@ -1807,6 +1813,162 @@ class AsyncDecodeDataLoader:
     @property
     def batch_size(self):
         return self._loader.batch_size
+
+
+# ─── 测试代码 ──────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import time
+
+    # ── 数据集路径 ──────────────────────────────────────────────────────
+    DATA_ROOT = "/Data/lerobot_data_ort6d/Trossen_Stationary_AI_480x640_padded_MERGED"
+    REPO_ID = "Trossen_Stationary_AI_480x640_padded_MERGED"
+
+    # ── 配置 ────────────────────────────────────────────────────────────
+    BS = 512
+    NUM_WORKERS = 4
+    MAX_HISTORY_LENGTH = 100
+    ACTION_CHUNK_SIZE = 10
+    DEFERRED_VIDEO_DECODE = False  # 不推迟解码视频
+    BUFFER_SIZE = 600  # deferred_video_decode=False 时 buffer 存全量帧，适当减小
+
+    # delta_timestamps: 仅查当前帧（单帧），用于 4 个摄像头 + state + action
+    DELTA_TIMESTAMPS = {
+        "observation.images.cam_high": [0.0],
+        "observation.images.cam_low": [0.0],
+        "observation.images.cam_left_wrist": [0.0],
+        "observation.images.cam_right_wrist": [0.0],
+        "observation.ee_ort6d_pos": [0.0],
+        "action.ee_ort6d_pos": [0.0],
+    }
+
+    # ── 此数据集特殊性说明 ──────────────────────────────────────────────
+    # 1. info.json 中 cam_low/cam_left_wrist/cam_right_wrist 的 dtype 是
+    #    "image" 但实际都有 mp4 视频文件。需覆盖 video_keys 和 camera_keys。
+    # 2. 此数据集的 action key 是 action.ee_ort6d_pos (20d) 和
+    #    action.joint_position (14d)，不是 "action"。需重设 action_dim。
+    # 3. observation.state 对应 observation.ee_ort6d_pos (20d)。
+    ALL_CAMERA_KEYS = [
+        "observation.images.cam_high",
+        "observation.images.cam_low",
+        "observation.images.cam_left_wrist",
+        "observation.images.cam_right_wrist",
+    ]
+
+    from lerobot.common.datasets_v30.utils_3 import get_delta_indices
+
+    def _create_dataset(seed=42):
+        """创建并修复数据集实例。"""
+        ds = LoLAStreamingDataset(
+            repo_id=REPO_ID,
+            root=DATA_ROOT,
+            max_history_length=MAX_HISTORY_LENGTH,
+            action_chunk_size=ACTION_CHUNK_SIZE,
+            history_padding_side="left",
+            delta_timestamps=DELTA_TIMESTAMPS,
+            tolerance_s=0.04,
+            deferred_video_decode=DEFERRED_VIDEO_DECODE,
+            decode_device="cpu",
+            decode_num_threads=1,
+            async_decode=False,
+            shuffle=True,
+            buffer_size=BUFFER_SIZE,
+            seed=seed,
+        )
+        # 修复 camera_keys / video_keys
+        ds.meta.__class__.video_keys = property(lambda self: ALL_CAMERA_KEYS)
+        ds.meta.__class__.camera_keys = property(lambda self: ALL_CAMERA_KEYS)
+        # 修复 action_dim
+        ds.action_dim = 20  # action.ee_ort6d_pos
+        # delta_timestamps 已使用正确的 key 名，直接计算 delta_indices
+        ds.delta_timestamps = DELTA_TIMESTAMPS
+        ds.delta_indices = get_delta_indices(DELTA_TIMESTAMPS, ds.fps)
+        return ds
+
+    # ── 创建数据集 ──────────────────────────────────────────────────────
+    print("=" * 70)
+    print(f"Testing LoLAStreamingDataset")
+    print(f"  deferred_video_decode={DEFERRED_VIDEO_DECODE}")
+    print(f"  bs={BS}, num_workers={NUM_WORKERS}")
+    print(f"  buffer_size={BUFFER_SIZE}")
+    print(f"  cameras={len(ALL_CAMERA_KEYS)}")
+    print("=" * 70)
+
+    dataset = _create_dataset(seed=42)
+    print(f"[TEST] delta_timestamps: {dataset.delta_timestamps}")
+    print(f"[TEST] delta_indices: { {k: v[:3] for k, v in dataset.delta_indices.items()} }")
+
+    # ── 创建 DataLoader ──────────────────────────────────────────────────
+    collate_fn = AsyncDecodeDataLoader.make_collate_fn()
+
+    raw_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=BS,
+        num_workers=NUM_WORKERS,
+        collate_fn=collate_fn,
+        pin_memory=False,
+        prefetch_factor=2 if NUM_WORKERS > 0 else None,
+        persistent_workers=False,
+    )
+
+    loader = AsyncDecodeDataLoader(raw_loader, dataset, collate_fn=None)
+
+    # ── 预热 (1 batch) + 打印结构 ──────────────────────────────────────
+    print("\n--- Warming up (1 batch) ---")
+    t0 = time.time()
+    for batch in loader:
+        t1 = time.time()
+        warmup_time = t1 - t0
+        print(f"Warmup batch: {warmup_time:.2f}s")
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+            elif isinstance(v, list):
+                print(f"  {k}: list len={len(v)}")
+            else:
+                print(f"  {k}: {type(v).__name__}")
+        break
+
+    # ── Benchmark ────────────────────────────────────────────────────────
+    print(f"\n--- Benchmark: bs={BS}, deferred_video_decode={DEFERRED_VIDEO_DECODE} ---")
+
+    # 重新创建数据集和 loader
+    del loader, raw_loader
+
+    dataset2 = _create_dataset(seed=43)
+    raw_loader2 = torch.utils.data.DataLoader(
+        dataset2,
+        batch_size=BS,
+        num_workers=NUM_WORKERS,
+        collate_fn=collate_fn,
+        pin_memory=False,
+        prefetch_factor=2 if NUM_WORKERS > 0 else None,
+        persistent_workers=False,
+    )
+    loader2 = AsyncDecodeDataLoader(raw_loader2, dataset2, collate_fn=None)
+
+    t_start = time.time()
+    num_batches = 0
+    for batch in loader2:
+        num_batches += 1
+        elapsed = time.time() - t_start
+        print(f"  Batch {num_batches}: elapsed={elapsed:.1f}s, "
+              f"avg={elapsed/num_batches:.2f}s/batch, "
+              f"throughput={num_batches * BS / elapsed:.1f} samples/s")
+        if num_batches >= 3:
+            break
+    t_end = time.time()
+
+    total_time = t_end - t_start
+    avg_time = total_time / num_batches if num_batches > 0 else 0
+    throughput = BS / avg_time if avg_time > 0 else 0
+
+    print(f"\n{'='*70}")
+    print(f"RESULT: {num_batches} batches, total={total_time:.2f}s")
+    print(f"  Avg time per batch (bs={BS}): {avg_time:.2f}s")
+    print(f"  Throughput: {throughput:.1f} samples/s")
+    print(f"  Throughput: {num_batches / total_time:.2f} batches/s")
+    print(f"{'='*70}")
 
     @property
     def num_workers(self):
