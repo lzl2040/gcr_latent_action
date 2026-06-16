@@ -36,8 +36,8 @@ from torch.utils.data import DataLoader
 
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.transforms import ImageTransforms
-from lerobot.common.datasets.lerobot_dataset_for_ace import MultiDatasetforDistTraining, extra_collate_fn
-# from lerobot.common.datasets_v30.lerobot_dataset import MultiDatasetforDistTraining, LeRobotDataset
+# from lerobot.common.datasets.lerobot_dataset_for_ace import MultiDatasetforDistTraining, extra_collate_fn
+from lerobot.common.datasets_v30.lerobot_dataset import MultiDatasetforDistTraining, LeRobotDataset
 from lerobot.common.datasets.sampler import EpisodeAwareSampler, DistEpisodeAwareSampler
 from lerobot.common.datasets.utils import cycle
 from lerobot.common.envs.factory import make_env
@@ -272,6 +272,7 @@ def train(cfg: TrainPipelineConfig):
                             num_workers=4,
                             pin_memory=True,
                             drop_last=True,
+                            multiprocessing_context="spawn"
                             # persistent_workers=True,  # 防止每个epoch重新创建worker进程，减少内存碎片
                             # prefetch_factor=2,  # 降低预取数量，避免内存过度占用
                             )
