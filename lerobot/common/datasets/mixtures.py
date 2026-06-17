@@ -342,6 +342,13 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("ms_data_xdof_3", 0.05),
     ],
     
+    "ms_buy_v30":[
+        ("ms_data_scale", 1.0),
+        ("ms_data_xdof_1", 0.15),
+        ("ms_data_xdof_2", 0.15),
+        ("ms_data_xdof_3", 0.15),
+    ],
+    
     "ms_complete_data_wo_sim":[
         ("berkeley_cable_routing", 1.0),
         ("fractal20220817_data", 0.54087122203),                # Google RT-1 Robot Data (Large-Scale)
