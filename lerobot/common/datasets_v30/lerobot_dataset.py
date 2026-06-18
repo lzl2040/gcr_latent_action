@@ -130,6 +130,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         encoder_threads: int | None = None,
         dataset_name: str = None,
         video_return_type: str = "float32",
+        decode_device: str | None = None,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -264,6 +265,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.revision = revision if revision else CODEBASE_VERSION
         self.video_backend = video_backend if video_backend else get_safe_default_codec()
         self.video_return_type = video_return_type
+        self.decode_device = decode_device or "cpu"
         self.delta_indices = None
         self.batch_encoding_size = batch_encoding_size
         self.episodes_since_last_encoding = 0
@@ -559,10 +561,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if query_indices is not None and key in query_indices:
                 if self._absolute_to_relative_idx is not None:
                     relative_indices = [self._absolute_to_relative_idx[idx] for idx in query_indices[key]]
-                    timestamps = self.hf_dataset[relative_indices]["timestamp"]
+                    timestamps = self.hf_dataset.select(relative_indices)["timestamp"]
                 else:
-                    timestamps = self.hf_dataset[query_indices[key]]["timestamp"]
-                query_timestamps[key] = torch.stack(timestamps).tolist()
+                    timestamps = self.hf_dataset.select(query_indices[key])["timestamp"]
+                query_timestamps[key] = torch.stack(list(timestamps)).tolist()
             else:
                 query_timestamps[key] = [current_ts]
 
@@ -572,8 +574,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         """
         Query dataset for indices across keys, skipping video keys.
 
-        Query rows first. With HuggingFace Dataset, `dataset[key]` materializes
-        the full column, which is very expensive for large datasets.
+        Uses .select() to create a lightweight index mapping before column
+        access, which avoids materializing all columns for the selected rows.
+        This is significantly faster than dataset[list_of_indices][key]
+        which deserializes every column for those rows first.
 
         Args:
             query_indices: Dict mapping keys to index lists to retrieve
@@ -591,8 +595,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 if self._absolute_to_relative_idx is None
                 else [self._absolute_to_relative_idx[idx] for idx in q_idx]
             )
+            # Use .select() for efficient column-only access (vs row-first access)
             try:
-                result[key] = torch.stack(self.hf_dataset[relative_indices][key])
+                result[key] = torch.stack(list(self.hf_dataset.select(relative_indices)[key]))
             except (KeyError, TypeError, IndexError):
                 result[key] = torch.stack([self.hf_dataset[i][key] for i in relative_indices])
         return result
@@ -619,6 +624,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 self.tolerance_s,
                 self.video_backend,
                 return_type=self.video_return_type,
+                device=self.decode_device,
             )
             item[vid_key] = frames.squeeze(0)
         return item
@@ -1349,7 +1355,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                     image_transforms=image_transforms,
                     video_backend=cfg.dataset.video_backend,
                     dataset_name=dataset_name,
-                    video_return_type="uint8"
+                    # video_return_type="float32" # [0,1]
+                    video_return_type="uint8" # [0, 255]
                 )
                 self.datasets.append(dataset)
                 self.dataset_sizes.append(len(dataset))
