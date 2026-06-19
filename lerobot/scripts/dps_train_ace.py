@@ -272,9 +272,9 @@ def train(cfg: TrainPipelineConfig):
                             num_workers=4,
                             pin_memory=True,
                             drop_last=True,
-                            multiprocessing_context="spawn"
-                            # persistent_workers=True,  # 防止每个epoch重新创建worker进程，减少内存碎片
-                            # prefetch_factor=2,  # 降低预取数量，避免内存过度占用
+                            # multiprocessing_context="spawn"
+                            persistent_workers=True,  # 防止每个epoch重新创建worker进程，减少内存碎片
+                            prefetch_factor=4,  # 降低预取数量，避免内存过度占用
                             )
     
     model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
