@@ -400,6 +400,7 @@ def decode_video_frames(
     tolerance_s: float,
     backend: str | None = None,
     return_type: str = "float32",
+    device: str | None = None,
 ) -> torch.Tensor:
     """
     Decodes video frames using the specified backend.
@@ -409,16 +410,18 @@ def decode_video_frames(
         timestamps (list[float]): List of timestamps to extract frames.
         tolerance_s (float): Allowed deviation in seconds for frame retrieval.
         backend (str, optional): Backend to use for decoding. Defaults to "torchcodec" when available in the platform; otherwise, defaults to "pyav"..
+        return_type (str): Return dtype ("float32" or "uint8").
+        device (str, optional): Device for video decoding ("cpu" or "cuda"). Only supported by torchcodec backend.
 
     Returns:
         torch.Tensor: Decoded frames.
 
-    Currently supports torchcodec on cpu and pyav.
+    Currently supports torchcodec on cpu/cuda and pyav on cpu.
     """
     if backend is None:
         backend = get_safe_default_codec()
     if backend == "torchcodec":
-        return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s, return_type=return_type)
+        return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s, return_type=return_type, device=device)
     elif backend in ["pyav", "video_reader"]:
         return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
     else:
@@ -527,52 +530,110 @@ def decode_video_frames_torchvision(
         )
     return closest_frames
 
+DEFAULT_DECODER_CACHE_SIZE = 100
+"""Default LRU capacity for :class:`VideoDecoderCache`.
+
+Sized to comfortably hold a small rolling window of episodes worth of decoders
+(typical recipes: 2-4 cameras per episode × tens of episodes in flight) while
+bounding host RAM. Each cached entry retains a torchcodec ``VideoDecoder`` plus
+an open ``fsspec`` file handle — on the order of a few MB per entry. Override
+via the ``LEROBOT_VIDEO_DECODER_CACHE_SIZE`` env var or by passing ``max_size``
+to the constructor (``None`` restores the legacy unbounded behaviour).
+"""
+
+def _default_max_cache_size() -> int | None:
+    raw = os.environ.get("LEROBOT_VIDEO_DECODER_CACHE_SIZE")
+    if raw is None:
+        return DEFAULT_DECODER_CACHE_SIZE
+    raw = raw.strip().lower()
+    if raw in ("", "none", "unbounded", "-1"):
+        return None
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"LEROBOT_VIDEO_DECODER_CACHE_SIZE must be an integer, 'none', or '-1'; got {raw!r}"
+        ) from e
+    if value <= 0:
+        raise ValueError(f"LEROBOT_VIDEO_DECODER_CACHE_SIZE must be positive; got {value}")
+    return value
+
 
 class VideoDecoderCache:
-    """Thread-safe cache for video decoders to avoid expensive re-initialization."""
+    """Thread-safe LRU cache for torchcodec ``VideoDecoder`` instances.
 
-    def __init__(self, max_size: int | None = None):
-        if max_size is None:
-            max_size = int(os.environ.get("LEROBOT_VIDEO_DECODER_CACHE_SIZE", "256"))
-        self.max_size = max(0, max_size)
-        self._cache: OrderedDict[str, Any] = OrderedDict()
+    Cached entries hold a ``VideoDecoder`` plus the open ``fsspec`` file handle
+    backing it. When the cache is full and a new path is requested, the
+    least-recently-used entry is evicted and its file handle is closed. This
+    bounds host-RAM growth when iterating over datasets with many distinct
+    video files (otherwise each ``DataLoader`` worker pins every decoder it has
+    ever opened until the process exits).
+
+    Args:
+        max_size: Maximum number of decoders to retain. ``None`` disables
+            eviction and restores legacy unbounded behaviour. Defaults to the
+            value of ``LEROBOT_VIDEO_DECODER_CACHE_SIZE`` if set, otherwise
+            :data:`DEFAULT_DECODER_CACHE_SIZE`.
+    """
+
+    _SENTINEL: ClassVar[object] = object()
+
+    def __init__(self, max_size: int | None | object = _SENTINEL):
+        if max_size is VideoDecoderCache._SENTINEL:
+            max_size = _default_max_cache_size()
+        if max_size is not None and max_size <= 0:
+            raise ValueError(f"max_size must be positive or None; got {max_size}")
+        self.max_size: int | None = max_size  # type: ignore[assignment]
+        self._cache: OrderedDict[str, tuple[Any, Any]] = OrderedDict()
         self._lock = Lock()
 
+    def __contains__(self, video_path: object) -> bool:
+        with self._lock:
+            return str(video_path) in self._cache
+
     def get_decoder(self, video_path: str):
-        """Get a cached decoder or create a new one."""
+        """Get a cached decoder or create a new one, evicting LRU if at capacity."""
         if importlib.util.find_spec("torchcodec"):
             from torchcodec.decoders import VideoDecoder
         else:
-            raise ImportError("torchcodec is required but not available.")
+            raise ImportError(
+                "'torchcodec' is required but not installed. "
+                "Install it with: pip install 'lerobot[dataset]' (or uv pip install 'lerobot[dataset]')"
+            )
 
         video_path = str(video_path)
 
-        if self.max_size == 0:
-            return VideoDecoder(video_path, seek_mode="approximate")
-
         with self._lock:
-            if video_path in self._cache:
+            entry = self._cache.get(video_path)
+            if entry is not None:
                 self._cache.move_to_end(video_path)
-            else:
-                decoder = VideoDecoder(video_path, seek_mode="approximate")
-                self._cache[video_path] = decoder
+                return entry[0]
+
+            file_handle = fsspec.open(video_path).__enter__()
+            try:
+                decoder = VideoDecoder(file_handle, seek_mode="approximate")
+            except Exception:
+                file_handle.close()
+                raise
+            self._cache[video_path] = (decoder, file_handle)
+
+            # Evict LRU entries until we are back under the cap. We close
+            # evicted file handles immediately; the associated ``VideoDecoder``
+            # is released to the GC when its last reference goes away.
+            if self.max_size is not None:
                 while len(self._cache) > self.max_size:
-                    _, old_decoder = self._cache.popitem(last=False)
-                    self._release_decoder(old_decoder)
+                    _evicted_path, (_evicted_decoder, evicted_handle) = self._cache.popitem(last=False)
+                    with contextlib.suppress(Exception):
+                        evicted_handle.close()
 
-            return self._cache[video_path]
-
-    @staticmethod
-    def _release_decoder(decoder):
-        close = getattr(decoder, "close", None)
-        if callable(close):
-            close()
+            return decoder
 
     def clear(self):
-        """Clear the cache and close file handles."""
+        """Clear the cache and close all file handles."""
         with self._lock:
-            for decoder in self._cache.values():
-                self._release_decoder(decoder)
+            for _, file_handle in self._cache.values():
+                with contextlib.suppress(Exception):
+                    file_handle.close()
             self._cache.clear()
 
     def size(self) -> int:
@@ -597,6 +658,7 @@ def decode_video_frames_torchcodec(
     log_loaded_timestamps: bool = False,
     decoder_cache: VideoDecoderCache | None = None,
     return_type: str = "float32",
+    device: str | None = None,
 ) -> torch.Tensor:
     """Loads frames associated with the requested timestamps of a video using torchcodec.
 
@@ -606,6 +668,8 @@ def decode_video_frames_torchcodec(
         tolerance_s: Allowed deviation in seconds for frame retrieval.
         log_loaded_timestamps: Whether to log loaded timestamps.
         decoder_cache: Optional decoder cache instance. Uses default if None.
+        device: Device for video decoding ("cpu" or "cuda"). When "cuda", uses NVDEC
+            hardware acceleration. Must NOT be used in forked DataLoader workers.
 
     Note: Setting device="cuda" outside the main process, e.g. in data loader workers, will lead to CUDA initialization errors.
 
