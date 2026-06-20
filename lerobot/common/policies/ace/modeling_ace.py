@@ -336,6 +336,7 @@ class ACEAttention(nn.Module):
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
         
+        print("hidden_states", hidden_states.dtype)
         print("q", q.dtype)
         print("k", k.dtype)
         print("v", v.dtype)
@@ -686,6 +687,10 @@ class ActionChunkEncoder(nn.Module):
         # RoPE
         cos_type, sin_type = self.type_rope.get_cos_sin_by_position_ids(type_ids)
         cos_time, sin_time = self.time_rope.get_cos_sin_by_position_ids(time_ids)
+        cos_type = cos_type.to(dtype=actions.dtype)
+        sin_type = sin_type.to(dtype=actions.dtype)
+        cos_time = cos_time.to(dtype=actions.dtype)
+        sin_time = sin_time.to(dtype=actions.dtype)
 
         # Encoder
         for layer in self.layers:
