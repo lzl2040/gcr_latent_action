@@ -335,6 +335,12 @@ class ACEAttention(nn.Module):
 
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
+        
+        print("q", q.dtype)
+        print("k", k.dtype)
+        print("v", v.dtype)
+        print("scores", scores.dtype)
+        print("attn_weights", attn_weights.dtype)
 
         attn_output = torch.matmul(attn_weights, v)
 
@@ -560,6 +566,7 @@ class ActionChunkEncoder(nn.Module):
 
     def _group_actions(self, actions: torch.Tensor) -> torch.Tensor:
         batch_size = actions.shape[0]
+        # print(actions.shape)
 
         actions = actions.view(
             batch_size,
