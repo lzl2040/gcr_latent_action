@@ -336,12 +336,12 @@ class ACEAttention(nn.Module):
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
         
-        print("hidden_states", hidden_states.dtype)
-        print("q", q.dtype)
-        print("k", k.dtype)
-        print("v", v.dtype)
-        print("scores", scores.dtype)
-        print("attn_weights", attn_weights.dtype)
+        # print("hidden_states", hidden_states.dtype)
+        # print("q", q.dtype)
+        # print("k", k.dtype)
+        # print("v", v.dtype)
+        # print("scores", scores.dtype)
+        # print("attn_weights", attn_weights.dtype)
 
         attn_output = torch.matmul(attn_weights, v)
 
