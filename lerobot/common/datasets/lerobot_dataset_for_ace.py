@@ -1475,7 +1475,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                         dataset_name=dataset_name,
                     )
                 else:
-                    parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30"
+                    # parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30"
                     data_root = os.path.join(parent_dir, data_root)
                     print(f"Load data from {data_root}")
                     ds_meta = LeRobotDatasetMetadataV30(repo_id, root=data_root)
@@ -1744,17 +1744,21 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         else:
             item["source"] = f"{item['dataset_name']}_with_unknown_episode_id"
         
+        raw_action_dim = item["action"].shape[-1]
+        # print(raw_action_dim)
+        
         # Pad the action and observation vectors
         item["action"] = self.pad_vector(item["action"], self.max_action_dim)
         item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
         
         # Normlize the action and observation vectors
-        if "agi" in item["dataset_name"] or "dual" in item["dataset_name"] or "agilex" in item["dataset_name"]:
+        # if "agi" in item["dataset_name"] or "dual" in item["dataset_name"] or "agilex" in item["dataset_name"]:
+        if raw_action_dim > 10:
             xyz_idx = [0, 1, 2, 10, 11, 12]   # 双臂 xyz
         else:
             xyz_idx = [0, 1, 2]               # 单臂 xyz
 
-        # print(t/orch.max(item["action"]), torch.min(item["action"]))
+        # print(torch.max(item["action"]), torch.min(item["action"]))
         # action
         mean = self.stats["action"]["mean"].to(item["action"].dtype).to(item["action"].device)
         std = self.stats["action"]["std"].to(item["action"].dtype).to(item["action"].device)
@@ -1778,6 +1782,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             "observation.state": item["observation.state"],
             "source": item["source"],
             "timestamp": item["timestamp"],
+            "task": item["task"]
         }
         return return_dict
     

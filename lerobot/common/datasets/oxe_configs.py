@@ -847,6 +847,24 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_POS,
     },
     
+    "ms_data_xdof_4":{
+        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
+        # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["proprio"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    
+    "ms_data_xdof_5":{
+        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
+        # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["proprio"],
+        "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    
     "local_game_minecraft":{
         "image_obs_keys": {"primary": "primary", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
