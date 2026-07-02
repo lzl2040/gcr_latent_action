@@ -225,8 +225,9 @@ def train(cfg: TrainPipelineConfig):
 
     logger.info("Setting model parameters to BF16...")
     if cfg.policy.frozen_ace == False:
-        for params in policy.parameters():
-            params.requires_grad = True
+        for name, params in policy.named_parameters():
+            if "text_model" not in name:
+                params.requires_grad = True
             params.data = params.data.bfloat16()
 
     # Logging setup (main process only)
