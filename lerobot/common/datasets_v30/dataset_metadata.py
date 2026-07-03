@@ -149,7 +149,7 @@ class LeRobotDatasetMetadata:
             self.stats["action"] = self.stats["action.ee_ort6d_pos"]
         else:
             if "action.ee_6d_pos" in self.stats.keys():
-                    self.stats["observation.state"] = self.stats["action.ee_6d_pos"]
+                    self.stats["action"] = self.stats["action.ee_6d_pos"]
 
     def pull_from_repo(
         self,

@@ -630,6 +630,8 @@ def aggregate_stats(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str
             pad_stats_with_key = stats_with_key
         # only for action and observation.state
         if key in ["action", "observation.state"]:
+            for s in pad_stats_with_key:
+                print(s["mean"].shape, s["std"].shape, s["max"].shape, s["min"].shape)
             aggregated_stats[key] = aggregate_feature_stats(pad_stats_with_key)
             for k, v in aggregated_stats[key].items():
                 if isinstance(aggregated_stats[key][k], np.ndarray):
