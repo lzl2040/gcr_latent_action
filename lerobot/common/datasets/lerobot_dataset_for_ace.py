@@ -1476,7 +1476,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                     )
                 else:
                     parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30"
-                    # data_root = os.path.join(parent_dir, data_root)
+                    data_root = os.path.join(parent_dir, data_root)
                     print(f"Load data from {data_root}")
                     ds_meta = LeRobotDatasetMetadataV30(repo_id, root=data_root)
                     if meta_features == None:
