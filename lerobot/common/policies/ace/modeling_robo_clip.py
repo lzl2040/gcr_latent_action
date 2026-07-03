@@ -352,7 +352,12 @@ class VisionEncoder(nn.Module):
         """
         device = next(self.parameters()).device
 
-        inputs = self.processor(images=images, text=texts, padding="max_length", return_tensors="pt")
+        inputs = self.processor(images=images, 
+                                text=texts, 
+                                padding="max_length", 
+                                truncation=True,
+                                max_length=64,
+                                return_tensors="pt")
         inputs = {
             k: v.to(device=device, dtype=self.dtype if v.is_floating_point() else v.dtype)
             for k, v in inputs.items()
