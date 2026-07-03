@@ -643,9 +643,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
         return self.num_frames
 
     def __getitem__(self, idx) -> dict:
+        # import time
+        # t0 = time.perf_counter()
         # Ensure dataset is loaded when we actually need to read from it
         self._ensure_hf_dataset_loaded()
+        # t1 = time.perf_counter()
         item = self.hf_dataset[idx]
+        # t2 = time.perf_counter()
         ep_idx = item["episode_index"].item()
         # Use the absolute index from the dataset for delta timestamp calculations
         abs_idx = item["index"].item()
@@ -657,16 +661,19 @@ class LeRobotDataset(torch.utils.data.Dataset):
             item = {**item, **padding}
             for key, val in query_result.items():
                 item[key] = val
+        # t3 = time.perf_counter()
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
             video_frames = self._query_videos(query_timestamps, ep_idx)
             item = {**video_frames, **item}
+        # t4 = time.perf_counter()
 
         if self.image_transforms is not None:
             image_keys = self.meta.camera_keys
             for cam in image_keys:
                 item[cam] = self.image_transforms(item[cam])
+        # t5 = time.perf_counter()
 
         # Add task as a string
         task_idx = item["task_index"].item()
@@ -679,20 +686,38 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         item["fps"] = math.ceil(self.meta.fps)
         item["dataset_name"] = self.dataset_name
-        
+        # t6 = time.perf_counter()
+
         if "action" not in item.keys():
-            if "observation.ee_ort6d_pos" not in item.keys():
-                item["observation.state"] = item["observations.ee_ort6d_pos"]
-            else:
-                item["observation.state"] = item["observation.ee_ort6d_pos"]
-            item["action"] = item["action.ee_ort6d_pos"]
+            candidate_state_keys = ["observation.ee_ort6d_pos", "observations.ee_ort6d_pos", "observations.ee_6d_pos"]
+            for key in candidate_state_keys:
+                if key in item.keys():
+                    item["observation.state"] = item[key]
+                    break
+            candidate_action_keys = ["action.ee_ort6d_pos", "action.ee_6d_pos"]
+            for key in candidate_action_keys:
+                if key in item.keys():
+                    item["action"] = item[key]
+                    break
             # item["observation.state"] = item["observation.ee_ort6d_pos"]
-        
+        # t7 = time.perf_counter()
+
         keys = list(item.keys())
         for key in keys:
             if item[key] is None:
                 del item[key]  # Remove keys with None values (e.g. video keys when videos are not downloaded)
                 # item[key] = torch.tensor([])  # Replace None with empty tensor for consistency
+        # t8 = time.perf_counter()
+        # print(
+        #     f"[LeRobotDataset.__getitem__] "
+        #     f"_ensure_hf_dataset_loaded: {(t1 - t0) * 1000:.3f}ms, "
+        #     f"hf_dataset[idx]: {(t2 - t1) * 1000:.3f}ms, "
+        #     f"delta_indices+query+video: {(t4 - t2) * 1000:.3f}ms, "
+        #     f"image_transforms: {(t5 - t4) * 1000:.3f}ms, "
+        #     f"task/metadata: {(t7 - t5) * 1000:.3f}ms, "
+        #     f"cleanup None keys: {(t8 - t7) * 1000:.3f}ms, "
+        #     f"total: {(t8 - t0) * 1000:.3f}ms"
+        # )
         return item
         
         # return self._finalize_item(item)
@@ -1511,19 +1536,32 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         # NOTE: Removed print statement that was causing significant performance overhead!
-        # Each print in __getitem__ requires I/O operations and in DataLoader with 
+        # Each print in __getitem__ requires I/O operations and in DataLoader with
         # num_workers > 0, prints from workers are serialized, slowing down data loading.
-        
+        import time
+        t0 = time.perf_counter()
         # if self.is_ft:
         dataset_id, data_id = self.id2dataset[index]
+        t1 = time.perf_counter()
         dataset = self.datasets[dataset_id]
+        t2 = time.perf_counter()
         item = dataset[data_id]
-        
+        t3 = time.perf_counter()
         dataset_name = item["dataset_name"]
         data_config = OXE_DATASET_CONFIGS[dataset_name]
         image_obs_keys = data_config["image_obs_keys"]
-        
+        t4 = time.perf_counter()
         data_dict = self._fetch_data_dict(item, image_obs_keys)
+        t5 = time.perf_counter()
+        # print(
+        #     f"[MultiDatasetforDistTraining.__getitem__] "
+        #     f"id2dataset lookup: {(t1 - t0) * 1000:.3f}ms, "
+        #     f"dataset access: {(t2 - t1) * 1000:.3f}ms, "
+        #     f"LeRobotDataset __getitem__: {(t3 - t2) * 1000:.3f}ms, "
+        #     f"get config: {(t4 - t3) * 1000:.3f}ms, "
+        #     f"_fetch_data_dict: {(t5 - t4) * 1000:.3f}ms, "
+        #     f"total: {(t5 - t0) * 1000:.3f}ms"
+        # )
         return data_dict
     
     def _fetch_data_dict(self, item, image_obs_keys):
@@ -1587,12 +1625,15 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         else:
             item["source"] = f"{item['dataset_name']}_with_unknown_episode_id"
         
+        raw_action_dim = item["action"].shape[-1]
+        print(raw_action_dim)
         # Pad the action and observation vectors
         item["action"] = self.pad_vector(item["action"], self.max_action_dim)
         item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
         
         # Normlize the action and observation vectors
-        if "agi" in item["dataset_name"] or "dual" in item["dataset_name"] or "agilex" in item["dataset_name"]:
+        # if "agi" in item["dataset_name"] or "dual" in item["dataset_name"] or "agilex" in item["dataset_name"]:
+        if raw_action_dim > 10:
             xyz_idx = [0, 1, 2, 10, 11, 12]   # 双臂 xyz
         else:
             xyz_idx = [0, 1, 2]               # 单臂 xyz
