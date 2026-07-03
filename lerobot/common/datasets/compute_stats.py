@@ -628,10 +628,12 @@ def aggregate_stats(stats_list: list[dict[str, dict]], max_dim = 32) -> dict[str
                 pad_stats_with_key.append(pad_stats)
         else:
             pad_stats_with_key = stats_with_key
-        aggregated_stats[key] = aggregate_feature_stats(pad_stats_with_key)
-        for k, v in aggregated_stats[key].items():
-            if isinstance(aggregated_stats[key][k], np.ndarray):
-                aggregated_stats[key][k] = torch.from_numpy(aggregated_stats[key][k])
+        # only for action and observation.state
+        if key in ["action", "observation.state"]:
+            aggregated_stats[key] = aggregate_feature_stats(pad_stats_with_key)
+            for k, v in aggregated_stats[key].items():
+                if isinstance(aggregated_stats[key][k], np.ndarray):
+                    aggregated_stats[key][k] = torch.from_numpy(aggregated_stats[key][k])
 
     return aggregated_stats
 
