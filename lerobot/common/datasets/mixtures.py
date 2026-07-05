@@ -334,14 +334,14 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("interna1_dual_arm_2", 0.05),
         # ("interna1_dual_arm_3", 0.05),
         # ("interna1_dual_arm_4", 0.1),
-        ("interna1_single_arm", 0.15),
+        ("interna1_single_arm", 0.1),
         # ms_buy_data
         ("ms_data_scale", 0.1),
         ("ms_data_xdof_1", 0.15),
         ("ms_data_xdof_2", 0.15),
-        ("ms_data_xdof_3", 0.15),
-        ("ms_data_xdof_4", 0.1),
-        ("ms_data_xdof_5", 0.1),
+        # ("ms_data_xdof_3", 0.15),
+        # ("ms_data_xdof_4", 0.1),
+        # ("ms_data_xdof_5", 0.1),
     ],
     
     "ms_buy_v30":[

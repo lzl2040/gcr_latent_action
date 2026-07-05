@@ -129,6 +129,7 @@ fi
 FIXED_OUTPUT_DIR="/mnt/wangxiaofa/action_chunk_encoder_exp"
 
 # 执行训练命令
+export CUDA_LAUNCH_BLOCKING=1
 python lerobot/scripts/dps_train_ace.py \
     --deepspeed="./ds_zero2.json" \
     --policy.type="robo_clip" \
