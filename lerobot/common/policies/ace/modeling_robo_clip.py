@@ -459,12 +459,12 @@ class RobotCLIP(PreTrainedPolicy):
         # Projection layers to align embeddings
         self.image_projection = nn.Sequential(
             nn.Linear(config.projection_dim, config.projection_dim),
-            # nn.LayerNorm(config.projection_dim),
+            nn.LayerNorm(config.projection_dim),
         )
 
         self.action_projection = nn.Sequential(
             nn.Linear(config.hidden_dim, config.projection_dim),
-            # nn.LayerNorm(config.projection_dim),
+            nn.LayerNorm(config.projection_dim),
         )
         
         # Temperature for contrastive loss
