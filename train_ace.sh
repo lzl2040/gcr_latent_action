@@ -20,7 +20,7 @@ CHUNK_SIZE=16
 TASK_TYPE="train_ace"
 DATASET_SIZE_ONE_EPOCH=1000_0000
 PRRENT_DIR="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
-PARENT_DIR_V21="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d-0618/"
+PARENT_DIR_V21="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
 PARENT_DIR_V30="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
 LOG_DIR="/mnt/wangxiaofa/ace_logs"
 OUTPUT_DIR="/mnt/wangxiaofa/action_chunk_encoder_exp"
@@ -150,6 +150,7 @@ FIXED_OUTPUT_DIR=$OUTPUT_DIR
 export PATH="/opt/conda/envs/lerobot/bin:$PATH"
 ffmpeg
 which ffmpeg
+echo $PATH
 
 # 执行训练命令
 export CUDA_LAUNCH_BLOCKING=1
