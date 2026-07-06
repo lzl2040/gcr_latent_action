@@ -9,7 +9,7 @@
     "viola": "viola",
     "berkeley_autolab_ur5": "berkeley_autolab_ur5",
     "toto": "toto",
-    "language_table": "language_table_v3_0.1.0_lerobot",
+    "language_table": "language_table_lerobot",
     "stanford_hydra_dataset_converted_externally_to_rlds": "stanford_hydra_dataset",
     "austin_buds_dataset_converted_externally_to_rlds": "austin_buds_dataset_lerobot",
     "nyu_franka_play_dataset_converted_externally_to_rlds": "nyu_franka_play_dataset_lerobot",
