@@ -22,6 +22,8 @@ DATASET_SIZE_ONE_EPOCH=1000_0000
 PRRENT_DIR="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
 PRRENT_DIR_V21="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
 PRRENT_DIR_V30="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
+LOG_DIR="/mnt/wangxiaofa/ace_logs"
+OUTPUT_DIR="/mnt/wangxiaofa/action_chunk_encoder_exp"
 export LEROBOT_VIDEO_DECODER_CACHE_SIZE=32
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -114,6 +116,14 @@ while [[ $# -gt 0 ]]; do
             PRRENT_DIR_V30="$2"
             shift 2
             ;;
+        --log_dir)
+            LOG_DIR="$2"
+            shift 2
+            ;;
+        --output_dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
         --chunk_size)
             CHUNK_SIZE="$2"
             shift 2
@@ -136,7 +146,7 @@ if [[ -z "$JOB_NAME" ]]; then
 fi
 
 # 固定输出目录（根据需求修改）
-FIXED_OUTPUT_DIR="/mnt/wangxiaofa/action_chunk_encoder_exp"
+FIXED_OUTPUT_DIR=$OUTPUT_DIR
 
 # 执行训练命令
 export CUDA_LAUNCH_BLOCKING=1
@@ -173,6 +183,6 @@ python lerobot/scripts/dps_train_ace.py \
     --wandb.enable=true \
     --wandb.project="ace" \
     --job_name="$JOB_NAME" \
-    --log_dir="/mnt/wangxiaofa/ace_logs" \
+    --log_dir=$LOG_DIR \
     --weight_resume=true \
     --resume=false
