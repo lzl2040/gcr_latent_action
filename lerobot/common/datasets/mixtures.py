@@ -312,7 +312,7 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("furniture_bench_dataset_converted_externally_to_rlds", 0.5),
         # ("ucsd_kitchen_dataset_converted_externally_to_rlds", 1.0),
         ("austin_sailor_dataset_converted_externally_to_rlds", 1.0),
-        ("austin_sirius_dataset_converted_externally_to_rlds", 1.0),
+        # ("austin_sirius_dataset_converted_externally_to_rlds", 1.0),
         ("dlr_edan_shared_control_converted_externally_to_rlds", 1.0),
         # ("iamlab_cmu_pickup_insert_converted_externally_to_rlds", 1.0),
         # ("utaustin_mutex", 0.3),
