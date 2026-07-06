@@ -20,8 +20,8 @@ CHUNK_SIZE=16
 TASK_TYPE="train_ace"
 DATASET_SIZE_ONE_EPOCH=1000_0000
 PRRENT_DIR="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
-PRRENT_DIR_V21="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
-PRRENT_DIR_V30="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
+PARENT_DIR_V21="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
+PARENT_DIR_V30="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
 LOG_DIR="/mnt/wangxiaofa/ace_logs"
 OUTPUT_DIR="/mnt/wangxiaofa/action_chunk_encoder_exp"
 export LEROBOT_VIDEO_DECODER_CACHE_SIZE=32
@@ -109,11 +109,11 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --parent_dir_v21)
-            PRRENT_DIR_V21="$2"
+            PARENT_DIR_V30="$2"
             shift 2
             ;;
         --parent_dir_v30)
-            PRRENT_DIR_V30="$2"
+            PARENT_DIR_V30="$2"
             shift 2
             ;;
         --log_dir)
