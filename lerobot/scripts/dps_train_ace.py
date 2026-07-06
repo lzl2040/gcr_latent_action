@@ -26,6 +26,7 @@ from typing import Any
 
 import deepspeed
 from deepspeed import get_accelerator
+from torchcodec.decoders import VideoDecoder
 
 import torch
 from termcolor import colored
