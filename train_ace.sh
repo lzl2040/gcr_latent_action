@@ -147,6 +147,9 @@ fi
 
 # 固定输出目录（根据需求修改）
 FIXED_OUTPUT_DIR=$OUTPUT_DIR
+export PATH="/opt/conda/envs/lerobot/bin:$PATH"
+ffmpeg
+which ffmpeg
 
 # 执行训练命令
 export CUDA_LAUNCH_BLOCKING=1
