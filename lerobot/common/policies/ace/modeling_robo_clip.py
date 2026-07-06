@@ -399,17 +399,17 @@ class VisionEncoder(nn.Module):
         # bottleneck -> VAE-like feature
         vae_feature_raw = self.bottleneck(patch_tokens_2d)  # [B, C_out, H_out, W_out]
         # print(vae_feature_raw.shape, patch_tokens_2d.shape) # torch.Size([64, 16, 28, 28]) torch.Size([64, 768, 14, 14])
-        vae_feature = self.tanh(vae_feature_raw)
-        # vae_feature = vae_feature_raw / (vae_feature_raw.abs().max(dim=-1, keepdim=True)[0] + 1e-8)
+        # vae_feature = self.tanh(vae_feature_raw)
+        vae_feature = vae_feature_raw / (vae_feature_raw.abs().max(dim=-1, keepdim=True)[0] + 1e-8)
 
         # average pool -> token
         pooled_token = F.adaptive_avg_pool2d(vae_feature, output_size=1).flatten(1)  # [B, C_out]
 
         # fuse pooled token with original cls token
         final_token = self.fusion_head(cls_token, pooled_token)  # [B, output_dim]
-        # final_token = final_token / (
-        #     final_token.abs().max(dim=-1, keepdim=True)[0] + 1e-8
-        # )
+        final_token = final_token / (
+            final_token.abs().max(dim=-1, keepdim=True)[0] + 1e-8
+        )
 
         return {
             "final_token": final_token,
@@ -459,12 +459,12 @@ class RobotCLIP(PreTrainedPolicy):
         # Projection layers to align embeddings
         self.image_projection = nn.Sequential(
             nn.Linear(config.projection_dim, config.projection_dim),
-            nn.LayerNorm(config.projection_dim),
+            # nn.LayerNorm(config.projection_dim),
         )
 
         self.action_projection = nn.Sequential(
             nn.Linear(config.hidden_dim, config.projection_dim),
-            nn.LayerNorm(config.projection_dim),
+            # nn.LayerNorm(config.projection_dim),
         )
         
         # Temperature for contrastive loss
@@ -506,10 +506,10 @@ class RobotCLIP(PreTrainedPolicy):
         image_embeddings = self.vision_model(images, texts)["final_token"]  # (B, projection_dim)
         # print(f"Image embeddings shape after vision model: {image_embeddings.shape}")
         image_embeddings = self.image_projection(image_embeddings)
-        image_embeddings = F.normalize(
-            image_embeddings,
-            dim=-1
-        )
+        # image_embeddings = F.normalize(
+        #     image_embeddings,
+        #     dim=-1
+        # )
         return image_embeddings
     
     def encode_actions(self, actions: torch.Tensor, sample_rate: int = 0) -> torch.Tensor:
@@ -526,10 +526,10 @@ class RobotCLIP(PreTrainedPolicy):
         action_embeddings = action_output["embedding"]  # (B, output_dim)
         recon_loss = action_output["recon_loss"]  # (B, chunk_size, action_dim)
         action_embeddings = self.action_projection(action_embeddings)
-        action_embeddings = F.normalize(
-            action_embeddings,
-            dim=-1
-        )
+        # action_embeddings = F.normalize(
+        #     action_embeddings,
+        #     dim=-1
+        # )
         return action_embeddings, recon_loss
     
     def forward_ace(self, batch):

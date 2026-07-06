@@ -705,10 +705,10 @@ class ActionChunkEncoder(nn.Module):
             )
 
         # Normalize hidden states as in your current version
-        # hidden_states = hidden_states / (
-        #     hidden_states.abs().max(dim=-1, keepdim=True)[0] + 1e-8
-        # )
-        hidden_states = self.tanh(hidden_states)
+        hidden_states = hidden_states / (
+            hidden_states.abs().max(dim=-1, keepdim=True)[0] + 1e-8
+        )
+        # hidden_states = self.tanh(hidden_states)
 
         # Global embedding
         embedding = hidden_states[:, 0, :]
