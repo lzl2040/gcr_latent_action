@@ -1458,7 +1458,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 data_root = vla2data_root[dataset_name]
                 repo_id = f"bulldog-{dataset_name}" # any
                 if "ms_data" not in dataset_name:
-                    parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d"
+                    parent_dir = cfg.dataset.parent_dir_v21
+                    # parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d"
                     data_root = os.path.join(parent_dir, data_root)
                     print(f"Load data from {data_root}")
                     ds_meta = LeRobotDatasetMetadata(repo_id, root=data_root)
@@ -1475,7 +1476,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                         dataset_name=dataset_name,
                     )
                 else:
-                    parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30"
+                    parent_dir = cfg.dataset.parent_dir_v30
+                    # parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30"
                     data_root = os.path.join(parent_dir, data_root)
                     print(f"Load data from {data_root}")
                     ds_meta = LeRobotDatasetMetadataV30(repo_id, root=data_root)

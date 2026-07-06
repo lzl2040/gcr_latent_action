@@ -13,6 +13,7 @@ from collections import deque
 from PIL import Image
 import math
 import time
+import os
 from torch import distributed as dist
 from lerobot.common.constants import (
     ACTION,
@@ -260,6 +261,10 @@ class VisionEncoder(nn.Module):
     ):
         super().__init__()
 
+        if not os.path.exists(model_name):
+            model_name = "google/siglip2-base-patch16-224"
+            print(f"Load Vision Encoder from {model_name}")
+        
         self.model = AutoModel.from_pretrained(
             model_name,
             dtype=torch.float32

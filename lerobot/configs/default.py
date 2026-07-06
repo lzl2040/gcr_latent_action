@@ -44,6 +44,8 @@ class DatasetConfig:
     dataset_size_one_epoch: int = 1000_0000
     processor: str = "/mnt/wangxiaofa/qwen_params/Qwen2.5-VL-7B-Instruct/"
     parent_dir: str = "/mnt/wangxiaofa/robot_dataset/lerobot-format/"
+    parent_dir_v21: str = "/mnt/wangxiaofa/robot_dataset/lerobot-format/"
+    parent_dir_v30: str = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
     calvin_sub_task: int | None = 0
 
 

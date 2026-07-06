@@ -20,6 +20,8 @@ CHUNK_SIZE=16
 TASK_TYPE="train_ace"
 DATASET_SIZE_ONE_EPOCH=1000_0000
 PRRENT_DIR="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
+PRRENT_DIR_V21="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
+PRRENT_DIR_V30="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
 export LEROBOT_VIDEO_DECODER_CACHE_SIZE=32
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -104,6 +106,14 @@ while [[ $# -gt 0 ]]; do
             PARENT_DIR="$2"
             shift 2
             ;;
+        --parent_dir_v21)
+            PRRENT_DIR_V21="$2"
+            shift 2
+            ;;
+        --parent_dir_v30)
+            PRRENT_DIR_V30="$2"
+            shift 2
+            ;;
         --chunk_size)
             CHUNK_SIZE="$2"
             shift 2
@@ -148,6 +158,8 @@ python lerobot/scripts/dps_train_ace.py \
     --is_ft=$IS_FT \
     --dataset.processor="/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/" \
     --dataset.parent_dir=$PARENT_DIR \
+    --dataset.parent_dir_v21=$PARENT_DIR_V21 \
+    --dataset.parent_dir_v30=$PARENT_DIR_V30 \
     --dataset.video_backend="torchcodec" \
     --policy.scheduler_warmup_steps=$SCHEDULER_WARMUP_STEPS \
     --policy.scheduler_decay_steps=$SCHEDULER_DECAY_STEPS \
