@@ -109,7 +109,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --parent_dir_v21)
-            PARENT_DIR_V30="$2"
+            PARENT_DIR_V21="$2"
             shift 2
             ;;
         --parent_dir_v30)
