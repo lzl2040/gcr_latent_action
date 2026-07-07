@@ -593,7 +593,7 @@ class RobotCLIP(PreTrainedPolicy):
         # print(F"Contrastive loss: {loss.item():.4f}")
         loss_dict = {"contrastive_loss": loss.item(), "recon_loss": torch.tensor(0.0, device=loss.device).item()}
         if step % 100 == 0:
-            print("scale:", self.logit_scale.exp().item())
+            print("scale:", self.logit_scale.exp().item(), "grad", self.logit_scale.grad.item())
             print("image norm:", image_embeddings.norm(dim=-1).mean().item())
             print("action norm:", action_embeddings.norm(dim=-1).mean().item())
             print("positive sim:",
