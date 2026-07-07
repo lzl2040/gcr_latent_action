@@ -473,7 +473,10 @@ class RobotCLIP(PreTrainedPolicy):
         )
         
         # Temperature for contrastive loss
-        self.logit_scale = nn.Parameter(torch.tensor(1.0 / config.temperature))
+        # self.logit_scale = nn.Parameter(torch.tensor(1.0 / config.temperature))
+        self.logit_scale = nn.Parameter(
+            torch.log(torch.tensor(1 / config.temperature))
+        )
         
         # Layer norm for stability
         self.tanh = nn.Tanh()
