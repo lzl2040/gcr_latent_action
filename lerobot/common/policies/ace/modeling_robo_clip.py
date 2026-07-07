@@ -537,7 +537,7 @@ class RobotCLIP(PreTrainedPolicy):
         )
         return action_embeddings, recon_loss
     
-    def forward_ace(self, batch):
+    def forward_ace(self, batch, step = 100):
         images = batch['observation.images.primary'].to(dtype=torch.float32)  # (B, C, H, W), [0, 1]
         actions = batch['action']
         sample_rate = batch.get('sample_rate', 0)
@@ -589,6 +589,12 @@ class RobotCLIP(PreTrainedPolicy):
         
         # print(F"Contrastive loss: {loss.item():.4f}")
         loss_dict = {"contrastive_loss": loss.item(), "recon_loss": torch.tensor(0.0, device=loss.device).item()}
+        if step % 100 == 0:
+            print("scale:", self.logit_scale.exp().item())
+            print("image norm:", image_embeddings.norm(dim=-1).mean().item())
+            print("action norm:", action_embeddings.norm(dim=-1).mean().item())
+            print("positive sim:",
+                (image_embeddings * action_embeddings).sum(-1).mean().item())
         return loss, loss_dict
     
     def forward_action_decoder(self, batch):
@@ -599,7 +605,7 @@ class RobotCLIP(PreTrainedPolicy):
         loss_dict = {"recon_loss": recon_loss.mean().item(), "contrastive_loss":torch.tensor(0.0, device=loss.device).item()}
         return loss, loss_dict
     
-    def forward(self, batch: Dict[str, torch.Tensor], task_type="train_ace") -> torch.Tensor:
+    def forward(self, batch: Dict[str, torch.Tensor], task_type="train_ace", step = 100) -> torch.Tensor:
         """Forward pass computing contrastive loss.
         
         Args:
@@ -613,7 +619,7 @@ class RobotCLIP(PreTrainedPolicy):
         """
         # print(batch["task"])
         if task_type == "train_ace":
-            return self.forward_ace(batch)
+            return self.forward_ace(batch, step)
         elif task_type == "train_action_decoder":
             return self.forward_action_decoder(batch)
         else:

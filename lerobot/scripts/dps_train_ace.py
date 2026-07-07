@@ -110,13 +110,14 @@ def update_policy(
     model_engine,
     batch: Any,
     logger,
-    task_type: str = "train_ace"
+    task_type: str = "train_ace",
+    step = 100
 ) -> tuple[MetricsTracker, dict]:
     
     batch = {k: v.to(model_engine.device, dtype=torch.bfloat16) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
     
     # torch.cuda.empty_cache()
-    loss, output_dict = model_engine(batch, task_type=task_type)
+    loss, output_dict = model_engine(batch, task_type=task_type, step=step)
     # action_embeddings, image_embeddings, logit_scale = model_engine(batch)
     
     # local_bs = image_embeddings.size(0)
@@ -386,7 +387,8 @@ def train(cfg: TrainPipelineConfig):
                 batch,
                 # first_batch,
                 logger,
-                cfg.task_type
+                cfg.task_type,
+                step = step
             )
             step += 1
             fwd_bwd_time += time.perf_counter() - fwd_bwd_start

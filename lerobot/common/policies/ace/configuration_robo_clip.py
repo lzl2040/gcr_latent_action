@@ -77,10 +77,10 @@ class RobotCLIPConfig(PreTrainedConfig):
     num_attention_heads: int = 12
     num_hidden_layers: int = 12
     output_dim: int = None
-    # vision_model_name: str = "/Data/lzl/huggingface/siglip2-base-patch16-224"
-    vision_model_name: str = "/mnt/wangxiaofa/pt_weights/siglip2-base-patch16-224"
+    vision_model_name: str = "/Data/lzl/huggingface/siglip2-base-patch16-224"
+    # vision_model_name: str = "/mnt/wangxiaofa/pt_weights/siglip2-base-patch16-224"
     projection_dim: int = 768 # siglip2 output dim
-    temperature: float = 1.0
+    temperature: float = 0.07 
     freeze_vision_encoder: bool = True
     # Shorter state and action vectors will be padded
     max_state_dim: int = 32
