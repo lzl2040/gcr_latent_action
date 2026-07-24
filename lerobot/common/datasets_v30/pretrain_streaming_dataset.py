@@ -2234,6 +2234,63 @@ class AsyncDecodeDataLoader:
 
         return collate_fn
 
+    @staticmethod
+    def make_simple_collate_fn():
+        """Collate function for SimpleStreamingDataset (no history actions, no tier).
+
+        Handles:
+        - String keys (task, subtask) → list
+        - PIL Image / None values → list (pass-through)
+        - Dict values (camera_valid_mask, _video_lookup) → list
+        - Tensor values → torch.stack
+        - Int/float scalar values → list
+        """
+
+        def collate_fn(batch):
+            result = {}
+            for key in batch[0].keys():
+                values = [item[key] for item in batch]
+
+                # String keys → keep as list
+                if key in ("task", "subtask"):
+                    result[key] = values
+                # Image keys → keep as list (PIL.Image or None)
+                elif key.startswith("observation.images."):
+                    result[key] = values
+                # Dict keys → keep as list
+                elif key in ("camera_valid_mask", "_video_lookup"):
+                    result[key] = values
+                # None values → keep as list
+                elif values[0] is None:
+                    result[key] = values
+                # Tensor values → stack
+                elif isinstance(values[0], torch.Tensor):
+                    # Check for variable-length tensors (e.g. delta_timestamps produces [n_ts, dim])
+                    shapes = [v.shape for v in values]
+                    if len(set(shapes)) > 1:
+                        # Pad to max length along dim 0
+                        max_len = max(s[0] for s in shapes)
+                        padded = []
+                        for v in values:
+                            if v.shape[0] < max_len:
+                                pad_shape = (max_len - v.shape[0],) + v.shape[1:]
+                                padding = torch.zeros(pad_shape, dtype=v.dtype)
+                                v = torch.cat([padding, v], dim=0)
+                            padded.append(v)
+                        result[key] = torch.stack(padded)
+                    else:
+                        result[key] = torch.stack(values)
+                # BoolTensor is_pad masks → stack
+                elif isinstance(values[0], torch.BoolTensor):
+                    result[key] = torch.stack(values)
+                # Scalar int/float → keep as list
+                else:
+                    result[key] = values
+
+            return result
+
+        return collate_fn
+
     def _prefetch_iter(self):
         """Background-thread prefetch: producer reads from DataLoader,
         applies collate_fn and optionally preprocess_fn, then buffers
@@ -2435,6 +2492,10 @@ class SimpleStreamingDataset(torch.utils.data.IterableDataset):
         self.decode_num_threads = decode_num_threads
         self._cuda_decoder_cache = None
         self.episode_chunk_size = episode_chunk_size
+
+        # Compatibility with AsyncDecodeDataLoader
+        self.async_decode = False
+        self._decode_pipeline = None
 
         # Explicit key overrides (for ms data)
         self._action_key = action_key
@@ -3164,14 +3225,28 @@ class SimpleStreamingDataset(torch.utils.data.IterableDataset):
         while True:
             yield from (int(i) for i in rng.integers(0, buffer_size, size=random_batch_size))
 
+    # ── Compatibility methods for AsyncDecodeDataLoader ────────────────
 
-if __name__ == "__main__":
-    import sys
+    def decode_items_batch(self, items):
+        """Decode a batch of items with deferred video lookup."""
+        if not self.deferred_video_decode:
+            return items
+        need_decode = ["_video_lookup" in item for item in items]
+        if not any(need_decode):
+            return items
+        return [self._decode_videos(item) if "_video_lookup" in item else item for item in items]
 
+    def shutdown_decode_pipeline(self):
+        """No-op for SimpleStreamingDataset (no subprocess decode pipeline)."""
+        pass
+
+
+def test_simple_dataset_basic():
+    """Basic sanity test for SimpleStreamingDataset."""
     dataset_root = "/Data/lerobot_data_ort6d/Trossen_Stationary_AI_480x640_padded_MERGED"
 
     print("=" * 60)
-    print("SimpleStreamingDataset Test")
+    print("SimpleStreamingDataset Basic Test")
     print("=" * 60)
 
     # ── Test 1: Basic iteration without video decode ──────────────────
@@ -3265,4 +3340,122 @@ if __name__ == "__main__":
             break
 
     print(f"\n  Total items iterated: {count3}")
-    print("\nAll tests passed!")
+    print("\nAll basic tests passed!")
+
+
+def benchmark_simple_dataset_with_dataloader():
+    """Benchmark SimpleStreamingDataset with DataLoader + AsyncDecodeDataLoader.
+
+    Tests deferred video decode pipeline with:
+    - bs=512, num_workers=8
+    - AsyncDecodeDataLoader with make_simple_collate_fn
+    - Reports per-batch timing for 3 iterations
+    """
+    import time
+
+    dataset_root = "/Data/lerobot_data_ort6d/Trossen_Stationary_AI_480x640_padded_MERGED"
+
+    print("=" * 60)
+    print("SimpleStreamingDataset Benchmark (Deferred Decode + DataLoader)")
+    print("=" * 60)
+
+    # ── Create dataset ────────────────────────────────────────────────
+    print("\n[1] Creating SimpleStreamingDataset...")
+    ds = SimpleStreamingDataset(
+        repo_id="Trossen_Stationary_AI_480x640_padded_MERGED",
+        root=dataset_root,
+        deferred_video_decode=True,
+        buffer_size=5000,
+        episode_chunk_size=8,
+        decode_num_threads=4,
+    )
+
+    # ── Create DataLoader ─────────────────────────────────────────────
+    batch_size = 512
+    num_workers = 8
+
+    print(f"\n[2] Creating DataLoader (bs={batch_size}, num_workers={num_workers})...")
+    loader = torch.utils.data.DataLoader(
+        ds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        collate_fn=lambda x: x,  # raw items, let AsyncDecodeDataLoader handle collation
+        pin_memory=False,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=2 if num_workers > 0 else None,
+    )
+
+    # ── Create AsyncDecodeDataLoader ──────────────────────────────────
+    print(f"\n[3] Creating AsyncDecodeDataLoader with make_simple_collate_fn...")
+    collate_fn = AsyncDecodeDataLoader.make_simple_collate_fn()
+    async_loader = AsyncDecodeDataLoader(
+        loader,
+        ds,
+        collate_fn=collate_fn,
+        prefetch_queue_size=2,
+    )
+
+    # ── Warm-up iteration ─────────────────────────────────────────────
+    print(f"\n[4] Warm-up: iterating 1 batch to fill pipeline...")
+    t0 = time.time()
+    for batch in async_loader:
+        warmup_time = time.time() - t0
+        print(f"  Warm-up batch: {warmup_time:.2f}s")
+        # Print batch shapes
+        print(f"  Batch keys: {list(batch.keys())}")
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
+            elif isinstance(v, list) and len(v) > 0:
+                v0 = v[0]
+                if isinstance(v0, torch.Tensor):
+                    print(f"    {k}: list[{len(v)}] of Tensor {v0.shape}")
+                elif v0 is None:
+                    print(f"    {k}: list[{len(v)}] of None")
+                else:
+                    print(f"    {k}: list[{len(v)}] of {type(v0).__name__}")
+            else:
+                print(f"    {k}: {type(v).__name__}")
+        break
+
+    # ── Benchmark 3 iterations ────────────────────────────────────────
+    print(f"\n[5] Benchmarking 3 iterations (bs={batch_size})...")
+    times = []
+    for i, batch in enumerate(async_loader):
+        if i == 0:
+            # Skip the first batch (already consumed in warm-up above,
+            # but async_loader re-iterates so we time from scratch)
+            t0 = time.time()
+            continue
+
+        batch_time = time.time() - t0
+        times.append(batch_time)
+        n_items = sum(1 for v in batch.values()
+                      if isinstance(v, torch.Tensor) and v.dim() >= 1)
+        actual_bs = batch["action"].shape[0] if "action" in batch else "?"
+        print(f"  Iter {i}: {batch_time:.2f}s  (actual_bs={actual_bs})")
+
+        t0 = time.time()
+
+        if i >= 3:
+            break
+
+    if times:
+        avg_time = sum(times) / len(times)
+        throughput = batch_size / avg_time
+        print(f"\n  Average batch time: {avg_time:.2f}s")
+        print(f"  Throughput: {throughput:.0f} items/s")
+        print(f"  Per-item time: {avg_time / batch_size * 1000:.2f}ms")
+
+    # Clean up
+    async_loader.close()
+    print("\nBenchmark done!")
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "bench":
+        benchmark_simple_dataset_with_dataloader()
+    else:
+        test_simple_dataset_basic()

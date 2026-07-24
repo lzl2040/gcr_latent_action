@@ -913,7 +913,9 @@ class LoLAStreamingDataset(torch.utils.data.IterableDataset):
         # deferred + 非 async 时，yield 前解码视频（在 worker 进程中执行）
         decode_on_yield = self.deferred_video_decode and not self.async_decode
 
-        # 单 shard 模式：直接迭代，使用 buffer shuffle
+        # 无限循环迭代：训练时数据永不耗尽。
+        # 当一个 epoch 的数据遍历完毕，重新创建 Backtrackable 迭代器
+        # 继续下一个 epoch，而不是 flush buffer（flush 会导致灾难性卡顿）。
         buffer_indices_generator = self._iter_random_indices(rng, self.buffer_size)
         frames_buffer = []
         yield_count = 0
@@ -923,44 +925,44 @@ class LoLAStreamingDataset(torch.utils.data.IterableDataset):
         if skip_remaining > 0:
             print(f"[LoLAStreamingDataset] Worker {parallel_id} skipping {skip_remaining} items for resume...", flush=True)
 
-        while True:
-            try:
-                for frame in frame_generator(backtrack_dataset):
-                    if len(frames_buffer) == self.buffer_size:
-                        i = next(buffer_indices_generator)
-                        to_yield = frames_buffer[i]
-                        if skip_remaining > 0:
-                            skip_remaining -= 1
-                            frames_buffer[i] = frame
-                            continue  # fast-forward: advance rng/buffer state but don't yield
-                        yield_count += 1
-                        if decode_on_yield and "_video_lookup" in to_yield:
-                            to_yield = self._decode_videos(to_yield)
-                        yield to_yield
-                        frames_buffer[i] = frame
-                    else:
-                        frames_buffer.append(frame)
-                    break
-            except (RuntimeError, StopIteration) as e:
-                print(
-                    f"[LoLAStreamingDataset] Worker {parallel_id} "
-                    f"finished after yielding {yield_count} items: {type(e).__name__}: {e}",
-                    flush=True,
-                )
-                break
+        epoch = 0
+        while True:  # 无限循环：训练永不停止
+            # 每个 epoch 开始时重新创建迭代器
+            backtrack_dataset = self._make_polars_backtrackable(row_offset, row_limit)
+            epoch += 1
 
-        # Flush remaining buffer
-        rng.shuffle(frames_buffer)
-        yield_count += len(frames_buffer)
-        print(f"[LoLAStreamingDataset] Worker {parallel_id} finished, "
-              f"total yielded: {yield_count}, buffer: {len(frames_buffer)}", flush=True)
-        if decode_on_yield:
-            for frame in frames_buffer:
-                if "_video_lookup" in frame:
-                    frame = self._decode_videos(frame)
-                yield frame
-        else:
-            yield from frames_buffer
+            exhausted = False
+            while not exhausted:
+                try:
+                    for frame in frame_generator(backtrack_dataset):
+                        if len(frames_buffer) == self.buffer_size:
+                            i = next(buffer_indices_generator)
+                            to_yield = frames_buffer[i]
+                            if skip_remaining > 0:
+                                skip_remaining -= 1
+                                frames_buffer[i] = frame
+                                continue  # fast-forward: advance rng/buffer state but don't yield
+                            yield_count += 1
+                            if decode_on_yield and "_video_lookup" in to_yield:
+                                to_yield = self._decode_videos(to_yield)
+                            yield to_yield
+                            frames_buffer[i] = frame
+                        else:
+                            frames_buffer.append(frame)
+                        break  # frame_generator yields one item at a time
+                except (RuntimeError, StopIteration):
+                    exhausted = True
+
+            # 不 flush buffer！buffer 中的数据保留到下一个 epoch 继续使用。
+            # flush buffer（yield 所有剩余帧）是灾难性的：
+            # - deferred=False: 每个 item ~14MB，buffer 512 ≈ 7GB 一次性 yield
+            # - DataLoader 需等所有 worker flush 完才能组 batch → 卡顿 100-460s
+            print(
+                f"[LoLAStreamingDataset] Worker {parallel_id} "
+                f"epoch {epoch} done, yielded {yield_count} items total, "
+                f"buffer retains {len(frames_buffer)} items for next epoch",
+                flush=True,
+            )
 
     def make_frame(self, dataset_iterator):
         """生成帧数据，包含完整历史 action 和视频帧。"""
@@ -1814,25 +1816,35 @@ class AsyncDecodeDataLoader:
     def batch_size(self):
         return self._loader.batch_size
 
+    @property
+    def num_workers(self):
+        return self._loader.num_workers
+
+    @property
+    def dataset(self):
+        return self._loader.dataset
+
 
 # ─── 测试代码 ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import time
 
-    # ── 数据集路径 ──────────────────────────────────────────────────────
     DATA_ROOT = "/Data/lerobot_data_ort6d/Trossen_Stationary_AI_480x640_padded_MERGED"
     REPO_ID = "Trossen_Stationary_AI_480x640_padded_MERGED"
 
-    # ── 配置 ────────────────────────────────────────────────────────────
     BS = 512
     NUM_WORKERS = 4
     MAX_HISTORY_LENGTH = 100
     ACTION_CHUNK_SIZE = 10
-    DEFERRED_VIDEO_DECODE = False  # 不推迟解码视频
-    BUFFER_SIZE = 600  # deferred_video_decode=False 时 buffer 存全量帧，适当减小
 
-    # delta_timestamps: 仅查当前帧（单帧），用于 4 个摄像头 + state + action
+    ALL_CAMERA_KEYS = [
+        "observation.images.cam_high",
+        "observation.images.cam_low",
+        "observation.images.cam_left_wrist",
+        "observation.images.cam_right_wrist",
+    ]
+
     DELTA_TIMESTAMPS = {
         "observation.images.cam_high": [0.0],
         "observation.images.cam_low": [0.0],
@@ -1842,138 +1854,67 @@ if __name__ == "__main__":
         "action.ee_ort6d_pos": [0.0],
     }
 
-    # ── 此数据集特殊性说明 ──────────────────────────────────────────────
-    # 1. info.json 中 cam_low/cam_left_wrist/cam_right_wrist 的 dtype 是
-    #    "image" 但实际都有 mp4 视频文件。需覆盖 video_keys 和 camera_keys。
-    # 2. 此数据集的 action key 是 action.ee_ort6d_pos (20d) 和
-    #    action.joint_position (14d)，不是 "action"。需重设 action_dim。
-    # 3. observation.state 对应 observation.ee_ort6d_pos (20d)。
-    ALL_CAMERA_KEYS = [
-        "observation.images.cam_high",
-        "observation.images.cam_low",
-        "observation.images.cam_left_wrist",
-        "observation.images.cam_right_wrist",
-    ]
-
     from lerobot.common.datasets_v30.utils_3 import get_delta_indices
 
-    def _create_dataset(seed=42):
-        """创建并修复数据集实例。"""
-        ds = LoLAStreamingDataset(
-            repo_id=REPO_ID,
-            root=DATA_ROOT,
-            max_history_length=MAX_HISTORY_LENGTH,
-            action_chunk_size=ACTION_CHUNK_SIZE,
-            history_padding_side="left",
-            delta_timestamps=DELTA_TIMESTAMPS,
-            tolerance_s=0.04,
-            deferred_video_decode=DEFERRED_VIDEO_DECODE,
-            decode_device="cpu",
-            decode_num_threads=1,
-            async_decode=False,
-            shuffle=True,
-            buffer_size=BUFFER_SIZE,
-            seed=seed,
-        )
-        # 修复 camera_keys / video_keys
-        ds.meta.__class__.video_keys = property(lambda self: ALL_CAMERA_KEYS)
-        ds.meta.__class__.camera_keys = property(lambda self: ALL_CAMERA_KEYS)
-        # 修复 action_dim
-        ds.action_dim = 20  # action.ee_ort6d_pos
-        # delta_timestamps 已使用正确的 key 名，直接计算 delta_indices
-        ds.delta_timestamps = DELTA_TIMESTAMPS
-        ds.delta_indices = get_delta_indices(DELTA_TIMESTAMPS, ds.fps)
-        return ds
-
-    # ── 创建数据集 ──────────────────────────────────────────────────────
-    print("=" * 70)
-    print(f"Testing LoLAStreamingDataset")
-    print(f"  deferred_video_decode={DEFERRED_VIDEO_DECODE}")
-    print(f"  bs={BS}, num_workers={NUM_WORKERS}")
-    print(f"  buffer_size={BUFFER_SIZE}")
-    print(f"  cameras={len(ALL_CAMERA_KEYS)}")
-    print("=" * 70)
-
-    dataset = _create_dataset(seed=42)
-    print(f"[TEST] delta_timestamps: {dataset.delta_timestamps}")
-    print(f"[TEST] delta_indices: { {k: v[:3] for k, v in dataset.delta_indices.items()} }")
-
-    # ── 创建 DataLoader ──────────────────────────────────────────────────
-    collate_fn = AsyncDecodeDataLoader.make_collate_fn()
-
-    raw_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=BS,
-        num_workers=NUM_WORKERS,
-        collate_fn=collate_fn,
-        pin_memory=False,
-        prefetch_factor=2 if NUM_WORKERS > 0 else None,
-        persistent_workers=False,
+    ds = LoLAStreamingDataset(
+        repo_id=REPO_ID, root=DATA_ROOT,
+        max_history_length=MAX_HISTORY_LENGTH,
+        action_chunk_size=ACTION_CHUNK_SIZE,
+        history_padding_side="left",
+        delta_timestamps=DELTA_TIMESTAMPS, tolerance_s=0.04,
+        deferred_video_decode=False, decode_device="cpu",
+        decode_num_threads=1, async_decode=False,
+        shuffle=True, buffer_size=512, seed=42,
     )
+    ds.meta.__class__.video_keys = property(lambda self: ALL_CAMERA_KEYS)
+    ds.meta.__class__.camera_keys = property(lambda self: ALL_CAMERA_KEYS)
+    ds.action_dim = 20
+    ds.delta_timestamps = DELTA_TIMESTAMPS
+    ds.delta_indices = get_delta_indices(DELTA_TIMESTAMPS, ds.fps)
 
-    loader = AsyncDecodeDataLoader(raw_loader, dataset, collate_fn=None)
+    collate_fn = AsyncDecodeDataLoader.make_collate_fn()
+    raw_loader = torch.utils.data.DataLoader(
+        ds, batch_size=BS, num_workers=NUM_WORKERS,
+        collate_fn=collate_fn, pin_memory=False, prefetch_factor=2,
+    )
+    loader = AsyncDecodeDataLoader(raw_loader, ds, collate_fn=None)
 
-    # ── 预热 (1 batch) + 打印结构 ──────────────────────────────────────
-    print("\n--- Warming up (1 batch) ---")
+    print("=" * 70)
+    print(f"  Trossen 4cam 480x640 AV1, deferred=False, bs={BS}, workers={NUM_WORKERS}")
+    print(f"  无限循环模式（无 flush 卡顿）")
+    print("=" * 70)
+
+    # warmup + 打印结构
+    print("--- Warmup (buffer fill, 首 batch 较慢) ---")
     t0 = time.time()
     for batch in loader:
         t1 = time.time()
-        warmup_time = t1 - t0
-        print(f"Warmup batch: {warmup_time:.2f}s")
+        print(f"  Warmup: {t1-t0:.2f}s")
         for k, v in batch.items():
-            if isinstance(v, torch.Tensor):
-                print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
-            elif isinstance(v, list):
-                print(f"  {k}: list len={len(v)}")
-            else:
-                print(f"  {k}: {type(v).__name__}")
+            if isinstance(v, torch.Tensor) and ("cam" in k or "action" in k or "ee_ort" in k):
+                print(f"    {k}: shape={v.shape}")
         break
 
-    # ── Benchmark ────────────────────────────────────────────────────────
-    print(f"\n--- Benchmark: bs={BS}, deferred_video_decode={DEFERRED_VIDEO_DECODE} ---")
-
-    # 重新创建数据集和 loader
-    del loader, raw_loader
-
-    dataset2 = _create_dataset(seed=43)
-    raw_loader2 = torch.utils.data.DataLoader(
-        dataset2,
-        batch_size=BS,
-        num_workers=NUM_WORKERS,
-        collate_fn=collate_fn,
-        pin_memory=False,
-        prefetch_factor=2 if NUM_WORKERS > 0 else None,
-        persistent_workers=False,
-    )
-    loader2 = AsyncDecodeDataLoader(raw_loader2, dataset2, collate_fn=None)
-
-    t_start = time.time()
-    num_batches = 0
-    for batch in loader2:
-        num_batches += 1
-        elapsed = time.time() - t_start
-        print(f"  Batch {num_batches}: elapsed={elapsed:.1f}s, "
-              f"avg={elapsed/num_batches:.2f}s/batch, "
-              f"throughput={num_batches * BS / elapsed:.1f} samples/s")
-        if num_batches >= 3:
+    # 稳态测速：buffer 填满后应无卡顿
+    print("--- Steady-state (10 batches) ---")
+    batch_times = []
+    prev_t = time.time()
+    for i, batch in enumerate(loader):
+        now = time.time()
+        dt = now - prev_t
+        prev_t = now
+        batch_times.append(dt)
+        print(f"  Batch {i+1}: {dt:.2f}s")
+        if i >= 9:
             break
-    t_end = time.time()
 
-    total_time = t_end - t_start
-    avg_time = total_time / num_batches if num_batches > 0 else 0
-    throughput = BS / avg_time if avg_time > 0 else 0
-
-    print(f"\n{'='*70}")
-    print(f"RESULT: {num_batches} batches, total={total_time:.2f}s")
-    print(f"  Avg time per batch (bs={BS}): {avg_time:.2f}s")
-    print(f"  Throughput: {throughput:.1f} samples/s")
-    print(f"  Throughput: {num_batches / total_time:.2f} batches/s")
-    print(f"{'='*70}")
-
-    @property
-    def num_workers(self):
-        return self._loader.num_workers
-
-    @property
-    def dataset(self):
-        return self._loader.dataset
+    # 分析
+    normal = [t for t in batch_times if t < 10]
+    stall = [t for t in batch_times if t >= 10]
+    if normal:
+        avg = sum(normal) / len(normal)
+        print(f"\n  RESULT: {len(normal)} normal batches, avg={avg:.2f}s/batch, {BS/avg:.1f} samples/s")
+    if stall:
+        print(f"  STALL: {len(stall)} batches (>10s): {[round(t,1) for t in stall]}")
+    else:
+        print(f"  No stall batches ✅")

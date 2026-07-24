@@ -17,16 +17,16 @@ class LatentActionConfig(PreTrainedConfig):
     # qwen_path: str = "/Data/lzl/qwen2.5_vl_7b/Qwen2.5-VL-7B-Instruct"
     # img_pred_model: str = "/mnt/wangxiaofa/pt_weights/stable-diffusion-3.5-medium/"
     
-    img_pred_model: str = "/mnt/wangxiaofa/pt_weights/Sana_1600M_512px_diffusers/"
-    vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/"
-    action_expert_path: str = "/mnt/wangxiaofa/pi0_pretrain/pi0_gemma_expert_only.pt"
-    img_encoder_model: str = "/mnt/wangxiaofa/pt_weights/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    # img_pred_model: str = "/mnt/wangxiaofa/pt_weights/Sana_1600M_512px_diffusers/"
+    # vlm_path: str = "/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/"
+    # action_expert_path: str = "/mnt/wangxiaofa/pi0_pretrain/pi0_gemma_expert_only.pt"
+    # img_encoder_model: str = "/mnt/wangxiaofa/pt_weights/CLIP-ViT-H-14-laion2B-s32B-b79K"
 
     # vlm_path: str = "OpenGVLab/InternVL3_5-1B-HF"
-    # vlm_path: str = "/Data/lzl/huggingface/InternVL3_5-2B-HF"
-    # img_pred_model: str = "/Data/lzl/huggingface/Sana_1600M_512px_diffusers"
-    # action_expert_path: str = "/Data/lzl/weights/pi_zero_pt/pi0_gemma_expert_only.pt"
-    # img_encoder_model: str = "/Data/lzl/huggingface/CLIP-ViT-H-14-laion2B-s32B-b79K"
+    vlm_path: str = "/Data/lzl/huggingface/InternVL3_5-2B-HF"
+    img_pred_model: str = "/Data/lzl/huggingface/Sana_1600M_512px_diffusers"
+    action_expert_path: str = "/Data/lzl/weights/pi_zero_pt/pi0_gemma_expert_only.pt"
+    img_encoder_model: str = "/Data/lzl/huggingface/CLIP-ViT-H-14-laion2B-s32B-b79K"
     ip_skip_num: int = 2
     ip_token_gen_type: str = "cls_proj"
     ip_token_num: int = 8 # for image projection is 8
@@ -47,9 +47,12 @@ class LatentActionConfig(PreTrainedConfig):
     # loss_type
     loss_type: str = "raw"
 
-    # token num
-    num_action_token: int = 64
-    num_sc_token: int = 64
+    # token num: for 16-frame
+    # num_action_token: int = 64
+    # num_sc_token: int = 64
+    # for 2-frame
+    num_action_token: int = 8
+    num_sc_token: int = 8
     action_token_idx: list = field(default_factory=list)
     sc_token_idx: list = field(default_factory=list)
     # vlm_token_dim: int = 1024 # 1B

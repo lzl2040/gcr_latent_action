@@ -302,9 +302,9 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("taco_play", 1.0),
         ("jaco_play", 1.0),
         ("roboturk", 1.0),
-        ("viola", 1.0),
+        # ("viola", 1.0),
         ("berkeley_autolab_ur5", 1.0),
-        ("toto", 1.0),
+        # ("toto", 1.0),
         # ("language_table", 0.1),
         ("stanford_hydra_dataset_converted_externally_to_rlds", 1.0),
         # ("austin_buds_dataset_converted_externally_to_rlds", 1.0), # state is not quant or rpy
