@@ -24,6 +24,7 @@ IS_FT=true
 IP_TOKEN_NUM=16
 IP_TOKEN_GEN_TYPE="cls_proj"cls_proj
 IMG_DECODER_PART_TRAIN=true
+LATENT_TOKEN_NUM=64
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -82,6 +83,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --bs)
             BATCH_SIZE="$2"
+            shift 2
+            ;;
+        --latent_token_num)
+            LATENT_TOKEN_NUM="$2"
             shift 2
             ;;
         --use_lora)
@@ -189,6 +194,8 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --policy.freeze_vision_encoder=true \
     --policy.train_expert_only=false \
     --policy.pretrained_path=$PRETRAINED_PATH \
+    --policy.num_action_token=$LATENT_TOKEN_NUM \
+    --policy.num_sc_token=$LATENT_TOKEN_NUM \
     --wandb.enable=true \
     --wandb.project="latent_act" \
     --job_name="$JOB_NAME" \
