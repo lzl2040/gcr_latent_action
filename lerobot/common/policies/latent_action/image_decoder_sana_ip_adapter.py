@@ -277,7 +277,8 @@ def forward_c(
             )
 
     # 3. Normalization
-    hidden_states = self.norm_out(hidden_states, embedded_timestep, self.scale_shift_table)
+    # hidden_states = self.norm_out(hidden_states, embedded_timestep, self.scale_shift_table)
+    hidden_states = self.norm_out(hidden_states, embedded_timestep)
 
     hidden_states = self.proj_out(hidden_states)
 
