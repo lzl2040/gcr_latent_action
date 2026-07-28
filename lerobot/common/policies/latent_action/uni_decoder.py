@@ -322,6 +322,7 @@ class UniDecoder(nn.Module):
         x_t = action_time_expanded * action_noise + (1 - action_time_expanded) * actions
         u_t = action_noise - actions
         con_embeddings = torch.cat([sc_embedding, act_embeddings], dim = 1)
+        # con_embeddings = torch.cat([act_embeddings], dim = 1) # actually should be this
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix_for_action(
             con_embeddings=con_embeddings
         )
@@ -382,6 +383,194 @@ class UniDecoder(nn.Module):
         # losses["image_loss"] = torch.tensor(0.0)
         losses["image_loss"] = img_loss
         return losses
+
+    def embed_image_latent_for_sampling(self, image_latent, timestep, prompt_embs):
+        """Embed the current noisy image latent for one joint denoising step."""
+        batch_size, _, height, width = image_latent.shape
+        patch_size = self.image_decoder.transformer.config.patch_size
+        post_patch_height = height // patch_size
+        post_patch_width = width // patch_size
+
+        image_latent_embs = self.image_decoder.transformer.patch_embed(
+            image_latent.to(dtype=self.dtype)
+        )
+        timestep, embedded_timestep = self.image_decoder.transformer.time_embed(
+            timestep,
+            batch_size=batch_size,
+            hidden_dtype=image_latent_embs.dtype,
+        )
+
+        prompt_embs = self.image_decoder.transformer.caption_projection(prompt_embs)
+        prompt_embs = prompt_embs.view(batch_size, -1, image_latent_embs.shape[-1])
+        prompt_embs = self.image_decoder.transformer.caption_norm(prompt_embs)
+
+        return (
+            image_latent_embs,
+            prompt_embs,
+            timestep,
+            post_patch_height,
+            post_patch_width,
+            embedded_timestep,
+        )
+
+    @torch.no_grad()
+    def sample(
+        self,
+        first_image,
+        sc_embedding,
+        act_embeddings,
+        num_inference_steps=None,
+        action_noise=None,
+        image_latents=None,
+        generator=None,
+    ):
+        """Jointly sample actions and a future image.
+
+        The image scheduler's sigma schedule is also used as the action flow
+        schedule. This keeps both noisy states at the same noise level for every
+        call to ``forward_multi_model`` and guarantees that both end at sigma 0.
+        """
+        if num_inference_steps is None:
+            num_inference_steps = self.config.num_steps
+        if num_inference_steps <= 0:
+            raise ValueError(
+                f"num_inference_steps must be positive, got {num_inference_steps}"
+            )
+        if first_image.ndim != 4:
+            raise ValueError(
+                "first_image must have shape [batch, channels, height, width], "
+                f"got {tuple(first_image.shape)}"
+            )
+
+        batch_size = sc_embedding.shape[0]
+        device = sc_embedding.device
+        if first_image.shape[0] != batch_size or act_embeddings.shape[0] != batch_size:
+            raise ValueError(
+                "first_image, sc_embedding, and act_embeddings must have the same batch size"
+            )
+
+        # These conditions do not change during denoising.
+        # sc_embedding_zero = torch.zeros_like(sc_embedding)
+        prompt_embs, ip_tokens = self.prepare_condition_for_image_decoder(
+            sc_embedding, first_image
+        )
+        con_embeddings = torch.cat([sc_embedding, act_embeddings], dim=1)
+        # sc_embedding_zero = torch.zeros_like(sc_embedding)
+        # act_embeddings_zero = torch.zeros_like(act_embeddings)
+        # con_embeddings = torch.cat([sc_embedding, act_embeddings_zero], dim=1)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix_for_action(
+            con_embeddings=con_embeddings
+        )
+
+        _, _, image_height, image_width = first_image.shape
+        latent_channels = self.image_decoder.transformer.config.in_channels
+        image_latents = self.image_decoder.prepare_latents(
+            batch_size,
+            latent_channels,
+            image_height,
+            image_width,
+            self.dtype,
+            device,
+            generator=generator,
+            latents=image_latents,
+        )
+
+        actions_shape = (
+            batch_size,
+            self.config.n_action_steps,
+            self.config.max_action_dim,
+        )
+        if action_noise is None:
+            action_latents = self.sample_noise(actions_shape, device)
+        else:
+            if tuple(action_noise.shape) != actions_shape:
+                raise ValueError(
+                    f"action_noise must have shape {actions_shape}, "
+                    f"got {tuple(action_noise.shape)}"
+                )
+            action_latents = action_noise.to(device=device, dtype=self.dtype)
+
+        scheduler = self.image_decoder.noise_scheduler
+        scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = scheduler.timesteps
+        sigmas = scheduler.sigmas.to(device=device, dtype=torch.float32)
+        if len(sigmas) != len(timesteps) + 1:
+            raise RuntimeError(
+                "The image scheduler must provide one more sigma than timestep "
+                f"(got {len(sigmas)} sigmas and {len(timesteps)} timesteps)"
+            )
+
+        for step_index, image_timestep in enumerate(timesteps):
+            # The image model consumes the scheduler timestep, while the action
+            # flow model consumes the corresponding normalized noise level.
+            action_time = sigmas[step_index].expand(batch_size)
+            action_dt = sigmas[step_index + 1] - sigmas[step_index]
+
+            suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix_for_action(
+                action_latents, action_time
+            )
+            pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+            att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+            att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+
+            image_timestep_batch = image_timestep.expand(batch_size)
+            image_timestep_batch = (
+                image_timestep_batch
+                * self.image_decoder.transformer.config.timestep_scale
+            )
+            (
+                image_latent_embs,
+                prompt_embs_for_id,
+                t_for_id,
+                post_patch_height,
+                post_patch_width,
+                embedded_timestep,
+            ) = self.embed_image_latent_for_sampling(
+                image_latents,
+                image_timestep_batch,
+                prompt_embs,
+            )
+
+            outputs, _ = self.forward_multi_model(
+                inputs_embeds=[image_latent_embs, prefix_embs, suffix_embs],
+                use_cache=False,
+                fill_kv_cache=False,
+                past_key_values=None,
+                prompt_embs_for_id=prompt_embs_for_id,
+                t_for_id=t_for_id,
+                ip_tokens_for_id=ip_tokens,
+                height=post_patch_height,
+                width=post_patch_width,
+                embedded_t=embedded_timestep,
+                attention_mask=att_2d_masks,
+            )
+
+            image_velocity = outputs[0].float()
+            if (
+                self.image_decoder.transformer.config.out_channels // 2
+                == latent_channels
+            ):
+                image_velocity = image_velocity.chunk(2, dim=1)[0]
+            image_latents = scheduler.step(
+                image_velocity,
+                image_timestep,
+                image_latents,
+                return_dict=False,
+            )[0]
+
+            suffix_out = outputs[-1][:, -self.config.n_action_steps :]
+            action_velocity = self.action_out_proj(suffix_out.to(dtype=self.dtype))
+            action_latents = action_latents + action_dt.to(
+                dtype=action_latents.dtype
+            ) * action_velocity
+
+        image_latents = image_latents.to(dtype=self.dtype)
+        image = self.image_decoder.vae.decode(
+            image_latents / self.image_decoder.vae_config_scaling_factor,
+            return_dict=False,
+        )[0]
+        image = self.image_decoder.image_processor.postprocess(image, output_type="np")
+        return action_latents, image
 
     def forward_multi_model(self, 
         past_key_values: list[torch.FloatTensor] | Cache | None = None,

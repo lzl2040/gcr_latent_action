@@ -155,8 +155,9 @@ class LatentActionModel(PreTrainedPolicy):
         self.sc_token_idx = config.sc_token_idx
         self.action_token_idx = config.action_token_idx
         if config.is_distill == False:
+            # decoder_cls = UniDecoder2 if config.use_unified_decoder else UniDecoder
+            # self.uni_decoder = decoder_cls(config)
             self.uni_decoder = UniDecoder(config)
-            # self.uni_decoder = UniDecoder2(config)
 
         self.dtype = torch.bfloat16
 
@@ -340,7 +341,7 @@ class LatentActionModel(PreTrainedPolicy):
         print(responese)
 
 
-    def infer(self, batch: dict[str, Tensor]):
+    def infer(self, batch: dict[str, Tensor], num_inference_steps: int = 20):
         pixel_values = batch["pixel_values"]
         input_ids = batch["input_ids"] # 对于224分辨率图像，每个image占64个token
         attention_mask = batch["attention_mask"].to(dtype=self.dtype)
@@ -376,7 +377,22 @@ class LatentActionModel(PreTrainedPolicy):
         # print(batch.keys())
         # print(sc_embeddings.shape, act_embeddings.shape)
 
-        actions = self.uni_decoder.sample_actions(sc_embeddings, act_embeddings) # 128
+        if isinstance(self.uni_decoder, UniDecoder2):
+            actions, future_image = self.uni_decoder.sample(
+                first_image,
+                sc_embeddings,
+                act_embeddings,
+                num_inference_steps=num_inference_steps,
+            )
+        else:
+            # Backward-compatible inference for the old, separated decoders.
+            actions = self.uni_decoder.sample_actions(sc_embeddings, act_embeddings) # 128
+            future_image = self.uni_decoder.sample_ip_adapter_images(
+                first_image,
+                sc_embeddings,
+                num_inference_steps=num_inference_steps,
+            )
+
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
             actions = actions * in_episode_bound.unsqueeze(-1)
@@ -390,12 +406,7 @@ class LatentActionModel(PreTrainedPolicy):
         
         # actions = actions.numpy()
 
-        furture_image = self.uni_decoder.sample_ip_adapter_images(first_image, 
-                                                                  sc_embeddings,
-                                                                  # default 20
-                                                                  num_inference_steps=20)
-
-        return actions, furture_image
+        return actions, future_image
 
 def sample_beta(alpha, beta, bsize, device):
     gamma1 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / alpha)
@@ -789,4 +800,3 @@ class UniDecoder(nn.Module):
             )
         image = self.image_decoder.image_processor.postprocess(image, output_type="np")
         return image
-

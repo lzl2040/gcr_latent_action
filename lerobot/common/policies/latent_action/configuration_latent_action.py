@@ -61,6 +61,7 @@ class LatentActionConfig(PreTrainedConfig):
     # img_dim: int = 1024 # for gemma
     
     img_loss_weight: float = 0.6
+    use_unified_decoder: bool = False
 
 
     # model weights
