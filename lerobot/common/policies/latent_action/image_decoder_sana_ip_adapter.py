@@ -317,20 +317,20 @@ class ImagePredictionModel(nn.Module):
             local_files_only=True
         )
         
-        # self.transformer = SanaTransformer2DModel.from_pretrained(
-        #     self.img_pred_model, 
-        #     subfolder="transformer", 
-        #     locals_files_only=True
-        # )
-        # 1. 只加载配置文件（不下载/加载权重）
-        config_model = SanaTransformer2DModel.load_config(
-            self.img_pred_model,
-            subfolder="transformer",
-            local_files_only=True,   # 注意：你原代码拼写是 locals_files_only
+        self.transformer = SanaTransformer2DModel.from_pretrained(
+            self.img_pred_model, 
+            subfolder="transformer", 
+            locals_files_only=True
         )
+        # 1. 只加载配置文件（不下载/加载权重）
+        # config_model = SanaTransformer2DModel.load_config(
+        #     self.img_pred_model,
+        #     subfolder="transformer",
+        #     local_files_only=True,   # 注意：你原代码拼写是 locals_files_only
+        # )
         
-        # 2. 根据配置随机初始化模型
-        self.transformer = SanaTransformer2DModel.from_config(config_model)
+        # # 2. 根据配置随机初始化模型
+        # self.transformer = SanaTransformer2DModel.from_config(config_model)
         inner_dim = self.transformer.config.num_attention_heads * self.transformer.config.attention_head_dim
         self.transformer.norm_out = SanaModulatedNorm_Modified(inner_dim, 
                                                                elementwise_affine=False, 
