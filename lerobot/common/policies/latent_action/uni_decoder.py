@@ -191,6 +191,7 @@ class UniDecoder(nn.Module):
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
             attention_implementation=self.config.attention_implementation,
+            unified_decoder=config.use_unified_decoder
         )
         self.action_decoder = ActionDecoderModel(paligemma_with_expert_config, config.action_expert_path)
 
