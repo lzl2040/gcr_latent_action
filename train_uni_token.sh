@@ -25,7 +25,7 @@ IP_TOKEN_NUM=16
 IP_TOKEN_GEN_TYPE="cls_proj"cls_proj
 IMG_DECODER_PART_TRAIN=true
 LATENT_TOKEN_NUM=64
-MOT_ATTENTION="all_sana"
+MOT_ATTENTION="all_sana" # split
 UNIFIED_DECODER=false
 
 # 解析命令行参数
