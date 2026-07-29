@@ -127,6 +127,61 @@ def sana_attention(query, key, value):
     hidden_states = hidden_states.flatten(1, 2).transpose(1, 2)
     return hidden_states
 
+
+def standard_attention(query, key, value, attention_mask=None):
+    """Scaled dot-product attention for condition and action tokens.
+
+    Args:
+        query/key: [B, H, D, L].
+        value: [B, H, D + 1, L]. The last channel is the homogeneous
+            normalization channel added for SANA attention and is discarded.
+        attention_mask: Optional boolean mask [B, L, L], where True means that
+            the query token may attend to the key token.
+
+    Returns:
+        Attention output with shape [B, L, H * D].
+    """
+    if value.shape[2] == query.shape[2] + 1:
+        value = value[:, :, :-1, :]
+    elif value.shape[2] != query.shape[2]:
+        raise ValueError(
+            "Expected value head dimension to equal the query head dimension "
+            f"or have one SANA normalization channel, got query={query.shape} "
+            f"and value={value.shape}."
+        )
+
+    # [B, H, D, L] -> [B, H, L, D]
+    query = query.transpose(2, 3).float()
+    key = key.transpose(2, 3).float()
+    value = value.transpose(2, 3).float()
+
+    att_weights = torch.matmul(query, key.transpose(-2, -1))
+    att_weights = att_weights * (query.shape[-1] ** -0.5)
+
+    if attention_mask is not None:
+        expected_shape = (query.shape[0], query.shape[2], key.shape[2])
+        if tuple(attention_mask.shape) != expected_shape:
+            raise ValueError(
+                f"Expected attention_mask shape {expected_shape}, "
+                f"got {tuple(attention_mask.shape)}."
+            )
+        attention_mask = attention_mask[:, None, :, :].to(
+            device=att_weights.device, dtype=torch.bool
+        )
+        att_weights = att_weights.masked_fill(
+            ~attention_mask, torch.finfo(att_weights.dtype).min
+        )
+
+    att_probs = F.softmax(att_weights, dim=-1)
+    if attention_mask is not None:
+        # Avoid a uniform distribution for a fully masked (padding) query row.
+        att_probs = att_probs * attention_mask.any(dim=-1, keepdim=True)
+
+    hidden_states = torch.matmul(att_probs, value)
+    hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
+    return hidden_states
+
+
 class UniDecoder(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -673,41 +728,74 @@ class UniDecoder(nn.Module):
                 value_states.append(value)
                 # print(i, query.shape, key.shape, value.shape)
 
-            # B,L,H,D with L sequence length, H number of heads, D head dim
-            # concatenate on the number of embeddings/tokens
-            query_states = torch.cat(query_states, dim=-1)
-            key_states = torch.cat(key_states, dim=-1)
-            value_states = torch.cat(value_states, dim=-1)
-            
-            
-            if use_cache and past_key_values is None:
-                past_key_values = {}
+            if self.config.unified_attention_mode == "all_sana":
+                # Original behavior: concatenate all three streams and fuse them
+                # together with SANA linear attention.
+                query_states = torch.cat(query_states, dim=-1)
+                key_states = torch.cat(key_states, dim=-1)
+                value_states = torch.cat(value_states, dim=-1)
 
-            if use_cache:
-                if fill_kv_cache:
-                    past_key_values[layer_idx] = {
-                        "key_states": key_states,
-                        "value_states": value_states,
-                    }
-                else:
-                    # TODO here, some optimization can be done - similar to a `StaticCache` we can declare the `max_len` before.
-                    # so we create an empty cache, with just one cuda malloc, and if (in autoregressive case) we reach
-                    # the max len, then we (for instance) double the cache size. This implementation already exists
-                    # in `transformers`. (molbap)
-                    key_states = torch.cat([past_key_values[layer_idx]["key_states"], key_states], dim=1)
-                    value_states = torch.cat(
-                        [past_key_values[layer_idx]["value_states"], value_states], dim=1
+                if use_cache and past_key_values is None:
+                    past_key_values = {}
+
+                if use_cache:
+                    if fill_kv_cache:
+                        past_key_values[layer_idx] = {
+                            "key_states": key_states,
+                            "value_states": value_states,
+                        }
+                    else:
+                        # TODO here, some optimization can be done - similar to a `StaticCache` we can declare the `max_len` before.
+                        # so we create an empty cache, with just one cuda malloc, and if (in autoregressive case) we reach
+                        # the max len, then we (for instance) double the cache size. This implementation already exists
+                        # in `transformers`. (molbap)
+                        key_states = torch.cat([past_key_values[layer_idx]["key_states"], key_states], dim=1)
+                        value_states = torch.cat(
+                            [past_key_values[layer_idx]["value_states"], value_states], dim=1
+                        )
+
+                att_output = sana_attention(
+                    query_states, key_states, value_states
+                )  # B L D
+            else:
+                if len(query_states) != 3:
+                    raise ValueError(
+                        "Split unified attention requires image (i=0), "
+                        "condition (i=1), and action (i=2) token streams."
                     )
-            # print(torch.isnan(query_states).any(), torch.isnan(key_states).any(), torch.isnan(value_states).any())
-            
-            att_output = sana_attention(
-                query_states, key_states, value_states
-            ) # B L D
+                if use_cache:
+                    raise NotImplementedError(
+                        "KV cache is not implemented for split unified attention."
+                    )
 
-            # attention_interface = self.action_decoder.get_attention_interface()
-            # att_output = attention_interface(
-            #     attention_mask, batch_size, head_dim, query_states, key_states, value_states
-            # )
+                # i=0: image tokens attend only to image tokens with SANA.
+                image_att_output = sana_attention(
+                    query_states[0], key_states[0], value_states[0]
+                )
+
+                # i=1 and i=2: condition/action tokens are concatenated along
+                # the sequence dimension and use standard attention.
+                condition_action_query = torch.cat(
+                    [query_states[1], query_states[2]], dim=-1
+                )
+                condition_action_key = torch.cat(
+                    [key_states[1], key_states[2]], dim=-1
+                )
+                condition_action_value = torch.cat(
+                    [value_states[1], value_states[2]], dim=-1
+                )
+                condition_action_att_output = standard_attention(
+                    condition_action_query,
+                    condition_action_key,
+                    condition_action_value,
+                    # attention_mask,
+                )
+
+                # Restore the original stream order expected by the residual
+                # blocks below: image, condition, action.
+                att_output = torch.cat(
+                    [image_att_output, condition_action_att_output], dim=1
+                )
 
             # print(torch.isnan(att_output).any())
             att_output = att_output.to(dtype=torch.bfloat16)

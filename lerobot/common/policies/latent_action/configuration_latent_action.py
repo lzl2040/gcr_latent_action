@@ -110,6 +110,10 @@ class LatentActionConfig(PreTrainedConfig):
     # Attention utils
     use_cache: bool = True
     attention_implementation: str = "eager"  # or eager, flex
+    # "split": image tokens use SANA attention, while condition/action tokens
+    # use standard scaled dot-product attention. "all_sana" keeps the original
+    # behavior where all three token streams are fused by SANA attention.
+    unified_attention_mode: str = "split"
 
     # Training presets
     optimizer_lr: float = 1e-4
@@ -140,6 +144,11 @@ class LatentActionConfig(PreTrainedConfig):
         if self.n_obs_steps != 1:
             raise ValueError(
                 f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
+            )
+        if self.unified_attention_mode not in {"split", "all_sana"}:
+            raise ValueError(
+                "`unified_attention_mode` must be either 'split' or 'all_sana', "
+                f"got {self.unified_attention_mode!r}."
             )
 
         if self.use_delta_joint_actions_aloha:

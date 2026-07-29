@@ -155,9 +155,10 @@ class LatentActionModel(PreTrainedPolicy):
         self.sc_token_idx = config.sc_token_idx
         self.action_token_idx = config.action_token_idx
         if config.is_distill == False:
-            # decoder_cls = UniDecoder2 if config.use_unified_decoder else UniDecoder
-            # self.uni_decoder = decoder_cls(config)
-            self.uni_decoder = UniDecoder(config)
+            decoder_cls = UniDecoder2 if config.use_unified_decoder else UniDecoder
+            self.uni_decoder = decoder_cls(config)
+            # self.uni_decoder = UniDecoder(config)
+            # self.uni_decoder = UniDecoder2(config)
 
         self.dtype = torch.bfloat16
 
