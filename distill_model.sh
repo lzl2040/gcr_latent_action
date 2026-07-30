@@ -25,6 +25,9 @@ IP_TOKEN_NUM=16
 IP_TOKEN_GEN_TYPE="cls_proj"cls_proj
 IMG_DECODER_PART_TRAIN=true
 NORM_TYPE="quantile"
+LATENT_TOKEN_NUM=64
+MOT_ATTENTION="all_sana" # split
+UNIFIED_DECODER=false
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -133,6 +136,18 @@ while [[ $# -gt 0 ]]; do
             IS_FT="$2"
             shift 2
             ;;
+        --mot_attn)
+            MOT_ATTENTION="$2"
+            shift 2
+            ;;
+        --uni_decoder)
+            UNIFIED_DECODER="$2"
+            shift 2
+            ;;
+        --latent_token_num)
+            LATENT_TOKEN_NUM="$2"
+            shift 2
+            ;;
         --pre_path)
             PRETRAINED_PATH="$2"
             shift 2
@@ -197,6 +212,10 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --policy.freeze_vision_encoder=true \
     --policy.train_expert_only=false \
     --policy.is_distill=true \
+    --policy.num_action_token=$LATENT_TOKEN_NUM \
+    --policy.num_sc_token=$LATENT_TOKEN_NUM \
+    --policy.unified_attention_mode=$MOT_ATTENTION \
+    --policy.use_unified_decoder=$UNIFIED_DECODER \
     --wandb.enable=true \
     --wandb.project="latent_act" \
     --job_name="$JOB_NAME" \
@@ -205,5 +224,6 @@ CUDA_LAUNCH_BLOCKING=1 torchrun \
     --resume=false \
     --policy.pretrained_path=$PRETRAINED_PATH \
     --policy2.pretrained_path="/mnt/wangxiaofa/pi0_05/pi05_base/model_new.pt" \
+    --policy2.latent_token_num=$LATENT_TOKEN_NUM
     # --policy2.pretrained_path="/mnt/wangxiaofa/pi0_pretrain//model_new.pt" \
     

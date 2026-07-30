@@ -108,8 +108,8 @@ class DistillModel(nn.Module):
         kl = kl_loss_fn(log_p, q)
 
         # ---------- 合并 ----------
-        # loss = mse + alpha * kl
-        loss = mse
+        loss = mse + alpha * kl
+        # loss = mse
         # loss = kl
         # return loss, {"mse": mse.item(), "kl": kl.item()}
         return loss, {"mse": mse.item(), "kl": 0.0}
@@ -148,7 +148,7 @@ class DistillModel(nn.Module):
                                            teacher_logits=teacher_logits,
                                            alpha=1,
                                            temperature=3)
-        loss = loss + 0.5 * lg_loss
-        # lg_loss = torch.tensor(0.0, device=loss.device)
+        # loss = loss + 0.5 * lg_loss
+        lg_loss = torch.tensor(0.0, device=loss.device)
         loss_dict["lg_loss"] = lg_loss
         return loss, loss_dict
