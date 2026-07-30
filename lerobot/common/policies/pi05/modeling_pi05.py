@@ -222,6 +222,7 @@ class PI05Policy(PreTrainedPolicy):
 
         new_action_tokens = [f"[{COMPRESS_ACTION_TOKEN}]"]
         new_scene_tokens = [f"[{COMPRESS_SC_TOKEN}]"]
+        self.latent_token_num = config.latent_token_num
         self.language_tokenizer.add_tokens(new_action_tokens)
         self.language_tokenizer.add_tokens(new_scene_tokens)
         # self.cp_act_token_idx =  [self.processor.tokenizer(f"[{COMPRESS_ACTION_TOKEN}{i}]", add_special_tokens=False).input_ids[0] for i in range(cfg.policy.num_action_token)]
@@ -367,10 +368,10 @@ class PI05Policy(PreTrainedPolicy):
             summary_text = ""
             # Latent, Scene
             summary_text = summary_text + "Scene representations:"
-            for j in range(64):
+            for j in range(self.latent_token_num):
                 summary_text += f"[{self.COMPRESS_SC_TOKEN}] "
             summary_text += ". Motion representations:"
-            for j in range(64):
+            for j in range(self.latent_token_num):
                 summary_text += f"[{self.COMPRESS_ACTION_TOKEN}] "
             # summary_text += ".\nAction:"
             summary_text += ".\n"
