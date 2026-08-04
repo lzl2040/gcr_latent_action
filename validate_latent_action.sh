@@ -7,8 +7,8 @@ python scripts/validate_latent_action.py \
     --dataset.image_transforms.enable=false \
     --dataset.wrist_image_transforms.enable=true \
     --dataset.wrist_image_transforms.is_primary=false \
-    --dataset.processor="/home/v-zuoleili/Pretrain/InternVL3_5-2B-HF" \
-    --dataset.parent_dir="/home/v-zuoleili/Data/lerobot_data" \
+    --dataset.processor="/Data/lzl/huggingface/InternVL3_5-2B-HF" \
+    --dataset.parent_dir="/Data/lerobot_data" \
     --data_mix="simpler_bridge" \
     --dataset.sample_ratio=5 \
     --output_dir="qwen_flow" \
