@@ -100,6 +100,24 @@ Per-item cost after the fix (measured, single process):
 | ftp_1_sharpa_split_0 | 93 | 0.018 |
 | ftp_1_VisuoTactile_D-WHEEL | 68 | 0.006 |
 
+### 3.1 The real ceiling is the disk, not the CPU
+
+With the fixes above, `iostat` during training shows `sdc` (the `/Data` volume that holds
+the videos) at **94.9 % utilisation, 95 ms average await, ~208 read IOPS, 13.6 MB/s**.
+That is a spinning disk being asked for random seeks into 100-200 MB multi-episode mp4
+files. CPU load sits at ~22 of 64 cores and 260 GB of RAM stay free, so neither is the
+constraint.
+
+The only in-code lever is **read locality**, and it happens to coincide with the science:
+drawing more frames from the *same* episode gives both harder negatives and fewer seeks.
+Raising `episode_group_size` 4 -> 8 and `episode_group_frac` 0.5 -> 0.75 measured
+**80 -> 164 samples/s** in an A/B dataloader benchmark. A batch of 256 still contains
+~18 distinct episodes plus 48 other frames of the same dataset plus 64 frames from the
+rest of the mixture, so diversity is preserved.
+
+Further speedups require infrastructure, not code: move `/Data/lerobot_data_ort6d` to an
+SSD, or pre-transcode the AV1 videos to smaller per-episode files.
+
 ## 4. Verified run
 
 `conda activate lerobot_v2 && bash train_ace_local.sh` (2 × RTX A6000, `CUDA_VISIBLE_DEVICES=0,3`):
@@ -108,8 +126,10 @@ Per-item cost after the fix (measured, single process):
 params        : 74.9 M trainable / 450.1 M total
 micro batch   : 256 per GPU (global 512)
 peak memory   : ~3.1 GB at batch 128, comfortably < 48 GB at 256
-step time     : updt_s ≈ 0.62 s, data_s ≈ 0.004 s (dataloading fully hidden)
-throughput    : ≈ 410 samples/s/GPU
+step time     : data_s ≈ 0.004 s -- dataloading is fully hidden behind compute
+                updt_s ≈ 0.5 s warm / ≈ 2 s sustained (blocked on the disk via the
+                cross-rank all_gather, see 3.1)
+throughput    : ≈ 250-500 samples/s/GPU depending on page-cache warmth
 ```
 
 Metric trace (global batch 512, chance accuracy = 1/512 = 0.002):
@@ -121,6 +141,8 @@ Metric trace (global batch 512, chance accuracy = 1/512 = 0.002):
 | 100 | 5.747 | 0.008 |
 | 140 | 5.611 | 0.013 |
 | 180 | 5.495 | 0.018 |
+| 280 | 5.458 | 0.021 |
+| 320 | 5.401 | 0.019 |
 
 Tactile gates stay at ~0 over the first 200 steps, i.e. the model has not yet found the
 tactile channel useful — which is the intended cold start, not a bug.
