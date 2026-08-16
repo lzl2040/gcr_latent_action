@@ -795,15 +795,31 @@ class LeRobotDataset(torch.utils.data.Dataset):
         }
         return query_indices, padding
 
+    @property
+    def video_keys_to_decode(self) -> list[str]:
+        """Video keys that ``__getitem__`` actually decodes (see the v3.0 counterpart)."""
+        keys = getattr(self, "_video_keys_to_decode", None)
+        if keys is None:
+            return self.meta.video_keys
+        return keys
+
+    @video_keys_to_decode.setter
+    def video_keys_to_decode(self, keys: list[str] | None) -> None:
+        if keys is None:
+            self._video_keys_to_decode = None
+            return
+        available = set(self.meta.video_keys)
+        self._video_keys_to_decode = [k for k in keys if k in available]
+
     def _get_query_timestamps(
         self,
         current_ts: float,
         query_indices: dict[str, list[int]] | None = None,
     ) -> dict[str, list[float]]:
         query_timestamps = {}
-        for key in self.meta.video_keys:
+        for key in self.video_keys_to_decode:
             if query_indices is not None and key in query_indices:
-                timestamps = self.hf_dataset.select(query_indices[key])["timestamp"]
+                timestamps = self.hf_dataset[list(query_indices[key])]["timestamp"]
                 query_timestamps[key] = torch.stack(list(timestamps)).tolist()
             else:
                 query_timestamps[key] = [current_ts]
@@ -811,11 +827,15 @@ class LeRobotDataset(torch.utils.data.Dataset):
         return query_timestamps
 
     def _query_hf_dataset(self, query_indices: dict[str, list[int]]) -> dict:
-        return {
-            key: torch.stack(list(self.hf_dataset.select(q_idx)[key]))
-            for key, q_idx in query_indices.items()
-            if key not in self.meta.video_keys
-        }
+        # NOTE: `hf_dataset.select(...)` is pathologically slow for non-contiguous
+        # index lists on large datasets; plain list indexing uses the fast gather path.
+        result = {}
+        for key, q_idx in query_indices.items():
+            if key in self.meta.video_keys:
+                continue
+            rows = self.hf_dataset[list(q_idx)][key]
+            result[key] = rows if isinstance(rows, torch.Tensor) else torch.stack(list(rows))
+        return result
 
     def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int, primary_obs_key = None) -> dict[str, torch.Tensor]:
         """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
@@ -899,7 +919,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             item = {**video_frames, **item}
 
         if self.image_transforms is not None:
-            image_keys = self.meta.camera_keys
+            image_keys = [key for key in self.meta.camera_keys if key in item]
             for cam in image_keys:
                 # if "wrist" in cam:
                 #     item[cam] = self.wrist_image_transforms(item[cam])

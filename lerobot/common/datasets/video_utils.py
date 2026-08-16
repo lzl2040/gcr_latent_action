@@ -135,6 +135,34 @@ def decode_video_frames(
 
 _default_decoder_cache = VideoDecoderCache()
 
+
+_VIDEO_DECODE_WARNING_LIMIT = 20
+_video_decode_warning_count = 0
+
+
+def _log_video_decode_warning(message: str) -> None:
+    """Log video decoding anomalies.
+
+    Optionally mirrors them to ``$LEROBOT_VIDEO_DECODE_LOG`` when that env var points to a
+    writable file. Previously this wrote to a hard-coded absolute path, which raised
+    ``FileNotFoundError`` on any machine that did not have that directory.
+    """
+    global _video_decode_warning_count
+    _video_decode_warning_count += 1
+    if _video_decode_warning_count <= _VIDEO_DECODE_WARNING_LIMIT:
+        logging.warning(message)
+
+    log_path = os.environ.get("LEROBOT_VIDEO_DECODE_LOG")
+    if not log_path:
+        return
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write(message + "\n")
+    except OSError:
+        pass
+
+
 def decode_video_frames_torchcodec(
     video_path: Path | str,
     timestamps: list[float],
@@ -176,14 +204,12 @@ def decode_video_frames_torchcodec(
     # frame_indices = [min(round(ts * average_fps), decoder._num_frames - 1) for ts in timestamps]
     frame_indices = [round(ts * average_fps) for ts in timestamps]
     # retrieve frames based on indices
-    error_txt_path = "/mnt/wangxiaofa/action_chunk_encoder_exp/error_log.txt"
     try:
         frames_batch = decoder.get_frames_at(indices=frame_indices)
     except Exception as e:
         frame_indices = [min(round(ts * average_fps), decoder._num_frames - 1) for ts in timestamps]
         frames_batch = decoder.get_frames_at(indices=frame_indices)
-        with open(error_txt_path, "a") as f:
-            f.write(f"Frame decode error: {e} from {video_path} using fallback ones tensor.\n")
+        _log_video_decode_warning(f"Frame decode error: {e} from {video_path}, clamped frame indices instead.")
     
     for frame, pts in zip(frames_batch.data, frames_batch.pts_seconds, strict=True):
         loaded_frames.append(frame)
@@ -202,8 +228,10 @@ def decode_video_frames_torchcodec(
     is_within_tol = min_ < tolerance_s
     # print(f"video: {video_path} timestamp loading check: queried timestamps: {query_ts} loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}")
     if not is_within_tol.all():
-        with open(error_txt_path, "a") as f:
-            f.write(f"Video: {video_path} timestamp loading warning: queried timestamps: {query_ts} loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}\n")
+        _log_video_decode_warning(
+            f"Video: {video_path} timestamp loading warning: queried timestamps: {query_ts} "
+            f"loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}"
+        )
         # print(f"video: {video_path} timestamp loading check: queried timestamps: {query_ts} loaded timestamps: {loaded_ts} min distance: {min_} within tolerance: {is_within_tol}")
     #     raise FrameTimestampError(
     #         f"One or several query timestamps unexpectedly violate the tolerance ({min_[~is_within_tol]} > {tolerance_s=})."

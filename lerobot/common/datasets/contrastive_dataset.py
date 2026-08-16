@@ -1,0 +1,585 @@
+"""Multi-modal, multi-dataset loader for perception <-> physical contrastive learning.
+
+This loader produces, for every sample:
+
+Perception side
+    * ``image_t0`` / ``image_t1``  : the primary camera at time ``t`` and ``t + horizon``
+    * ``task``                     : the language instruction
+    * ``pair_is_valid``            : 0 when ``t + horizon`` had to be clamped inside the episode
+
+Physical side
+    * ``action`` / ``action_mask`` : action chunk in the canonical 40-dim slotted space
+    * ``observation.state`` / ``state_mask``
+    * ``tactile_signal`` / ``tactile_signal_mask`` : low-dimensional tactile readings
+    * ``tactile_image``  / ``tactile_image_mask``  : tactile camera views (small resolution)
+
+Heterogeneity is handled by :mod:`lerobot.common.datasets.canonical_space`: every dataset is
+mapped into the same slotted vector plus a validity mask, so datasets that only expose joint
+positions, only end-effector poses, or both, all coexist without silently overlapping.
+
+Indexing supports two forms:
+    * ``dataset[i]``                    -> the ``i``-th entry of the per-epoch sampling plan
+    * ``dataset[(ds_idx, frame_idx)]``  -> an explicit sample, used by the contrastive sampler
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import os
+import random
+from datetime import datetime
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from tabulate import tabulate
+
+from lerobot.common.datasets.canonical_space import (
+    CANON_DIM,
+    MAX_TACTILE_SIGNAL_DIM,
+    MAX_TACTILE_VIEWS,
+    get_spec,
+    tactile_image_keys,
+    tactile_signal_keys,
+)
+from lerobot.common.datasets.lerobot_dataset_for_ace import (
+    LeRobotDataset,
+    LeRobotDatasetMetadata,
+    resolve_delta_timestamps,
+)
+from lerobot.common.datasets.mixtures import OXE_NAMED_MIXTURES
+from lerobot.common.datasets.oxe_configs import OXE_DATASET_CONFIGS
+from lerobot.common.datasets_v30.dataset_metadata import (
+    LeRobotDatasetMetadata as LeRobotDatasetMetadataV30,
+)
+from lerobot.common.datasets_v30.lerobot_dataset import LeRobotDataset as LeRobotDatasetV30
+
+logger = logging.getLogger(__name__)
+
+
+def _to_tensor(value) -> torch.Tensor | None:
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        return value
+    try:
+        return torch.as_tensor(value)
+    except Exception:  # noqa: BLE001 - defensive: heterogeneous raw dataset payloads
+        return None
+
+
+class MultiModalContrastiveDataset(torch.utils.data.Dataset):
+    """Mixture of LeRobot datasets emitting aligned perception/physical modalities."""
+
+    def __init__(
+        self,
+        cfg,
+        image_transforms=None,
+        seed: int = 1000,
+        data_mix: str = "debug_research_data",
+        vla2root_json: str = "vla2root.json",
+        dataset_size_one_epoch: int = 100_000,
+    ):
+        super().__init__()
+        self.cfg = cfg
+        self.seed = seed
+        self.epoch = 0
+        self.image_transforms = image_transforms
+
+        policy_cfg = cfg.policy
+        self.chunk_size = policy_cfg.chunk_size
+        # Temporal gap (in frames) between the two perception frames. The visual change over
+        # this window is exactly what the action chunk is supposed to explain.
+        self.frame_horizon = getattr(policy_cfg, "frame_horizon", None) or self.chunk_size
+        self.tactile_img_size = getattr(policy_cfg, "tactile_img_size", 64)
+        self.max_tactile_views = min(getattr(policy_cfg, "max_tactile_views", MAX_TACTILE_VIEWS), MAX_TACTILE_VIEWS)
+        self.use_wrist_image = getattr(policy_cfg, "use_wrist_image", False)
+
+        mixture_spec = OXE_NAMED_MIXTURES[data_mix]
+        included_datasets, sample_weights = [], []
+        for d_name, d_weight in mixture_spec:
+            if d_name in included_datasets:
+                continue
+            included_datasets.append(d_name)
+            sample_weights.append(d_weight)
+
+        with open(vla2root_json) as f:
+            vla2data_root = json.load(f)
+
+        self.datasets: list = []
+        self.dataset_names: list[str] = []
+        self.dataset_sizes: list[int] = []
+        self.specs: list[dict] = []
+        self.image_key_maps: list[dict] = []
+        self.norm_stats: list[dict] = []
+        self.episode_ranges: list[np.ndarray] = []
+        kept_weights: list[float] = []
+        meta_features = None
+
+        for dataset_name, weight in zip(included_datasets, sample_weights, strict=True):
+            if dataset_name not in vla2data_root:
+                logger.warning("%s missing from %s, skipping.", dataset_name, vla2root_json)
+                continue
+            data_root = self._resolve_root(cfg, vla2data_root[dataset_name])
+            if data_root is None:
+                logger.warning("%s not found on disk, skipping.", dataset_name)
+                continue
+
+            with open(os.path.join(data_root, "meta", "info.json")) as f:
+                info = json.load(f)
+            version = info.get("codebase_version", "v2.1")
+
+            spec = get_spec(
+                dataset_name,
+                action_dim=self._feature_dim(info, "action"),
+                state_dim=self._feature_dim(info, "observation.state"),
+            )
+
+            dataset, ds_meta, img_keys = self._build_dataset(
+                cfg, dataset_name, data_root, version, spec
+            )
+            if dataset is None:
+                continue
+            if meta_features is None:
+                meta_features = dict(ds_meta.features)
+
+            self.datasets.append(dataset)
+            self.dataset_names.append(dataset_name)
+            self.dataset_sizes.append(len(dataset))
+            self.specs.append(spec)
+            self.image_key_maps.append(img_keys)
+            self.norm_stats.append(self._build_norm_stats(dataset, spec))
+            self.episode_ranges.append(self._build_episode_ranges(dataset, version))
+            kept_weights.append(weight)
+
+        if not self.datasets:
+            raise RuntimeError(f"No dataset of mixture '{data_mix}' could be loaded.")
+
+        # Balance by dataset size, as in the original pipeline.
+        weights = np.array(kept_weights, dtype=np.float64) * np.array(self.dataset_sizes, dtype=np.float64)
+        self.sample_weights = weights / weights.sum()
+        self.dataset_size_one_epoch = dataset_size_one_epoch
+        self.dataset_sample_counts = (self.sample_weights * dataset_size_one_epoch).astype(int)
+
+        print(
+            tabulate(
+                [
+                    [self.dataset_names[i], self.dataset_sizes[i], f"{self.sample_weights[i]:.4f}", len(self.episode_ranges[i])]
+                    for i in range(len(self.datasets))
+                ],
+                headers=["Dataset", "Frames", "Ratio", "Episodes"],
+                tablefmt="grid",
+            )
+        )
+
+        self.id2dataset, self.num_episodes = self._build_sampling_plan(seed)
+        self.dataset_len = len(self.id2dataset)
+
+        self.meta = self._build_unified_meta(cfg, meta_features)
+
+    # ------------------------------------------------------------------
+    # construction helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_root(cfg, relative_root: str) -> str | None:
+        for parent in (cfg.dataset.parent_dir_v21, cfg.dataset.parent_dir_v30):
+            if parent is None:
+                continue
+            candidate = os.path.join(parent, relative_root)
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    @staticmethod
+    def _feature_dim(info: dict, key: str) -> int | None:
+        feature = info.get("features", {}).get(key)
+        if feature is None:
+            return None
+        shape = feature.get("shape")
+        if not shape:
+            return None
+        return int(np.prod(shape))
+
+    def _build_dataset(self, cfg, dataset_name, data_root, version, spec):
+        repo_id = f"bulldog-{dataset_name}"
+        meta_cls = LeRobotDatasetMetadata if version == "v2.1" else LeRobotDatasetMetadataV30
+        ds_meta = meta_cls(repo_id, root=data_root)
+        fps = ds_meta.fps
+
+        img_keys = self._resolve_image_keys(dataset_name, None, ds_meta=ds_meta)
+        rgb_keys = [img_keys["primary"]] if img_keys["primary"] else []
+        if self.use_wrist_image and img_keys.get("wrist"):
+            rgb_keys.append(img_keys["wrist"])
+        tac_img_keys = [k for k in tactile_image_keys(spec) if k in ds_meta.video_keys][
+            : self.max_tactile_views
+        ]
+
+        # Only the action sources this dataset's canonical spec actually reads are chunked;
+        # chunking every ``action.*`` column (e.g. 44-dim hand joints) wastes a lot of IO.
+        wanted_action_keys = {src for src, *_ in spec.get("action", [])}
+        resolved = resolve_delta_timestamps(cfg.policy, ds_meta) or {}
+        delta_timestamps = {k: v for k, v in resolved.items() if k in wanted_action_keys}
+
+        # Two frames for the RGB stream(s), a single frame for tactile cameras.
+        for key in rgb_keys:
+            if key in ds_meta.video_keys:
+                delta_timestamps[key] = [0.0, self.frame_horizon / fps]
+
+        try:
+            common = dict(
+                root=data_root,
+                delta_timestamps=delta_timestamps or None,
+                image_transforms=None,  # applied per-modality in this class
+                video_backend=cfg.dataset.video_backend,
+                dataset_name=dataset_name,
+            )
+            if version == "v2.1":
+                dataset = LeRobotDataset(repo_id, **common)
+            else:
+                dataset = LeRobotDatasetV30(repo_id, video_return_type="uint8", **common)
+        except Exception as exc:  # noqa: BLE001 - a broken dataset must not kill the whole mixture
+            logger.warning("Failed to open %s (%s): %s", dataset_name, data_root, exc)
+            return None, None, None
+
+        dataset.video_keys_to_decode = rgb_keys + tac_img_keys
+        return dataset, ds_meta, img_keys
+
+    def _resolve_image_keys(self, dataset_name, dataset, ds_meta=None) -> dict:
+        """Map the OXE ``primary``/``secondary``/``wrist`` roles onto real dataset keys."""
+        meta = ds_meta if ds_meta is not None else dataset.meta
+        available = set(meta.video_keys) | set(getattr(meta, "image_keys", []) or [])
+        config = OXE_DATASET_CONFIGS.get(dataset_name, {})
+        role_map = config.get("image_obs_keys", {})
+
+        resolved = {}
+        for role in ("primary", "secondary", "wrist"):
+            raw = role_map.get(role)
+            resolved[role] = None
+            if raw is None:
+                continue
+            for prefix in ("observation.images.", "observations.images.", "images.rgb."):
+                candidate = f"{prefix}{raw}"
+                if candidate in available:
+                    resolved[role] = candidate
+                    break
+        if resolved["primary"] is None:
+            # Fall back to any non-tactile camera so the sample is still usable.
+            for key in sorted(available):
+                if "tactile" not in key:
+                    resolved["primary"] = key
+                    break
+        return resolved
+
+    def _build_norm_stats(self, dataset, spec) -> dict:
+        """Project each dataset's own statistics into the canonical slots.
+
+        Per-dataset (rather than mixture-wide) normalisation is used on purpose: it removes the
+        dataset-specific scale that a contrastive model would otherwise exploit as a shortcut.
+        """
+        stats = getattr(dataset.meta, "stats", None) or {}
+
+        def project(instructions):
+            mean = np.zeros(CANON_DIM, dtype=np.float32)
+            std = np.ones(CANON_DIM, dtype=np.float32)
+            mask = np.zeros(CANON_DIM, dtype=np.float32)
+            for src_key, s0, s1, d0 in instructions:
+                width = s1 - s0
+                mask[d0 : d0 + width] = 1.0
+                src = stats.get(src_key)
+                if src is None or "mean" not in src:
+                    continue
+                src_mean = np.asarray(src["mean"], dtype=np.float32).reshape(-1)
+                src_std = np.asarray(src["std"], dtype=np.float32).reshape(-1)
+                if src_mean.shape[0] < s1:
+                    continue
+                mean[d0 : d0 + width] = src_mean[s0:s1]
+                std[d0 : d0 + width] = np.maximum(src_std[s0:s1], 1e-3)
+            return {
+                "mean": torch.from_numpy(mean),
+                "std": torch.from_numpy(std),
+                "mask": torch.from_numpy(mask),
+            }
+
+        out = {"action": project(spec.get("action", [])), "state": project(spec.get("state", []))}
+
+        sig_mean = np.zeros(MAX_TACTILE_SIGNAL_DIM, dtype=np.float32)
+        sig_std = np.ones(MAX_TACTILE_SIGNAL_DIM, dtype=np.float32)
+        sig_mask = np.zeros(MAX_TACTILE_SIGNAL_DIM, dtype=np.float32)
+        offset = 0
+        for key in tactile_signal_keys(spec):
+            src = stats.get(key)
+            if src is None or "mean" not in src:
+                continue
+            src_mean = np.asarray(src["mean"], dtype=np.float32).reshape(-1)
+            src_std = np.asarray(src["std"], dtype=np.float32).reshape(-1)
+            width = min(src_mean.shape[0], MAX_TACTILE_SIGNAL_DIM - offset)
+            if width <= 0:
+                break
+            sig_mean[offset : offset + width] = src_mean[:width]
+            sig_std[offset : offset + width] = np.maximum(src_std[:width], 1e-3)
+            sig_mask[offset : offset + width] = 1.0
+            offset += width
+        out["tactile_signal"] = {
+            "mean": torch.from_numpy(sig_mean),
+            "std": torch.from_numpy(sig_std),
+            "mask": torch.from_numpy(sig_mask),
+        }
+        return out
+
+    @staticmethod
+    def _build_episode_ranges(dataset, version) -> np.ndarray:
+        """``(num_episodes, 2)`` array of ``[from_index, to_index)`` absolute frame ranges."""
+        if version == "v2.1":
+            idx = dataset.episode_data_index
+            starts = np.asarray(idx["from"], dtype=np.int64)
+            ends = np.asarray(idx["to"], dtype=np.int64)
+        else:
+            episodes = dataset.meta.episodes
+            starts = np.asarray(episodes["dataset_from_index"], dtype=np.int64)
+            ends = np.asarray(episodes["dataset_to_index"], dtype=np.int64)
+        return np.stack([starts, ends], axis=1)
+
+    def _build_unified_meta(self, cfg, meta_features):
+        img_feature = None
+        features = {}
+        for key, value in (meta_features or {}).items():
+            if value.get("dtype") in ("image", "video"):
+                img_feature = value
+            else:
+                features[key] = value
+        if img_feature is None:
+            img_feature = {"dtype": "video", "shape": (224, 224, 3), "names": None, "info": {}}
+        img_size = cfg.dataset.image_transforms.img_size
+        img_feature = dict(img_feature)
+        img_feature["shape"] = (img_size, img_size, 3)
+        for key in ("observation.images.primary", "observation.images.secondary", "observation.images.wrist"):
+            features[key] = img_feature
+
+        canon = {
+            "dtype": "float32",
+            "shape": (CANON_DIM,),
+            "names": None,
+        }
+        features["action"] = canon
+        features["observation.state"] = canon
+
+        stats = {
+            "action": {
+                "mean": np.zeros(CANON_DIM, dtype=np.float32),
+                "std": np.ones(CANON_DIM, dtype=np.float32),
+                "max": np.ones(CANON_DIM, dtype=np.float32),
+                "min": -np.ones(CANON_DIM, dtype=np.float32),
+                "count": np.array([1]),
+            },
+        }
+        stats["observation.state"] = stats["action"]
+        meta = LeRobotDatasetMetadata.create_with_stats_feats(stats=stats, features=features)
+        meta.repo_id = "Prometheus"
+        return meta
+
+    # ------------------------------------------------------------------
+    # sampling plan
+    # ------------------------------------------------------------------
+    def _build_sampling_plan(self, seed: int):
+        rng = random.Random(seed)
+        plan: list[tuple[int, int]] = []
+        episode_count = 0
+        for ds_idx, (dataset, count) in enumerate(zip(self.datasets, self.dataset_sample_counts, strict=True)):
+            size = len(dataset)
+            if count <= 0 or size == 0:
+                continue
+            if count <= size:
+                indices = rng.sample(range(size), count)
+            else:
+                indices = rng.choices(range(size), k=count)
+            plan.extend((ds_idx, i) for i in indices)
+            episode_count += int(len(self.episode_ranges[ds_idx]) * min(1.0, count / size))
+        return plan, max(episode_count, 1)
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+        self.id2dataset, self.num_episodes = self._build_sampling_plan(self.seed + epoch)
+        self.dataset_len = len(self.id2dataset)
+
+    def __len__(self):
+        return self.dataset_len
+
+    # ------------------------------------------------------------------
+    # item construction
+    # ------------------------------------------------------------------
+    def __getitem__(self, index):
+        if isinstance(index, (tuple, list)) and len(index) == 2:
+            ds_idx, frame_idx = int(index[0]), int(index[1])
+        else:
+            ds_idx, frame_idx = self.id2dataset[int(index)]
+
+        dataset = self.datasets[ds_idx]
+        frame_idx = int(np.clip(frame_idx, 0, len(dataset) - 1))
+        try:
+            item = dataset[frame_idx]
+        except Exception as exc:  # noqa: BLE001 - never let one broken frame kill training
+            logger.warning("Failed to read %s[%d]: %s", self.dataset_names[ds_idx], frame_idx, exc)
+            item = dataset[0]
+            frame_idx = 0
+
+        return self._to_canonical(item, ds_idx, frame_idx)
+
+    def _resize_rgb(self, image: torch.Tensor) -> torch.Tensor:
+        size = self.cfg.dataset.image_transforms.img_size
+        if image.shape[-1] == size and image.shape[-2] == size:
+            return image
+        return F.interpolate(
+            image.unsqueeze(0).float(), size=(size, size), mode="bilinear", align_corners=False
+        ).squeeze(0).to(torch.uint8)
+
+    def _extract_frames(self, item, primary_key):
+        """Return ``(image_t0, image_t1, pair_is_valid)`` as uint8 CHW tensors."""
+        size = self.cfg.dataset.image_transforms.img_size
+        frames = item.get(primary_key) if primary_key else None
+        if frames is None:
+            zeros = torch.zeros(3, size, size, dtype=torch.uint8)
+            return zeros, zeros.clone(), 0.0
+
+        if frames.ndim == 4:  # (T, C, H, W)
+            first = frames[0]
+            last = frames[-1] if frames.shape[0] > 1 else frames[0]
+            is_pad = item.get(f"{primary_key}_is_pad")
+            valid = 0.0 if (is_pad is not None and bool(is_pad[-1])) else 1.0
+        else:
+            first = frames
+            last = frames
+            valid = 0.0
+
+        first = self._resize_rgb(first)
+        last = self._resize_rgb(last)
+        return first, last, valid
+
+    def _build_canonical_vector(self, item, instructions, norm, is_chunk: bool):
+        width = CANON_DIM
+        chunk = self.chunk_size if is_chunk else 1
+        out = torch.zeros(chunk, width, dtype=torch.float32)
+        mask = torch.zeros(width, dtype=torch.float32)
+
+        for src_key, s0, s1, d0 in instructions:
+            value = _to_tensor(item.get(src_key))
+            if value is None:
+                continue
+            value = value.to(torch.float32)
+            if is_chunk:
+                if value.ndim == 1:
+                    value = value.unsqueeze(0).expand(chunk, -1)
+                elif value.ndim > 2:
+                    value = value.reshape(value.shape[0], -1)
+                if value.shape[0] < chunk:
+                    pad = value[-1:].expand(chunk - value.shape[0], -1)
+                    value = torch.cat([value, pad], dim=0)
+                value = value[:chunk]
+            else:
+                value = value.reshape(-1) if value.ndim == 1 else value.reshape(value.shape[0], -1)[0]
+                value = value.unsqueeze(0)
+            if value.shape[-1] < s1:
+                continue
+            span = s1 - s0
+            out[:, d0 : d0 + span] = value[:, s0:s1]
+            mask[d0 : d0 + span] = 1.0
+
+        mask = mask * norm["mask"]
+        out = (out - norm["mean"]) / norm["std"]
+        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0) * mask
+        return (out if is_chunk else out.squeeze(0)), mask
+
+    def _build_tactile_signal(self, item, spec, norm):
+        signal = torch.zeros(MAX_TACTILE_SIGNAL_DIM, dtype=torch.float32)
+        offset = 0
+        found = False
+        for key in tactile_signal_keys(spec):
+            value = _to_tensor(item.get(key))
+            if value is None:
+                continue
+            value = value.to(torch.float32).reshape(-1)
+            width = min(value.shape[0], MAX_TACTILE_SIGNAL_DIM - offset)
+            if width <= 0:
+                break
+            signal[offset : offset + width] = value[:width]
+            offset += width
+            found = True
+        if not found:
+            return signal, torch.zeros((), dtype=torch.float32)
+        signal = (signal - norm["mean"]) / norm["std"]
+        signal = torch.nan_to_num(signal, nan=0.0, posinf=0.0, neginf=0.0) * norm["mask"]
+        return signal, torch.ones((), dtype=torch.float32)
+
+    def _build_tactile_images(self, item, spec):
+        size = self.tactile_img_size
+        views = torch.zeros(self.max_tactile_views, 3, size, size, dtype=torch.uint8)
+        mask = torch.zeros(self.max_tactile_views, dtype=torch.float32)
+        for slot, key in enumerate(tactile_image_keys(spec)[: self.max_tactile_views]):
+            frame = item.get(key)
+            if frame is None:
+                continue
+            if frame.ndim == 4:
+                frame = frame[0]
+            frame = F.interpolate(
+                frame.unsqueeze(0).float(), size=(size, size), mode="bilinear", align_corners=False
+            ).squeeze(0)
+            views[slot] = frame.clamp(0, 255).to(torch.uint8)
+            mask[slot] = 1.0
+        return views, mask
+
+    def _to_canonical(self, item, ds_idx, frame_idx):
+        spec = self.specs[ds_idx]
+        norm = self.norm_stats[ds_idx]
+        primary_key = self.image_key_maps[ds_idx]["primary"]
+
+        image_t0, image_t1, pair_valid = self._extract_frames(item, primary_key)
+        action, action_mask = self._build_canonical_vector(item, spec.get("action", []), norm["action"], True)
+        state, state_mask = self._build_canonical_vector(item, spec.get("state", []), norm["state"], False)
+        tactile_signal, tactile_signal_mask = self._build_tactile_signal(item, spec, norm["tactile_signal"])
+        tactile_image, tactile_image_mask = self._build_tactile_images(item, spec)
+
+        episode_index = int(_to_tensor(item.get("episode_index", 0)).reshape(-1)[0].item())
+        task = item.get("task", "")
+        if isinstance(task, (list, tuple)):
+            task = task[0] if task else ""
+
+        return {
+            "image_t0": image_t0,
+            "image_t1": image_t1,
+            "pair_is_valid": torch.tensor(pair_valid, dtype=torch.float32),
+            "task": str(task),
+            "action": action,
+            "action_mask": action_mask,
+            "observation.state": state,
+            "state_mask": state_mask,
+            "tactile_signal": tactile_signal,
+            "tactile_signal_mask": tactile_signal_mask,
+            "tactile_image": tactile_image,
+            "tactile_image_mask": tactile_image_mask,
+            "sample_rate": torch.tensor(int(item.get("fps", 10)), dtype=torch.long),
+            "dataset_id": torch.tensor(ds_idx, dtype=torch.long),
+            "episode_uid": torch.tensor(ds_idx * 1_000_000 + episode_index, dtype=torch.long),
+            "frame_index": torch.tensor(frame_idx, dtype=torch.long),
+        }
+
+    # ------------------------------------------------------------------
+    @property
+    def num_frames(self) -> int:
+        return self.dataset_len
+
+    @property
+    def features(self):
+        return self.meta.features
+
+
+def contrastive_collate_fn(batch: list[dict]) -> dict:
+    """Stack tensors, keep language instructions as a python list."""
+    out = {}
+    for key in batch[0]:
+        values = [sample[key] for sample in batch]
+        if isinstance(values[0], torch.Tensor):
+            out[key] = torch.stack(values, dim=0)
+        else:
+            out[key] = values
+    return out
