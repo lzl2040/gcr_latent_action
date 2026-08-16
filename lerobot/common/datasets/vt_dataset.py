@@ -2006,7 +2006,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             )
         frame_len = len(video)
         idx = random.randrange(len(QUESTION_LIST))  # 随机选一个索引
-        question = QUESTION_LIST[idx].format(sent=text, T = frame_len-1, Tm1=frame_len - 2)
+        question = QUESTION_LIST[idx].format(sent=text)
         # question = "What is your name?"
         message[0]["content"].append({"type": "text", "text": question})
         # if self.train:

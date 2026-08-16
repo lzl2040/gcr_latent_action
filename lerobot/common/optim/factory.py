@@ -34,6 +34,11 @@ def make_optimizer_and_scheduler(
     Returns:
         tuple[Optimizer, LRScheduler | None]: The couple (Optimizer, Scheduler). Scheduler can be `None`.
     """
+    
+    # for name, params in policy.named_parameters():
+    #     if "scale_shift_table" in name:
+    #         print(name)
+    
     params = policy.get_optim_params() if cfg.use_policy_training_preset else policy.parameters()
     params = list(filter(lambda p: p.requires_grad, params))
     optimizer = cfg.optimizer.build(params)

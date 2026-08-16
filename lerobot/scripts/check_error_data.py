@@ -47,12 +47,9 @@ from torch.utils.data import DataLoader
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp.api import StateDictType, FullStateDictConfig
 
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLDecoderLayer, Qwen2_5_VLVisionBlock
-from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RMSNorm
-
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.transforms import ImageTransforms
-from lerobot.common.datasets.vt_dataset import MultiDatasetforDistTraining, extra_collate_fn
+from lerobot.common.datasets.world_dataset import MultiDatasetforDistTraining, extra_collate_fn
 from lerobot.common.datasets.sampler import EpisodeAwareSampler, DistEpisodeAwareSampler
 from lerobot.common.datasets.utils import cycle
 from lerobot.common.envs.factory import make_env
@@ -181,7 +178,8 @@ def train_step(model, batch, scaler, cfg, sync_flag):
             loss, output_dict = model(batch)
             loss = loss / cfg.gradient_accumulation_steps
             output_dict["action_loss"] = output_dict["action_loss"] / cfg.gradient_accumulation_steps
-            output_dict["image_loss"] = output_dict["image_loss"] / cfg.gradient_accumulation_steps
+            output_dict["video_loss"] = output_dict["video_loss"] / cfg.gradient_accumulation_steps
+            output_dict["language_loss"] = output_dict["language_loss"] / cfg.gradient_accumulation_steps
             # 反向传播
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -318,42 +316,17 @@ def train(cfg: TrainPipelineConfig):
     if rank == 0:
         model_params = sum(p.numel() for p in policy.parameters()) / 1e9
         logger.info(f"Model parameters: {model_params} B")
-        image_decoder_params = sum(p.numel() for p in policy.uni_decoder.image_decoder.parameters()) / 1e9
-        vlm_params = sum(p.numel() for p in policy.vlm.parameters()) / 1e9
-        logger.info(f"Image decoder params:{image_decoder_params} B")
-        logger.info(f"VLM params:{vlm_params} B")
-        # logger.info(f"Qwen VL visual parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.visual.parameters())}")
-        # logger.info(f"Qwen VL parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen25vl.parameters())}")
-        # logger.info(f"kv repre model parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.kv_repre.parameters())}")
-        # logger.info(f"AWA Expert parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.awa_model.parameters())}")
-        # logger.info(f"Action Expert parameters: {sum(p.numel() for p in policy.model.paligemma_with_expert.qwen_expert.parameters())}")
-        # lora_params = sum(
-        #     p.numel()
-        #     for name, p in policy.model.named_parameters()
-        #     if "lora" in name.lower()
-        # )
+        latent_encoder_params = sum(p.numel() for p in policy.future_latent_encoder.parameters()) / 1e9
+        logger.info(f"Future Latent Encoder params:{latent_encoder_params} B")
 
-        # logger.info(f"LoRA parameters: {lora_params:,} ({lora_params / 1e6:.2f}M)")
-        
         trainable_params = sum(
             p.numel() for p in policy.parameters() if p.requires_grad
         )
-        vlm_trainbale_params = sum(
-            p.numel() for p in policy.vlm.parameters() if p.requires_grad
+        latent_encoder_trainable_params = sum(
+            p.numel() for p in policy.future_latent_encoder.parameters() if p.requires_grad
         )
 
-        # action_decoder_params = sum(p.numel() for p in policy.uni_decoder.action_decoder.parameters()) / 1e9
-        # action_decoder_trainable_params = sum(
-        #     p.numel() for p in policy.uni_decoder.action_decoder.parameters() if p.requires_grad
-        # )
-        # logger.info(f"Action decoder params:{action_decoder_params} B")
-        # logger.info(f"Action Decoder Trainable parameters: {action_decoder_trainable_params:,} ({action_decoder_trainable_params / 1e6:.2f}M)")
-
-        image_decoder_trainable_params = sum(
-            p.numel() for p in policy.uni_decoder.image_decoder.parameters() if p.requires_grad
-        )
-        logger.info(f"VLM Trainable parameters: {vlm_trainbale_params:,} ({vlm_trainbale_params / 1e6:.2f}M)")
-        logger.info(f"Image Decoder Trainable parameters: {image_decoder_trainable_params:,} ({image_decoder_trainable_params / 1e6:.2f}M)")
+        logger.info(f"Future Latent Encoder Trainable parameters: {latent_encoder_trainable_params:,} ({latent_encoder_trainable_params / 1e6:.2f}M)")
         logger.info(f"Trainable parameters: {trainable_params:,} ({trainable_params / 1e6:.2f}M)")
        
     # 训练状态初始化
@@ -473,7 +446,7 @@ def train(cfg: TrainPipelineConfig):
     # Metrics setup
     train_metrics = {
         "loss": AverageMeter("loss", ":.4f"),
-        "img_loss": AverageMeter("img_loss", ":.4f"),
+        "video_loss": AverageMeter("video_loss", ":.4f"),
         "action_loss": AverageMeter("action_loss", ":.4f"),
         "language_loss": AverageMeter("language_loss", ":.4f"),
         "grad_norm": AverageMeter("grdn", ":.4f"),
@@ -504,7 +477,7 @@ def train(cfg: TrainPipelineConfig):
     dataloading_s = 0.0
     grad_norm_value = 0.0
     loss_value = 0.0
-    img_loss_value = 0.0
+    video_loss_value = 0.0
     action_loss_value = 0.0
     language_loss_value = 0.0
     
@@ -519,7 +492,7 @@ def train(cfg: TrainPipelineConfig):
     if cfg.weight_resume:
         logger.info("Setting up learning rate scheduler...")
         # for _ in range(int((step-1)/cfg.gradient_accumulation_steps)):
-        for _ in range(int((step-1)/cfg.gradient_accumulation_steps)):
+        for _ in range(int((step-1) / cfg.gradient_accumulation_steps)):
             lr_scheduler.step()
         logger.info("Resuming Data Batch")
         # if cfg.job_type == "pretrain":
@@ -584,11 +557,11 @@ def train(cfg: TrainPipelineConfig):
         step_start = time.perf_counter()
         
         loss, grad_norm, outputs = train_step(model, batch, scaler, cfg, sync_flag)
-        del batch
+        # del batch
         grad_to_record = grad_norm.item() if grad_norm is not None else 0.0
         grad_norm_value += grad_to_record
         loss_value += loss.detach().mean().item()
-        img_loss_value += outputs["image_loss"]
+        video_loss_value += outputs["video_loss"]
         action_loss_value += outputs["action_loss"]
         language_loss_value += outputs["language_loss"]
             
@@ -614,7 +587,7 @@ def train(cfg: TrainPipelineConfig):
             train_tracker.dataloading_s = dataloading_s
             train_tracker.update_s = fwd_bwd_time
             train_tracker.loss = loss_value
-            train_tracker.img_loss = img_loss_value
+            train_tracker.video_loss = video_loss_value
             train_tracker.action_loss = action_loss_value
             train_tracker.language_loss = language_loss_value
             train_tracker.grad_norm = grad_norm_value
@@ -624,7 +597,7 @@ def train(cfg: TrainPipelineConfig):
             fwd_bwd_time = 0.0
             dataloading_s = 0.0
             loss_value = 0.0
-            img_loss_value = 0.0
+            video_loss_value = 0.0
             action_loss_value = 0.0
             language_loss_value = 0.0
             grad_norm_value = 0.0

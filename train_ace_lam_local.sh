@@ -1,0 +1,32 @@
+CUDA_VISIBLE_DEVICES=0,1,2,3 deepspeed --num_gpus=4 lerobot/scripts/dps_train_ace_lam.py \
+    --deepspeed="./ds_zero2.json" \
+    --policy.type="latent_act" \
+    --policy2.type="robo_clip" \
+    --policy.max_frame=16 \
+    --is_ft=false \
+    --save_freq=2000 \
+    --dataset.repo_id="whatever" \
+    --dataset.image_transforms.enable=false \
+    --dataset.wrist_image_transforms.enable=false \
+    --dataset.wrist_image_transforms.is_primary=false \
+    --dataset.processor="/Data/lzl/huggingface/InternVL3_5-2B-HF" \
+    --dataset.parent_dir="/Data/lerobot_data_ort6d" \
+    --data_mix="libero" \
+    --dataset.sample_ratio=5 \
+    --output_dir="qwen_flow" \
+    --batch_size=5 \
+    --steps=60_0000 \
+    --log_freq=20 \
+    --policy.scheduler_warmup_steps=10 \
+    --policy.scheduler_decay_steps=25000 \
+    --policy.scheduler_platform_steps=20000 \
+    --policy.optimizer_lr=1e-4 \
+    --policy.chunk_size=16 \
+    --policy.n_action_steps=16 \
+    --wandb.project="fsdp_qwen_pi0_ft" \
+    --job_name="debug_simpler_bridge" \
+    --policy.pretrained_path="/Data/lzl/latent_action/0127_pretrain_latent_split_decoder/step180000.pt" \
+    --policy2.pretrained_path="" \
+    --weight_resume=false \
+    # --wandb.enable=true \
+    

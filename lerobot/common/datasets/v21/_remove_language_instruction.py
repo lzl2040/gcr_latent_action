@@ -8,7 +8,7 @@ from huggingface_hub import HfApi
 from lerobot import available_datasets
 from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.common.datasets.utils import INFO_PATH, write_info
-from lerobot.common.datasets.v21.convert_dataset_v20_to_v21 import V20, SuppressWarnings
+from lerobot.common.datasets.v21.update_quantile import V20, SuppressWarnings
 
 LOCAL_DIR = Path("data/")
 
