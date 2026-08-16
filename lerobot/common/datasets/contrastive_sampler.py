@@ -38,8 +38,8 @@ class ContrastiveBatchSampler(Sampler):
         samples_per_epoch: int = 100_000,
         horizon: int = 16,
         same_dataset_frac: float = 0.75,
-        episode_group_frac: float = 0.5,
-        episode_group_size: int = 4,
+        episode_group_frac: float = 0.75,
+        episode_group_size: int = 8,
         min_frame_gap: int = 32,
     ):
         self.episode_ranges = episode_ranges
