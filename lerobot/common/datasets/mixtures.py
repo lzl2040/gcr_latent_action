@@ -346,8 +346,8 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     
     "ms_buy_v30":[
         # ("ms_data_scale", 1.0),
-        ("ms_data_xdof_1", 0.15),
-        ("ms_data_xdof_2", 0.15),
+        # ("ms_data_xdof_1", 0.15),
+        # ("ms_data_xdof_2", 0.15),
         ("ms_data_xdof_3", 0.15),
         # ("ms_data_xdof_4", 0.15),
         # ("ms_data_xdof_5", 0.15),
@@ -425,6 +425,59 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     #   ("ms_data_xdof_3", 1.0),
         ("toto", 1.0),
         ("taco_play", 1.0)
+    ],
+    
+    "research_data":[
+        ("fractal20220817_data", 1.0),                # Google RT-1 Robot Data (Large-Scale)
+        ("kuka", 0.5),
+        ("bridge_orig", 0.5),                                   # Original Version of Bridge V2 from Project Website
+        ("taco_play", 1.0),
+        ("jaco_play", 1.0),
+        ("roboturk", 1.0),
+        ("berkeley_autolab_ur5", 1.0),
+        # ("language_table", 0.1),
+        ("stanford_hydra_dataset_converted_externally_to_rlds", 1.0),
+        ("nyu_franka_play_dataset_converted_externally_to_rlds", 1.0),
+        ("furniture_bench_dataset_converted_externally_to_rlds", 0.5),
+        ("austin_sailor_dataset_converted_externally_to_rlds", 1.0),
+        ("austin_sirius_dataset_converted_externally_to_rlds", 1.0),
+        ("dlr_edan_shared_control_converted_externally_to_rlds", 1.0),
+        ("cmu_stretch", 1.0),
+        ## New Datasets in MagicSoup++
+        ("bc_z", 0.3),                                          # Note: use v0.1.0 --> later versions broken
+        ("fmb_dataset", 0.3),
+        ("dobbe", 0.3),
+        # ("droid", 0.01),
+        ("agibot_alpha", 0.1),
+        ("robomind_franka_dual_arm", 1.0),
+        ("robomind_franka_3rgb", 1.0),
+        ("robomind_franka_1rgb", 1.5),
+        ("robomind_agilex_3rgb", 0.5),
+        ("robomind_ur_1rgb", 0.5),
+        # ("interna1_dual_arm_0", 0.05),
+        # ("interna1_dual_arm_1", 0.05),
+        # ("interna1_dual_arm_2", 0.05),
+        # ("interna1_dual_arm_3", 0.05),
+        # ("interna1_dual_arm_4", 0.1),
+        ("interna1_single_arm", 0.15),
+        # ms_buy_data
+        ("ms_data_scale", 0.2),
+        ("ms_data_xdof_1", 0.1),
+        ("ms_data_xdof_2", 0.1),
+        ("ms_data_xdof_3", 0.15),
+        ("ms_data_xdof_4", 0.15),
+        ("ftp_1_RH20TCfg5Franka", 0.1),
+        ("ftp_1_sharpa_split_0", 0.1),
+        ("ftp_1_VisuoTactile_D-WHEEL_split_0", 0.1)
+    ],
+    
+    "debug_research_data":[
+        ("fractal20220817_data", 1.0),
+        ("taco_play", 1.0),
+        ("ms_data_xdof_3", 0.15),
+        ("ftp_1_RH20TCfg5Franka", 0.1),
+        ("ftp_1_sharpa_split_0", 0.1),
+        ("ftp_1_VisuoTactile_D-WHEEL_split_0", 0.1)
     ],
     
     "debug":[

@@ -74,6 +74,8 @@ class StateEncoding(IntEnum):
     JOINT = 3               # Joint Angles (7, <PAD> if fewer) + Gripper Open/Close (1)
     JOINT_BIMANUAL = 4      # Joint Angles (2 x [ Joint Angles (6) + Gripper Open/Close (1) ])
     # fmt: on
+    EEF_R6 = 5 # EEF Delta XYZ (3) + R6 (6) + Gripper Open/Close (1)
+    EEF_R6_AND_JOINT = 6          # EEF_R6 + JOINT (xyz+joint+gripper)
 
 
 # Defines Action Encoding Schemes
@@ -84,6 +86,7 @@ class ActionEncoding(IntEnum):
     JOINT_POS_BIMANUAL = 3  # Joint Delta Position (2 x [ Joint Delta Position (6) + Gripper Open/Close (1) ])
     EEF_R6 = 4              # EEF Delta XYZ (3) + R6 (6) + Gripper Open/Close (1)
     # fmt: on
+    EEF_R6_AND_JOINT = 6          # EEF_R6 + JOINT (xyz+joint+gripper)
 
 
 # === Individual Dataset Configs ===
@@ -92,95 +95,95 @@ OXE_DATASET_CONFIGS = {
         "image_obs_keys": {"primary": "camera_front", "secondary": "camera_top", "wrist": "camera_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     "robomind_ur_1rgb":{
         "image_obs_keys": {"primary": "camera_top", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     "robomind_franka_3rgb":{
         "image_obs_keys": {"primary": "camera_top", "secondary": "camera_left", "wrist": "camera_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     "robomind_franka_1rgb":{
         "image_obs_keys": {"primary": "camera_top", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     "robomind_agilex_3rgb":{
         "image_obs_keys": {"primary": "camera_front", "secondary": "camera_left_wrist", "wrist": "camera_right_wrist"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
      "interna1_single_arm":{
         # "image_obs_keys": {"primary": "head", "secondary": None, "wrist": "hand"},
         "image_obs_keys": {"primary": "head", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     "interna1_dual_arm_0":{
         "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     "interna1_dual_arm_1":{
         "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     "interna1_dual_arm_2":{
         "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     "interna1_dual_arm_3":{
         "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     "interna1_dual_arm_4":{
         "image_obs_keys": {"primary": "head", "secondary": "hand_left", "wrist": "hand_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     
     "fractal20220817_data": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["base_pose_tool_reached", "gripper_closed"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     
     "agibot_alpha":{
         "image_obs_keys": {"primary": "top_head", "secondary": "hand_left", "wrist": "hand_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["all"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6
     },
     
     "kuka": {
@@ -190,8 +193,8 @@ OXE_DATASET_CONFIGS = {
             "clip_function_input/base_pose_tool_reached",
             "gripper_closed",
         ],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "bridge_oxe": {  # Version of Bridge V2 in Open X-Embodiment mixture
         "image_obs_keys": {"primary": "image", "secondary": "image_1", "wrist": None},
@@ -204,15 +207,15 @@ OXE_DATASET_CONFIGS = {
         "image_obs_keys": {"primary": "image_0", "secondary": "image_1", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "bridge_dataset": {  # Original version of Bridge V2 from project website
         "image_obs_keys": {"primary": "image_0", "secondary": "image_1", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "taco_play": {
         "image_obs_keys": {
@@ -226,8 +229,8 @@ OXE_DATASET_CONFIGS = {
             "wrist": "depth_gripper",
         },
         "state_obs_keys": ["state_eef", None, "state_gripper"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "jaco_play": {
         "image_obs_keys": {
@@ -237,8 +240,8 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["state_eef", None, "state_gripper"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "berkeley_cable_routing": {
         "image_obs_keys": {
@@ -284,8 +287,8 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": "depth", "secondary": None, "wrist": None},
         "state_obs_keys": ["state"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "toto": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
@@ -298,8 +301,8 @@ OXE_DATASET_CONFIGS = {
         "image_obs_keys": {"primary": "rgb", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["effector_translation", None, None, None, None, None, None],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "columbia_cairlab_pusht_real": {
         "image_obs_keys": {
@@ -334,8 +337,8 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["eef_state", None, "gripper_state"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "austin_buds_dataset_converted_externally_to_rlds": {
         "image_obs_keys": {
@@ -360,8 +363,8 @@ OXE_DATASET_CONFIGS = {
             "wrist": None,
         },
         "state_obs_keys": ["eef_state", None, None],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "maniskill_dataset_converted_externally_to_rlds": {
         "image_obs_keys": {
@@ -386,8 +389,8 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["state"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "cmu_franka_exploration_dataset_converted_externally_to_rlds": {
         "image_obs_keys": {
@@ -422,8 +425,8 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["state"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "austin_sirius_dataset_converted_externally_to_rlds": {
         "image_obs_keys": {
@@ -433,8 +436,8 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["state"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "bc_z": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
@@ -445,8 +448,8 @@ OXE_DATASET_CONFIGS = {
             None,
             "present/sensed_close",
         ],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "utokyo_pr2_opening_fridge_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
@@ -533,15 +536,15 @@ OXE_DATASET_CONFIGS = {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["state", None, None],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "dlr_edan_shared_control_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["state", None],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "asu_table_top_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
@@ -630,8 +633,8 @@ OXE_DATASET_CONFIGS = {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["eef_state", None, "gripper_state"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "berkeley_gnm_recon": {
         "image_obs_keys": {"primary": None, "secondary": None, "wrist": "image"},
@@ -662,8 +665,8 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
         "aux_kwargs": {
             "dataset_frame_transform_kwargs": {
                 "chunk_filter_fn": zero_action_filter,
@@ -682,15 +685,15 @@ OXE_DATASET_CONFIGS = {
             "wrist": "image_wrist_1_depth",
         },
         "state_obs_keys": ["proprio"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "dobbe": {
         "image_obs_keys": {"primary": "wrist_image", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "roboset": {
         "image_obs_keys": {
@@ -819,32 +822,32 @@ OXE_DATASET_CONFIGS = {
         "image_obs_keys": {"primary": "cam_high", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "ms_data_xdof_1":{
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
         "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "ms_data_xdof_2":{
         "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     "ms_data_xdof_3":{
         "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     
     "ms_data_xdof_4":{
@@ -852,8 +855,8 @@ OXE_DATASET_CONFIGS = {
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     
     "ms_data_xdof_5":{
@@ -861,8 +864,8 @@ OXE_DATASET_CONFIGS = {
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
-        "state_encoding": StateEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     
     "local_game_minecraft":{
@@ -1114,5 +1117,27 @@ OXE_DATASET_CONFIGS = {
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
+    },
+    # ftp-1
+    "ftp_1_RH20TCfg5Franka": {
+        "image_obs_keys": {"primary": "ego", "secondary": "main", "wrist": "right_wrist_camera"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
+    },
+    "ftp_1_sharpa_split_0": {
+        "image_obs_keys": {"primary": "ego", "secondary": "left_wrist_camera", "wrist": "right_wrist_camera"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6_AND_JOINT,
+        "action_encoding": ActionEncoding.EEF_R6_AND_JOINT,
+    },
+    "ftp_1_VisuoTactile_D-WHEEL_split_0": {
+        "image_obs_keys": {"primary": "ego", "secondary": "left_wrist_camera", "wrist": "right_wrist_camera"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     }
 }

@@ -1456,12 +1456,24 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         for dataset_name in included_datasets:
             if dataset_name in vla2data_root.keys():
                 data_root = vla2data_root[dataset_name]
+                path1 = os.path.join(cfg.dataset.parent_dir_v21, data_root)
+                path2 = os.path.join(cfg.dataset.parent_dir_v30, data_root)
+                version = "v2.1"
+                if not os.path.exists(path1) and not os.path.exists(path2):
+                    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] - {dataset_name} not found in {parent_dir} or {parent_v30_dir}, skipping...")
+                    continue
+                else:
+                    if os.path.exists(path1):
+                        data_root = path1
+                    else:
+                        data_root = path2
+                    json_path = os.path.join(data_root, "meta", "info.json")
+                    with open(json_path, "r") as f:
+                        info = json.load(f)
+                    version = info.get("codebase_version", "v2.1")
                 repo_id = f"bulldog-{dataset_name}" # any
-                if "ms_data" not in dataset_name:
-                    parent_dir = cfg.dataset.parent_dir_v21
-                    # parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d"
-                    data_root = os.path.join(parent_dir, data_root)
-                    print(f"Load data from {data_root}")
+                print(f"Load data from {data_root}")
+                if version == "v2.1":
                     ds_meta = LeRobotDatasetMetadata(repo_id, root=data_root)
                     if meta_features == None:
                         meta_features = ds_meta.features
@@ -1476,10 +1488,6 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                         dataset_name=dataset_name,
                     )
                 else:
-                    parent_dir = cfg.dataset.parent_dir_v30
-                    # parent_dir = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30"
-                    data_root = os.path.join(parent_dir, data_root)
-                    print(f"Load data from {data_root}")
                     ds_meta = LeRobotDatasetMetadataV30(repo_id, root=data_root)
                     if meta_features == None:
                         meta_features = ds_meta.features

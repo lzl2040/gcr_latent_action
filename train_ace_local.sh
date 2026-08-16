@@ -16,9 +16,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 deepspeed --num_gpus=4 --master_port=29601 lerobot/
     --dataset.wrist_image_transforms.enable=false \
     --dataset.wrist_image_transforms.is_primary=false \
     --dataset.processor="/Data/lzl/huggingface/InternVL3_5-2B-HF" \
-    --dataset.parent_dir="/Data/lerobot_data_ort6d/v30" \
+    --dataset.parent_dir_v21="/Data/lerobot_data_ort6d" \
+    --dataset.parent_dir_v30="/Data/lerobot_data_ort6d/v30" \
     --dataset.video_backend="torchcodec" \
-    --data_mix="ms_buy_v30" \
+    --data_mix="debug_research_data" \
     --dataset.sample_ratio=5 \
     --dataset.dataset_size_one_epoch=100000 \
     --output_dir="qwen_flow" \
