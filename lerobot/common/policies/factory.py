@@ -31,6 +31,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.common.policies.vqbet.configuration_vqbet import VQBeTConfig
 from lerobot.common.policies.ace.configuration_robo_clip import RobotCLIPConfig
+from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 
@@ -73,6 +74,9 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
     elif name == "robo_clip":
         from lerobot.common.policies.ace.modeling_robo_clip import RobotCLIP
         return RobotCLIP
+    elif name == "robo_contrast":
+        from lerobot.common.policies.ace.modeling_robo_contrast import RoboContrast
+        return RoboContrast
     elif name == "pi05":
         from lerobot.common.policies.pi05.modeling_pi05 import PI05Policy
         return PI05Policy
@@ -95,6 +99,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return PI05Config(**kwargs)
     elif policy_type == "robo_clip":
         return RobotCLIPConfig(**kwargs)
+    elif policy_type == "robo_contrast":
+        return RoboContrastConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 

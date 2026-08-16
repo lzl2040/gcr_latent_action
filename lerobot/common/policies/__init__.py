@@ -9,3 +9,4 @@ from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
 from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig
 # from .cosmos_policy.configuration_cosmos_policy import CosmosPolicyConfig as CosmosPolicyConfig
 from .ace.configuration_robo_clip import RobotCLIPConfig as RobotCLIPConfig
+from .ace.configuration_robo_contrast import RoboContrastConfig as RoboContrastConfig
