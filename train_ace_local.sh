@@ -20,7 +20,7 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} deepspeed --num_gpus=${NUM
     --dataset.video_backend="torchcodec" \
     --data_mix="debug_research_data" \
     --dataset.sample_ratio=5 \
-    --dataset.dataset_size_one_epoch=100000 \
+    --dataset.dataset_size_one_epoch=1000000 \
     --num_workers=12 \
     --output_dir="robo_contrast" \
     --steps=60_0000 \
