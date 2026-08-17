@@ -57,5 +57,6 @@ deepspeed --master_port=${MASTER_PORT} lerobot/scripts/dps_train_contrast.py \
     --wandb.project="robo_contrast" \
     --job_name="perception_physical_contrast" \
     --weight_resume=false \
-    --task_type="train_contrastive"
+    --task_type="train_contrastive" \
+    "$@"
     # --wandb.enable=true \
