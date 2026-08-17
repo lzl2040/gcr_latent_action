@@ -10,7 +10,17 @@ export LEROBOT_VIDEO_DECODER_CACHE_SIZE=256
 export TOKENIZERS_PARALLELISM=false
 # Other jobs come and go on these GPUs, so keep our own footprint defragmented.
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+# Default to whichever GPUs are actually free, since some of them usually belong to someone
+# else. Override explicitly with CUDA_VISIBLE_DEVICES=... when you want specific devices.
+if [ -z "${CUDA_VISIBLE_DEVICES}" ]; then
+    CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
+        | awk -F', ' '$2 < 5000 {printf "%s%s", sep, $1; sep=","}')
+fi
+if [ -z "${CUDA_VISIBLE_DEVICES}" ]; then
+    echo "No GPU has less than 5 GB in use; refusing to start. Check nvidia-smi." >&2
+    exit 1
+fi
+export CUDA_VISIBLE_DEVICES
 echo "devices=${CUDA_VISIBLE_DEVICES}"
 # The machine is shared, and a run that is killed can leave dataloader workers holding the
 # rendezvous socket, so a fixed port eventually fails with EADDRINUSE. Pick a free one.
