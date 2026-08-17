@@ -565,23 +565,24 @@ class PhysicalEncoder(nn.Module):
     """Encodes state + action chunk + tactile into one embedding, tolerating missing modalities.
 
     Every modality is read over the same window ``[t, t+H]`` that the perception side sees,
-    but at a resolution set by what it costs to read and by how many tokens it deserves:
+    at a resolution set by what it costs to read, and is then grouped into
+    ``G = chunk_size / group_size`` tokens:
 
-    ==================  ============  ========
+    ==================  ============  ==========================
     modality            frames read   tokens
-    ==================  ============  ========
+    ==================  ============  ==========================
     CLS                 --            1
-    state               chunk (16)    8
-    action              chunk (16)    8
-    tactile signal      t, t+H        1
-    tactile image       t, t+H        4
-    ==================  ============  ========
+    state               chunk         G
+    action              chunk         G
+    tactile signal      chunk         G
+    tactile image       t, t+H        ``max_tactile_views``
+    ==================  ============  ==========================
 
-    The token budget is the main defence against tactile dominance: a tactile camera carries
-    far more raw capacity per token than a 40-dim state vector, so it gets four tokens against
-    the action chunk's eight rather than the 64-per-pad that a naive patchwise encoding would
-    produce. The zero-initialised gates, the tactile dropout and the reduced tactile learning
-    rate handle the rest.
+    The token budget is the main defence against tactile dominance. A tactile camera carries
+    far more raw capacity per token than a 40-dim state vector, so it is folded into one token
+    per pad -- ``[feat_t, feat_t1 - feat_t]`` -- rather than the 64-per-pad that a naive
+    patchwise encoding would produce. The zero-initialised gates, the tactile dropout and the
+    reduced tactile learning rate handle the rest.
     """
 
     MOD_CLS, MOD_STATE, MOD_ACTION, MOD_TAC_SIG, MOD_TAC_IMG = range(5)
@@ -606,11 +607,11 @@ class PhysicalEncoder(nn.Module):
         # "commanded" against "achieved" at matching times.
         self.state_proj = nn.Linear(self.group_size * self.state_dim * 2, dim)
         self.action_proj = nn.Linear(self.group_size * self.action_dim * 2, dim)
-        # Tactile is read at the two ends of the window, so both projections see a pair of
-        # frames and keep their original token count: the useful thing about tactile is the
-        # *change* in contact, but spending more tokens on it would let it crowd out the
-        # action chunk it is supposed to complement.
-        self.signal_proj = nn.Linear(self.signal_dim * 2 * 2, dim)
+        # Tactile images are read at the two ends of the window, so their projection sees a
+        # pair of frames and keeps its original token count: the useful thing about tactile is
+        # the *change* in contact, but spending more tokens on it would let it crowd out the
+        # action chunk. The tactile signal is chunked like state and action.
+        self.signal_proj = nn.Linear(self.group_size * self.signal_dim * 2, dim)
         self.tactile_cnn = TactileImageEncoder(config.tactile_feat_dim, config.tactile_pretrained)
         self.tactile_img_proj = nn.Linear(config.tactile_feat_dim * 2, dim)
         self.tactile_recon = (
@@ -710,11 +711,15 @@ class PhysicalEncoder(nn.Module):
 
         # -- tactile signal ------------------------------------------------
         keep_signal = self._maybe_drop(signal_present, self.config.modality_dropout_tactile)
-        sig_mask = signal_present.unsqueeze(1).expand(-1, signal.shape[1], self.signal_dim)
-        signal_token = self.signal_proj(self._with_mask(signal, sig_mask).reshape(b, -1))
-        signal_token = torch.tanh(self.tactile_signal_gate).to(dtype) * signal_token
-        signal_token = keep_signal * signal_token + (1 - keep_signal) * missing[self.MOD_TAC_SIG]
-        signal_token = (signal_token + mod[self.MOD_TAC_SIG]).unsqueeze(1)
+        sig_mask = signal_present.unsqueeze(1).expand(-1, self.chunk_size, self.signal_dim)
+        sig_feat = self._with_mask(signal, sig_mask)
+        sig_feat = sig_feat.view(b, self.num_groups, self.group_size * sig_feat.shape[-1])
+        signal_tokens = self.signal_proj(sig_feat)
+        signal_tokens = torch.tanh(self.tactile_signal_gate).to(dtype) * signal_tokens
+        signal_tokens = keep_signal.unsqueeze(1) * signal_tokens + (
+            1 - keep_signal
+        ).unsqueeze(1) * missing[self.MOD_TAC_SIG]
+        signal_tokens = signal_tokens + group_pos + mod[self.MOD_TAC_SIG] + rate_embed
 
         # -- tactile images ------------------------------------------------
         # One token per pad rather than a single pooled token: pads touch different parts of
@@ -725,8 +730,8 @@ class PhysicalEncoder(nn.Module):
         # Each pad arrives as two frames, and the token is built from ``[feat_t, feat_t1 -
         # feat_t]``. The difference term is the point: a grasp that closes mid-window is
         # invisible at ``t`` alone, and the contrastive target is the *change* over the window.
-        # Folding the pair into one token keeps tactile at four tokens against the action
-        # chunk's eight.
+        # Folding the pair into one token per pad keeps the tactile cameras level with the
+        # three chunked streams instead of doubling their share of the sequence.
         num_views = tac_images.shape[1]
         any_view = (tac_img_mask.sum(dim=-1, keepdim=True) > 0).to(dtype)
         keep_tac_img = self._maybe_drop(any_view, self.config.modality_dropout_tactile)
@@ -778,9 +783,10 @@ class PhysicalEncoder(nn.Module):
         )
 
         # -- transformer ---------------------------------------------------
-        # 1 CLS + 8 state + 8 action + 1 tactile signal + 4 tactile image = 22 tokens.
+        # 1 CLS + G state + G action + G tactile signal + V tactile image tokens, where
+        # G = chunk_size / group_size and V = max_tactile_views.
         cls = (self.cls_token.to(dtype).expand(b, -1, -1) + mod[self.MOD_CLS])
-        tokens = torch.cat([cls, state_tokens, action_tokens, signal_token, img_tokens], dim=1)
+        tokens = torch.cat([cls, state_tokens, action_tokens, signal_tokens, img_tokens], dim=1)
         for block in self.blocks:
             tokens = block(tokens)
 

@@ -157,6 +157,14 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         if not self.datasets:
             raise RuntimeError(f"No dataset of mixture '{data_mix}' could be loaded.")
 
+        # Which datasets carry tactile at all. Tactile is a small slice of most mixtures, so
+        # any metric computed over the whole mixture barely sees it; the evaluator uses this
+        # to build a tactile-only split that can.
+        self.has_tactile = np.array(
+            [bool(tactile_signal_keys(s)) or bool(tactile_image_keys(s)) for s in self.specs],
+            dtype=bool,
+        )
+
         # Balance by dataset size, as in the original pipeline.
         weights = np.array(kept_weights, dtype=np.float64) * np.array(self.dataset_sizes, dtype=np.float64)
         self.sample_weights = weights / weights.sum()
@@ -224,29 +232,31 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         # How far each modality is read over the window is decided by what it costs to read.
         #
-        # The proprioceptive state is a parquet column living in the same row group as the
-        # action, so the whole chunk comes back for almost nothing. It is worth having: the
-        # action chunk is what was *commanded*, the state trajectory is what actually
-        # *happened*, and the visual change we align against is the result of the latter.
+        # Everything that lives in parquet -- state, action, tactile signal -- is in the same
+        # row group, so the whole chunk comes back for almost nothing. The state trajectory is
+        # worth having next to the action chunk: the action is what was *commanded*, the state
+        # is what actually *happened*, and the visual change we align against is the result of
+        # the latter. The tactile signal is worth having at full rate for a different reason --
+        # a contact transient is a few frames wide, so two samples can straddle it and see
+        # almost nothing of it.
         chunk_stamps = [i / fps for i in range(self.chunk_size)]
         for key in {src for src, *_ in spec.get("state", [])}:
             if key in ds_meta.features:
                 delta_timestamps[key] = chunk_stamps
+        for key in tactile_signal_keys(spec):
+            if key in ds_meta.features:
+                delta_timestamps[key] = chunk_stamps
 
-        # Everything else is read at the two ends of the window only. For the RGB streams that
-        # is the whole design; for tactile it is a deliberate compromise. Tactile carries
+        # The video streams are read at the two ends of the window only. For RGB that is the
+        # whole design; for tactile cameras it is a deliberate compromise. Tactile carries
         # contact events -- grasp closure, slip, impact -- which are things that *happen during*
         # the window, so a single frame at ``t`` can miss the entire signal (if the grasp closes
-        # at t+8, the frame at t shows no contact at all). But tactile cameras are video, and
-        # decoding 16 frames x 4 pads on a spinning disk is exactly where this pipeline is
-        # already bottlenecked. Two frames catch "before contact -> after contact" at 2x the
-        # decode cost instead of 16x.
+        # at t+8, the frame at t shows no contact at all). But decoding 16 frames x 4 pads on a
+        # spinning disk is exactly where this pipeline is already bottlenecked, so two frames
+        # buy "before contact -> after contact" at 2x the decode cost instead of 16x.
         pair_stamps = [0.0, self.frame_horizon / fps]
         for key in rgb_keys:
             if key in ds_meta.video_keys:
-                delta_timestamps[key] = pair_stamps
-        for key in tactile_signal_keys(spec):
-            if key in ds_meta.features:
                 delta_timestamps[key] = pair_stamps
         for key in tac_img_keys:
             delta_timestamps[key] = pair_stamps
@@ -515,8 +525,14 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         return (out if is_chunk else out.squeeze(0)), mask
 
     def _build_tactile_signal(self, item, spec, norm):
-        """``(2, 32)``: the tactile signal at ``t`` and at ``t + horizon``."""
-        signal = torch.zeros(2, MAX_TACTILE_SIGNAL_DIM, dtype=torch.float32)
+        """``(chunk, 32)``: the tactile signal over the whole window.
+
+        Read at full rate rather than at the two ends, because a contact transient is only a
+        few frames wide: two samples can straddle it and see almost nothing of it. Unlike the
+        tactile cameras this costs nothing, the signal being a parquet column.
+        """
+        chunk = self.chunk_size
+        signal = torch.zeros(chunk, MAX_TACTILE_SIGNAL_DIM, dtype=torch.float32)
         offset = 0
         found = False
         for key in tactile_signal_keys(spec):
@@ -526,9 +542,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             value = value.to(torch.float32)
             # A key may come back as (D,) if this dataset had no window to read.
             value = value.reshape(1, -1) if value.ndim == 1 else value.reshape(value.shape[0], -1)
-            if value.shape[0] < 2:
-                value = value[:1].expand(2, -1)
-            value = value[:2]
+            if value.shape[0] < chunk:
+                value = torch.cat([value, value[-1:].expand(chunk - value.shape[0], -1)], dim=0)
+            value = value[:chunk]
             width = min(value.shape[1], MAX_TACTILE_SIGNAL_DIM - offset)
             if width <= 0:
                 break

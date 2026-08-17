@@ -47,6 +47,7 @@ deepspeed --master_port=${MASTER_PORT} lerobot/scripts/dps_train_contrast.py \
     --output_dir="robo_contrast" \
     --steps=60_0000 \
     --log_freq=20 \
+    --eval_freq=250 \
     --policy.chunk_size=16 \
     --policy.frame_horizon=16 \
     --policy.scheduler_warmup_steps=500 \

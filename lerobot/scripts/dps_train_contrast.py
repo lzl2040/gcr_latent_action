@@ -27,6 +27,7 @@ from lerobot.common.datasets.contrastive_dataset import (
     MultiModalContrastiveDataset,
     contrastive_collate_fn,
 )
+from lerobot.common.datasets.contrastive_eval import build_eval_loaders, evaluate
 from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
@@ -153,6 +154,18 @@ def train(cfg: TrainPipelineConfig):
         prefetch_factor=4 if cfg.num_workers > 0 else None,
     )
 
+    # A fixed set of frames, identical in every run, scored periodically. In-batch retrieval
+    # accuracy on random training batches is too noisy to compare runs with -- see
+    # ``contrastive_eval`` for the measurement -- so this is the number to judge a change on.
+    eval_loaders = build_eval_loaders(
+        dataset=dataset,
+        policy_cfg=cfg.policy,
+        collate_fn=contrastive_collate_fn,
+        num_workers=max(2, cfg.num_workers // 4),
+        rank=rank,
+        world_size=world_size,
+    )
+
     # ------------------------------------------------------------------ policy
     logger.info("Creating policy...")
     policy = make_policy(
@@ -265,6 +278,21 @@ def train(cfg: TrainPipelineConfig):
                 train_tracker.step()
                 fwd_bwd_time = 0.0
                 dataloading_s = 0.0
+
+            if eval_loaders and cfg.eval_freq > 0 and step % cfg.eval_freq == 0:
+                eval_start = time.perf_counter()
+                eval_metrics = evaluate(model_engine, eval_loaders, move_batch)
+                if rank == 0:
+                    summary = " ".join(
+                        f"{k.split('/')[-1]}:{v:.4f}"
+                        for k, v in eval_metrics.items()
+                        if not k.endswith("_rows")
+                    )
+                    logger.info(
+                        f"eval step:{step} {summary} took:{time.perf_counter() - eval_start:.1f}s"
+                    )
+                    if wandb_logger:
+                        wandb_logger.log_dict(eval_metrics, step)
 
             if cfg.save_checkpoint and (step % cfg.save_freq == 0 or step == cfg.steps):
                 logger.info(f"Checkpoint policy after step {step}")

@@ -56,9 +56,15 @@ class RoboContrastConfig(PreTrainedConfig):
     # ------------------------------------------------------------------ physical
     chunk_size: int = 16
     n_action_steps: int = 16
-    # 2 frames per action token -> 8 action tokens. A physical transformer this wide is
-    # wasted on 4 tokens; more tokens also give the tactile gate something to compete with.
-    group_size: int = 2
+    # Frames per grouped token. ``chunk_size / group_size`` tokens are emitted for each of
+    # state, action and tactile signal, so this sets the physical sequence length:
+    # ``1 + 3 * chunk_size / group_size + max_tactile_views``.
+    #
+    # 4 keeps the three chunked streams and the tactile cameras at 4 tokens each, which is the
+    # most even split available and stops the tactile signal -- now read at full rate -- from
+    # outweighing the action chunk. 2 doubles the temporal resolution of the grouped tokens at
+    # the cost of that balance.
+    group_size: int = 4
     hidden_dim: int = 1024
     num_attention_heads: int = 16
     # Sized so that the *learnable* capacity of the two branches is roughly equal
