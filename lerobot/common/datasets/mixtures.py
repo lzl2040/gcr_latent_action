@@ -449,11 +449,13 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("dobbe", 0.3),
         # ("droid", 0.01),
         ("agibot_alpha", 0.1),
+        # robomind
         ("robomind_franka_dual_arm", 1.0),
         ("robomind_franka_3rgb", 1.0),
         ("robomind_franka_1rgb", 1.5),
         ("robomind_agilex_3rgb", 0.5),
         ("robomind_ur_1rgb", 0.5),
+        # interna1
         # ("interna1_dual_arm_0", 0.05),
         # ("interna1_dual_arm_1", 0.05),
         # ("interna1_dual_arm_2", 0.05),
@@ -466,9 +468,21 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("ms_data_xdof_2", 0.1),
         ("ms_data_xdof_3", 0.15),
         ("ms_data_xdof_4", 0.15),
+        # FTP-1
         ("ftp_1_RH20TCfg5Franka", 0.1),
-        ("ftp_1_sharpa_split_0", 0.1),
-        ("ftp_1_VisuoTactile_D-WHEEL_split_0", 0.1)
+        ("ftp_1_RH20TCfg6ATIAxia", 0.1),
+        ("ftp_1_RH20TCfg7Tactile", 0.1),
+        ("ftp_1_VLA_touch", 0.1),
+        ("ftp_1_ViTaMIn", 0.1),
+        ("ftp_1_VisuoTactile_QINGLOONG", 0.1),
+        ("ftp_1_exUMI", 0.1),
+        ("ftp_1_Unit", 0.1),
+        ("ftp_1_RDP_Bimanual", 0.1),
+        ("ftp_1_RDP", 0.1),
+        ("ftp_1_FreeTacMan", 0.1),
+        ("ftp_1_MotionTrans", 0.1),
+        ("ftp_1_sharpa", 0.1),
+        ("ftp_1_VisuoTactile_D-WHEEL", 0.1)
     ],
     
     "debug_research_data":[
