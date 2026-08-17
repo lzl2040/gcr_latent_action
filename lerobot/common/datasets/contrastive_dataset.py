@@ -55,6 +55,7 @@ from lerobot.common.datasets_v30.dataset_metadata import (
     LeRobotDatasetMetadata as LeRobotDatasetMetadataV30,
 )
 from lerobot.common.datasets_v30.lerobot_dataset import LeRobotDataset as LeRobotDatasetV30
+from lerobot.common.policies.ace.ftp1_tactile import tactile_image_sensors
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,15 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             [bool(tactile_signal_keys(s)) or bool(tactile_image_keys(s)) for s in self.specs],
             dtype=bool,
         )
+
+        # Which physical sensor produced each tactile pad, and the z-score FTP-1 measured for
+        # it. Only the "ftp1" tactile backbone consumes these, but they are cheap (a few
+        # floats per dataset) and building them unconditionally keeps the batch schema fixed,
+        # so the two backbones stay swappable without touching the collate function.
+        self.tactile_sensor_meta = [
+            self._build_tactile_sensor_meta(name, spec)
+            for name, spec in zip(self.dataset_names, self.specs, strict=True)
+        ]
 
         # Balance by dataset size, as in the original pipeline.
         weights = np.array(kept_weights, dtype=np.float64) * np.array(self.dataset_sizes, dtype=np.float64)
@@ -564,6 +574,26 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         signal = torch.nan_to_num(signal, nan=0.0, posinf=0.0, neginf=0.0) * norm["mask"]
         return signal, torch.ones((), dtype=torch.float32)
 
+    def _build_tactile_sensor_meta(self, dataset_name, spec):
+        """Per-pad sensor id and z-score, padded out to ``max_tactile_views``.
+
+        Slot order follows ``tactile_image_keys(spec)`` exactly, which is also the slot order
+        ``_build_tactile_images`` writes, so a pad's pixels and its normalisation can never
+        drift apart. Unused slots get id -1; the model never dispatches them because their
+        mask is zero.
+        """
+        keys = tactile_image_keys(spec)[: self.max_tactile_views]
+        ids, means, stds = tactile_image_sensors(dataset_name, len(keys))
+
+        sensor_id = torch.full((self.max_tactile_views,), -1, dtype=torch.long)
+        mean = torch.zeros(self.max_tactile_views, 3, dtype=torch.float32)
+        std = torch.ones(self.max_tactile_views, 3, dtype=torch.float32)
+        for slot in range(len(keys)):
+            sensor_id[slot] = ids[slot]
+            mean[slot] = torch.tensor(means[slot], dtype=torch.float32)
+            std[slot] = torch.tensor(stds[slot], dtype=torch.float32)
+        return sensor_id, mean, std
+
     def _build_tactile_images(self, item, spec):
         """``(V, 2, 3, S, S)``: each pad at ``t`` and at ``t + horizon``."""
         size = self.tactile_img_size
@@ -595,6 +625,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         state, state_mask = self._build_canonical_vector(item, spec.get("state", []), norm["state"], True)
         tactile_signal, tactile_signal_mask = self._build_tactile_signal(item, spec, norm["tactile_signal"])
         tactile_image, tactile_image_mask = self._build_tactile_images(item, spec)
+        sensor_id, sensor_mean, sensor_std = self.tactile_sensor_meta[ds_idx]
 
         episode_index = int(_to_tensor(item.get("episode_index", 0)).reshape(-1)[0].item())
         task = item.get("task", "")
@@ -614,6 +645,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "tactile_signal_mask": tactile_signal_mask,
             "tactile_image": tactile_image,
             "tactile_image_mask": tactile_image_mask,
+            "tactile_sensor_id": sensor_id,
+            "tactile_img_mean": sensor_mean,
+            "tactile_img_std": sensor_std,
             "sample_rate": torch.tensor(int(item.get("fps", 10)), dtype=torch.long),
             "dataset_id": torch.tensor(ds_idx, dtype=torch.long),
             "episode_uid": torch.tensor(ds_idx * 1_000_000 + episode_index, dtype=torch.long),

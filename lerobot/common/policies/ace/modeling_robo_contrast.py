@@ -39,6 +39,7 @@ from torch import distributed as dist
 from torch.utils.checkpoint import checkpoint
 
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
+from lerobot.common.policies.ace.ftp1_tactile import FTP1_SENSOR_NAMES, FTP1TactileTower
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 
 # DINOv3 is normalised with ImageNet statistics (see its preprocessor_config.json), unlike
@@ -612,7 +613,16 @@ class PhysicalEncoder(nn.Module):
         # the *change* in contact, but spending more tokens on it would let it crowd out the
         # action chunk. The tactile signal is chunked like state and action.
         self.signal_proj = nn.Linear(self.group_size * self.signal_dim * 2, dim)
-        self.tactile_cnn = TactileImageEncoder(config.tactile_feat_dim, config.tactile_pretrained)
+        self.use_ftp1_tactile = config.tactile_backbone == "ftp1"
+        if self.use_ftp1_tactile:
+            self.tactile_cnn = FTP1TactileTower(
+                config.ftp1_tactile_dir,
+                list(config.ftp1_tactile_sensors) or FTP1_SENSOR_NAMES,
+                out_dim=config.tactile_feat_dim,
+                img_size=config.tactile_img_size,
+            )
+        else:
+            self.tactile_cnn = TactileImageEncoder(config.tactile_feat_dim, config.tactile_pretrained)
         self.tactile_img_proj = nn.Linear(config.tactile_feat_dim * 2, dim)
         self.tactile_recon = (
             TactileReconHead(config.tactile_feat_dim, config.tactile_recon_size)
@@ -753,7 +763,20 @@ class PhysicalEncoder(nn.Module):
             selected = torch.zeros(1, dtype=torch.long, device=device)
         sel_images = flat_images[selected]
         # ``sel_images`` is (N, 2, 3, H, W); the encoder treats the frame axis as its view axis.
-        sel_pair = self.tactile_cnn(sel_images)[0]
+        if self.use_ftp1_tactile:
+            # The FTP-1 tower has one tokenizer per physical sensor, so it additionally needs
+            # to know which sensor each selected pad came from and the per-dataset z-score
+            # that sensor's weights were calibrated against.
+            sensor_ids = batch["tactile_sensor_id"].to(device).reshape(-1)[selected]
+            sel_mean = batch["tactile_img_mean"].to(device).reshape(-1, 3)[selected]
+            sel_std = batch["tactile_img_std"].to(device).reshape(-1, 3)[selected]
+            # The tower is frozen; running it without building a graph saves the activations
+            # of 12 transformer layers over 197 tokens per pad-frame.
+            with torch.no_grad():
+                sel_pair = self.tactile_cnn(sel_images, sensor_ids, sel_mean, sel_std)
+            sel_pair = sel_pair.to(dtype)
+        else:
+            sel_pair = self.tactile_cnn(sel_images)[0]
         sel_feats = sel_pair[:, 0]
         sel_delta = sel_pair[:, 1] - sel_pair[:, 0]
         if not has_tactile:
@@ -827,6 +850,10 @@ class RoboContrast(PreTrainedPolicy):
         highest-capacity-per-token module on the physical side, so at a shared learning rate
         it converges first and the contrastive loss learns to read tactile and ignore the
         action chunk.
+
+        With ``tactile_backbone="ftp1"`` the tower is frozen, so the ``requires_grad`` filter
+        below leaves only its output LayerNorm in this group -- the reduced learning rate then
+        just makes the model cautious about rescaling pretrained features.
         """
         tactile_params, other_params = [], []
         tactile_prefix = ("physical_encoder.tactile_cnn.", "physical_encoder.tactile_recon.")

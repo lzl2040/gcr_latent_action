@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from lerobot.common.optim.optimizers import AdamWNormConfig
 from lerobot.common.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
+from lerobot.common.policies.ace.ftp1_tactile import FTP1_IMAGE_SIZE, FTP1_SENSOR_NAMES
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 
@@ -83,6 +84,8 @@ class RoboContrastConfig(PreTrainedConfig):
     # with the learned `missing` token.
     max_tactile_views: int = 6
     # ResNet-18 downsamples by 32, so 112 gives a 4x4 map (64 would give a useless 2x2).
+    # Forced to 224 by ``__post_init__`` when ``tactile_backbone="ftp1"``, which is the
+    # resolution its positional embedding was trained at.
     tactile_img_size: int = 112
     tactile_feat_dim: int = 512
     # Temporal distance (in frames) between the two perception frames. Defaults to chunk_size.
@@ -98,8 +101,26 @@ class RoboContrastConfig(PreTrainedConfig):
     # supervises marker positions / depth / contact pose from simulation, which we do not
     # have for real sensors, so we keep only the RGB reconstruction head. Giving tactile its
     # own objective stops its features from being shaped purely by the contrastive loss.
+    #
+    # Set to "ftp1" to swap the ResNet for the *pretrained* FTP-1 tactile tower instead
+    # (`lerobot/common/policies/ace/ftp1_tactile.py`). That tower is frozen, so it replaces
+    # ~11.7M trainable parameters with 0, and it was trained on ~3000 h of tactile data
+    # including our own sharpa / VisuoTactile / RDP datasets. Which of the two is better is an
+    # empirical question: judge it on the *windowed contrastive loss*, not retrieval accuracy,
+    # which cannot resolve tactile changes at all (doc/results.md S9).
     tactile_backbone: str = "resnet18"
     tactile_pretrained: bool = True
+    # Where the FTP-1 `hpt_tokenizer/*.safetensors` files live. Only read for backbone="ftp1".
+    ftp1_tactile_dir: str = "/Data/lzl/huggingface/ftp1_v0426_50kstep"
+    # Which per-sensor tokenizers to load. Empty means "every sensor we have a mapping for",
+    # which is 7 x 22.0M = 154M frozen parameters. `debug_research_data` only reaches three of
+    # them (SharpaWave, OpenLoongVTouch, GelSightMini), so narrowing this list saves ~88M
+    # parameters of GPU memory and some start-up time; a sensor that is needed but not listed
+    # falls back to zero features, so only narrow it deliberately.
+    ftp1_tactile_sensors: tuple[str, ...] = ()
+    # The reconstruction head only exists to shape the tactile features. A frozen FTP-1 tower
+    # has no features to shape, so `__post_init__` switches this off for backbone="ftp1" --
+    # otherwise we would pay for a decoder whose gradient reaches nothing.
     tactile_recon_weight: float = 0.1
     tactile_recon_size: int = 28
     # UniVTAC trains its tactile backbone with a dedicated (much lower) learning rate; the
@@ -175,6 +196,33 @@ class RoboContrastConfig(PreTrainedConfig):
                 f"`hidden_dim` ({self.hidden_dim}) must be divisible by "
                 f"`num_attention_heads` ({self.num_attention_heads})."
             )
+        if self.tactile_backbone not in ("resnet18", "ftp1"):
+            raise ValueError(
+                f"`tactile_backbone` must be 'resnet18' or 'ftp1', got {self.tactile_backbone!r}."
+            )
+        if self.tactile_backbone == "ftp1":
+            # Nested `--policy.ftp1_tactile_sensors="['A','B']"` is not parsed as a list:
+            # draccus decodes the literal into a tuple of its *characters*. Detect that (any
+            # element that is not a valid sensor name) and rebuild the list from the joined
+            # text, so both the CLI literal and a real tuple in code work.
+            raw = self.ftp1_tactile_sensors
+            names = [str(x) for x in ([raw] if isinstance(raw, str) else raw)]
+            if any(name not in FTP1_SENSOR_NAMES for name in names):
+                text = "".join(names).strip().strip("[]()")
+                names = [part.strip().strip("\"'") for part in text.split(",") if part.strip()]
+            self.ftp1_tactile_sensors = tuple(names)
+            unknown = set(self.ftp1_tactile_sensors) - set(FTP1_SENSOR_NAMES)
+            if unknown:
+                raise ValueError(
+                    f"Unknown FTP-1 tactile sensor(s) {sorted(unknown)}. "
+                    f"Valid names: {FTP1_SENSOR_NAMES}."
+                )
+            # The published positional embedding is (1, 197, 768), i.e. exactly 14x14 patches
+            # of 16 pixels. Anything else has to be resampled, which puts the input
+            # off-distribution for weights we are not training.
+            self.tactile_img_size = FTP1_IMAGE_SIZE
+            # A frozen tower cannot be shaped by a reconstruction loss.
+            self.tactile_recon_weight = 0.0
 
     def validate_features(self) -> None:
         for i in range(self.empty_cameras):
