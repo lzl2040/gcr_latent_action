@@ -60,11 +60,14 @@ class RoboContrastConfig(PreTrainedConfig):
     # state, action and tactile signal, so this sets the physical sequence length:
     # ``1 + 3 * chunk_size / group_size + max_tactile_views``.
     #
-    # 4 keeps the three chunked streams and the tactile cameras at 4 tokens each, which is the
-    # most even split available and stops the tactile signal -- now read at full rate -- from
-    # outweighing the action chunk. 2 doubles the temporal resolution of the grouped tokens at
-    # the cost of that balance.
-    group_size: int = 4
+    # 2 was measured to be better than 4 (contrastive loss 3.71 vs 4.14 over steps 900-1250,
+    # against a same-config noise floor of 0.09; see doc/results.md S9). Two reasons, and the
+    # second is the one that is easy to get backwards:
+    #   * finer temporal resolution -- 8 groups of 2 frames rather than 4 groups of 4;
+    #   * *less* tactile dominance, not more. The tactile cameras contribute a fixed 4 tokens
+    #     whatever this value is, so raising group_size shrinks only the three chunked streams
+    #     and pushes tactile's share of the content tokens up, from 43% at 2 to 50% at 4.
+    group_size: int = 2
     hidden_dim: int = 1024
     num_attention_heads: int = 16
     # Sized so that the *learnable* capacity of the two branches is roughly equal

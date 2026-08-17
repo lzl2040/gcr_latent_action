@@ -292,11 +292,11 @@ state / action 一样按 `group_size` 分组。
 相同的位置编码，trunk 才能在对应时刻上比较"命令值"与"实际值"；模态 embedding 已经负责区分
 两者的身份。触觉信号分组后也用同一份位置编码，理由相同。
 
-**`group_size = 4`，物理侧序列为 17 个 token**：1 CLS + 4 state + 4 action + 4 触觉信号 +
-4 触觉图像。三个 chunk 流各出 `chunk_size / group_size = 4` 个 token，恰好与 4 路触觉相机
-持平——这是能拿到的最均衡的划分。触觉信号改成读满 16 帧之后这一点变得重要：如果继续用
-`group_size = 2`，光触觉信号一项就是 8 个 token，加上 4 路触觉图像，触觉会占到内容 token 的
-一半以上，反过来把动作块挤到次要位置。
+**`group_size = 2`，物理侧序列为 29 个 token**：1 CLS + 8 state + 8 action + 8 触觉信号 +
+4 触觉图像。曾经改成 `group_size = 4`（17 token）试图"让四个流各占 4 个 token、防止读满 16 帧
+的触觉信号挤压动作块"，实测更差（对比损失 4.14 vs 3.71，见 `doc/results.md` §9），而且理由本身
+就是错的：**触觉相机固定贡献 4 个 token，与 `group_size` 无关**，所以调大 `group_size` 只压缩
+三个 chunk 流，反而把触觉占内容 token 的比例从 43% 抬到 50%，同时还把时间分辨率减半。
 
 ---
 

@@ -484,3 +484,121 @@ same batch composition, every time. That removes batch-composition variance enti
 make differences of 0.01 legible where 0.055 is currently invisible. Until that exists, prefer
 comparing gate trajectories and tactile-conditional counts over aggregate accuracy, and treat
 any single-step reading as meaningless.
+
+---
+
+## 9. Full-rate tactile signal, `group_size`, and a metric that actually works
+
+Two changes and one measurement. The changes: the tactile signal is now read over the whole
+16-frame window instead of at the two ends, and a fixed evaluation split was built to answer
+"is this better?" at all. The measurement then said the `group_size` change shipped alongside
+them was wrong, and it has been reverted.
+
+### 9.1 Why the tactile signal is read at full rate
+
+§8 gave both tactile streams two frames, `t` and `t+H`. That is right for the tactile cameras
+and wrong for the tactile signal, for a reason that is specific to what a contact looks like:
+
+- A contact transient is a few frames wide. Two samples at the ends of the window can
+  **straddle** it and see almost nothing — a strictly worse failure than reading only `t`,
+  because it looks like a successful read.
+- The signal is a parquet column sharing a row group with state and action, so reading all 16
+  frames costs nothing. The tactile cameras are video, and 16 frames x 4 pads lands squarely on
+  the spinning disk this pipeline is already bottlenecked by.
+
+So the two streams are now treated differently, and the reason is cost, not principle. The
+signal is grouped like state and action; the cameras keep their `[feat_t, feat_t1 - feat_t]`
+pair folded into one token per pad.
+
+Verified on the three tactile datasets (mid-episode frames — see §8 for why that matters):
+`ftp_1_RH20TCfg5Franka` returns `(16, 32)` with per-frame std 0.135, and the two camera
+datasets return `(4, 2, 3, 112, 112)` with real `t1 - t0` change. The three are complementary:
+RH20T is signal-only, the other two are camera-only.
+
+### 9.2 The fixed evaluation split
+
+§8 ended by noting that in-batch retrieval accuracy has a **run-to-run noise floor of 0.055**,
+larger than any effect being measured, because batch composition dominates it. That made every
+comparison in this document unfalsifiable, so `lerobot/common/datasets/contrastive_eval.py` now
+draws a deterministic list of `(dataset_idx, frame_idx)` batches once and scores exactly those
+in every run, with two splits: `mixture` (training weights) and `tactile` (only the tactile
+datasets, because tactile is 2.7% of this mixture and the headline number cannot see it).
+Accuracy is computed within each batch on one rank, never across an all-gather, so a 2-GPU run
+and a 4-GPU run remain comparable.
+
+**It helped, and it was not enough.** Two runs of identical code and identical seed, scored on
+the same frames:
+
+| step | gs4-a | gs4-b | \|diff\| |
+| --- | --- | --- | --- |
+| 250 | 0.0220 | 0.0283 | 0.0063 |
+| 500 | 0.0308 | 0.0215 | 0.0093 |
+| 750 | 0.0879 | 0.0674 | 0.0205 |
+| 1000 | 0.1025 | 0.1191 | 0.0166 |
+| 1250 | 0.2324 | 0.1289 | **0.1035** |
+
+Fixing the frames removed batch-composition variance but not **training-trajectory** variance:
+bf16 kernels are not bitwise reproducible, and 1250 steps is long enough for that to diverge
+into genuinely different models. The noise floor grows with training, reaching 0.10 by step
+1250 — larger than the 0.055 it replaced. Retrieval accuracy is simply the wrong statistic
+here: it is a 0/1 decision per row, so it throws away almost everything the model computed.
+
+### 9.3 The metric that does work: training loss
+
+Averaged over a window, the contrastive loss is an order of magnitude more reproducible,
+because every row contributes a continuous value rather than a coin flip:
+
+| metric | window | noise floor (same config) | effect (gs4 - gs2) | verdict |
+| --- | --- | --- | --- | --- |
+| `mixture_acc` | 250–1250 | 0.0312 | −0.0287 | within noise |
+| `tactile_acc` | 250–1250 | 0.0059 | −0.0023 | within noise |
+| `contra_loss` | 600–900 | 0.0421 | **+0.3214** | 7.6x noise |
+| `contra_loss` | 900–1250 | 0.0863 | **+0.4294** | 5.0x noise |
+
+**Use windowed training loss to compare arms. Use the fixed eval splits to track progress.**
+Retrieval accuracy could not resolve this difference even though the difference is large.
+
+### 9.4 `group_size = 4` was worse, and the reasoning behind it was backwards
+
+`group_size` was raised 2 -> 4 on the theory that the newly full-rate tactile signal would
+otherwise take 8 tokens and crowd out the action chunk, and that 4 tokens each for state,
+action, signal and cameras was "the most even split available".
+
+Measured: `group_size=2` reaches contrastive loss **3.71 vs 4.14** over steps 900–1250, five
+times the noise floor. Counting the tokens shows why:
+
+| | state | action | signal | cameras | content total | tactile share |
+| --- | --- | --- | --- | --- | --- | --- |
+| `group_size=2` | 8 | 8 | 8 | 4 | 28 | **43%** |
+| `group_size=4` | 4 | 4 | 4 | 4 | 16 | **50%** |
+
+The tactile cameras contribute a **fixed** 4 tokens regardless of `group_size`, because they
+are one token per pad and there are 4 pads. Raising `group_size` therefore shrinks only the
+three chunked streams, and pushes tactile's share *up* rather than down — the exact opposite
+of the stated goal — while also halving the temporal resolution of state, action and signal.
+`group_size` is back to 2, physical sequence 29 tokens.
+
+The general lesson: when a config is meant to rebalance a budget, count the budget after the
+change instead of reasoning about it. This one took two 1250-step runs to catch and would have
+taken one `print`.
+
+### 9.5 Two process traps hit while running this
+
+- **`train_ace_local.sh` did not forward `"$@"`.** `bash train_ace_local.sh
+  --policy.group_size=2` silently dropped the override, and the "control" arm ran the identical
+  config. Caught because its step-20 metrics were byte-identical to the other arm. Fixed.
+- **GPU auto-selection changes the global batch.** The launcher picks every GPU with <5 GB in
+  use, so when two neighbours' jobs finished, a replicate quietly ran on 4 GPUs at batch 1024
+  instead of 2 at 512. **Always pin `CUDA_VISIBLE_DEVICES` when comparing runs**; the launcher
+  now warns about it.
+
+### 9.6 Status
+
+Verified: `conda activate lerobot_v2 && bash train_ace_local.sh` runs end to end on 2x A6000
+at ~2.15 s/step, global batch 512, 771M total / 403M trainable. Eval costs ~26 s at
+`eval_freq=250` (~5% overhead) once the page cache is warm.
+
+Unresolved: whether the full-rate tactile signal itself helps. `tactile_acc` cannot resolve it
+(noise floor 0.0059, and the tactile datasets are 2.7% of the mixture), and windowed
+`contra_loss` is dominated by the 97% of rows without tactile. Answering it needs the loss
+restricted to tactile rows, which is not currently logged.
