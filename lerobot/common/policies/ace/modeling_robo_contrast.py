@@ -259,10 +259,23 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
             for p in self.text_backbone.parameters():
                 p.requires_grad = False
 
+        # Normalise the frozen features before projecting them. Backbones differ wildly in
+        # output scale -- DINOv3 patch tokens have L2 ~12.6 where SigLIP2's have ~43.9 -- and
+        # without this the rest of the encoder is implicitly tuned to one particular backbone.
+        self.vision_norm = nn.LayerNorm(vision_dim)
+        self.text_norm = nn.LayerNorm(text_dim)
         self.visual_proj = nn.Linear(vision_dim, dim)
         self.text_proj = nn.Linear(text_dim, dim)
+        # Two consecutive frames are nearly identical, so `v1 - v0` is an order of magnitude
+        # smaller than either. Left alone it is swamped by the appearance streams and by the
+        # type embeddings, and the pre-norm blocks then read a token that is mostly type
+        # embedding. Rescaling the difference to unit scale is what keeps the change legible.
+        self.diff_norm = nn.LayerNorm(dim)
         # 0 = frame t, 1 = frame t+H, 2 = their difference, 3 = language
         self.evidence_type_embed = nn.Embedding(4, dim)
+        # nn.Embedding defaults to N(0, 1), which here is a per-token L2 of ~32 against a
+        # visual signal of ~8: the tag would drown the content it is supposed to label.
+        nn.init.normal_(self.evidence_type_embed.weight, std=0.02)
 
         self.change_queries = nn.Parameter(torch.randn(config.num_change_queries, dim) * 0.02)
         # Trunk: joint vision-vision-difference-language reasoning over the full evidence bank.
@@ -363,11 +376,11 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         p0, p1 = patches[:batch], patches[batch:]
 
         input_ids, text_mask = self.tokenize(texts, device)
-        text_tokens = self.text_proj(self._encode_text(input_ids).to(dtype))
+        text_tokens = self.text_proj(self.text_norm(self._encode_text(input_ids).to(dtype)))
 
-        v0 = self.visual_proj(p0)
-        v1 = self.visual_proj(p1)
-        diff = v1 - v0
+        v0 = self.visual_proj(self.vision_norm(p0))
+        v1 = self.visual_proj(self.vision_norm(p1))
+        diff = self.diff_norm(v1 - v0)
 
         type_ids = torch.arange(4, device=device)
         type_emb = self.evidence_type_embed(type_ids).to(dtype)
