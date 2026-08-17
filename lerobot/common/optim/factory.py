@@ -40,7 +40,19 @@ def make_optimizer_and_scheduler(
     #         print(name)
     
     params = policy.get_optim_params() if cfg.use_policy_training_preset else policy.parameters()
-    params = list(filter(lambda p: p.requires_grad, params))
+    params = list(params)
+    if params and isinstance(params[0], dict):
+        # `get_optim_params` may return parameter *groups* (e.g. to give a backbone its own
+        # learning rate), in which case the frozen-parameter filter applies inside each group.
+        groups = []
+        for group in params:
+            group = dict(group)
+            group["params"] = [p for p in group["params"] if p.requires_grad]
+            if group["params"]:
+                groups.append(group)
+        params = groups
+    else:
+        params = [p for p in params if p.requires_grad]
     optimizer = cfg.optimizer.build(params)
     lr_scheduler = cfg.scheduler.build(optimizer, cfg.steps) if cfg.scheduler is not None else None
     return optimizer, lr_scheduler

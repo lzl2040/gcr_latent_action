@@ -586,21 +586,34 @@ class PhysicalEncoder(nn.Module):
         any_view = (tac_img_mask.sum(dim=-1, keepdim=True) > 0).to(dtype)
         keep_tac_img = self._maybe_drop(any_view, self.config.modality_dropout_tactile)
         recon_loss = None
-        # Only the pads that actually exist are pushed through the CNN. Most batches contain a
+        flat_valid = tac_img_mask.reshape(-1) > 0
+        flat_images = tac_images.reshape(b * num_views, *tac_images.shape[2:])
+        # Only the pads that actually exist are pushed through the CNN: most batches contain a
         # handful of tactile samples among 256, so encoding the zero-filled placeholders would
         # waste almost all of the ResNet's compute (and pollute the reconstruction target).
-        flat_valid = tac_img_mask.reshape(-1) > 0
-        if bool(flat_valid.any()):
-            flat_images = tac_images.reshape(b * num_views, *tac_images.shape[2:])
-            valid_feats = self.tactile_cnn(flat_images[flat_valid].unsqueeze(1))[0].squeeze(1)
-            feat_dim = valid_feats.shape[-1]
-            view_feats = torch.zeros(b * num_views, feat_dim, device=device, dtype=valid_feats.dtype)
-            view_feats = view_feats.index_put((flat_valid.nonzero(as_tuple=True)[0],), valid_feats)
-            img_tokens = self.tactile_img_proj(view_feats.view(b, num_views, feat_dim))
-            if self.tactile_recon is not None and self.training:
-                recon_loss = self._tactile_recon_loss(valid_feats, flat_images[flat_valid])
-        else:
-            img_tokens = torch.zeros(b, num_views, self.config.hidden_dim, device=device, dtype=dtype)
+        #
+        # The selection must never become *empty*, though. Under ZeRO-2 the set of parameters
+        # that receive a gradient determines the gradient-reduction schedule, so a rank whose
+        # batch happens to contain no tactile data would skip the tactile parameters and desync
+        # from its peers -- which shows up as an NCCL collective timeout rather than an error.
+        # Keeping one dummy row and zeroing its contribution makes the schedule data independent.
+        selected = flat_valid.nonzero(as_tuple=True)[0]
+        has_tactile = selected.numel() > 0
+        if not has_tactile:
+            selected = torch.zeros(1, dtype=torch.long, device=device)
+        sel_images = flat_images[selected]
+        sel_feats = self.tactile_cnn(sel_images.unsqueeze(1))[0].squeeze(1)
+        if not has_tactile:
+            sel_feats = sel_feats * 0.0
+
+        feat_dim = sel_feats.shape[-1]
+        view_feats = torch.zeros(b * num_views, feat_dim, device=device, dtype=sel_feats.dtype)
+        view_feats = view_feats.index_put((selected,), sel_feats)
+        img_tokens = self.tactile_img_proj(view_feats.view(b, num_views, feat_dim))
+        if self.tactile_recon is not None and self.training:
+            recon_loss = self._tactile_recon_loss(sel_feats, sel_images)
+            if not has_tactile:
+                recon_loss = recon_loss * 0.0
 
         img_tokens = torch.tanh(self.tactile_image_gate).to(dtype) * img_tokens
         # A pad that this dataset does not have is replaced by the learned "missing" token, so
