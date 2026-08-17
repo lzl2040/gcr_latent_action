@@ -9,9 +9,9 @@ Perception side
 
 Physical side
     * ``action`` / ``action_mask`` : action chunk in the canonical 40-dim slotted space
-    * ``observation.state`` / ``state_mask``
-    * ``tactile_signal`` / ``tactile_signal_mask`` : low-dimensional tactile readings
-    * ``tactile_image``  / ``tactile_image_mask``  : tactile camera views (small resolution)
+    * ``observation.state`` / ``state_mask`` : state trajectory over the same chunk
+    * ``tactile_signal`` / ``tactile_signal_mask`` : low-dimensional tactile readings at t, t+H
+    * ``tactile_image``  / ``tactile_image_mask``  : tactile camera views at t, t+H
 
 Heterogeneity is handled by :mod:`lerobot.common.datasets.canonical_space`: every dataset is
 mapped into the same slotted vector plus a validity mask, so datasets that only expose joint
@@ -222,10 +222,34 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         resolved = resolve_delta_timestamps(cfg.policy, ds_meta) or {}
         delta_timestamps = {k: v for k, v in resolved.items() if k in wanted_action_keys}
 
-        # Two frames for the RGB stream(s), a single frame for tactile cameras.
+        # How far each modality is read over the window is decided by what it costs to read.
+        #
+        # The proprioceptive state is a parquet column living in the same row group as the
+        # action, so the whole chunk comes back for almost nothing. It is worth having: the
+        # action chunk is what was *commanded*, the state trajectory is what actually
+        # *happened*, and the visual change we align against is the result of the latter.
+        chunk_stamps = [i / fps for i in range(self.chunk_size)]
+        for key in {src for src, *_ in spec.get("state", [])}:
+            if key in ds_meta.features:
+                delta_timestamps[key] = chunk_stamps
+
+        # Everything else is read at the two ends of the window only. For the RGB streams that
+        # is the whole design; for tactile it is a deliberate compromise. Tactile carries
+        # contact events -- grasp closure, slip, impact -- which are things that *happen during*
+        # the window, so a single frame at ``t`` can miss the entire signal (if the grasp closes
+        # at t+8, the frame at t shows no contact at all). But tactile cameras are video, and
+        # decoding 16 frames x 4 pads on a spinning disk is exactly where this pipeline is
+        # already bottlenecked. Two frames catch "before contact -> after contact" at 2x the
+        # decode cost instead of 16x.
+        pair_stamps = [0.0, self.frame_horizon / fps]
         for key in rgb_keys:
             if key in ds_meta.video_keys:
-                delta_timestamps[key] = [0.0, self.frame_horizon / fps]
+                delta_timestamps[key] = pair_stamps
+        for key in tactile_signal_keys(spec):
+            if key in ds_meta.features:
+                delta_timestamps[key] = pair_stamps
+        for key in tac_img_keys:
+            delta_timestamps[key] = pair_stamps
 
         try:
             common = dict(
@@ -491,18 +515,24 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         return (out if is_chunk else out.squeeze(0)), mask
 
     def _build_tactile_signal(self, item, spec, norm):
-        signal = torch.zeros(MAX_TACTILE_SIGNAL_DIM, dtype=torch.float32)
+        """``(2, 32)``: the tactile signal at ``t`` and at ``t + horizon``."""
+        signal = torch.zeros(2, MAX_TACTILE_SIGNAL_DIM, dtype=torch.float32)
         offset = 0
         found = False
         for key in tactile_signal_keys(spec):
             value = _to_tensor(item.get(key))
             if value is None:
                 continue
-            value = value.to(torch.float32).reshape(-1)
-            width = min(value.shape[0], MAX_TACTILE_SIGNAL_DIM - offset)
+            value = value.to(torch.float32)
+            # A key may come back as (D,) if this dataset had no window to read.
+            value = value.reshape(1, -1) if value.ndim == 1 else value.reshape(value.shape[0], -1)
+            if value.shape[0] < 2:
+                value = value[:1].expand(2, -1)
+            value = value[:2]
+            width = min(value.shape[1], MAX_TACTILE_SIGNAL_DIM - offset)
             if width <= 0:
                 break
-            signal[offset : offset + width] = value[:width]
+            signal[:, offset : offset + width] = value[:, :width]
             offset += width
             found = True
         if not found:
@@ -512,18 +542,22 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         return signal, torch.ones((), dtype=torch.float32)
 
     def _build_tactile_images(self, item, spec):
+        """``(V, 2, 3, S, S)``: each pad at ``t`` and at ``t + horizon``."""
         size = self.tactile_img_size
-        views = torch.zeros(self.max_tactile_views, 3, size, size, dtype=torch.uint8)
+        views = torch.zeros(self.max_tactile_views, 2, 3, size, size, dtype=torch.uint8)
         mask = torch.zeros(self.max_tactile_views, dtype=torch.float32)
         for slot, key in enumerate(tactile_image_keys(spec)[: self.max_tactile_views]):
             frame = item.get(key)
             if frame is None:
                 continue
-            if frame.ndim == 4:
-                frame = frame[0]
+            if frame.ndim == 3:  # (C, H, W) -- no window was read
+                frame = frame.unsqueeze(0)
+            if frame.shape[0] < 2:
+                frame = frame[:1].expand(2, -1, -1, -1)
+            frame = frame[:2]
             frame = F.interpolate(
-                frame.unsqueeze(0).float(), size=(size, size), mode="bilinear", align_corners=False
-            ).squeeze(0)
+                frame.float(), size=(size, size), mode="bilinear", align_corners=False
+            )
             views[slot] = frame.clamp(0, 255).to(torch.uint8)
             mask[slot] = 1.0
         return views, mask
@@ -535,7 +569,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         image_t0, image_t1, pair_valid = self._extract_frames(item, primary_key)
         action, action_mask = self._build_canonical_vector(item, spec.get("action", []), norm["action"], True)
-        state, state_mask = self._build_canonical_vector(item, spec.get("state", []), norm["state"], False)
+        state, state_mask = self._build_canonical_vector(item, spec.get("state", []), norm["state"], True)
         tactile_signal, tactile_signal_mask = self._build_tactile_signal(item, spec, norm["tactile_signal"])
         tactile_image, tactile_image_mask = self._build_tactile_images(item, spec)
 

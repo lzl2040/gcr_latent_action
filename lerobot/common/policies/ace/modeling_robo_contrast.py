@@ -562,7 +562,27 @@ class TactileReconHead(nn.Module):
 
 
 class PhysicalEncoder(nn.Module):
-    """Encodes state + action chunk + tactile into one embedding, tolerating missing modalities."""
+    """Encodes state + action chunk + tactile into one embedding, tolerating missing modalities.
+
+    Every modality is read over the same window ``[t, t+H]`` that the perception side sees,
+    but at a resolution set by what it costs to read and by how many tokens it deserves:
+
+    ==================  ============  ========
+    modality            frames read   tokens
+    ==================  ============  ========
+    CLS                 --            1
+    state               chunk (16)    8
+    action              chunk (16)    8
+    tactile signal      t, t+H        1
+    tactile image       t, t+H        4
+    ==================  ============  ========
+
+    The token budget is the main defence against tactile dominance: a tactile camera carries
+    far more raw capacity per token than a 40-dim state vector, so it gets four tokens against
+    the action chunk's eight rather than the 64-per-pad that a naive patchwise encoding would
+    produce. The zero-initialised gates, the tactile dropout and the reduced tactile learning
+    rate handle the rest.
+    """
 
     MOD_CLS, MOD_STATE, MOD_ACTION, MOD_TAC_SIG, MOD_TAC_IMG = range(5)
 
@@ -579,11 +599,20 @@ class PhysicalEncoder(nn.Module):
 
         # Every projection consumes ``[value * mask, mask]`` so an all-zero slot is
         # distinguishable from a genuine zero measurement.
-        self.state_proj = nn.Linear(self.state_dim * 2, dim)
+        #
+        # State is grouped exactly like the action chunk and shares its positional embedding:
+        # group *i* of the state trajectory and group *i* of the action chunk cover the same
+        # frames, and giving them the same positional code is what lets the trunk compare
+        # "commanded" against "achieved" at matching times.
+        self.state_proj = nn.Linear(self.group_size * self.state_dim * 2, dim)
         self.action_proj = nn.Linear(self.group_size * self.action_dim * 2, dim)
-        self.signal_proj = nn.Linear(self.signal_dim * 2, dim)
+        # Tactile is read at the two ends of the window, so both projections see a pair of
+        # frames and keep their original token count: the useful thing about tactile is the
+        # *change* in contact, but spending more tokens on it would let it crowd out the
+        # action chunk it is supposed to complement.
+        self.signal_proj = nn.Linear(self.signal_dim * 2 * 2, dim)
         self.tactile_cnn = TactileImageEncoder(config.tactile_feat_dim, config.tactile_pretrained)
-        self.tactile_img_proj = nn.Linear(config.tactile_feat_dim, dim)
+        self.tactile_img_proj = nn.Linear(config.tactile_feat_dim * 2, dim)
         self.tactile_recon = (
             TactileReconHead(config.tactile_feat_dim, config.tactile_recon_size)
             if config.tactile_recon_weight > 0
@@ -647,12 +676,24 @@ class PhysicalEncoder(nn.Module):
         missing = self.missing_embed.weight.to(dtype)
 
         # -- state ---------------------------------------------------------
+        # The state trajectory, not just the state at t. The action chunk says what was
+        # commanded; the state says what the arm actually did, and the visual change we align
+        # against is the consequence of the latter. The two also diverge in the ways that
+        # matter most here -- contact, compliance, a slipping gripper.
         keep_state = self._maybe_drop(
             (state_mask.sum(dim=-1, keepdim=True) > 0).to(dtype), self.config.modality_dropout_state
         )
-        state_token = self.state_proj(self._with_mask(state, state_mask))
-        state_token = keep_state * state_token + (1 - keep_state) * missing[self.MOD_STATE]
-        state_token = (state_token + mod[self.MOD_STATE]).unsqueeze(1)
+        st_mask_chunk = state_mask.unsqueeze(1).expand(-1, self.chunk_size, -1)
+        st_feat = self._with_mask(state, st_mask_chunk)
+        st_feat = st_feat.view(b, self.num_groups, self.group_size * st_feat.shape[-1])
+        state_tokens = self.state_proj(st_feat)
+        state_tokens = keep_state.unsqueeze(1) * state_tokens + (
+            1 - keep_state
+        ).unsqueeze(1) * missing[self.MOD_STATE]
+        group_ids = torch.arange(self.num_groups, device=device)
+        group_pos = self.group_pos_embed(group_ids).to(dtype).unsqueeze(0)
+        rate_embed = self.sample_rate_embed(sample_rate).to(dtype).unsqueeze(1)
+        state_tokens = state_tokens + group_pos + mod[self.MOD_STATE] + rate_embed
 
         # -- action chunk --------------------------------------------------
         keep_action = self._maybe_drop(
@@ -665,19 +706,12 @@ class PhysicalEncoder(nn.Module):
         action_tokens = keep_action.unsqueeze(1) * action_tokens + (
             1 - keep_action
         ).unsqueeze(1) * missing[self.MOD_ACTION]
-        group_ids = torch.arange(self.num_groups, device=device)
-        action_tokens = (
-            action_tokens
-            + self.group_pos_embed(group_ids).to(dtype).unsqueeze(0)
-            + mod[self.MOD_ACTION]
-            + self.sample_rate_embed(sample_rate).to(dtype).unsqueeze(1)
-        )
+        action_tokens = action_tokens + group_pos + mod[self.MOD_ACTION] + rate_embed
 
         # -- tactile signal ------------------------------------------------
         keep_signal = self._maybe_drop(signal_present, self.config.modality_dropout_tactile)
-        signal_token = self.signal_proj(
-            self._with_mask(signal, signal_present.expand(-1, self.signal_dim))
-        )
+        sig_mask = signal_present.unsqueeze(1).expand(-1, signal.shape[1], self.signal_dim)
+        signal_token = self.signal_proj(self._with_mask(signal, sig_mask).reshape(b, -1))
         signal_token = torch.tanh(self.tactile_signal_gate).to(dtype) * signal_token
         signal_token = keep_signal * signal_token + (1 - keep_signal) * missing[self.MOD_TAC_SIG]
         signal_token = (signal_token + mod[self.MOD_TAC_SIG]).unsqueeze(1)
@@ -687,6 +721,12 @@ class PhysicalEncoder(nn.Module):
         # the object and averaging them destroys exactly the contact pattern we want. The zero
         # initialised gate, the modality dropout and the reduced tactile learning rate are what
         # stop these extra tokens from taking over.
+        #
+        # Each pad arrives as two frames, and the token is built from ``[feat_t, feat_t1 -
+        # feat_t]``. The difference term is the point: a grasp that closes mid-window is
+        # invisible at ``t`` alone, and the contrastive target is the *change* over the window.
+        # Folding the pair into one token keeps tactile at four tokens against the action
+        # chunk's eight.
         num_views = tac_images.shape[1]
         any_view = (tac_img_mask.sum(dim=-1, keepdim=True) > 0).to(dtype)
         keep_tac_img = self._maybe_drop(any_view, self.config.modality_dropout_tactile)
@@ -707,16 +747,23 @@ class PhysicalEncoder(nn.Module):
         if not has_tactile:
             selected = torch.zeros(1, dtype=torch.long, device=device)
         sel_images = flat_images[selected]
-        sel_feats = self.tactile_cnn(sel_images.unsqueeze(1))[0].squeeze(1)
+        # ``sel_images`` is (N, 2, 3, H, W); the encoder treats the frame axis as its view axis.
+        sel_pair = self.tactile_cnn(sel_images)[0]
+        sel_feats = sel_pair[:, 0]
+        sel_delta = sel_pair[:, 1] - sel_pair[:, 0]
         if not has_tactile:
             sel_feats = sel_feats * 0.0
+            sel_delta = sel_delta * 0.0
+        sel_joint = torch.cat([sel_feats, sel_delta], dim=-1)
 
-        feat_dim = sel_feats.shape[-1]
-        view_feats = torch.zeros(b * num_views, feat_dim, device=device, dtype=sel_feats.dtype)
-        view_feats = view_feats.index_put((selected,), sel_feats)
+        feat_dim = sel_joint.shape[-1]
+        view_feats = torch.zeros(b * num_views, feat_dim, device=device, dtype=sel_joint.dtype)
+        view_feats = view_feats.index_put((selected,), sel_joint)
         img_tokens = self.tactile_img_proj(view_feats.view(b, num_views, feat_dim))
         if self.tactile_recon is not None and self.training:
-            recon_loss = self._tactile_recon_loss(sel_feats, sel_images)
+            # Reconstruct the frame at ``t`` only -- the head exists to shape the features, and
+            # doubling it over both frames would double its cost for no extra supervision.
+            recon_loss = self._tactile_recon_loss(sel_feats, sel_images[:, 0])
             if not has_tactile:
                 recon_loss = recon_loss * 0.0
 
@@ -731,8 +778,9 @@ class PhysicalEncoder(nn.Module):
         )
 
         # -- transformer ---------------------------------------------------
+        # 1 CLS + 8 state + 8 action + 1 tactile signal + 4 tactile image = 22 tokens.
         cls = (self.cls_token.to(dtype).expand(b, -1, -1) + mod[self.MOD_CLS])
-        tokens = torch.cat([cls, state_token, action_tokens, signal_token, img_tokens], dim=1)
+        tokens = torch.cat([cls, state_tokens, action_tokens, signal_token, img_tokens], dim=1)
         for block in self.blocks:
             tokens = block(tokens)
 
