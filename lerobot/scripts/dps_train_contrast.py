@@ -161,7 +161,7 @@ def train(cfg: TrainPipelineConfig):
         dataset=dataset,
         policy_cfg=cfg.policy,
         collate_fn=contrastive_collate_fn,
-        num_workers=max(2, cfg.num_workers // 4),
+        num_workers=max(2, cfg.num_workers // 2),
         rank=rank,
         world_size=world_size,
     )
