@@ -279,3 +279,106 @@ fully hidden in the steady state. The periodic excursions to 5–12 s are the HD
 not the model: they coincide with one GPU dropping to 0% utilisation while the other rank
 waits on a disk stall inside the gradient allreduce. Note that `data_s` is measured on rank
 0 only, so a stall on rank 1 surfaces as inflated `updt_s` rather than as `data_s`.
+
+## 7. Branch `ace_plus/dinov3_perception`
+
+Two concerns motivated this branch: the perception features came from SigLIP2, and the
+change queries were supervised *only* by the contrastive loss.
+
+### 7.1 Why DINOv3 for vision
+SigLIP's visual features are trained to match a caption, so they preserve what language
+describes and discard the rest. But the change between two frames a few hundred
+milliseconds apart is mostly *not* describable — a gripper closing 2 cm has no caption —
+so a language-aligned prior is the wrong one for the thing we are trying to measure.
+DINOv3 is self-supervised and keeps far more spatial and geometric detail.
+
+DINOv3 has no text tower, so language still comes from SigLIP2. That is deliberate rather
+than a fallback: its text space is already aligned to a visual space, which is what makes
+"the instruction selects which change matters" work at all. Only the text tower is kept,
+which drops 93M of frozen vision parameters that DINOv3 now replaces.
+
+Practical notes: DINOv3 emits 1 CLS + 4 register tokens before the 196 patches (all
+stripped), and expects ImageNet normalisation rather than SigLIP's 0.5/0.5.
+
+### 7.2 The reconstruction objective
+`ChangePredictor` predicts the frame-`t+H` DINOv3 features from the frame-`t` features, the
+instruction, and the change queries; the loss is smooth L1 against per-token normalised
+targets (I-JEPA style).
+
+The bottleneck is the entire point. The predictor reads the **raw projected `v0`**, never
+the evidence trunk's output — the trunk has already attended over the `v1 - v0` stream and
+therefore determines `v1` exactly, so a predictor reading it could ignore the queries
+completely and the objective would be vacuous. As built, the 16 change queries are the only
+route by which anything about frame `t+H` reaches the prediction. Targets come from the
+frozen backbone and are detached, so there is no collapse mode.
+
+### 7.3 The scale bug that nearly sank it
+The first version trained badly: accuracy stuck at 0.009 through step 700, `pos_sim` pinned
+near 0.98 — a nearly constant perception embedding. The cause was **not** architectural.
+
+| tensor | per-token L2, before | after |
+|---|---|---|
+| `v0` (projected) | ~8 | 18.2 |
+| `v1 - v0` | 7.75 | 32.0 |
+| type embedding | ~32 | 0.65 |
+
+`nn.Embedding` initialises to N(0, 1), which at width 1024 means the *tag* identifying each
+evidence stream was four times larger than the content it tagged; the pre-norm blocks then
+renormalised each token and read mostly the tag. SigLIP2 had been getting away with this by
+coincidence — its features happened to be about the same size as the tags. And the
+difference stream, the one signal the design exists to capture, was the faintest thing in
+the bank.
+
+Fixes: LayerNorm on the frozen vision/text features before projection (so the encoder is no
+longer implicitly tuned to one backbone's scale), LayerNorm on the difference stream, and
+std-0.02 init for the type embeddings.
+
+**This is the lesson worth carrying:** when swapping a frozen backbone, check the output
+magnitude against every learned constant it is summed with. Nothing errors, the loss still
+decreases, and the model just quietly underperforms.
+
+### 7.4 Parameter budget
+Split evenly between the branches, as requested. Frozen towers are excluded from the split
+since they are feature extractors, not capacity the model can use.
+
+| | total | trainable |
+|---|---|---|
+| perception | 573.5M | **205.6M** (51%) |
+| — frozen DINOv3 ViT-B/16 | 85.7M | — |
+| — frozen SigLIP2 text | 282.3M | — |
+| — evidence trunk (5) / decoder (5) / predictor (3) | | 63.0 / 84.0 / 55.4M |
+| physical | 197.1M | **197.1M** (49%) |
+| — trunk (14) / tactile | | 176.4 / 18.3M |
+| **total** | **770.7M** | **402.7M** |
+
+### 7.5 Verified run
+2 × A6000, global batch 512, 13.4 GB per GPU, ~2.13 s/step.
+
+| step | contrastive | precon | trecon | acc | pos_sim |
+|---|---|---|---|---|---|
+| 20   | 6.255 | 0.433 | 0.099 | 0.003 | 0.139 |
+| 300  | 5.231 | 0.113 | 0.014 | 0.020 | 0.966 |
+| 540  | 4.051 | 0.091 | 0.005 | 0.098 | 0.929 |
+| 780  | 3.886 | 0.091 | 0.004 | 0.223 | 0.953 |
+| 1060 | 3.622 | 0.087 | 0.003 | **0.271** | 0.950 |
+
+Against the SigLIP2 branch at equal steps: **0.226 vs 0.169 at step 900**, with a lower
+contrastive loss (3.83 vs 4.11) *while also* carrying the reconstruction objective.
+
+### 7.6 Does the change query really encode the change?
+Probed directly by re-scoring the reconstruction with the queries perturbed (250-step model,
+batch 64):
+
+| queries fed to the predictor | recon loss |
+|---|---|
+| true | 0.13480 |
+| shuffled across the batch | 0.13826 |
+| zeroed | 0.13865 |
+| *reference:* copy `v0` unchanged | 0.13083 |
+
+So the predictor demonstrably uses the queries — mismatching them hurts. But at 250 steps it
+has not yet beaten the trivial "assume nothing moved" reference, which is the number to
+watch: it is only above that line that the queries are carrying real motion rather than the
+predictor learning the dataset's average frame. In the full run `precon` reaches 0.087,
+comfortably below the ~0.131 reference, so the objective does become non-trivial — but this
+probe is the right check to repeat on any future change to the predictor.
