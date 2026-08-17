@@ -253,3 +253,29 @@ Two smaller fixes came from the same run: `make_optimizer_and_scheduler` assumed
 `get_optim_params()` returns a flat tensor list and broke on parameter groups, and the
 launcher's hard-coded rendezvous port collided with orphaned workers from a killed run
 (it now picks a free port).
+
+### 6.5 Verified run of the scaled model
+`CUDA_VISIBLE_DEVICES=0,3 bash train_ace_local.sh`, 2 × A6000, micro batch 256 → global
+batch 512 (chance retrieval accuracy = 1/512 = 0.002). Ran to the wall-clock cutoff with
+no errors and 16.4 GB per GPU.
+
+| step | loss | recon | retrieval acc | pos_sim | tactile gates (sig / img) |
+|---|---|---|---|---|---|
+| 20  | 6.255 | 0.129 | 0.003 | 0.221 | 0.000 / 0.000 |
+| 180 | 5.511 | 0.039 | 0.014 | 0.983 | 0.001 / 0.000 |
+| 420 | 5.263 | 0.006 | 0.021 | 0.960 | 0.003 / 0.002 |
+| 540 | 4.526 | 0.005 | 0.049 | 0.942 | 0.006 / 0.002 |
+| 780 | 4.420 | 0.004 | 0.084 | 0.950 | 0.012 / 0.005 |
+| 900 | 4.105 | 0.002 | **0.169** | 0.950 | 0.015 / 0.007 |
+
+Against the 450M baseline the two models are level early (step 180: 0.014 vs 0.018) and the
+scaled one pulls away as the LR reaches its plateau (step 540: 0.049 vs 0.045; step 900:
+0.169, which is **87× chance**). The auxiliary reconstruction loss falls by two orders of
+magnitude, and both tactile gates open slowly and monotonically from zero — the intended
+behaviour, i.e. tactile is being adopted because it helps rather than because it is loud.
+
+Throughput: `updt_s ≈ 1.67 s` at batch 256 with `data_s ≈ 0.004 s`, so the dataloader is
+fully hidden in the steady state. The periodic excursions to 5–12 s are the HDD of §3.1,
+not the model: they coincide with one GPU dropping to 0% utilisation while the other rank
+waits on a disk stall inside the gradient allreduce. Note that `data_s` is measured on rank
+0 only, so a stall on rank 1 surfaces as inflated `updt_s` rather than as `data_s`.
