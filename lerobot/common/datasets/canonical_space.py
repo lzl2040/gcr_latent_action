@@ -57,8 +57,11 @@ CANON_XYZ_INDICES: list[int] = [0, 1, 2, 10, 11, 12]
 
 # Maximum width of a flattened tactile *signal* vector (forces / torques / taxels).
 MAX_TACTILE_SIGNAL_DIM = 32
-# Maximum number of tactile *image* views kept per sample.
-MAX_TACTILE_VIEWS = 4
+# Maximum number of tactile *image* views kept per sample. 6 because `ftp_1_sharpa` has six
+# pads (three per hand); at 4 the excess was silently dropped by list truncation, and since the
+# keys are ordered left-first that removed two of the three *right*-hand pads rather than
+# thinning both hands evenly.
+MAX_TACTILE_VIEWS = 6
 
 
 def _seg(src_key: str, src_from: int, src_to: int, dst_from: int) -> tuple[str, int, int, int]:
