@@ -602,3 +602,187 @@ Unresolved: whether the full-rate tactile signal itself helps. `tactile_acc` can
 (noise floor 0.0059, and the tactile datasets are 2.7% of the mixture), and windowed
 `contra_loss` is dominated by the 97% of rows without tactile. Answering it needs the loss
 restricted to tactile rows, which is not currently logged.
+
+## 10. Reusing FTP-1's pretrained tactile weights
+
+The question was whether the open-source weights at `michaelyuancb/ftp1-policy` could replace
+the ImageNet ResNet-18 that currently encodes tactile camera pads.
+
+### 10.1 The repo has two tactile encoders and the obvious one is the wrong one
+
+`UniVTAC/encoder/network.py::Tactile` is the ResNet-18 our own `TactileImageEncoder` was
+modelled on, so it looks like the thing to reuse. It is a dead end, for two independent
+reasons: its training script writes checkpoints to a local `ablation/` path and **no weights
+were ever published**, and it was only ever trained on *simulated GelSight Mini*, so it would
+not transfer to SharpaWave or OpenLoongVTouch even if the weights existed. Anyone revisiting
+this should not spend time looking again.
+
+The usable artefact is the tower inside the shipped policy, `src/openpi/models_pytorch/`,
+whose weights *are* published under MIT as `MJJJJ1064/ftp1_v0426_50kstep`. Per pad:
+
+```
+(3,224,224) --patch16--> 197 tokens
+  --> per-sensor ViT, depth 3, width 768   (22.0M, one copy per sensor type)
+  --> shared trunk, depth 9                 (64.2M)
+  --> LayerNorm --> CLS --> Linear(768->512)
+```
+
+Two things made it drop in cleanly. The output is **1 token per pad**, matching the tokenisation
+our physical encoder already used; and the projection is `768->512`, and 512 was already our
+`tactile_feat_dim`, so the pretrained head is reused verbatim rather than thrown away. The
+checkpoint's `normalization/` also happens to cover **our exact datasets** — `sharpa`,
+`VisuoTactile_D-WHEEL`, `RDP_Bimanual`, `RH20TCfg5Franka`.
+
+The key layout is exactly timm's. timm is not installed here, so `ftp1_tactile.py`
+reimplements the layout by hand using **identical parameter names**, and loads with
+`strict=True` on purpose, so any future drift fails loudly instead of silently loading a
+partially-random tower.
+
+Correction to an earlier note in this file: there is **no** `tactile_type='full'` /
+64-tokens-per-pad mode anywhere in that repo. FTP-1 emits one token per function area, max 48.
+
+### 10.2 Channel order was settled by measurement, not assumption
+
+FTP-1's own eval feeds BGR, because its zarr was built with `cv2.imdecode`. Whether our
+decoded frames matched was genuinely ambiguous, and getting it backwards would have silently
+degraded the tower rather than crashed.
+
+`VisuoTactile_D-WHEEL` is the decisive test — it is the only sensor whose three channel means
+are far enough apart to distinguish the orders. Measured against the published stats:
+
+| | mean abs error vs published |
+| --- | --- |
+| our frames as-is | **0.050** |
+| our frames reversed | 0.124 |
+
+So our decoding already matches FTP-1's order and **no flip is applied**.
+
+### 10.3 Normalisation is per *dataset*, not per sensor
+
+The same GelSight Mini has channel mean −0.175 in `Unit`, −0.398 in `VLA_touch`, −0.568 in
+`RDP` and −0.849 in `RDP_Bimanual` — gel colour, lighting and camera gain differ per rig. So
+`FTP1_TACTILE_DATASETS` is keyed by `(dataset, slot)`, with slot order mirroring
+`tactile_image_keys(spec)` so pixels and their statistics cannot drift apart.
+
+Independent cross-check that the transcribed table is right: the checkpoint's
+`FlexivGripperForce` std is 16.284, matching the 16.3 measured from our own data in §8.
+
+### 10.4 The tower is frozen, and one of the reasons is not obvious
+
+Three reasons, any one sufficient. It is 152M parameters, which would blow the budget; tactile
+is not a large enough fraction of the signal to determine that many parameters; and — the
+subtle one — **per-sensor dispatch makes the set of gradient-receiving parameters
+data-dependent**. A batch with no SharpaWave rows gives the SharpaWave ViT no gradient. Under
+ZeRO-2 that does not raise; it desynchronises the reduction schedule and hangs for the full
+600 s NCCL timeout. Frozen parameters never enter the schedule at all, so the hazard vanishes.
+
+**Do not unfreeze without first making dispatch data-independent.** Verified explicitly: 246
+parameters receive gradient both with and without tactile rows in the batch, and the sets are
+identical.
+
+Cost, measured back-to-back on the same GPUs at the same time: **2.90 -> 3.39 s/step, +17%**,
+with trainable parameters *dropping* 403M -> 385M. An earlier reading of "+57%" was wrong — its
+baseline came from a stale, less-loaded machine. Never compare against a baseline measured at a
+different time.
+
+### 10.5 Two of sharpa's six pads are dead, and this matters more than the encoder choice
+
+While probing channel statistics, whole-video measurements turned up a data problem that is
+independent of everything above:
+
+| dataset / view | fraction of frames with ~zero spatial std | median std |
+| --- | --- | --- |
+| sharpa / tactile_left_0 | 0.58 | 0.0020 |
+| sharpa / tactile_left_1 | 0.58 | 0.0013 |
+| **sharpa / tactile_left_2** | **1.00** | 0.0000 |
+| sharpa / tactile_right_0 | 0.46 | 0.0241 |
+| sharpa / tactile_right_1 | 0.38 | 0.0517 |
+| **sharpa / tactile_right_2** | **1.00** | 0.0000 |
+| **RDP_Bimanual / tactile_right_0** | **1.00** | 0.0000 |
+| RDP_Bimanual / tactile_left_0 | 0.00 | 0.2459 |
+| VisuoTactile_D-WHEEL (all 4) | 0.00 | 0.19–0.23 |
+
+Two sharpa pads and one RDP_Bimanual pad are constant for their entire file. The four live
+sharpa pads are blank 38–58% of the time, and their median spatial std of 0.001–0.05 is roughly
+**10x below** the 0.1999 that FTP-1 published for the same dataset — our copy of sharpa is far
+lower contrast than the copy FTP-1 measured. D-WHEEL is fully healthy.
+
+This is consequential because the mixture changed: tactile is now **~22%** of
+`debug_research_data` (fractal 0.340, ms_data_xdof_3 0.421, **sharpa 0.143**, D-WHEEL 0.047,
+RH20TCfg5Franka 0.029, RDP_Bimanual 0.002), not the 2.7% assumed in §9. Any argument in this
+file that leans on tactile being a negligible slice needs redoing.
+
+The obvious fix — set `mask=0` for a pad whose spatial std is ~0, so the model stops spending
+tokens on a constant image — is about ten lines and **is not implemented**. It would need the
+usual ZeRO-2 gradient-path check.
+
+Related, unresolved: our `RDP_Bimanual/tactile_left_0` measures mean (0.019, 0.014, 0.086),
+which matches the **RDP** domain's MCTac (0.039, 0.053, 0.123) almost exactly and matches *none*
+of RDP_Bimanual's own sensors. Our copy is probably not the copy FTP-1 measured. The sensor
+assignment there is inferred from key ordering and is flagged in-code as unverified.
+
+### 10.6 Offline proxies could not decide FTP-1 vs ResNet
+
+Two cheap proxies were tried before committing to an A/B, and both were discarded:
+
+- **Cosine spread.** FTP-1's features are *less* spread than the ImageNet ResNet's. On a dead
+  stream that is the correct behaviour; on a live one it is ambiguous. Uninformative.
+- **Spearman(|Δfeature|, |Δpixel|).** ResNet won on sharpa (0.92 vs 0.80), FTP-1 won on D-WHEEL
+  (0.11 vs −0.03). Inconclusive, and in opposite directions.
+
+Consistent with §9: proxies that are not the training objective do not predict the training
+objective. The encoder is therefore a **config switch** (`policy.tactile_backbone`, default
+`resnet`), to be decided by windowed `contra_loss` on a matched A/B rather than by argument.
+
+### 10.7 A trap worth naming: draccus splits nested list literals into characters
+
+`--policy.ftp1_tactile_sensors="['A','B']"` arrives as the tuple
+`('[', "'", 'A', "'", ',', ...)` — one element per character. Bare `draccus.parse` does **not**
+reproduce this; it only happens under the nested `--policy.` path, so it cannot be caught by
+testing the parser in isolation. A first fix that checked `isinstance(value, str)` failed
+because the value is already split by the time it is seen. `__post_init__` now rejoins the
+elements and re-splits whenever any element is not a valid sensor name, and raises with a
+readable message otherwise.
+
+### 10.8 A/B verdict: the frozen FTP-1 tower is *worse* than the trainable ResNet
+
+Matched A/B, 1300 steps, 2x A6000 each, launched simultaneously on pinned
+`CUDA_VISIBLE_DEVICES` so neither arm got a quieter machine. The two arms consumed
+**byte-identical data** — `smpl` and `tac_n` agree at every logged step — which means the
+per-step differences can be **paired**, a far more powerful test than comparing two noisy means
+against the §9 noise floor.
+
+| window | ftp1 `contra_loss` | resnet `contra_loss` | diff | ftp1 `acc` | resnet `acc` |
+| --- | --- | --- | --- | --- | --- |
+| 600–1300 | 4.694 | **4.609** | +0.084 | 0.0442 | **0.0496** |
+| 900–1300 | 4.503 | **4.345** | +0.158 | 0.0591 | **0.0682** |
+| 1000–1300 | 4.400 | **4.275** | +0.124 | 0.0678 | **0.0737** |
+
+Paired over identical data (lower is better, so positive = FTP-1 loses):
+
+| window | n | mean diff | t | steps where ftp1 wins |
+| --- | --- | --- | --- | --- |
+| >=600 | 36 | +0.084 | +3.49 | 9 / 36 |
+| >=900 | 21 | **+0.158** | **+6.20** | **1 / 21** |
+
+The result is consistent and not marginal: over the second half of training the FTP-1 arm is
+behind at 20 of 21 logged steps, the gap exceeds the 0.04–0.09 noise floor, and retrieval
+accuracy agrees independently. Note the gap **grows** with training (+0.084 -> +0.158) — the
+signature of a frozen encoder being overtaken by a trainable one that is still adapting, rather
+than of a bad initialisation.
+
+Honest confound: the arms differ in two ways, not one. `tactile_backbone=ftp1` also forces
+`tactile_recon_weight=0`, so the ResNet arm gets an extra auxiliary reconstruction signal. That
+term is tiny in the loss (0.1 x 0.003), and the widening-with-training pattern points at
+frozen-vs-trainable rather than the aux loss, but the experiment does not separate them.
+
+**Decision: `tactile_backbone` stays `resnet` by default.** The FTP-1 path is kept as a working
+config switch, because the picture could change: it is frozen (see §10.4 for why unfreezing is
+not free), and §10.5 shows a large share of our tactile pixels are dead or very low contrast,
+which handicaps a pretrained encoder more than a randomly-initialised one that can simply learn
+to ignore them. Cost is +17% step time for a worse result, so there is no reason to switch now.
+
+The broader lesson, and the second time this file has recorded it: pretrained weights that are
+architecturally perfect (same token count, same 512-d output, normalisation stats covering our
+exact datasets) can still lose. The fit of the artefact says nothing about whether it helps —
+only the training objective does.

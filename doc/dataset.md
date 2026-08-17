@@ -170,8 +170,25 @@ dataset[(ds_idx, frame_idx)] # 显式指定数据集与帧，供 ContrastiveBatc
 | `state_mask` | `(40,)` float32 | 同上 |
 | `tactile_signal` | `(16, 32)` float32 | 低维触觉读数，整个窗口 |
 | `tactile_signal_mask` | `()` float32 | 标量，1 表示这条样本有触觉信号 |
-| `tactile_image` | `(4, 2, 3, 112, 112)` uint8 | 触觉相机，4 路 × 2 帧，槽位对齐，缺的补零 |
-| `tactile_image_mask` | `(4,)` float32 | 逐路有效性 |
+| `tactile_image` | `(6, 2, 3, S, S)` uint8 | 触觉相机，6 路 × 2 帧，槽位对齐，缺的补零。`S` 由 `policy.tactile_img_size` 决定：ResNet-18 用 112，FTP-1 塔强制 224 |
+| `tactile_image_mask` | `(6,)` float32 | 逐路有效性 |
+| `tactile_sensor_id` | `(6,)` int64 | 每一路对应哪种物理传感器（索引到 `FTP1_SENSOR_NAMES`），`-1` 表示该槽位没有 pad |
+| `tactile_img_mean` | `(6, 3)` float32 | 每一路的逐通道 z-score 均值，见下 |
+| `tactile_img_std` | `(6, 3)` float32 | 每一路的逐通道 z-score 标准差 |
+
+后三个 key 只有 `policy.tactile_backbone="ftp1"` 会用到，但**无条件产出**，这样两种触觉
+backbone 共用同一份 batch schema，切换时不需要动 collate。
+
+关于归一化统计量：FTP-1 的统计量是**按数据集**而不是按传感器算的——同一个 GelSight Mini
+在 `Unit` 里通道均值是 -0.18，在 `RDP_Bimanual` 里是 -0.85，因为胶垫颜色、打光和相机增益
+逐台不同。所以 `FTP1_TACTILE_DATASETS`（`lerobot/common/policies/ace/ftp1_tactile.py`）是按
+`(数据集, 槽位)` 建表的，槽位顺序严格跟 `tactile_image_keys(spec)` 一致，保证像素和它的
+归一化参数不会错位。预处理流程与 FTP-1 一致：`x = uint8/255*2-1`，再 `(x-mean)/std`。
+
+通道顺序是**实测**确认的，不是假定的：FTP-1 自己的 eval 脚本喂的是 BGR（它的 zarr 来自
+`cv2.imdecode`）。拿 `VisuoTactile_D-WHEEL` 实测——它是唯一三个通道均值差得够开的传感器——
+按现状是 (-0.330, -0.180, -0.170)，公布值是 (-0.410, -0.201, -0.219)，平均绝对误差 0.050；
+反过来是 0.124。所以我们解码出来的帧本来就和 FTP-1 同序，**不做翻转**。
 
 ### 元信息
 
