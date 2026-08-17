@@ -341,6 +341,12 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         sig_mean = np.zeros(MAX_TACTILE_SIGNAL_DIM, dtype=np.float32)
         sig_std = np.ones(MAX_TACTILE_SIGNAL_DIM, dtype=np.float32)
         sig_mask = np.zeros(MAX_TACTILE_SIGNAL_DIM, dtype=np.float32)
+        # The slot layout is decided *here* and handed to `_build_tactile_signal`, rather than
+        # each of them walking its own running offset over the same key list. The two walks skip
+        # on different conditions -- this one skips keys with no statistics, the other skips keys
+        # the item did not return -- so a key present in one and absent in the other would shift
+        # every later slot and silently normalise the wrong dimensions.
+        sig_slots: list[tuple[str, int, int]] = []
         offset = 0
         for key in tactile_signal_keys(spec):
             src = stats.get(key)
@@ -354,11 +360,13 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             sig_mean[offset : offset + width] = src_mean[:width]
             sig_std[offset : offset + width] = np.maximum(src_std[:width], 1e-3)
             sig_mask[offset : offset + width] = 1.0
+            sig_slots.append((key, offset, width))
             offset += width
         out["tactile_signal"] = {
             "mean": torch.from_numpy(sig_mean),
             "std": torch.from_numpy(sig_std),
             "mask": torch.from_numpy(sig_mask),
+            "slots": sig_slots,
         }
         return out
 
@@ -530,12 +538,14 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         Read at full rate rather than at the two ends, because a contact transient is only a
         few frames wide: two samples can straddle it and see almost nothing of it. Unlike the
         tactile cameras this costs nothing, the signal being a parquet column.
+
+        Slots come from the normalisation stats so that dimension ``i`` of the output always
+        means the same physical channel as dimension ``i`` of ``mean``/``std``/``mask``.
         """
         chunk = self.chunk_size
         signal = torch.zeros(chunk, MAX_TACTILE_SIGNAL_DIM, dtype=torch.float32)
-        offset = 0
         found = False
-        for key in tactile_signal_keys(spec):
+        for key, offset, width in norm.get("slots", ()):
             value = _to_tensor(item.get(key))
             if value is None:
                 continue
@@ -545,11 +555,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             if value.shape[0] < chunk:
                 value = torch.cat([value, value[-1:].expand(chunk - value.shape[0], -1)], dim=0)
             value = value[:chunk]
-            width = min(value.shape[1], MAX_TACTILE_SIGNAL_DIM - offset)
-            if width <= 0:
-                break
-            signal[:, offset : offset + width] = value[:, :width]
-            offset += width
+            take = min(width, value.shape[1])
+            signal[:, offset : offset + take] = value[:, :take]
             found = True
         if not found:
             return signal, torch.zeros((), dtype=torch.float32)

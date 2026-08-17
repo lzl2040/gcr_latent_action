@@ -78,7 +78,10 @@ class RoboContrastConfig(PreTrainedConfig):
     max_action_dim: int = 40
     max_state_dim: int = 40
     max_tactile_signal_dim: int = 32
-    max_tactile_views: int = 4
+    # Must not exceed canonical_space.MAX_TACTILE_VIEWS, which the dataset clamps against.
+    # 6 covers `ftp_1_sharpa`'s three pads per hand; datasets with fewer fill the spare slots
+    # with the learned `missing` token.
+    max_tactile_views: int = 6
     # ResNet-18 downsamples by 32, so 112 gives a 4x4 map (64 would give a useless 2x2).
     tactile_img_size: int = 112
     tactile_feat_dim: int = 512
