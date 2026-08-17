@@ -210,6 +210,8 @@ def train(cfg: TrainPipelineConfig):
         "recon_loss": AverageMeter("trecon", ":.4f"),
         "percep_recon_loss": AverageMeter("precon", ":.4f"),
         "retrieval_acc": AverageMeter("acc", ":.3f"),
+        "tactile_hits": AverageMeter("tac_hit", ":.1f"),
+        "tactile_rows": AverageMeter("tac_n", ":.1f"),
         "pos_sim": AverageMeter("pos_sim", ":.3f"),
         "logit_scale": AverageMeter("scale", ":.2f"),
         "tac_sig_gate": AverageMeter("tsig", ":.3f"),
@@ -253,6 +255,8 @@ def train(cfg: TrainPipelineConfig):
                 train_tracker.recon_loss = output_dict.get("recon_loss", 0.0)
                 train_tracker.percep_recon_loss = output_dict.get("percep_recon_loss", 0.0)
                 train_tracker.retrieval_acc = output_dict.get("retrieval_acc", 0.0)
+                train_tracker.tactile_hits = output_dict.get("tactile_hits", 0.0)
+                train_tracker.tactile_rows = output_dict.get("tactile_rows", 0.0)
                 train_tracker.pos_sim = output_dict.get("pos_sim", 0.0)
                 train_tracker.logit_scale = output_dict.get("logit_scale", 0.0)
                 train_tracker.tac_sig_gate = output_dict.get("tactile_sig_gate", 0.0)

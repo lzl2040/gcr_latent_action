@@ -908,13 +908,30 @@ class RoboContrast(PreTrainedPolicy):
             percep_recon_value = percep_recon.item()
 
         with torch.no_grad():
-            acc = (logits_p2r.argmax(dim=-1) == labels).float().mean()
+            correct = (logits_p2r.argmax(dim=-1) == labels).float()
+            acc = correct.mean()
             pos_sim = (perception * physical).sum(-1).mean()
+            # Retrieval accuracy restricted to the rows that actually carry tactile.
+            # The tactile datasets are only ~2.7% of this mixture, so the aggregate accuracy
+            # is nearly blind to anything the tactile path does: a change that helped tactile
+            # enormously would still move `retrieval_acc` by a couple of points at most. This
+            # is the metric to read when judging tactile work.
+            has_tac = (
+                (batch["tactile_image_mask"].to(device).sum(dim=-1) > 0)
+                | (batch["tactile_signal_mask"].to(device).reshape(-1) > 0)
+            ).float()
+            n_tac = has_tac.sum()
         loss_dict = {
             "contrastive_loss": contrastive.item(),
             "recon_loss": recon_value,
             "percep_recon_loss": percep_recon_value,
             "retrieval_acc": acc.item(),
+            # Reported as a hit count and a row count rather than a ratio: most batches contain
+            # no tactile at all, and averaging a per-step ratio over those would fold in a
+            # meaningless zero. Summing both over a window and dividing gives the true
+            # conditional accuracy.
+            "tactile_hits": (correct * has_tac).sum().item(),
+            "tactile_rows": n_tac.item(),
             "pos_sim": pos_sim.item(),
             "logit_scale": logit_scale.item(),
             "tactile_sig_gate": torch.tanh(self.physical_encoder.tactile_signal_gate).item(),
