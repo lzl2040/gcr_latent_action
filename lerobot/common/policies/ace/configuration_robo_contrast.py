@@ -25,7 +25,14 @@ class RoboContrastConfig(PreTrainedConfig):
     pretrained_path: str = ""
 
     # ------------------------------------------------------------------ perception
-    vision_model_name: str = "/Data/lzl/huggingface/siglip2-base-patch16-224"
+    # DINOv3 rather than SigLIP2 for vision. SigLIP's visual features are trained to match a
+    # caption, so they keep what language describes and discard the rest; the change between
+    # two frames is mostly *not* describable, and DINOv3's self-supervised features preserve
+    # far more spatial and geometric detail. DINOv3 has no text tower, so language still comes
+    # from SigLIP2 -- its text embedding is already aligned to a visual space, which is what
+    # makes "the instruction selects which change matters" work.
+    vision_model_name: str = "/Data/lzl/huggingface/dinov3-vitb16-pretrain-lvd1689m"
+    text_model_name: str = "/Data/lzl/huggingface/siglip2-base-patch16-224"
     freeze_vision_encoder: bool = True
     freeze_text_encoder: bool = True
     text_max_length: int = 32
@@ -34,9 +41,15 @@ class RoboContrastConfig(PreTrainedConfig):
     # Self-attention layers run over the evidence bank ([v0, v1, v1-v0, text]) *before* the
     # change queries read it. This is where most of the perception capacity lives: it is the
     # only place where a parameter sees all ~620 tokens rather than 16 queries.
-    num_evidence_layers: int = 6
-    num_fusion_layers: int = 6
+    num_evidence_layers: int = 5
+    num_fusion_layers: int = 5
     fusion_num_heads: int = 16
+    # Feature-space reconstruction: predict the frame-(t+H) DINOv3 features from the frame-t
+    # features, the instruction and the change queries. The queries are the only route by
+    # which anything about frame t+H can reach the prediction, so the objective forces them to
+    # actually encode the change instead of whatever shortcut the contrastive loss tolerates.
+    num_predictor_layers: int = 3
+    perception_recon_weight: float = 1.0
     # Keep every k-th patch token of each frame when building the evidence bank (1 = keep all).
     patch_token_stride: int = 1
 
@@ -48,7 +61,11 @@ class RoboContrastConfig(PreTrainedConfig):
     group_size: int = 2
     hidden_dim: int = 1024
     num_attention_heads: int = 16
-    num_physical_layers: int = 12
+    # Sized so that the *learnable* capacity of the two branches is roughly equal
+    # (~200M each); the frozen DINOv3 and SigLIP2 towers are feature extractors, not capacity
+    # the model is free to use. Depth is cheap here because the physical side is only ~15
+    # tokens wide, unlike the ~420-token evidence bank.
+    num_physical_layers: int = 14
     max_action_dim: int = 40
     max_state_dim: int = 40
     max_tactile_signal_dim: int = 32

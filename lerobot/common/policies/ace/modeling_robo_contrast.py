@@ -41,8 +41,10 @@ from torch.utils.checkpoint import checkpoint
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 
-SIGLIP_MEAN = 0.5
-SIGLIP_STD = 0.5
+# DINOv3 is normalised with ImageNet statistics (see its preprocessor_config.json), unlike
+# SigLIP2 which uses 0.5/0.5.
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
 def _all_gather_detached(tensor: torch.Tensor) -> torch.Tensor:
@@ -181,6 +183,40 @@ class ChangeQueryBlock(nn.Module):
 # ---------------------------------------------------------------------------
 # perception side
 # ---------------------------------------------------------------------------
+class ChangePredictor(nn.Module, _CheckpointMixin):
+    """Predicts the frame-``t+H`` visual features from frame ``t``, the text and the queries.
+
+    This is the perception-side counterpart of the tactile reconstruction head: without it the
+    only thing shaping the change queries is the contrastive loss, which is happy with any
+    representation that happens to separate the batch -- scene identity, camera pose, dataset
+    style -- and need not encode motion at all.
+
+    The construction is what makes the objective meaningful. The predictor sees the *raw*
+    projected frame-``t`` patches, never the evidence trunk's output: the trunk has already
+    attended over the ``v1 - v0`` difference stream, so its output determines ``v1`` exactly
+    and a predictor reading it could ignore the queries entirely. Here the 16 change queries
+    are the only channel through which anything about frame ``t+H`` can reach the prediction,
+    so lowering this loss requires putting the change into them.
+    """
+
+    def __init__(self, dim: int, out_dim: int, num_layers: int, num_heads: int, dropout: float,
+                 max_patches: int = 4096, use_checkpointing: bool = False):
+        super().__init__()
+        self.use_checkpointing = use_checkpointing
+        self.patch_pos = nn.Parameter(torch.randn(1, max_patches, dim) * 0.02)
+        self.blocks = nn.ModuleList(
+            [ChangeQueryBlock(dim, num_heads, dropout) for _ in range(num_layers)]
+        )
+        self.norm = nn.LayerNorm(dim)
+        self.head = nn.Linear(dim, out_dim)
+
+    def forward(self, v0, memory, memory_mask):
+        x = v0 + self.patch_pos[:, : v0.shape[1]].to(v0.dtype)
+        for block in self.blocks:
+            x = self._run_block(block, x, memory, memory_mask)
+        return self.head(self.norm(x))
+
+
 class PerceptionEncoder(nn.Module, _CheckpointMixin):
     """Text-conditioned extractor of the visual change between ``t`` and ``t + H``."""
 
@@ -189,25 +225,38 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         self.use_checkpointing = config.gradient_checkpointing
         from transformers import AutoModel, AutoTokenizer
 
-        model_name = config.vision_model_name
-        if not os.path.exists(model_name):
-            model_name = "google/siglip2-base-patch16-224"
-        self.backbone = AutoModel.from_pretrained(model_name, dtype=torch.float32)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        vision_name = config.vision_model_name
+        if not os.path.exists(vision_name):
+            vision_name = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+        text_name = config.text_model_name
+        if not os.path.exists(text_name):
+            text_name = "google/siglip2-base-patch16-224"
+
+        self.vision_backbone = AutoModel.from_pretrained(vision_name, dtype=torch.float32)
+        # Only SigLIP2's *text* tower is kept; dropping its vision tower saves 93M frozen
+        # parameters that DINOv3 now replaces.
+        text_full = AutoModel.from_pretrained(text_name, dtype=torch.float32)
+        self.text_backbone = text_full.text_model
+        del text_full
+        self.tokenizer = AutoTokenizer.from_pretrained(text_name)
         self.text_max_length = config.text_max_length
 
-        vision_dim = self.backbone.config.vision_config.hidden_size
-        text_dim = self.backbone.config.text_config.hidden_size
+        vision_dim = self.vision_backbone.config.hidden_size
+        text_dim = self.text_backbone.config.hidden_size
+        self.vision_dim = vision_dim
+        # DINOv3 prepends one CLS token and `num_register_tokens` register tokens; only the
+        # patch tokens are spatially meaningful, so the prefix is dropped.
+        self.num_prefix_tokens = 1 + int(getattr(self.vision_backbone.config, "num_register_tokens", 0))
         dim = config.hidden_dim
         self.patch_stride = max(1, config.patch_token_stride)
 
         self.freeze_vision = config.freeze_vision_encoder
         self.freeze_text = config.freeze_text_encoder
         if self.freeze_vision:
-            for p in self.backbone.vision_model.parameters():
+            for p in self.vision_backbone.parameters():
                 p.requires_grad = False
         if self.freeze_text:
-            for p in self.backbone.text_model.parameters():
+            for p in self.text_backbone.parameters():
                 p.requires_grad = False
 
         self.visual_proj = nn.Linear(vision_dim, dim)
@@ -238,10 +287,28 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
             nn.Linear(dim, config.projection_dim),
         )
 
+        self.recon_weight = config.perception_recon_weight
+        self.predictor = (
+            ChangePredictor(
+                dim,
+                vision_dim,
+                config.num_predictor_layers,
+                config.fusion_num_heads,
+                config.dropout,
+                use_checkpointing=config.gradient_checkpointing,
+            )
+            if config.num_predictor_layers > 0 and config.perception_recon_weight > 0
+            else None
+        )
+        # Targets are normalised per token before the loss (as in I-JEPA), so the objective is
+        # about the *pattern* of the feature vector rather than its magnitude, which otherwise
+        # dominates the L1 and is trivially predictable from frame t.
+        self.target_norm = nn.LayerNorm(vision_dim, elementwise_affine=False)
+
     # -- raw input handling -------------------------------------------------
     @staticmethod
     def _to_pixel_values(images: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-        """uint8 ``(B, 3, H, W)`` in ``[0, 255]`` -> SigLIP-normalised float tensor.
+        """uint8 ``(B, 3, H, W)`` in ``[0, 255]`` -> ImageNet-normalised float tensor.
 
         Doing this on-device replaces the previous PIL round-trip, which was the single most
         expensive step of the old training loop.
@@ -249,7 +316,9 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         x = images.to(dtype=torch.float32)
         if x.shape[-1] != 224 or x.shape[-2] != 224:
             x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
-        x = (x / 255.0 - SIGLIP_MEAN) / SIGLIP_STD
+        mean = IMAGENET_MEAN.to(device=x.device, dtype=x.dtype)
+        std = IMAGENET_STD.to(device=x.device, dtype=x.dtype)
+        x = (x / 255.0 - mean) / std
         return x.to(dtype=dtype)
 
     def tokenize(self, texts: list[str], device: torch.device):
@@ -269,8 +338,8 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
     def _encode_vision(self, pixel_values: torch.Tensor) -> torch.Tensor:
         ctx = torch.no_grad() if self.freeze_vision else torch.enable_grad()
         with ctx:
-            out = self.backbone.vision_model(pixel_values=pixel_values)
-        tokens = out.last_hidden_state
+            out = self.vision_backbone(pixel_values=pixel_values)
+        tokens = out.last_hidden_state[:, self.num_prefix_tokens :, :]
         if self.patch_stride > 1:
             tokens = tokens[:, :: self.patch_stride, :]
         return tokens.detach() if self.freeze_vision else tokens
@@ -278,7 +347,7 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
     def _encode_text(self, input_ids: torch.Tensor) -> torch.Tensor:
         ctx = torch.no_grad() if self.freeze_text else torch.enable_grad()
         with ctx:
-            out = self.backbone.text_model(input_ids)
+            out = self.text_backbone(input_ids)
         tokens = out.last_hidden_state
         return tokens.detach() if self.freeze_text else tokens
 
@@ -342,8 +411,31 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         for block in self.blocks:
             queries = block(queries, evidence, evidence_mask)
 
-        pooled = self.out_norm(queries).mean(dim=1)
-        return self.out_proj(pooled)
+        queries = self.out_norm(queries)
+        embedding = self.out_proj(queries.mean(dim=1))
+
+        recon_loss = None
+        if self.predictor is not None and self.training:
+            recon_loss = self._recon_loss(v0, queries, text_tokens, text_mask, p1)
+        return embedding, recon_loss
+
+    def _recon_loss(self, v0, queries, text_tokens, text_mask, p1) -> torch.Tensor:
+        """Predict the frame-``t+H`` patch features and score them against the real ones."""
+        memory = torch.cat([queries, text_tokens], dim=1)
+        if text_mask is not None:
+            query_mask = torch.ones(
+                queries.shape[0], queries.shape[1], device=queries.device, dtype=torch.bool
+            )
+            memory_mask = torch.cat([query_mask, text_mask.to(torch.bool)], dim=1)
+        else:
+            memory_mask = None
+
+        pred = self.predictor(v0, memory, memory_mask).float()
+        # The target comes from the frozen backbone and is detached: there is no trainable
+        # path into it, so the pair cannot collapse onto a constant the way a jointly trained
+        # student/teacher would.
+        target = self.target_norm(p1.detach().float())
+        return F.smooth_l1_loss(pred, target)
 
 
 # ---------------------------------------------------------------------------
@@ -691,9 +783,11 @@ class RoboContrast(PreTrainedPolicy):
         raise NotImplementedError("RoboContrast is a representation-learning model, not a controller.")
 
     # -- embeddings --------------------------------------------------------
-    def encode_perception(self, batch) -> torch.Tensor:
-        emb = self.perception_encoder(batch["image_t0"], batch["image_t1"], batch["task"])
-        return F.normalize(emb.float(), dim=-1)
+    def encode_perception(self, batch) -> tuple[torch.Tensor, torch.Tensor | None]:
+        emb, recon_loss = self.perception_encoder(
+            batch["image_t0"], batch["image_t1"], batch["task"]
+        )
+        return F.normalize(emb.float(), dim=-1), recon_loss
 
     def encode_physical(self, batch) -> tuple[torch.Tensor, torch.Tensor | None]:
         emb, recon_loss = self.physical_encoder(batch)
@@ -713,7 +807,7 @@ class RoboContrast(PreTrainedPolicy):
         return same_episode & close
 
     def forward(self, batch, task_type: str = "train_contrastive", step: int = 0):
-        perception = self.encode_perception(batch)
+        perception, percep_recon = self.encode_perception(batch)
         physical, tactile_recon = self.encode_physical(batch)
 
         rank, world_size = _rank_world()
@@ -744,9 +838,13 @@ class RoboContrast(PreTrainedPolicy):
 
         loss = contrastive
         recon_value = 0.0
+        percep_recon_value = 0.0
         if tactile_recon is not None and self.config.tactile_recon_weight > 0:
             loss = loss + self.config.tactile_recon_weight * tactile_recon
             recon_value = tactile_recon.item()
+        if percep_recon is not None and self.config.perception_recon_weight > 0:
+            loss = loss + self.config.perception_recon_weight * percep_recon
+            percep_recon_value = percep_recon.item()
 
         with torch.no_grad():
             acc = (logits_p2r.argmax(dim=-1) == labels).float().mean()
@@ -754,6 +852,7 @@ class RoboContrast(PreTrainedPolicy):
         loss_dict = {
             "contrastive_loss": contrastive.item(),
             "recon_loss": recon_value,
+            "percep_recon_loss": percep_recon_value,
             "retrieval_acc": acc.item(),
             "pos_sim": pos_sim.item(),
             "logit_scale": logit_scale.item(),
