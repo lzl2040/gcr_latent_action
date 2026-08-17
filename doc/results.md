@@ -48,18 +48,20 @@ shortcut instead of learning motion.
 
 ### 2.3 Tactile without domination
 Tactile arrives as a low-dimensional signal (RH20T: 6-d gripper torque) or as images
-(sharpa: 6 streams, VisuoTactile: 4 streams). Raw tactile images are 4×3×64×64 ≈ 49 k
-dimensions against 40 for the state, so three mechanisms keep them in check:
+(sharpa: 6 streams, VisuoTactile: 4 streams). Raw tactile images are 4×3×112×112 ≈ 150 k
+dimensions against 40 for the state, so four mechanisms keep them in check:
 
-1. a deliberately shallow CNN pooled into a **single** token, so tactile never outnumbers
-   the action tokens;
+1. **one token per pad**, never more, so tactile cannot outnumber the action tokens
+   (see §6.2 for why we rejected UniVTAC's 64-token-per-view alternative);
 2. **zero-initialised learnable gates** (`tanh`), so training starts from a tactile-free
    model and the channel only opens if it lowers the loss;
 3. **per-sample modality dropout** (tactile 0.3, state 0.15, action 0.1); dropped or
    absent modalities are replaced by learned `missing_embed` tokens, so a dataset without
-   tactile is not a distinct distribution.
+   tactile is not a distinct distribution;
+4. a **10× lower learning rate** for the tactile backbone (`tactile_lr_scale = 0.1`),
+   following UniVTAC's downstream policy.
 
-Tactile images are downsampled to 64×64 uint8 inside the dataloader worker.
+Tactile images are downsampled to 112×112 uint8 inside the dataloader worker.
 
 ### 2.4 Two-frame reading
 Implemented with `delta_timestamps[primary_video_key] = [0, H/fps]` rather than
@@ -157,3 +159,97 @@ tactile channel useful — which is the intended cold start, not a bug.
   already excludes the last `horizon` frames of every episode, so it should always be 1;
   it is kept as a diagnostic.
 - Mask and optical-flow perception modalities are designed for but not implemented.
+
+## 6. Scale-up to 727M parameters
+
+### 6.1 Where the capacity went
+The first working model was 450M total / 75M trainable, and almost all of the "total" was
+a frozen SigLIP2 text tower whose 256k-entry embedding table alone is 262M. Only 75M
+parameters were actually learning. Target: 500–800M total, ~300–400M trainable.
+
+| block | params | tokens it attends over |
+|---|---|---|
+| frozen SigLIP2 vision + text | 375.2M | — |
+| evidence trunk (6 layers) | 75.6M | ~420 |
+| change-query decoder (6 layers) | 100.8M | 16 queries × ~420 |
+| physical trunk (12 layers) | 151.2M | ~15 |
+| tactile ResNet-18 | 11.2M | — |
+| tactile reconstruction head | 7.1M | — |
+| **total / trainable** | **726.7M / 351.5M** | |
+
+`hidden_dim` 768→1024, 16 heads, 16 change queries, action `group_size` 4→2.
+
+Most of the new capacity sits where it is *cheap*: the physical trunk is the single
+largest trainable block (151M) but reads only ~15 tokens, so it costs almost nothing per
+step. The genuinely expensive addition is the 6-layer evidence trunk, and §6.3 is about
+paying for it.
+
+The other structural change: **language moved into the evidence bank**. Previously each
+fusion block did text cross-attention and then visual cross-attention. Now `[v0, v1-v0,
+text]` are concatenated with type embeddings and passed through a self-attention trunk, so
+the instruction can select which patches matter *before* the change queries read anything.
+`ChangeQueryBlock` correspondingly loses its text branch.
+
+### 6.2 Tactile, after reading UniVTAC
+`michaelyuancb/ftp1-policy/UniVTAC` turned out to be simpler than expected:
+`encoder/network.py::Tactile` is literally `torchvision.models.resnet18(num_classes=512)`,
+pretrained by **supervised reconstruction** (marked RGB, RGB, depth, 63 marker positions,
+7-DoF contact pose), not contrastively. The decoders are discarded at inference.
+
+Adopted:
+- the **ResNet-18 / 512-d backbone**, ImageNet-initialised, replacing our 4-layer CNN;
+- the **RGB reconstruction auxiliary loss** (weight 0.1). Of their five targets it is the
+  only one whose labels we already have — marker, depth and contact pose all require their
+  simulator;
+- a **separate, 10× lower LR group** for the tactile backbone, as in their ACT policy;
+- **frozen BatchNorm**, which they use when embedding the encoder into the policy. For us
+  it is not optional: the number of tactile pads per batch is data dependent, so trainable
+  BN statistics would drift with the mixture composition.
+
+Deliberately **not** adopted:
+- their default `tactile_type='full'`, which emits 8×8 = 64 tokens per view. With 4 pads
+  that is 256 tactile tokens against ~15 physical ones — precisely the domination failure
+  the gates and dropout exist to prevent. We keep one gated token per pad plus a view
+  embedding;
+- their lack of any sensor-type conditioning. UniVTAC handles only optical tactile sensors
+  and normalises heterogeneity by training one CNN over all of them; our mixture also
+  contains 6-d torque signals, which take the separate signal pathway.
+
+There is **no standalone UniVTAC checkpoint published** — only full policies
+(`MJJJJ1064/ftp1_v0426_50kstep`, `MJJJJ1064/ftp1_univtac_finetune`) that embed it — so the
+backbone starts from ImageNet rather than from their tactile pretraining.
+
+### 6.3 Making it affordable
+The first scaled version needed **49.3 GB and 1.62 s/step** at batch 256 — over an A6000's
+48 GB. Three changes brought it to **12.9 GB and 1.34 s/step**:
+
+1. **Dropped the `v1` stream from the evidence bank.** It carried no information:
+   `v1 == v0 + diff`, so it was 196 tokens of attention for an exact linear combination of
+   its neighbours. The bank went 620 → ~420 tokens. The explicit `diff` stream is the one
+   worth keeping — patches are spatially aligned across the two frames, so `diff[i]` is
+   directly "what changed at location i", which attention would otherwise have to
+   rediscover by matching patches.
+2. **Activation checkpointing on the evidence trunk.** ~30% more compute for a large
+   memory saving, which is free here: the GPU is idle waiting on the disk anyway (§3.1).
+3. **The tactile ResNet only runs on pads that actually exist.** Most batches hold a
+   handful of tactile samples among 256; encoding zero-filled placeholders wasted nearly
+   all of its compute and polluted the reconstruction target.
+
+### 6.4 The bug that only appears on 2 GPUs
+Change 3 above introduced a rank desync. Skipping the tactile CNN when a batch has no
+tactile data makes *the set of parameters receiving gradients data dependent*, and under
+ZeRO-2 that set determines the gradient-reduction schedule. A rank whose batch happened to
+be tactile-free simply never reduced the tactile gradients and its peers waited forever.
+
+The symptom is not an exception but a 600 s NCCL timeout, with one rank stuck on the
+351M-element ALLREDUCE while the other has already moved on to the next collective — worth
+recognising, because it looks like a hardware or NCCL problem and is not.
+
+The fix keeps the compute saving: the selection is padded to at least one row and that
+row's contribution is multiplied by zero, so the schedule is data independent. Verified
+with a two-rank test where rank 0 has tactile data and rank 1 has none.
+
+Two smaller fixes came from the same run: `make_optimizer_and_scheduler` assumed
+`get_optim_params()` returns a flat tensor list and broke on parameter groups, and the
+launcher's hard-coded rendezvous port collided with orphaned workers from a killed run
+(it now picks a free port).

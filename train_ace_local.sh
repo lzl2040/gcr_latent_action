@@ -1,11 +1,23 @@
 # Perception <-> physical contrastive pre-training (robo_contrast).
 # conda activate lerobot_v2 && bash train_ace_local.sh
 #
-# GPU note: pick free devices. `nvidia-smi` first -- this is a shared machine.
+# GPU note: this is a shared machine, so run `nvidia-smi` and select free devices with
+#   CUDA_VISIBLE_DEVICES=0,3 bash train_ace_local.sh
+# Do NOT reintroduce `--num_gpus`/`--include`: deepspeed *ignores* CUDA_VISIBLE_DEVICES when
+# either is passed and rewrites it to 0..N-1, which silently lands the job on whichever GPUs
+# happen to be numbered first -- including ones another user is already filling.
 export LEROBOT_VIDEO_DECODER_CACHE_SIZE=256
 export TOKENIZERS_PARALLELISM=false
-NUM_GPUS=${NUM_GPUS:-4}
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3} deepspeed --num_gpus=${NUM_GPUS} --master_port=29601 lerobot/scripts/dps_train_contrast.py \
+# Other jobs come and go on these GPUs, so keep our own footprint defragmented.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+echo "devices=${CUDA_VISIBLE_DEVICES}"
+# The machine is shared, and a run that is killed can leave dataloader workers holding the
+# rendezvous socket, so a fixed port eventually fails with EADDRINUSE. Pick a free one.
+MASTER_PORT=${MASTER_PORT:-$(python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")}
+echo "master_port=${MASTER_PORT}"
+
+deepspeed --master_port=${MASTER_PORT} lerobot/scripts/dps_train_contrast.py \
     --deepspeed="./ds_zero2_contrast.json" \
     --policy.type="robo_contrast" \
     --is_ft=false \
