@@ -207,6 +207,7 @@ def train(cfg: TrainPipelineConfig):
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
         "contra_loss": AverageMeter("contra_loss", ":.3f"),
+        "recon_loss": AverageMeter("recon", ":.4f"),
         "retrieval_acc": AverageMeter("acc", ":.3f"),
         "pos_sim": AverageMeter("pos_sim", ":.3f"),
         "logit_scale": AverageMeter("scale", ":.2f"),
@@ -248,6 +249,7 @@ def train(cfg: TrainPipelineConfig):
                 train_tracker.update_s = fwd_bwd_time
                 train_tracker.loss = loss.detach().mean().item()
                 train_tracker.contra_loss = output_dict.get("contrastive_loss", 0.0)
+                train_tracker.recon_loss = output_dict.get("recon_loss", 0.0)
                 train_tracker.retrieval_acc = output_dict.get("retrieval_acc", 0.0)
                 train_tracker.pos_sim = output_dict.get("pos_sim", 0.0)
                 train_tracker.logit_scale = output_dict.get("logit_scale", 0.0)

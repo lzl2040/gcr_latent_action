@@ -30,25 +30,32 @@ class RoboContrastConfig(PreTrainedConfig):
     freeze_text_encoder: bool = True
     text_max_length: int = 32
     # Number of latent "what changed?" queries used to read the two-frame visual evidence.
-    num_change_queries: int = 8
-    num_fusion_layers: int = 3
-    fusion_num_heads: int = 8
+    num_change_queries: int = 16
+    # Self-attention layers run over the evidence bank ([v0, v1, v1-v0, text]) *before* the
+    # change queries read it. This is where most of the perception capacity lives: it is the
+    # only place where a parameter sees all ~620 tokens rather than 16 queries.
+    num_evidence_layers: int = 6
+    num_fusion_layers: int = 6
+    fusion_num_heads: int = 16
     # Keep every k-th patch token of each frame when building the evidence bank (1 = keep all).
     patch_token_stride: int = 1
 
     # ------------------------------------------------------------------ physical
     chunk_size: int = 16
     n_action_steps: int = 16
-    group_size: int = 4
-    hidden_dim: int = 768
-    num_attention_heads: int = 12
-    num_physical_layers: int = 6
+    # 2 frames per action token -> 8 action tokens. A physical transformer this wide is
+    # wasted on 4 tokens; more tokens also give the tactile gate something to compete with.
+    group_size: int = 2
+    hidden_dim: int = 1024
+    num_attention_heads: int = 16
+    num_physical_layers: int = 12
     max_action_dim: int = 40
     max_state_dim: int = 40
     max_tactile_signal_dim: int = 32
     max_tactile_views: int = 4
-    tactile_img_size: int = 64
-    tactile_feat_dim: int = 128
+    # ResNet-18 downsamples by 32, so 112 gives a 4x4 map (64 would give a useless 2x2).
+    tactile_img_size: int = 112
+    tactile_feat_dim: int = 512
     # Temporal distance (in frames) between the two perception frames. Defaults to chunk_size.
     frame_horizon: int | None = None
     use_wrist_image: bool = False
@@ -57,6 +64,23 @@ class RoboContrastConfig(PreTrainedConfig):
     # Per-sample probability of hiding a modality during training. Tactile is dropped most
     # aggressively because a 4-view image stream would otherwise dominate the physical token
     # budget and let the model ignore state/action entirely.
+    # Tactile image encoder, following UniVTAC (`UniVTAC/encoder/network.py`): a plain
+    # ImageNet-pretrained ResNet-18 with a 512-d output, plus a reconstruction head. UniVTAC
+    # supervises marker positions / depth / contact pose from simulation, which we do not
+    # have for real sensors, so we keep only the RGB reconstruction head. Giving tactile its
+    # own objective stops its features from being shaped purely by the contrastive loss.
+    tactile_backbone: str = "resnet18"
+    tactile_pretrained: bool = True
+    tactile_recon_weight: float = 0.1
+    tactile_recon_size: int = 28
+    # UniVTAC trains its tactile backbone with a dedicated (much lower) learning rate; the
+    # same trick keeps a 11.7M-parameter CNN from racing ahead of the rest of the model.
+    tactile_lr_scale: float = 0.1
+
+    # Recompute trunk activations in the backward pass instead of storing them. Costs ~30%
+    # compute and saves ~15 GB at batch 256, which is worth it while the disk is the ceiling.
+    gradient_checkpointing: bool = True
+
     dropout: float = 0.0
     modality_dropout_tactile: float = 0.3
     modality_dropout_state: float = 0.15

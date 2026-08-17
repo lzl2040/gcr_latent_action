@@ -36,6 +36,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributed as dist
+from torch.utils.checkpoint import checkpoint
 
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.pretrained import PreTrainedPolicy
@@ -129,6 +130,23 @@ class FeedForward(nn.Module):
         return self.net(self.norm(x))
 
 
+class _CheckpointMixin:
+    """Optional activation checkpointing for the two token-heavy trunks.
+
+    The evidence bank is ~420 tokens wide at batch 256, so storing every intermediate
+    activation costs more memory than the parameters themselves. Recomputing them in the
+    backward pass trades ~30% extra compute for a large memory saving, which is the right
+    trade here: training is bound by the disk, not by the GPU.
+    """
+
+    use_checkpointing: bool = False
+
+    def _run_block(self, block, *args):
+        if self.use_checkpointing and self.training and torch.is_grad_enabled():
+            return checkpoint(block, *args, use_reentrant=False)
+        return block(*args)
+
+
 class SelfAttentionBlock(nn.Module):
     def __init__(self, dim: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
@@ -141,28 +159,34 @@ class SelfAttentionBlock(nn.Module):
 
 
 class ChangeQueryBlock(nn.Module):
-    """One round of: read the instruction, then read the visual evidence."""
+    """One round of the change-query decoder: read the fused evidence, then think.
+
+    The instruction lives *inside* the evidence bank (see ``PerceptionEncoder``), so a single
+    cross-attention is enough; an extra text-only cross-attention would re-read tokens the
+    queries can already see.
+    """
 
     def __init__(self, dim: int, num_heads: int, dropout: float = 0.0):
         super().__init__()
-        self.text_attn = MultiHeadAttention(dim, num_heads, dropout)
-        self.visual_attn = MultiHeadAttention(dim, num_heads, dropout)
+        self.self_attn = MultiHeadAttention(dim, num_heads, dropout)
+        self.cross_attn = MultiHeadAttention(dim, num_heads, dropout)
         self.ffn = FeedForward(dim, dropout=dropout)
 
-    def forward(self, queries, text_tokens, visual_tokens, text_mask=None):
-        queries = queries + self.text_attn(queries, text_tokens, text_mask)
-        queries = queries + self.visual_attn(queries, visual_tokens)
+    def forward(self, queries, evidence, evidence_mask=None):
+        queries = queries + self.self_attn(queries)
+        queries = queries + self.cross_attn(queries, evidence, evidence_mask)
         return queries + self.ffn(queries)
 
 
 # ---------------------------------------------------------------------------
 # perception side
 # ---------------------------------------------------------------------------
-class PerceptionEncoder(nn.Module):
+class PerceptionEncoder(nn.Module, _CheckpointMixin):
     """Text-conditioned extractor of the visual change between ``t`` and ``t + H``."""
 
     def __init__(self, config: RoboContrastConfig):
         super().__init__()
+        self.use_checkpointing = config.gradient_checkpointing
         from transformers import AutoModel, AutoTokenizer
 
         model_name = config.vision_model_name
@@ -188,10 +212,19 @@ class PerceptionEncoder(nn.Module):
 
         self.visual_proj = nn.Linear(vision_dim, dim)
         self.text_proj = nn.Linear(text_dim, dim)
-        # 0 = frame t, 1 = frame t+H, 2 = their difference
-        self.evidence_type_embed = nn.Embedding(3, dim)
+        # 0 = frame t, 1 = frame t+H, 2 = their difference, 3 = language
+        self.evidence_type_embed = nn.Embedding(4, dim)
 
         self.change_queries = nn.Parameter(torch.randn(config.num_change_queries, dim) * 0.02)
+        # Trunk: joint vision-vision-difference-language reasoning over the full evidence bank.
+        self.evidence_blocks = nn.ModuleList(
+            [
+                SelfAttentionBlock(dim, config.fusion_num_heads, config.dropout)
+                for _ in range(config.num_evidence_layers)
+            ]
+        )
+        self.evidence_norm = nn.LayerNorm(dim)
+        # Decoder: a handful of latent queries distil the bank into "what changed".
         self.blocks = nn.ModuleList(
             [
                 ChangeQueryBlock(dim, config.fusion_num_heads, config.dropout)
@@ -267,11 +300,33 @@ class PerceptionEncoder(nn.Module):
         v1 = self.visual_proj(p1)
         diff = v1 - v0
 
-        type_ids = torch.arange(3, device=device)
+        type_ids = torch.arange(4, device=device)
         type_emb = self.evidence_type_embed(type_ids).to(dtype)
+        # The bank carries the scene at `t`, what moved over the horizon, and the instruction.
+        # `v1` is deliberately *not* included: it equals `v0 + diff`, so a third visual stream
+        # would add 196 tokens of compute and memory for zero extra information. Keeping the
+        # difference explicit (rather than letting attention derive it) preserves the useful
+        # part: patches are spatially aligned across the two frames, so `diff[i]` is directly
+        # "what changed at location i".
         evidence = torch.cat(
-            [v0 + type_emb[0], v1 + type_emb[1], diff + type_emb[2]], dim=1
-        )  # (B, 3N, D)
+            [
+                v0 + type_emb[0],
+                diff + type_emb[2],
+                text_tokens + type_emb[3],
+            ],
+            dim=1,
+        )  # (B, 2N + L, D)
+
+        num_visual = v0.shape[1] * 2
+        if text_mask is not None:
+            visual_mask = torch.ones(batch, num_visual, device=device, dtype=torch.bool)
+            evidence_mask = torch.cat([visual_mask, text_mask.to(torch.bool)], dim=1)
+        else:
+            evidence_mask = None
+
+        for block in self.evidence_blocks:
+            evidence = self._run_block(block, evidence, evidence_mask)
+        evidence = self.evidence_norm(evidence)
 
         # Seed the change queries with the sentence embedding so the *instruction* selects
         # which change to look for, instead of the queries being scene-agnostic.
@@ -285,7 +340,7 @@ class PerceptionEncoder(nn.Module):
         queries = queries + text_pooled.unsqueeze(1)
 
         for block in self.blocks:
-            queries = block(queries, text_tokens, evidence, text_mask)
+            queries = block(queries, evidence, evidence_mask)
 
         pooled = self.out_norm(queries).mean(dim=1)
         return self.out_proj(pooled)
@@ -294,33 +349,111 @@ class PerceptionEncoder(nn.Module):
 # ---------------------------------------------------------------------------
 # physical side
 # ---------------------------------------------------------------------------
-class TactileImageEncoder(nn.Module):
-    """Deliberately small CNN: tactile images must not out-capacity state and action."""
+def _freeze_batchnorm(module: nn.Module) -> nn.Module:
+    """Replace every ``BatchNorm2d`` with a ``FrozenBatchNorm2d`` carrying the same statistics."""
+    import torchvision
 
-    def __init__(self, out_dim: int = 128):
+    if isinstance(module, nn.BatchNorm2d):
+        frozen = torchvision.ops.misc.FrozenBatchNorm2d(module.num_features, eps=module.eps)
+        frozen.weight.data.copy_(module.weight.data)
+        frozen.bias.data.copy_(module.bias.data)
+        frozen.running_mean.data.copy_(module.running_mean.data)
+        frozen.running_var.data.copy_(module.running_var.data)
+        return frozen
+    for name, child in module.named_children():
+        module.add_module(name, _freeze_batchnorm(child))
+    return module
+
+
+class TactileImageEncoder(nn.Module):
+    """ResNet-18 tactile encoder, after UniVTAC (``UniVTAC/encoder/network.py::Tactile``).
+
+    UniVTAC unifies heterogeneous *optical* tactile sensors (GelSight Mini, ViTAI GF225,
+    XenseWS) by pushing all of them through one ImageNet-initialised ResNet-18 with
+    ``num_classes=512``, i.e. the final FC is reused as an embedding head. It relies on the
+    backbone alone to abstract over gel colour, marker pattern and resolution; there is no
+    per-sensor adapter. We keep that choice — our sensors are equally heterogeneous and we
+    have no calibration data — but add an explicit view embedding downstream, because unlike
+    UniVTAC we must also cope with a *varying number* of sensors per dataset.
+
+    Note UniVTAC feeds raw ``[0, 1]`` images (no ImageNet normalisation) because its backbone
+    was re-trained from scratch on tactile data; we start from ImageNet weights, so we apply
+    ImageNet statistics instead.
+    """
+
+    IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_STD = (0.229, 0.224, 0.225)
+
+    def __init__(self, out_dim: int = 512, pretrained: bool = True):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(3, 32, 4, 2, 1),
-            nn.GroupNorm(8, 32),
-            nn.SiLU(),
-            nn.Conv2d(32, 64, 4, 2, 1),
-            nn.GroupNorm(8, 64),
-            nn.SiLU(),
-            nn.Conv2d(64, 128, 4, 2, 1),
-            nn.GroupNorm(8, 128),
-            nn.SiLU(),
-            nn.Conv2d(128, out_dim, 3, 2, 1),
-        )
+        import torchvision
+
+        weights = None
+        if pretrained:
+            try:
+                weights = torchvision.models.ResNet18_Weights.IMAGENET1K_V1
+            except Exception:  # offline / older torchvision
+                weights = None
+        try:
+            net = torchvision.models.resnet18(weights=weights)
+        except Exception:
+            net = torchvision.models.resnet18(weights=None)
+        # Frozen BatchNorm, as UniVTAC does when it plugs the encoder into the policy
+        # (`policy/ACT/detr/models/backbone.py`). Here it is not optional: the number of
+        # tactile pads varies per sample, so the effective BN batch size is data dependent
+        # and would make the features jitter with the mixture composition.
+        net = _freeze_batchnorm(net)
+
+        self.stem = nn.Sequential(net.conv1, net.bn1, net.relu, net.maxpool)
+        self.layers = nn.Sequential(net.layer1, net.layer2, net.layer3, net.layer4)
+        self.proj = nn.Linear(512, out_dim) if out_dim != 512 else nn.Identity()
         self.norm = nn.LayerNorm(out_dim)
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """``(B, V, 3, H, W)`` uint8 -> ``(B, V, out_dim)``."""
+        self.register_buffer("mean", torch.tensor(self.IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("std", torch.tensor(self.IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
+
+    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(B, V, 3, H, W)`` uint8 -> per-view embedding ``(B, V, out_dim)`` and feature map."""
         b, v = images.shape[:2]
-        x = images.reshape(b * v, *images.shape[2:]).to(dtype=self.net[0].weight.dtype)
-        x = x / 127.5 - 1.0
+        dtype = self.proj.weight.dtype if isinstance(self.proj, nn.Linear) else self.norm.weight.dtype
+        x = images.reshape(b * v, *images.shape[2:]).to(dtype=torch.float32) / 255.0
+        x = ((x - self.mean) / self.std).to(dtype)
+        feat_map = self.layers(self.stem(x))
+        pooled = F.adaptive_avg_pool2d(feat_map, 1).flatten(1)
+        emb = self.norm(self.proj(pooled))
+        return emb.view(b, v, -1), feat_map
+
+
+class TactileReconHead(nn.Module):
+    """Reconstructs the tactile image from its embedding.
+
+    UniVTAC pretrains its encoder with MSE reconstruction of the gel image plus marker
+    positions, depth and contact pose. Those three extra targets only exist in simulation, so
+    for real sensors we keep the one head whose supervision is always available. The point is
+    not the reconstruction itself but that the tactile features are shaped by an objective of
+    their own instead of being dragged around by the contrastive gradient.
+    """
+
+    def __init__(self, in_dim: int, out_size: int = 28):
+        super().__init__()
+        self.out_size = out_size
+        self.fc = nn.Linear(in_dim, 256 * 7 * 7)
+        self.net = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, 4, 2, 1),
+            nn.GroupNorm(8, 128),
+            nn.SiLU(),
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),
+            nn.GroupNorm(8, 64),
+            nn.SiLU(),
+            nn.Conv2d(64, 3, 3, 1, 1),
+        )
+
+    def forward(self, emb: torch.Tensor) -> torch.Tensor:
+        x = self.fc(emb).view(-1, 256, 7, 7)
         x = self.net(x)
-        x = F.adaptive_avg_pool2d(x, 1).flatten(1)
-        return self.norm(x).view(b, v, -1)
+        if x.shape[-1] != self.out_size:
+            x = F.interpolate(x, size=(self.out_size, self.out_size), mode="bilinear", align_corners=False)
+        return x
 
 
 class PhysicalEncoder(nn.Module):
@@ -344,12 +477,20 @@ class PhysicalEncoder(nn.Module):
         self.state_proj = nn.Linear(self.state_dim * 2, dim)
         self.action_proj = nn.Linear(self.group_size * self.action_dim * 2, dim)
         self.signal_proj = nn.Linear(self.signal_dim * 2, dim)
-        self.tactile_cnn = TactileImageEncoder(config.tactile_feat_dim)
+        self.tactile_cnn = TactileImageEncoder(config.tactile_feat_dim, config.tactile_pretrained)
         self.tactile_img_proj = nn.Linear(config.tactile_feat_dim, dim)
+        self.tactile_recon = (
+            TactileReconHead(config.tactile_feat_dim, config.tactile_recon_size)
+            if config.tactile_recon_weight > 0
+            else None
+        )
 
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
         self.modality_embed = nn.Embedding(5, dim)
         self.group_pos_embed = nn.Embedding(self.num_groups, dim)
+        # Which finger/pad a tactile token came from. UniVTAC has no such embedding because it
+        # always sees a fixed sensor set; our datasets ship 0, 1, 4 or 6 pads.
+        self.tactile_view_embed = nn.Embedding(config.max_tactile_views, dim)
         self.sample_rate_embed = nn.Embedding(64, dim)
         # Learned stand-ins used when a modality is absent or dropped.
         self.missing_embed = nn.Embedding(5, dim)
@@ -437,26 +578,55 @@ class PhysicalEncoder(nn.Module):
         signal_token = (signal_token + mod[self.MOD_TAC_SIG]).unsqueeze(1)
 
         # -- tactile images ------------------------------------------------
+        # One token per pad rather than a single pooled token: pads touch different parts of
+        # the object and averaging them destroys exactly the contact pattern we want. The zero
+        # initialised gate, the modality dropout and the reduced tactile learning rate are what
+        # stop these extra tokens from taking over.
+        num_views = tac_images.shape[1]
         any_view = (tac_img_mask.sum(dim=-1, keepdim=True) > 0).to(dtype)
         keep_tac_img = self._maybe_drop(any_view, self.config.modality_dropout_tactile)
-        if bool(any_view.any()):
-            view_feats = self.tactile_cnn(tac_images)
-            denom = tac_img_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
-            pooled = (view_feats * tac_img_mask.unsqueeze(-1)).sum(dim=1) / denom
-            img_token = self.tactile_img_proj(pooled)
+        recon_loss = None
+        # Only the pads that actually exist are pushed through the CNN. Most batches contain a
+        # handful of tactile samples among 256, so encoding the zero-filled placeholders would
+        # waste almost all of the ResNet's compute (and pollute the reconstruction target).
+        flat_valid = tac_img_mask.reshape(-1) > 0
+        if bool(flat_valid.any()):
+            flat_images = tac_images.reshape(b * num_views, *tac_images.shape[2:])
+            valid_feats = self.tactile_cnn(flat_images[flat_valid].unsqueeze(1))[0].squeeze(1)
+            feat_dim = valid_feats.shape[-1]
+            view_feats = torch.zeros(b * num_views, feat_dim, device=device, dtype=valid_feats.dtype)
+            view_feats = view_feats.index_put((flat_valid.nonzero(as_tuple=True)[0],), valid_feats)
+            img_tokens = self.tactile_img_proj(view_feats.view(b, num_views, feat_dim))
+            if self.tactile_recon is not None and self.training:
+                recon_loss = self._tactile_recon_loss(valid_feats, flat_images[flat_valid])
         else:
-            img_token = torch.zeros(b, self.config.hidden_dim, device=device, dtype=dtype)
-        img_token = torch.tanh(self.tactile_image_gate).to(dtype) * img_token
-        img_token = keep_tac_img * img_token + (1 - keep_tac_img) * missing[self.MOD_TAC_IMG]
-        img_token = (img_token + mod[self.MOD_TAC_IMG]).unsqueeze(1)
+            img_tokens = torch.zeros(b, num_views, self.config.hidden_dim, device=device, dtype=dtype)
+
+        img_tokens = torch.tanh(self.tactile_image_gate).to(dtype) * img_tokens
+        # A pad that this dataset does not have is replaced by the learned "missing" token, so
+        # a 4-pad dataset and a 0-pad dataset produce sequences of the same shape.
+        view_keep = (keep_tac_img * tac_img_mask).unsqueeze(-1)
+        img_tokens = view_keep * img_tokens + (1 - view_keep) * missing[self.MOD_TAC_IMG]
+        view_ids = torch.arange(num_views, device=device)
+        img_tokens = (
+            img_tokens + self.tactile_view_embed(view_ids).to(dtype).unsqueeze(0) + mod[self.MOD_TAC_IMG]
+        )
 
         # -- transformer ---------------------------------------------------
         cls = (self.cls_token.to(dtype).expand(b, -1, -1) + mod[self.MOD_CLS])
-        tokens = torch.cat([cls, state_token, action_tokens, signal_token, img_token], dim=1)
+        tokens = torch.cat([cls, state_token, action_tokens, signal_token, img_tokens], dim=1)
         for block in self.blocks:
             tokens = block(tokens)
 
-        return self.out_proj(self.out_norm(tokens[:, 0]))
+        return self.out_proj(self.out_norm(tokens[:, 0])), recon_loss
+
+    def _tactile_recon_loss(self, valid_feats, valid_images) -> torch.Tensor:
+        """MSE between the decoded and the true tactile image (UniVTAC's `rgb` head)."""
+        pred = self.tactile_recon(valid_feats).float()
+        size = self.config.tactile_recon_size
+        target = valid_images.float() / 255.0
+        target = F.interpolate(target, size=(size, size), mode="bilinear", align_corners=False)
+        return F.mse_loss(pred, target)
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +648,28 @@ class RoboContrast(PreTrainedPolicy):
 
     # -- PreTrainedPolicy API ---------------------------------------------
     def get_optim_params(self):
-        return [p for p in self.parameters() if p.requires_grad]
+        """Two groups: the tactile CNN gets a reduced learning rate.
+
+        UniVTAC gives its tactile backbone its own ``lr_tactile_backbone`` group. Here the
+        motivation is sharper: the ResNet-18 arrives ImageNet-pretrained and is by far the
+        highest-capacity-per-token module on the physical side, so at a shared learning rate
+        it converges first and the contrastive loss learns to read tactile and ignore the
+        action chunk.
+        """
+        tactile_params, other_params = [], []
+        tactile_prefix = ("physical_encoder.tactile_cnn.", "physical_encoder.tactile_recon.")
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            (tactile_params if name.startswith(tactile_prefix) else other_params).append(param)
+        groups = [{"params": other_params}]
+        if tactile_params:
+            # LambdaLR captures each group's `lr` as its `initial_lr` and scales it by the same
+            # schedule, so a per-group lr survives warmup and cosine decay.
+            groups.append(
+                {"params": tactile_params, "lr": self.config.optimizer_lr * self.config.tactile_lr_scale}
+            )
+        return groups
 
     def reset(self):
         self._queues = {"action": deque(maxlen=self.config.n_action_steps)}
@@ -491,9 +682,9 @@ class RoboContrast(PreTrainedPolicy):
         emb = self.perception_encoder(batch["image_t0"], batch["image_t1"], batch["task"])
         return F.normalize(emb.float(), dim=-1)
 
-    def encode_physical(self, batch) -> torch.Tensor:
-        emb = self.physical_encoder(batch)
-        return F.normalize(emb.float(), dim=-1)
+    def encode_physical(self, batch) -> tuple[torch.Tensor, torch.Tensor | None]:
+        emb, recon_loss = self.physical_encoder(batch)
+        return F.normalize(emb.float(), dim=-1), recon_loss
 
     # -- loss --------------------------------------------------------------
     def _false_negative_mask(self, episode_uid, frame_index, all_episode_uid, all_frame_index):
@@ -510,7 +701,7 @@ class RoboContrast(PreTrainedPolicy):
 
     def forward(self, batch, task_type: str = "train_contrastive", step: int = 0):
         perception = self.encode_perception(batch)
-        physical = self.encode_physical(batch)
+        physical, tactile_recon = self.encode_physical(batch)
 
         rank, world_size = _rank_world()
         local_bs = perception.shape[0]
@@ -536,14 +727,20 @@ class RoboContrast(PreTrainedPolicy):
 
         loss_p2r = F.cross_entropy(logits_p2r, labels)
         loss_r2p = F.cross_entropy(logits_r2p, labels)
-        loss = 0.5 * (loss_p2r + loss_r2p)
+        contrastive = 0.5 * (loss_p2r + loss_r2p)
+
+        loss = contrastive
+        recon_value = 0.0
+        if tactile_recon is not None and self.config.tactile_recon_weight > 0:
+            loss = loss + self.config.tactile_recon_weight * tactile_recon
+            recon_value = tactile_recon.item()
 
         with torch.no_grad():
             acc = (logits_p2r.argmax(dim=-1) == labels).float().mean()
             pos_sim = (perception * physical).sum(-1).mean()
         loss_dict = {
-            "contrastive_loss": loss.item(),
-            "recon_loss": 0.0,
+            "contrastive_loss": contrastive.item(),
+            "recon_loss": recon_value,
             "retrieval_acc": acc.item(),
             "pos_sim": pos_sim.item(),
             "logit_scale": logit_scale.item(),
