@@ -12,6 +12,10 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 # Default to whichever GPUs are actually free, since some of them usually belong to someone
 # else. Override explicitly with CUDA_VISIBLE_DEVICES=... when you want specific devices.
+#
+# WARNING for A/B runs: the global batch is micro_batch x num_gpus, so auto-selection makes
+# the effective batch depend on who else happens to be on the machine. Two runs you meant to
+# compare can silently differ by 2x. Always pin CUDA_VISIBLE_DEVICES when comparing runs.
 if [ -z "${CUDA_VISIBLE_DEVICES}" ]; then
     CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
         | awk -F', ' '$2 < 5000 {printf "%s%s", sep, $1; sep=","}')
