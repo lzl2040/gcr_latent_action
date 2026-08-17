@@ -382,3 +382,105 @@ watch: it is only above that line that the queries are carrying real motion rath
 predictor learning the dataset's average frame. In the full run `precon` reaches 0.087,
 comfortably below the ~0.131 reference, so the objective does become non-trivial — but this
 probe is the right check to repeat on any future change to the predictor.
+
+## 8. Reading the physical modalities over the window
+
+### 8.1 What was wrong
+Only the action chunk was read over `[t, t+H]`. State, tactile signal and tactile images were
+all sampled at `t` alone, so the physical side described an *instant* while the perception side
+described an *interval* — and the whole objective is to align the two.
+
+For tactile this was close to a bug rather than a tuning choice. Tactile earns its place by
+reporting contact events — grasp closure, slip, impact — and a contact is something that
+*happens during* the window. If the grasp closes at `t+8`, the frame at `t` shows no contact at
+all, so the most informative signal the sensor produces was systematically invisible.
+
+### 8.2 How far each modality is now read
+Decided by what it costs to read, since the pipeline is bound by a spinning disk:
+
+| modality | storage | frames read | tokens |
+| --- | --- | --- | --- |
+| action | parquet | 16 | 8 |
+| state | parquet | 16 | 8 |
+| tactile signal | parquet | `t`, `t+H` | 1 |
+| tactile image | **video** | `t`, `t+H` | 4 |
+
+State is a parquet column in the same row group as the action, so the full chunk is nearly
+free, and it is worth having on its own merits: the action chunk is what was *commanded*, the
+state trajectory is what actually *happened*, and the two diverge exactly where the difference
+becomes visible. Tactile is read at the two ends only because tactile cameras are video and
+decoding 16 frames × 4 pads is precisely where throughput is already constrained; two frames
+catch "before contact → after contact" at 2× the decode cost instead of 16×.
+
+Both tactile streams fold their frame pair into their *existing* token count via
+`[feat_t, feat_t1 - feat_t]`. The difference term is the point, and holding the token count
+fixed stops tactile growing from 36% to 50% of the content tokens at the action chunk's
+expense. State shares the action's positional embedding so group *i* of each covers the same
+frames. Sequence 15 → 22 tokens; physical branch 197.1M → 197.8M; 13.4 → 20 GB per GPU at
+global batch 512; 2.14 → 2.17 s/step.
+
+Verified at random mid-episode frames — state drift 0.31–0.58, tactile image |t1−t0| 0.49–2.74
+on a 0–255 scale, tactile signal delta 0.83. All of these read zero at *episode starts*, where
+nothing has moved yet; that is a trap worth remembering when debugging window reads, because a
+failed window read is silent (a single frame is broadcast across the chunk rather than raising).
+
+### 8.3 The measurement problem — the main finding
+**The aggregate retrieval accuracy cannot resolve a change of this size at ~1000 steps.**
+
+Two runs of *identical code with the same seed* were compared:
+
+| steps | run A | run B | mean \|difference\| |
+| --- | --- | --- | --- |
+| 500–800 | 0.101 | 0.106 | 0.011 |
+| 800–1060 | 0.235 | 0.182 | **0.055** |
+
+A 0.055 spread between two runs of the same code is as large as any difference measured
+*between* code versions (the windowed delta against the §7 baseline was −0.079 for one run and
+−0.015 for the other). Nondeterminism in dataloader worker ordering and video decoding changes
+which datasets land in which batch, and batch composition dominates in-batch retrieval
+accuracy. Any conclusion drawn from a single run at this horizon — in either direction — is
+noise. This invalidates the "0.271 → 0.302" reading that a single step at 1060 initially
+suggested.
+
+The metric is also **structurally blind to tactile**: the three tactile datasets are 2.7% of
+`debug_research_data` (0.0036 + 0.0178 + 0.0058, against fractal's 0.42 and YAM's 0.53). Even
+a change that doubled tactile retrieval would move the headline number by about a point.
+
+Hence `tactile_hits` / `tactile_rows` (§8.4), logged as counts rather than a ratio because most
+batches contain no tactile at all and averaging a per-step ratio would fold in zeros meaning
+"nothing to measure" rather than "got it wrong".
+
+### 8.4 What can be said
+Tactile-conditional retrieval accuracy, summed over windows (chance = 1/512 = 0.00195):
+
+| steps | hits / rows | conditional acc | aggregate acc |
+| --- | --- | --- | --- |
+| 0–300 | 0.8 / 111.8 | 0.0072 | 0.013 |
+| 300–600 | 1.5 / 117.1 | 0.0128 | 0.055 |
+| 600–900 | 4.2 / 95.7 | 0.0439 | 0.134 |
+| 900–1200 | 8.9 / 112.3 | **0.0793** | 0.238 |
+
+The tactile path does learn — 40× chance by step 1200 — but the §7 baseline predates the metric,
+so there is no A/B here yet.
+
+The gates are a partial exception, being far more reproducible than accuracy:
+
+| gate | noise floor (run A vs B) | effect vs §7 baseline | verdict |
+| --- | --- | --- | --- |
+| `tsig` | 0.00000 | 0.00486 | above noise |
+| `timg` | 0.00436 | 0.00311 | **within noise** |
+
+So the tactile *image* gate's apparent 3.6× faster opening is not a real result. The tactile
+*signal* gate genuinely differs, but its magnitude is *smaller* than the baseline's
+(0.0094 vs 0.0142), which does not support a simple "the new input is more useful" story.
+
+### 8.5 Verdict and what is actually needed
+The change is kept: it is principled (a contact that occurs mid-window is unobservable at `t`),
+cheap (+0.7M parameters, +1.5% step time), and shows no harm above the noise floor. But its
+benefit is **unproven at this horizon**, and honestly cannot be proven with the current tooling.
+
+What would settle it is a **fixed held-out evaluation set** scored at checkpoints: same frames,
+same batch composition, every time. That removes batch-composition variance entirely and would
+make differences of 0.01 legible where 0.055 is currently invisible. Until that exists, prefer
+comparing gate trajectories and tactile-conditional counts over aggregate accuracy, and treat
+any single-step reading as meaningless.
