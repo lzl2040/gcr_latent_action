@@ -95,6 +95,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # this window is exactly what the action chunk is supposed to explain.
         self.frame_horizon = getattr(policy_cfg, "frame_horizon", None) or self.chunk_size
         self.tactile_img_size = getattr(policy_cfg, "tactile_img_size", 64)
+        self.tactile_dead_std = getattr(policy_cfg, "tactile_dead_std", 0.002)
         self.max_tactile_views = min(getattr(policy_cfg, "max_tactile_views", MAX_TACTILE_VIEWS), MAX_TACTILE_VIEWS)
         self.use_wrist_image = getattr(policy_cfg, "use_wrist_image", False)
 
@@ -595,8 +596,23 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         return sensor_id, mean, std
 
     def _build_tactile_images(self, item, spec):
-        """``(V, 2, 3, S, S)``: each pad at ``t`` and at ``t + horizon``."""
+        """``(V, 2, 3, S, S)``: each pad at ``t`` and at ``t + horizon``.
+
+        Pads whose frames carry no spatial structure are masked out here. A large share of our
+        tactile pixels are dead: ``sharpa``'s six pads are blank 38-100% of the time and
+        ``RDP_Bimanual``'s right pad is constant for its whole file (measured distributions in
+        ``doc/results.md`` §10.5). A constant image is not a cheap input -- it costs a CNN pass
+        and a physical-sequence token, it is a trivially satisfiable reconstruction target, and
+        it teaches the encoder that "tactile present" often means "tactile says nothing".
+
+        The test is the *spatial* std within each channel, not the std over the whole frame: a
+        pad that is uniformly some non-black colour is spatially dead but has a non-zero global
+        std, so a global test would let it through. A pad is dropped only when **both** frames
+        are flat -- one flat and one live is a contact onset or release, which is exactly the
+        kind of event this branch exists to capture.
+        """
         size = self.tactile_img_size
+        dead_std = self.tactile_dead_std
         views = torch.zeros(self.max_tactile_views, 2, 3, size, size, dtype=torch.uint8)
         mask = torch.zeros(self.max_tactile_views, dtype=torch.float32)
         for slot, key in enumerate(tactile_image_keys(spec)[: self.max_tactile_views]):
@@ -612,6 +628,12 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 frame.float(), size=(size, size), mode="bilinear", align_corners=False
             )
             views[slot] = frame.clamp(0, 255).to(torch.uint8)
+            if dead_std > 0:
+                # Scale to [0, 1] so the threshold is expressed in the same units as the
+                # measured distributions; one 8-bit grey level is 1/255 = 0.0039.
+                spatial_std = (frame / 255.0).reshape(2, 3, -1).std(dim=-1).max()
+                if spatial_std.item() < dead_std:
+                    continue
             mask[slot] = 1.0
         return views, mask
 

@@ -171,13 +171,30 @@ dataset[(ds_idx, frame_idx)] # 显式指定数据集与帧，供 ContrastiveBatc
 | `tactile_signal` | `(16, 32)` float32 | 低维触觉读数，整个窗口 |
 | `tactile_signal_mask` | `()` float32 | 标量，1 表示这条样本有触觉信号 |
 | `tactile_image` | `(6, 2, 3, S, S)` uint8 | 触觉相机，6 路 × 2 帧，槽位对齐，缺的补零。`S` 由 `policy.tactile_img_size` 决定：ResNet-18 用 112，FTP-1 塔强制 224 |
-| `tactile_image_mask` | `(6,)` float32 | 逐路有效性 |
+| `tactile_image_mask` | `(6,)` float32 | 逐路有效性。除了"这一路不存在"之外，**空间方差≈0 的 pad 也会被置 0**，见下 |
 | `tactile_sensor_id` | `(6,)` int64 | 每一路对应哪种物理传感器（索引到 `FTP1_SENSOR_NAMES`），`-1` 表示该槽位没有 pad |
 | `tactile_img_mean` | `(6, 3)` float32 | 每一路的逐通道 z-score 均值，见下 |
 | `tactile_img_std` | `(6, 3)` float32 | 每一路的逐通道 z-score 标准差 |
 
 后三个 key 只有 `policy.tactile_backbone="ftp1"` 会用到，但**无条件产出**，这样两种触觉
 backbone 共用同一份 batch schema，切换时不需要动 collate。
+
+关于死 pad 掩码：我们的触觉像素里大约**一半是死的**——`sharpa` 六路里有 38%~100% 的帧是
+常数图，`RDP_Bimanual` 右侧 pad 整个文件恒定（分布见 `doc/results.md` §10.5/§11）。所以
+`_build_tactile_images` 在 load 时会把这种 pad 的 mask 直接置 0，阈值是
+`policy.tactile_dead_std`（默认 0.002，[0,1] 尺度，8bit 一个灰阶是 0.0039；设 0 可关闭）。
+
+两个实现细节容易做错：
+- 判据是**逐通道的空间 std**（`frame.reshape(2,3,-1).std(-1).max()`），不是整帧 std。一个
+  恒定但非黑的彩色 pad 在空间上是死的，但跨通道算整帧 std 会得到非零值，从而漏判。
+- 只有 **t 和 t+H 两帧都平**才丢弃。一帧平一帧有内容是接触的建立/断开，正是这一支要抓的
+  事件，所以帧轴上取 `max` 而不是 `min`。
+
+实测保留率：D-WHEEL 1.000（健康数据完全不受影响）、sharpa 0.414、RDP_Bimanual 0.500。
+模型侧不需要改动——编码器本来就只挑 mask 非零的 pad 过 CNN，因此这还顺带省了算力。但注意
+`PhysicalEncoder` 里那个"整个 batch 没有触觉时保留一行 dummy"的保护现在是**关键路径**：
+掩码之后"全 batch 无有效触觉"从罕见变成常见，去掉它会让 ZeRO-2 的梯度规约表变成数据相关，
+进而 NCCL 超时。
 
 关于归一化统计量：FTP-1 的统计量是**按数据集**而不是按传感器算的——同一个 GelSight Mini
 在 `Unit` 里通道均值是 -0.18，在 `RDP_Bimanual` 里是 -0.85，因为胶垫颜色、打光和相机增益

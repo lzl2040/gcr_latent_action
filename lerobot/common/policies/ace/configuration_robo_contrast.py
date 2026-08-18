@@ -88,6 +88,11 @@ class RoboContrastConfig(PreTrainedConfig):
     # resolution its positional embedding was trained at.
     tactile_img_size: int = 112
     tactile_feat_dim: int = 512
+    # A tactile pad whose per-channel *spatial* std stays below this (on a [0, 1] scale, so one
+    # 8-bit grey level is 0.0039) at both `t` and `t+H` is treated as absent rather than as a
+    # blank reading. Roughly half of our tactile pad-frames are dead -- see `doc/results.md`
+    # §10.5. Set to 0 to disable the check.
+    tactile_dead_std: float = 0.002
     # Temporal distance (in frames) between the two perception frames. Defaults to chunk_size.
     frame_horizon: int | None = None
     use_wrist_image: bool = False

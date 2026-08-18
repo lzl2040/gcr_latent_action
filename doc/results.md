@@ -713,8 +713,7 @@ RH20TCfg5Franka 0.029, RDP_Bimanual 0.002), not the 2.7% assumed in §9. Any arg
 file that leans on tactile being a negligible slice needs redoing.
 
 The obvious fix — set `mask=0` for a pad whose spatial std is ~0, so the model stops spending
-tokens on a constant image — is about ten lines and **is not implemented**. It would need the
-usual ZeRO-2 gradient-path check.
+tokens on a constant image — **is now implemented**; see §10.9.
 
 Related, unresolved: our `RDP_Bimanual/tactile_left_0` measures mean (0.019, 0.014, 0.086),
 which matches the **RDP** domain's MCTac (0.039, 0.053, 0.123) almost exactly and matches *none*
@@ -786,3 +785,74 @@ The broader lesson, and the second time this file has recorded it: pretrained we
 architecturally perfect (same token count, same 512-d output, normalisation stats covering our
 exact datasets) can still lose. The fit of the artefact says nothing about whether it helps —
 only the training objective does.
+
+## 11. Masking dead tactile pads
+
+§10.5 found that roughly half our tactile pad-frames carry no signal at all. A constant image
+is not a free input: it costs a CNN pass and a physical-sequence token, it is a trivially
+satisfiable reconstruction target, and it trains the encoder to expect that "tactile present"
+usually means "tactile says nothing". `MultiModalContrastiveDataset` now drops those pads at
+load time by zeroing `tactile_image_mask`, controlled by `policy.tactile_dead_std`.
+
+### 11.1 The threshold came from the measured distribution, not a guess
+
+Per-frame spatial std over 700 sampled items, on a [0, 1] scale (one 8-bit grey level = 0.0039):
+
+| dataset | slot | p05 | p25 | median | p95 |
+| --- | --- | --- | --- | --- | --- |
+| D-WHEEL | 0–3 | 0.097–0.117 | 0.101–0.121 | 0.102–0.141 | 0.108–0.157 |
+| sharpa | 0 | 0.0000 | 0.0002 | 0.0228 | 0.2132 |
+| sharpa | 1 | 0.0000 | 0.0000 | 0.0123 | 0.2051 |
+| sharpa | 2 | 0.0000 | 0.0000 | 0.0000 | 0.0835 |
+| sharpa | 3 | 0.0000 | 0.0000 | 0.0078 | 0.2075 |
+| sharpa | 4 | 0.0000 | 0.0000 | 0.0073 | 0.1965 |
+| sharpa | 5 | 0.0000 | 0.0000 | 0.0000 | **0.0002** |
+| RDP_Bimanual | 0 / 1 | 0.1186 / 0.0000 | | | |
+
+The population is strongly bimodal and the gap is wide: dead frames sit at <=0.0002, live ones
+at >=0.09, and only ~11% of pad-frames fall anywhere between 0.001 and 0.05. **0.002** — half a
+grey level — sits inside that gap, so the threshold is not delicately placed.
+
+This also corrects §10.5 on one point. `sharpa` slot 2 is *not* dead everywhere: its p95 is
+0.0835, so it does have live frames. The earlier "100% dead" reading came from a single video
+file. Slot 5 is genuinely dead throughout (p95 = 0.0002).
+
+### 11.2 Two details that a naive implementation gets wrong
+
+**Test spatial std per channel, not the std of the whole frame.** A pad stuck at a uniform
+non-black colour is spatially dead but has a non-zero global std across the channel axis, so a
+global test would wave it through. The check is `frame.reshape(2, 3, -1).std(-1).max()`.
+
+**Drop a pad only when *both* frames are flat.** One flat and one live is a contact onset or
+release — precisely the event this branch exists to capture — so requiring both to be dead
+keeps it. Hence `max` over the frame axis rather than `min` or `any`.
+
+### 11.3 Verified
+
+Keep rates on real data, 700 sampled items, counting only slots that physically exist:
+
+| dataset | pad slots | kept | keep rate |
+| --- | --- | --- | --- |
+| D-WHEEL | 112 | 112 | **1.000** |
+| sharpa | 648 | 268 | 0.414 |
+| RDP_Bimanual | 2 | 1 | 0.500 |
+| total | 762 | 381 | 0.500 |
+
+The important row is D-WHEEL at 1.000: the threshold removes half of all tactile pads without
+touching the one dataset measured as healthy. The other two match their measured dead fractions.
+
+- `tactile_dead_std=0` is an exact no-op (keep rate 1.000 everywhere), so the old behaviour is
+  one flag away.
+- End-to-end smoke run on 2x A6000 is clean, loss descending normally, no errors.
+- **ZeRO-2 gradient path is invariant**: 610 parameters receive gradient both when every pad in
+  the batch is masked and when some are live, and the sets are identical. This matters more
+  than before — masking makes "no live tactile anywhere in this batch" a common event rather
+  than a rare one, so the pre-existing dummy-row guard in `PhysicalEncoder` is now load-bearing.
+  Do not remove it.
+
+No model change was needed: the encoder already selected only unmasked pads, so this rides on
+existing machinery and slightly *reduces* tactile CNN compute.
+
+Not yet measured: whether masking improves `contra_loss`. It should at least not hurt, and the
+compute saving is real, but the honest statement is that this is a correctness fix justified by
+the input distribution rather than a result validated against the training objective.
