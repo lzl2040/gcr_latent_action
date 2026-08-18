@@ -954,3 +954,34 @@ pixel-MAE proxy, which §9 and §10.6 both show does not predict the training ob
 Not yet measured: whether this improves `contra_loss`. The input-side argument is strong
 (more visual change *and* more valid pairs, at no extra cost), but that is a statement about
 the inputs, not a result against the objective.
+
+### 12.5 The grid did not reach `t+H` (found while explaining it)
+
+Writing up how the window works surfaced an off-by-two. The offsets were built as
+`round(i * H / chunk_size)`, which spans the **half-open** `[0, H)`: at 30 fps the physical
+grid stopped at frame 46 while the image pair was `(0, 48)`, at 15 fps it stopped at 23 of 24,
+and at 3 fps it happened to land on 8. So the physical window described slightly *less* change
+than the perception side saw, by a margin that varied per dataset -- and every shape still
+matched, so nothing complained. That is precisely the failure mode §12.3 already lists three
+examples of.
+
+Fixed to `round(i * H / (chunk_size - 1))`, spanning the closed `[0, H]`. Verified that
+`max(offsets) == H` and `len(offsets) == chunk_size` for fps in {0.5, 1, 3, 10, 15, 30, 60,
+120}, and at runtime that the chunk grid and the image pair now both end on the same frame for
+all seven datasets. The loss curve is unchanged to 3 decimals over the first 40 steps, which is
+expected rather than suspicious: `H` itself did not move, so the image pair is bit-identical
+and only intermediate physical samples shifted by a frame or two.
+
+Two guards added at the same time, both about *arbitrary* datasets rather than today's mixture:
+
+- **fps <= 0 or missing now raises** instead of dividing by zero and producing a degenerate grid.
+- **The clamp now warns.** The equal-duration guarantee only holds while `chunk_seconds * fps`
+  stays inside `[chunk_frames_min, chunk_frames_max]`, i.e. **fps in [5, 30]** at the current
+  settings. Outside it the clamp wins and the dataset silently stops sharing the mixture's
+  temporal receptive field -- 0.80 s at 60 fps, 0.40 s at 120 fps, 8.0 s at 1 fps. It is a
+  deliberate cost cap (max bounds the rows read, min protects short episodes), and fractal
+  already lives on it at 2.67 s, but it should be visible in the log rather than inferred.
+
+Also removed a duplicate fps source: the dataset loop derived the sampler's horizon from
+`info.json` while `_build_dataset` used `ds_meta.fps`. `_build_dataset` now returns the horizon
+it actually built the timestamps with, so the sampler cannot disagree with the loader.

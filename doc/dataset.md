@@ -123,7 +123,7 @@ dataset[(ds_idx, frame_idx)] # 显式指定数据集与帧，供 ContrastiveBatc
 
 ```
 H_ds  = clamp(round(chunk_seconds * fps), chunk_frames_min, chunk_frames_max)
-offsets = [round(i * H_ds / chunk_size) for i in range(chunk_size)]
+offsets = [round(i * H_ds / (chunk_size - 1)) for i in range(chunk_size)]
 ```
 
 原因是本 mixture 的 fps 跨度有 10 倍，而且**按采样权重看是双峰的**：fractal 占 34% 但只有
@@ -143,6 +143,9 @@ offsets = [round(i * H_ds / chunk_size) for i in range(chunk_size)]
 - **重采样是"最近帧"，不是时间插值。** 每个 offset 都是真实帧号，否则 `delta_timestamps`
   会向 loader 请求落在两帧之间的时间戳而触发容差报错。窗口短于 `chunk_size` 时 offset 重复，
   长于时则跨步——形状始终是 `(chunk_size, D)`，下游完全不用改。
+- **分母是 `chunk_size - 1`，即闭区间 `[0, H]`。** 用 `chunk_size` 会让物理网格**够不到**
+  `t+H`（30fps 下只到第 46 帧而图像对在第 48 帧），而且差多少还随数据集变化（fractal 正好
+  到 8、taco 只到 23），等于悄悄破坏"物理侧描述的正是感知侧看到的那段变化"这个前提。
 - **action 的时间戳必须显式覆盖。** `resolve_delta_timestamps` 是按 `action_delta_indices`
   生成连续帧的，不覆盖的话 action 会和 state / 图像对处在不同时间基上，而且形状还完全对得上，
   属于静默错位。

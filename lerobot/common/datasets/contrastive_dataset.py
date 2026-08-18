@@ -144,7 +144,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 state_dim=self._feature_dim(info, "observation.state"),
             )
 
-            dataset, ds_meta, img_keys = self._build_dataset(
+            dataset, ds_meta, img_keys, horizon_ds = self._build_dataset(
                 cfg, dataset_name, data_root, version, spec
             )
             if dataset is None:
@@ -159,8 +159,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             self.image_key_maps.append(img_keys)
             self.norm_stats.append(self._build_norm_stats(dataset, spec))
             self.episode_ranges.append(self._build_episode_ranges(dataset, version))
-            fps_ds = float(info.get("fps", 10) or 10)
-            _, horizon_ds = self._window_offsets(fps_ds)
+            # The horizon recorded here is the one ``_build_dataset`` actually read with, not a
+            # recomputation: the sampler trims episodes by it, so a second derivation from a
+            # second fps source could silently disagree with the window the loader used.
+            fps_ds = float(ds_meta.fps)
             self.frame_horizons.append(horizon_ds)
             logger.info(
                 "%s: fps=%g -> window %d frames (%.2fs), resampled to %d steps",
@@ -242,19 +244,47 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         of change depending on nothing but the recording rate.
 
         ``horizon`` raw frames are covered, then resampled onto the fixed ``chunk_size`` token
-        grid. Resampling is **nearest-frame**, not interpolation in time: every returned offset
-        is a real frame index, so ``delta_timestamps`` never asks the loader for a timestamp
-        that falls between two frames (which trips its tolerance check). When the window holds
-        fewer raw frames than ``chunk_size`` the offsets simply repeat, which is honest -- there
-        is no more information to be had -- and when it holds more they are strided.
+        grid. Two properties are deliberate:
+
+        * **Nearest-frame, not interpolation in time.** Every returned offset is a real frame
+          index, so ``delta_timestamps`` never asks the loader for a timestamp that falls
+          between two frames, which would trip its tolerance check. A window shorter than
+          ``chunk_size`` repeats offsets -- honest, there is no more information to be had --
+          and a longer one strides them.
+        * **The grid spans ``[0, horizon]`` inclusive**, so its last step lands exactly on the
+          frame the perception side uses as ``image_t1``. Dividing by ``chunk_size`` instead of
+          ``chunk_size - 1`` would stop the physical window short of the visual one (46 of 48
+          frames at 30 fps) and, worse, do so by a dataset-dependent amount, quietly breaking
+          the correspondence this whole design rests on.
+
+        The returned length is always ``chunk_size``, whatever the dataset, so the physical
+        token count never varies.
         """
         if self.frame_horizon_override is not None:
             horizon = int(self.frame_horizon_override)
         else:
-            horizon = int(round(self.chunk_seconds * float(fps)))
+            fps = float(fps or 0.0)
+            if not fps > 0:
+                raise ValueError(
+                    f"fps must be positive to derive a duration-based window, got {fps!r}. "
+                    "Set policy.frame_horizon to pin a fixed frame count instead."
+                )
+            exact = self.chunk_seconds * fps
+            horizon = int(round(exact))
             horizon = max(self.chunk_frames_min, min(self.chunk_frames_max, horizon))
+            # Outside [chunk_frames_min, chunk_frames_max] the clamp wins and the window is no
+            # longer `chunk_seconds` long, so datasets stop sharing a temporal receptive field.
+            # That is a deliberate cost cap, not a bug, but it should never be silent.
+            if abs(horizon - exact) > 0.5:
+                logger.warning(
+                    "fps=%g wants a %.1f-frame window for %.2fs but the clamp gives %d frames "
+                    "(%.2fs); this dataset does not share the mixture's temporal window. "
+                    "Widen chunk_frames_min/max if that matters.",
+                    fps, exact, self.chunk_seconds, horizon, horizon / fps,
+                )
         horizon = max(1, horizon)
-        offsets = [round(i * horizon / self.chunk_size) for i in range(self.chunk_size)]
+        denom = max(1, self.chunk_size - 1)
+        offsets = [round(i * horizon / denom) for i in range(self.chunk_size)]
         return offsets, horizon
 
     def _build_dataset(self, cfg, dataset_name, data_root, version, spec):
@@ -332,10 +362,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 dataset = LeRobotDatasetV30(repo_id, video_return_type="uint8", **common)
         except Exception as exc:  # noqa: BLE001 - a broken dataset must not kill the whole mixture
             logger.warning("Failed to open %s (%s): %s", dataset_name, data_root, exc)
-            return None, None, None
+            return None, None, None, None
 
         dataset.video_keys_to_decode = rgb_keys + tac_img_keys
-        return dataset, ds_meta, img_keys
+        return dataset, ds_meta, img_keys, horizon
 
     def _resolve_image_keys(self, dataset_name, dataset, ds_meta=None) -> dict:
         """Map the OXE ``primary``/``secondary``/``wrist`` roles onto real dataset keys."""
