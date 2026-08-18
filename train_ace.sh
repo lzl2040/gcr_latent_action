@@ -7,6 +7,9 @@
 #   bash train_ace.sh --job_name my_run --nnodes 2 --nproc_per_node 8 \
 #        --node_rank 0 --master_addr 10.0.0.1 --master_port 29500
 #
+# `--` 之后的参数原样透传给训练脚本，用来临时覆盖任何这里没显式暴露的配置：
+#   bash train_ace.sh --job_name my_run -- --policy.tactile_dropout=0.5
+#
 # 注意：`vla2root.json` 和 ds_zero2_contrast.json 都是按**相对路径**读的，所以这里先 cd 到
 # 仓库根目录，否则集群上从别的工作目录起任务会找不到数据集映射表。
 cd "$(dirname "$0")" || exit 1
@@ -46,11 +49,19 @@ CHUNK_SIZE=32
 GROUP_SIZE=4
 CHUNK_SECONDS=1.6
 
+# 触觉塔："resnet18"（从头学）或 "ftp1"（加载 FTP-1 预训练的 per-sensor tokenizer，冻结）。
+# 选 ftp1 时 FTP1_TACTILE_DIR 必须指向集群上 hpt_tokenizer/*.safetensors 所在目录，
+# 且 __post_init__ 会把触觉图像尺寸强制成 224。
+TACTILE_BACKBONE="resnet18"
+FTP1_TACTILE_DIR=""
+# `--` 之后收集到这里，原样透传给训练脚本
+EXTRA_ARGS=()
+
 # 路径（集群挂载）
 PARENT_DIR_V21="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
-PARENT_DIR_V30="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
+PARENT_DIR_V30="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30-0710/"
 # 逗号分隔的额外根目录，给不在上面两个挂载点里的数据集用（例如 OpenNeoData）
-PARENT_DIR_EXTRA=""
+PARENT_DIR_EXTRA="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
 PROCESSOR="/mnt/wangxiaofa/pt_weights/InternVL3_5-2B-HF/"
 VISION_MODEL="/mnt/wangxiaofa/pt_weights/dinov3-vitb16-pretrain-lvd1689m"
 TEXT_MODEL="/mnt/wangxiaofa/pt_weights/siglip2-base-patch16-224"
@@ -90,6 +101,8 @@ while [[ $# -gt 0 ]]; do
         --chunk_size) CHUNK_SIZE="$2"; shift 2 ;;
         --group_size) GROUP_SIZE="$2"; shift 2 ;;
         --chunk_seconds) CHUNK_SECONDS="$2"; shift 2 ;;
+        --tactile_backbone) TACTILE_BACKBONE="$2"; shift 2 ;;
+        --ftp1_tactile_dir) FTP1_TACTILE_DIR="$2"; shift 2 ;;
         --parent_dir_v21) PARENT_DIR_V21="$2"; shift 2 ;;
         --parent_dir_v30) PARENT_DIR_V30="$2"; shift 2 ;;
         --parent_dir_extra) PARENT_DIR_EXTRA="$2"; shift 2 ;;
@@ -99,6 +112,7 @@ while [[ $# -gt 0 ]]; do
         --log_dir) LOG_DIR="$2"; shift 2 ;;
         --output_dir) OUTPUT_DIR="$2"; shift 2 ;;
         --pre_path) PRETRAINED_PATH="$2"; shift 2 ;;
+        --) shift; EXTRA_ARGS=("$@"); break ;;
         *) echo "未知参数: $1"; exit 1 ;;
     esac
 done
@@ -106,6 +120,23 @@ done
 if [[ -z "$JOB_NAME" ]]; then
     echo "错误：必须指定 --job_name"
     exit 1
+fi
+
+# ftp1 触觉塔要读本地权重目录，而配置里的默认值是开发机路径，集群上不存在。
+# 与其等模型初始化到一半才炸，不如在这里就说清楚。
+TACTILE_ARGS=(--policy.tactile_backbone="$TACTILE_BACKBONE")
+if [[ "$TACTILE_BACKBONE" == "ftp1" ]]; then
+    if [[ -z "$FTP1_TACTILE_DIR" ]]; then
+        echo "错误：--tactile_backbone ftp1 必须同时指定 --ftp1_tactile_dir（存放 hpt_tokenizer/*.safetensors 的目录）"
+        exit 1
+    fi
+    if [[ ! -d "$FTP1_TACTILE_DIR" ]]; then
+        echo "错误：--ftp1_tactile_dir 不存在: ${FTP1_TACTILE_DIR}"
+        exit 1
+    fi
+    TACTILE_ARGS+=(--policy.ftp1_tactile_dir="$FTP1_TACTILE_DIR")
+elif [[ -n "$FTP1_TACTILE_DIR" ]]; then
+    echo "警告：--ftp1_tactile_dir 已忽略，因为 --tactile_backbone 是 ${TACTILE_BACKBONE}（只有 ftp1 会读它）"
 fi
 
 # ---------------------------------------------------------------- deepspeed 配置
@@ -141,6 +172,7 @@ torchrun \
     --policy.chunk_size=$CHUNK_SIZE \
     --policy.group_size=$GROUP_SIZE \
     --policy.chunk_seconds=$CHUNK_SECONDS \
+    "${TACTILE_ARGS[@]}" \
     --policy.scheduler_warmup_steps=$SCHEDULER_WARMUP_STEPS \
     --policy.scheduler_decay_steps=$SCHEDULER_DECAY_STEPS \
     --policy.scheduler_platform_steps=$SCHEDULER_PLATFORM_STEPS \
@@ -171,5 +203,6 @@ torchrun \
     --wandb.enable=true \
     --wandb.project="robo_contrast" \
     --job_name="$JOB_NAME" \
-    --weight_resume=false \
-    --resume=false
+    --weight_resume=true \
+    --resume=false \
+    "${EXTRA_ARGS[@]}"
