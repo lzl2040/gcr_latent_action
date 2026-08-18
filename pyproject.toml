@@ -31,7 +31,11 @@ classifiers=[
 ]
 dependencies = [
     "cmake>=3.29.0.1",
-    "datasets>=2.19.0",
+    # 4.0 把 `Sequence` 特征改名成 `List`，两边互不认：4.x 写出的 parquet 在 <4.0 下会以
+    # `TypeError: must be called with a dataclass type or instance` 炸掉（OpenNeo 的数据就是
+    # 这么写的，datasets_v30/io_utils.py 里的 _register_list_feature_alias 是单向补丁，只能让
+    # 3.x 读 4.x 的数据，反过来不行）。整个仓库的 v2.1 / v3.0 加载路径都建立在 3.x 上。
+    "datasets>=3.0.0,<4.0.0",
     "deepdiff>=7.0.1",
     "diffusers>=0.27.2",
     "draccus==0.10.0",
@@ -53,8 +57,12 @@ dependencies = [
     "pynput>=1.7.7",
     "pyzmq>=26.2.1",
     "rerun-sdk>=0.21.0",
+    # 数据集模块在 import 期就用它打印统计表（contrastive_dataset.py、lerobot_dataset.py 等）
+    "tabulate>=0.9.0",
     "termcolor>=2.4.0",
     "torch>=2.2.1",
+    # video_utils.py 会优先选 torchcodec 作为解码后端，训练脚本也显式传 --dataset.video_backend
+    "torchcodec>=0.2.0",
     "torchvision>=0.21.0",
     "wandb>=0.16.3",
     "zarr>=2.17.0",
@@ -67,7 +75,17 @@ dora = ["gym-dora @ git+https://github.com/dora-rs/dora-lerobot.git#subdirectory
 dynamixel = ["dynamixel-sdk>=3.7.31", "pynput>=1.7.7"]
 feetech = ["feetech-servo-sdk>=1.0.0", "pynput>=1.7.7"]
 intelrealsense = ["pyrealsense2>=2.55.1.6486 ; sys_platform != 'darwin'"]
-pi0 = ["transformers>=4.48.0"]
+# 感知<->物理对比预训练（robo_contrast，train_ace.sh / train_ace_local.sh）需要的额外依赖。
+# 为了让现有的 `pip install -e ".[pi0]"` 一条命令仍然够用，pi0 里也带上了同样的约束。
+contrast = [
+    # DINOv3 (`dinov3_vit`) 从 4.56.0 才进 transformers，更早的版本会直接不认识这个 model type
+    "transformers>=4.56.0",
+    # 训练脚本 dps_train_contrast.py 直接 import deepspeed，两个启动脚本也都走 deepspeed/ZeRO-2
+    "deepspeed>=0.14.0",
+    # tactile_backbone="ftp1" 时用它读 hpt_tokenizer/*.safetensors
+    "safetensors>=0.4.0",
+]
+pi0 = ["transformers>=4.56.0", "deepspeed>=0.14.0", "safetensors>=0.4.0"]
 pusht = ["gym-pusht>=0.1.5 ; python_version < '4.0'"]
 stretch = [
     "hello-robot-stretch-body>=0.7.27 ; python_version < '4.0' and sys_platform == 'linux'",
