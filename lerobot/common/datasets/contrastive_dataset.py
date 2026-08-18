@@ -91,9 +91,14 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         policy_cfg = cfg.policy
         self.chunk_size = policy_cfg.chunk_size
-        # Temporal gap (in frames) between the two perception frames. The visual change over
-        # this window is exactly what the action chunk is supposed to explain.
-        self.frame_horizon = getattr(policy_cfg, "frame_horizon", None) or self.chunk_size
+        # Temporal window, expressed in seconds and resolved to a raw frame count per dataset
+        # in ``_window_offsets``. ``frame_horizon`` overrides it with a fixed frame count.
+        self.chunk_seconds = getattr(policy_cfg, "chunk_seconds", 1.6)
+        self.chunk_frames_min = getattr(policy_cfg, "chunk_frames_min", 8)
+        self.chunk_frames_max = getattr(policy_cfg, "chunk_frames_max", 48)
+        self.frame_horizon_override = getattr(policy_cfg, "frame_horizon", None)
+        # Filled in per dataset as they are built, so the resolved windows can be logged.
+        self.frame_horizons: list[int] = []
         self.tactile_img_size = getattr(policy_cfg, "tactile_img_size", 64)
         self.tactile_dead_std = getattr(policy_cfg, "tactile_dead_std", 0.002)
         self.max_tactile_views = min(getattr(policy_cfg, "max_tactile_views", MAX_TACTILE_VIEWS), MAX_TACTILE_VIEWS)
@@ -154,6 +159,13 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             self.image_key_maps.append(img_keys)
             self.norm_stats.append(self._build_norm_stats(dataset, spec))
             self.episode_ranges.append(self._build_episode_ranges(dataset, version))
+            fps_ds = float(info.get("fps", 10) or 10)
+            _, horizon_ds = self._window_offsets(fps_ds)
+            self.frame_horizons.append(horizon_ds)
+            logger.info(
+                "%s: fps=%g -> window %d frames (%.2fs), resampled to %d steps",
+                dataset_name, fps_ds, horizon_ds, horizon_ds / fps_ds, self.chunk_size,
+            )
             kept_weights.append(weight)
 
         if not self.datasets:
@@ -221,6 +233,30 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             return None
         return int(np.prod(shape))
 
+    def _window_offsets(self, fps: float) -> tuple[list[int], int]:
+        """``(frame_offsets, horizon)`` for one dataset, given its fps.
+
+        The window is a fixed *duration*, not a fixed frame count. A fixed frame count means
+        something different on every dataset -- 16 frames is 5.3 s at fractal's 3 fps and 0.53 s
+        at 30 fps -- so the perception side was being asked to explain wildly different amounts
+        of change depending on nothing but the recording rate.
+
+        ``horizon`` raw frames are covered, then resampled onto the fixed ``chunk_size`` token
+        grid. Resampling is **nearest-frame**, not interpolation in time: every returned offset
+        is a real frame index, so ``delta_timestamps`` never asks the loader for a timestamp
+        that falls between two frames (which trips its tolerance check). When the window holds
+        fewer raw frames than ``chunk_size`` the offsets simply repeat, which is honest -- there
+        is no more information to be had -- and when it holds more they are strided.
+        """
+        if self.frame_horizon_override is not None:
+            horizon = int(self.frame_horizon_override)
+        else:
+            horizon = int(round(self.chunk_seconds * float(fps)))
+            horizon = max(self.chunk_frames_min, min(self.chunk_frames_max, horizon))
+        horizon = max(1, horizon)
+        offsets = [round(i * horizon / self.chunk_size) for i in range(self.chunk_size)]
+        return offsets, horizon
+
     def _build_dataset(self, cfg, dataset_name, data_root, version, spec):
         repo_id = f"bulldog-{dataset_name}"
         meta_cls = LeRobotDatasetMetadata if version == "v2.1" else LeRobotDatasetMetadataV30
@@ -250,7 +286,17 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # the latter. The tactile signal is worth having at full rate for a different reason --
         # a contact transient is a few frames wide, so two samples can straddle it and see
         # almost nothing of it.
-        chunk_stamps = [i / fps for i in range(self.chunk_size)]
+        #
+        # All three read the *same* grid, which is the duration-based one from
+        # ``_window_offsets``. The action keys are overridden here rather than left to
+        # ``resolve_delta_timestamps``: that helper builds a consecutive-frame chunk from
+        # ``action_delta_indices``, which would put the action on a different time base to the
+        # state and the image pair it is supposed to explain.
+        offsets, horizon = self._window_offsets(fps)
+        chunk_stamps = [o / fps for o in offsets]
+        for key in wanted_action_keys:
+            if key in ds_meta.features:
+                delta_timestamps[key] = chunk_stamps
         for key in {src for src, *_ in spec.get("state", [])}:
             if key in ds_meta.features:
                 delta_timestamps[key] = chunk_stamps
@@ -265,7 +311,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # at t+8, the frame at t shows no contact at all). But decoding 16 frames x 4 pads on a
         # spinning disk is exactly where this pipeline is already bottlenecked, so two frames
         # buy "before contact -> after contact" at 2x the decode cost instead of 16x.
-        pair_stamps = [0.0, self.frame_horizon / fps]
+        pair_stamps = [0.0, horizon / fps]
         for key in rgb_keys:
             if key in ds_meta.video_keys:
                 delta_timestamps[key] = pair_stamps

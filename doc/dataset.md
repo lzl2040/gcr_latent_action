@@ -111,11 +111,46 @@ dataset[(ds_idx, frame_idx)] # 显式指定数据集与帧，供 ContrastiveBatc
 
 | 模态 | 存储 | 读取范围 | 理由 |
 | --- | --- | --- | --- |
-| action | parquet | 16 帧 | 同 row group，几乎免费 |
-| state | parquet | 16 帧 | 同上 |
-| 触觉信号 | parquet | 16 帧 | 同上；且接触瞬变只有几帧宽，两端采样会漏掉 |
-| 触觉图像 | **视频** | `t`, `t+H` | 16 帧 × 4 路解码正好砸在磁盘瓶颈上 |
+| action | parquet | 整个窗口 | 同 row group，几乎免费 |
+| state | parquet | 整个窗口 | 同上 |
+| 触觉信号 | parquet | 整个窗口 | 同上；且接触瞬变只有几帧宽，两端采样会漏掉 |
+| 触觉图像 | **视频** | `t`, `t+H` | 多帧 × 6 路解码正好砸在磁盘瓶颈上 |
 | RGB | **视频** | `t`, `t+H` | 感知侧本来就只需要两端 |
+
+#### 窗口是"时长"，不是"帧数"
+
+`H` **按数据集从时长换算**，不是固定帧数：
+
+```
+H_ds  = clamp(round(chunk_seconds * fps), chunk_frames_min, chunk_frames_max)
+offsets = [round(i * H_ds / chunk_size) for i in range(chunk_size)]
+```
+
+原因是本 mixture 的 fps 跨度有 10 倍，而且**按采样权重看是双峰的**：fractal 占 34% 但只有
+3 fps、平均 episode 才 43 帧，其余多数是 30 fps。固定 16 帧在 fractal 上是 5.3 秒、在 30fps
+数据上只有 0.53 秒——同一个数字在不同数据集上物理含义差 10 倍，纯属录制帧率的意外。
+
+当前默认（`chunk_seconds=1.6`, `min=8`, `max=48`, `chunk_size=32`）解析结果：
+
+| 数据集 | fps | 窗口帧数 | 时长 |
+| --- | --- | --- | --- |
+| fractal | 3 | 8 | 2.67s |
+| taco_play | 15 | 24 | 1.60s |
+| 其余（30fps） | 30 | 48 | 1.60s |
+
+启动时会把每个数据集解析出的窗口打到日志里。三个易错点：
+
+- **重采样是"最近帧"，不是时间插值。** 每个 offset 都是真实帧号，否则 `delta_timestamps`
+  会向 loader 请求落在两帧之间的时间戳而触发容差报错。窗口短于 `chunk_size` 时 offset 重复，
+  长于时则跨步——形状始终是 `(chunk_size, D)`，下游完全不用改。
+- **action 的时间戳必须显式覆盖。** `resolve_delta_timestamps` 是按 `action_delta_indices`
+  生成连续帧的，不覆盖的话 action 会和 state / 图像对处在不同时间基上，而且形状还完全对得上，
+  属于静默错位。
+- **batch sampler 的 horizon 必须逐数据集给。** 它按 `horizon` 裁掉每条 episode 的尾部，
+  用全局 48 会把 fractal 43 帧的 episode 裁光。
+
+`policy.frame_horizon` 保留为"用固定帧数覆盖全部数据集"的开关，默认 `None`（即按时长），
+仅用于消融。
 
 **为什么 state 值得读整个窗口。** 本 mixture 里多数数据集的 `action` 是绝对目标位姿，动作块
 本身已经描绘了窗口内的意图轨迹。但 action 是**被命令的**，state 轨迹是**实际发生的**——两者
@@ -123,12 +158,12 @@ dataset[(ds_idx, frame_idx)] # 显式指定数据集与帧，供 ContrastiveBatc
 视频里实际发生的变化，所以实际轨迹严格更接近监督信号。对于 action 是增量/速度、或只有关节
 的数据集（如 `ftp_1_VisuoTactile_D-WHEEL_split_0`），这就不只是精修了。
 
-**触觉信号读满 16 帧，触觉图像只读两帧——差别纯粹在代价。** 两者要的东西是一样的：接触事件
-（抓取闭合、滑移、碰撞）是**窗口内发生的**，只取 `t` 时刻，如果抓取在 `t+8` 完成，`t` 帧显示
-的是接触之前，字面意义上什么都没有。区别在于触觉信号是 parquet 列，读满窗口不花钱，而且
+**触觉信号读满窗口、触觉图像只读两帧——差别纯粹在代价。** 两者要的东西是一样的：接触事件
+（抓取闭合、滑移、碰撞）是**窗口内发生的**，只取 `t` 时刻，如果抓取在窗口中段完成，`t` 帧
+显示的是接触之前，字面意义上什么都没有。区别在于触觉信号是 parquet 列，读满窗口不花钱，而且
 接触瞬变往往只有几帧宽——两端各采一帧完全可能**跨过**它而几乎什么都看不到，这是比"只取 t"
-更隐蔽的失败。触觉相机是视频，4 路 × 16 帧解码正好砸在本管线的磁盘瓶颈上，所以退而求其次用
-两帧换"接触前 → 接触后"，代价是 2× 而非 16×。
+更隐蔽的失败。触觉相机是视频，6 路多帧解码正好砸在本管线的磁盘瓶颈上，所以退而求其次用
+两帧换"接触前 → 接触后"。
 
 实测三个触觉数据集在窗口内的变化幅度（随机 mid-episode 采样 12 条，触觉图像为 0–255 尺度）：
 
@@ -164,11 +199,11 @@ dataset[(ds_idx, frame_idx)] # 显式指定数据集与帧，供 ContrastiveBatc
 
 | key | shape / dtype | 含义 |
 | --- | --- | --- |
-| `action` | `(16, 40)` float32 | 规范空间动作块，已归一化并乘过 mask |
+| `action` | `(32, 40)` float32 | 规范空间动作块，已归一化并乘过 mask |
 | `action_mask` | `(40,)` float32 | 哪些槽位有效（整个 chunk 共用一份） |
-| `observation.state` | `(16, 40)` float32 | 规范空间状态**轨迹**，与动作块同窗口 |
+| `observation.state` | `(32, 40)` float32 | 规范空间状态**轨迹**，与动作块同窗口 |
 | `state_mask` | `(40,)` float32 | 同上 |
-| `tactile_signal` | `(16, 32)` float32 | 低维触觉读数，整个窗口 |
+| `tactile_signal` | `(32, 32)` float32 | 低维触觉读数，整个窗口 |
 | `tactile_signal_mask` | `()` float32 | 标量，1 表示这条样本有触觉信号 |
 | `tactile_image` | `(6, 2, 3, S, S)` uint8 | 触觉相机，6 路 × 2 帧，槽位对齐，缺的补零。`S` 由 `policy.tactile_img_size` 决定：ResNet-18 用 112，FTP-1 塔强制 224 |
 | `tactile_image_mask` | `(6,)` float32 | 逐路有效性。除了"这一路不存在"之外，**空间方差≈0 的 pad 也会被置 0**，见下 |

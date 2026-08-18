@@ -856,3 +856,101 @@ existing machinery and slightly *reduces* tactile CNN compute.
 Not yet measured: whether masking improves `contra_loss`. It should at least not hurt, and the
 compute saving is real, but the honest statement is that this is a correctness fix justified by
 the input distribution rather than a result validated against the training objective.
+
+## 12. The temporal window is a duration, not a frame count
+
+`chunk_size=16` was raised on the theory that most datasets run above 15 fps, so 16 frames is
+under a second and too short for the perception side to see meaningful change. The theory is
+right for most of the mixture and badly wrong for the largest single dataset in it.
+
+### 12.1 fps is bimodal *by sampling weight*, which is what actually matters
+
+| dataset | weight | fps | median ep len | 16 frames | 32 frames |
+| --- | --- | --- | --- | --- | --- |
+| ms_data_xdof_3 | 0.421 | 30 | 2522 | 0.53 s | 1.07 s |
+| **fractal** | **0.340** | **3** | **40** | **5.33 s** | **10.67 s** |
+| sharpa | 0.143 | 30 | 756 | 0.53 s | 1.07 s |
+| D-WHEEL | 0.047 | 30 | 1122 | 0.53 s | 1.07 s |
+| RH20T | 0.029 | 30 | 496 | 0.53 s | 1.07 s |
+| taco_play | 0.019 | 15 | 66 | 1.07 s | 2.13 s |
+
+Counted by dataset, five of seven run at 30 fps. Counted by sampling weight, **fractal alone is
+34% of the mixture and runs at 3 fps with 43-frame episodes**. A fixed frame count therefore
+means something different on every dataset -- the same 16 frames is 5.3 s on fractal and 0.53 s
+on everything else, a 10x spread caused by nothing but the recording rate.
+
+### 12.2 What a flat move to `chunk_size=32` would have cost
+
+Measured mean absolute pixel change between the two perception frames, and the fraction of
+sampled rows whose `t+H` stays inside the episode:
+
+| dataset | change @16 | change @32 | valid @16 | valid @32 |
+| --- | --- | --- | --- | --- |
+| ms_data_xdof_3 | 0.0302 | 0.0394 (+30%) | 0.994 | 0.989 |
+| **fractal** | 0.0625 | 0.0667 (**+7%**) | **0.634** | **0.318** |
+| sharpa | 0.0724 | 0.0929 (+28%) | 0.981 | 0.962 |
+| D-WHEEL | 0.0217 | 0.0239 (+10%) | 0.986 | 0.973 |
+| RH20T | 0.0429 | 0.0610 (+42%) | 0.973 | 0.945 |
+| taco_play | 0.0344 | 0.0412 (+20%) | 0.758 | 0.515 |
+
+fractal **saturates** -- across H = 2/4/8/16/32/48 its change goes 0.032/0.042/0.054/0.063/
+0.067/0.074 while validity collapses 0.93/0.86/0.80/0.66/0.39/0.14. Doubling its window buys
+7% more visual change and costs half its usable rows. Weighted over the mixture, a flat
+`chunk_size=32` moves valid pairs **0.864 -> 0.746**, i.e. 221 -> 191 usable rows out of a
+256-row batch. That directly undoes the cross-GPU negative gathering added earlier.
+
+Note the token budget is *not* the issue here: `num_groups = chunk_size / group_size`, so
+32/4 = 8 = the previous 16/2 and the physical sequence stays 31 tokens. This is the opposite of
+the §9.4 failure and the §9.4 lesson still applies -- count the budget, don't reason about it.
+
+### 12.3 Equal duration, resampled onto a fixed token grid
+
+`chunk_size` now means *the number of resampled timesteps handed to the model*, and the raw
+window is `clamp(round(chunk_seconds * fps), chunk_frames_min, chunk_frames_max)` frames,
+resampled onto that grid. With `chunk_seconds=1.6`, `min=8`, `max=48`:
+
+| dataset | fps | window | duration | change | valid |
+| --- | --- | --- | --- | --- | --- |
+| fractal | 3 | 8 | 2.67 s | 0.0536 | **0.802** |
+| taco_play | 15 | 24 | 1.60 s | 0.0400 | 0.857 |
+| ms_data_xdof_3 | 30 | 48 | 1.60 s | 0.0442 (+46%) | 0.986 |
+| sharpa | 30 | 48 | 1.60 s | 0.1098 (+52%) | 0.967 |
+| D-WHEEL | 30 | 48 | 1.60 s | 0.0299 (+38%) | 1.000 |
+| RH20T | 30 | 48 | 1.60 s | 0.0690 (+61%) | 1.000 |
+
+**Weighted valid pairs go 0.864 -> 0.920**, i.e. better than the 16-frame baseline rather than
+worse, while the 30 fps datasets get 38–61% more visual change. fractal's floor of 8 frames is
+why: it trades 14% less change for 21% more valid rows, which nets out slightly ahead
+(change x valid 0.0413 -> 0.0430) and is the reason `chunk_frames_min` exists.
+
+Three implementation points that are easy to get wrong:
+
+- **Resampling is nearest-frame, not interpolation in time.** Every offset is a real frame
+  index, so `delta_timestamps` is never asked for a timestamp between two frames, which would
+  trip the loader's tolerance check. Short windows repeat offsets and long ones stride them.
+- **The action keys had to be overridden explicitly.** `resolve_delta_timestamps` builds the
+  action chunk from `action_delta_indices`, which is a consecutive-frame range. Left alone, the
+  action would have sat on a different time base from the state and the image pair it is
+  supposed to explain -- a silent misalignment, since all the shapes still match.
+- **The batch sampler needs a horizon *per dataset*.** It trims each episode by `horizon` to
+  keep `t+H` inside it. A single global horizon of 48 would trim fractal's 43-frame episodes to
+  nothing, throwing away exactly what this change was meant to protect.
+
+Equalising *duration* rather than *visual change* is deliberate. Pixel change at equal duration
+still differs 4x across datasets (sharpa 0.110 vs D-WHEEL 0.030) because they are different
+scenes moving at different rates; tuning per-dataset windows to equalise it would be fitting a
+pixel-MAE proxy, which §9 and §10.6 both show does not predict the training objective.
+
+### 12.4 Verified
+
+- Physical sequence is 31 tokens, unchanged; shapes are `action (32,40)`, `state (32,40)`,
+  `tactile_signal (32,32)`, `tactile_image (6,2,3,112,112)`.
+- Resolved windows logged at startup: fractal 8, taco 24, everything else 48.
+- End-to-end run clean through an eval cycle, 772M params, global batch 512 on 2x A6000.
+- **No slowdown: 2.82 s/step vs 2.90 s/step for the 16-frame baseline**, despite reading 3x
+  more rows. State, action and tactile signal share a parquet row group, so the extra rows are
+  nearly free -- the video decode, which still reads exactly 2 frames, is the real cost.
+
+Not yet measured: whether this improves `contra_loss`. The input-side argument is strong
+(more visual change *and* more valid pairs, at no extra cost), but that is a statement about
+the inputs, not a result against the objective.

@@ -55,20 +55,22 @@ class RoboContrastConfig(PreTrainedConfig):
     patch_token_stride: int = 1
 
     # ------------------------------------------------------------------ physical
-    chunk_size: int = 16
+    # ``chunk_size`` is the number of *resampled* timesteps handed to the model, i.e. the token
+    # grid, not a raw frame count. How many raw frames that grid spans is decided per dataset
+    # from ``chunk_seconds`` -- see the note on ``chunk_seconds`` below.
+    chunk_size: int = 32
     n_action_steps: int = 16
     # Frames per grouped token. ``chunk_size / group_size`` tokens are emitted for each of
     # state, action and tactile signal, so this sets the physical sequence length:
     # ``1 + 3 * chunk_size / group_size + max_tactile_views``.
     #
-    # 2 was measured to be better than 4 (contrastive loss 3.71 vs 4.14 over steps 900-1250,
-    # against a same-config noise floor of 0.09; see doc/results.md S9). Two reasons, and the
-    # second is the one that is easy to get backwards:
-    #   * finer temporal resolution -- 8 groups of 2 frames rather than 4 groups of 4;
-    #   * *less* tactile dominance, not more. The tactile cameras contribute a fixed 4 tokens
-    #     whatever this value is, so raising group_size shrinks only the three chunked streams
-    #     and pushes tactile's share of the content tokens up, from 43% at 2 to 50% at 4.
-    group_size: int = 2
+    # Only the *ratio* matters for the token budget. An earlier experiment found group_size 4
+    # worse than 2 (contrastive loss 4.14 vs 3.71, doc/results.md S9.4), but that was at a fixed
+    # chunk_size=16, where raising group_size halved the number of groups (8 -> 4) and shrank
+    # the budget. Here chunk_size doubled at the same time, so ``num_groups`` is 8 either way
+    # and the change is token neutral. Do not read S9.4 as "group_size 4 is bad" -- read it as
+    # "count the budget after the change".
+    group_size: int = 4
     hidden_dim: int = 1024
     num_attention_heads: int = 16
     # Sized so that the *learnable* capacity of the two branches is roughly equal
@@ -93,7 +95,26 @@ class RoboContrastConfig(PreTrainedConfig):
     # blank reading. Roughly half of our tactile pad-frames are dead -- see `doc/results.md`
     # §10.5. Set to 0 to disable the check.
     tactile_dead_std: float = 0.002
-    # Temporal distance (in frames) between the two perception frames. Defaults to chunk_size.
+    # Length of the window in *seconds*, converted to a raw frame count per dataset.
+    #
+    # A fixed frame count is the wrong unit for this mixture. Its fps spans 10x (fractal is
+    # 3 fps, most of the rest is 30), so a 16-frame window means 5.3 s on fractal and 0.53 s on
+    # everything else -- a 10x difference in physical meaning, purely by accident of fps. The
+    # 30 fps datasets were being asked to explain almost no visual change, while fractal, whose
+    # episodes are only ~43 frames, was spending a third of an episode per sample and losing
+    # 37% of its pairs to episode ends.
+    #
+    # The window is therefore ``clamp(round(chunk_seconds * fps), min, max)`` raw frames,
+    # resampled onto the fixed ``chunk_size`` token grid. Measured per-dataset visual change
+    # and pair validity behind these numbers are in doc/results.md S12.
+    chunk_seconds: float = 1.6
+    # Floors and caps the raw window. The floor matters for fractal: 1.6 s at 3 fps is 5 frames,
+    # and 8 frames (2.67 s) measured strictly better -- more visual change *and* more valid
+    # pairs than the 16 frames it used before.
+    chunk_frames_min: int = 8
+    chunk_frames_max: int = 48
+    # Overrides the duration-based window with a fixed frame count on every dataset. ``None``
+    # means "derive it from chunk_seconds", which is what you want; this exists for ablations.
     frame_horizon: int | None = None
     use_wrist_image: bool = False
 
@@ -186,8 +207,19 @@ class RoboContrastConfig(PreTrainedConfig):
 
     def __post_init__(self):
         super().__post_init__()
-        if self.frame_horizon is None:
-            self.frame_horizon = self.chunk_size
+        # `frame_horizon` deliberately stays None here: the window is derived per dataset from
+        # `chunk_seconds`, and defaulting it to `chunk_size` would silently pin every dataset
+        # back to a fixed frame count.
+        if self.chunk_size % self.group_size != 0:
+            raise ValueError(
+                f"`chunk_size` ({self.chunk_size}) must be divisible by `group_size` "
+                f"({self.group_size}); it is split into chunk_size/group_size grouped tokens."
+            )
+        if self.chunk_frames_min > self.chunk_frames_max:
+            raise ValueError(
+                f"`chunk_frames_min` ({self.chunk_frames_min}) exceeds `chunk_frames_max` "
+                f"({self.chunk_frames_max})."
+            )
         if self.n_action_steps > self.chunk_size:
             raise ValueError(
                 f"`n_action_steps` ({self.n_action_steps}) cannot exceed `chunk_size` ({self.chunk_size})."

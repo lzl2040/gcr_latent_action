@@ -61,7 +61,7 @@ def _draw_batches(
     weights: np.ndarray,
     batch_size: int,
     num_batches: int,
-    horizon: int,
+    horizon: int | list[int],
     seed: int,
     policy_cfg,
 ) -> list[list[tuple[int, int]]]:
@@ -106,7 +106,7 @@ def build_eval_loaders(
     Returns a possibly-empty dict; the ``tactile`` split is skipped when the mixture has no
     tactile datasets.
     """
-    horizon = max(policy_cfg.chunk_size, policy_cfg.frame_horizon)
+    horizon = dataset.frame_horizons
     loaders: dict[str, DataLoader] = {}
 
     splits: dict[str, np.ndarray] = {"mixture": np.asarray(dataset.sample_weights, dtype=np.float64)}

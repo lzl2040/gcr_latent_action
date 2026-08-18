@@ -36,7 +36,7 @@ class ContrastiveBatchSampler(Sampler):
         rank: int = 0,
         seed: int = 0,
         samples_per_epoch: int = 100_000,
-        horizon: int = 16,
+        horizon: int | list[int] = 16,
         same_dataset_frac: float = 0.75,
         episode_group_frac: float = 0.75,
         episode_group_size: int = 8,
@@ -49,7 +49,19 @@ class ContrastiveBatchSampler(Sampler):
         self.num_replicas = max(1, num_replicas)
         self.rank = rank
         self.seed = seed
-        self.horizon = horizon
+        # One horizon per dataset: the window is a fixed duration, so its length in *frames*
+        # differs per dataset (8 at fractal's 3 fps, 48 at 30 fps). Trimming every episode by a
+        # single global horizon would cut low-fps datasets by far more than their own window
+        # needs -- trimming fractal's ~43-frame episodes by 48 would leave almost nothing.
+        if isinstance(horizon, (list, tuple, np.ndarray)):
+            if len(horizon) != len(episode_ranges):
+                raise ValueError(
+                    f"horizon has {len(horizon)} entries but there are {len(episode_ranges)} "
+                    "datasets; it must supply one horizon per dataset."
+                )
+            self.horizons = [int(h) for h in horizon]
+        else:
+            self.horizons = [int(horizon)] * len(episode_ranges)
         self.same_dataset_frac = float(np.clip(same_dataset_frac, 0.0, 1.0))
         self.episode_group_frac = float(np.clip(episode_group_frac, 0.0, 1.0))
         self.episode_group_size = max(2, episode_group_size)
@@ -59,9 +71,9 @@ class ContrastiveBatchSampler(Sampler):
         # Usable frame span per episode: [start, end - horizon). Episodes too short to host a
         # full chunk fall back to their single first frame (clamping is handled downstream).
         self.usable = []
-        for ranges in episode_ranges:
+        for ds_idx, ranges in enumerate(episode_ranges):
             starts = ranges[:, 0]
-            ends = np.maximum(ranges[:, 1] - self.horizon, starts + 1)
+            ends = np.maximum(ranges[:, 1] - self.horizons[ds_idx], starts + 1)
             self.usable.append(np.stack([starts, ends], axis=1))
 
         total_batches = max(1, samples_per_epoch // (batch_size * self.num_replicas))

@@ -136,7 +136,7 @@ def train(cfg: TrainPipelineConfig):
         rank=rank,
         seed=cfg.seed,
         samples_per_epoch=cfg.dataset.dataset_size_one_epoch,
-        horizon=max(cfg.policy.chunk_size, cfg.policy.frame_horizon),
+        horizon=dataset.frame_horizons,
         same_dataset_frac=cfg.policy.same_dataset_frac,
         episode_group_frac=cfg.policy.episode_group_frac,
         episode_group_size=cfg.policy.episode_group_size,
