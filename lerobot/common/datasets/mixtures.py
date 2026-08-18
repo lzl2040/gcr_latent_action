@@ -492,7 +492,7 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("ms_data_xdof_2", 0.01),
         ("ms_data_xdof_3", 0.1),
         ("ftp_1_sharpa", 1.0),
-        ("ftp_1_VisuoTactile_D-WHEEL", 1.0)
+        ("ftp_1_VisuoTactile_D-WHEEL", 1.0),
         ("ftp_1_exUMI", 1.0),
         ("ftp_1_RH20TCfg5Franka", 1.0),
         # ("ftp_1_sharpa_split_0", 1.0),
