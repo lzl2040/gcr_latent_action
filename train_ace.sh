@@ -69,6 +69,15 @@ LOG_DIR="/mnt/wangxiaofa/ace_logs"
 OUTPUT_DIR="/mnt/wangxiaofa/robo_contrast_exp"
 PRETRAINED_PATH=""
 
+# W&B。**不要把 API key 写进这个文件**——它是入库的，写进来等于把凭据提交进 git 历史，
+# 谁能读仓库谁就能用你的账号。key 按下面的顺序找：
+#   1. 环境变量 WANDB_API_KEY（集群上建议用任务提交系统的 secret 注入）
+#   2. $WANDB_KEY_FILE 指向的文件
+#   3. ~/.wandb_key
+#   4. 仓库根目录的 wandb.key（.gitignore 里的 `*.key` 已覆盖，不会被提交）
+WANDB_ENABLE=true
+WANDB_PROJECT="robo_contrast"
+
 export LEROBOT_VIDEO_DECODER_CACHE_SIZE=256
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
@@ -112,6 +121,8 @@ while [[ $# -gt 0 ]]; do
         --log_dir) LOG_DIR="$2"; shift 2 ;;
         --output_dir) OUTPUT_DIR="$2"; shift 2 ;;
         --pre_path) PRETRAINED_PATH="$2"; shift 2 ;;
+        --wandb_enable) WANDB_ENABLE="$2"; shift 2 ;;
+        --wandb_project) WANDB_PROJECT="$2"; shift 2 ;;
         --) shift; EXTRA_ARGS=("$@"); break ;;
         *) echo "未知参数: $1"; exit 1 ;;
     esac
@@ -119,6 +130,26 @@ done
 
 if [[ -z "$JOB_NAME" ]]; then
     echo "错误：必须指定 --job_name"
+    exit 1
+fi
+
+# ---------------------------------------------------------------- W&B 凭据
+if [[ -z "${WANDB_API_KEY}" ]]; then
+    for _candidate in "${WANDB_KEY_FILE}" "${HOME}/.wandb_key" "./wandb.key"; do
+        if [[ -n "$_candidate" && -f "$_candidate" ]]; then
+            WANDB_API_KEY="$(tr -d '[:space:]' < "$_candidate")"
+            echo "wandb key <- ${_candidate}"
+            break
+        fi
+    done
+fi
+export WANDB_API_KEY
+if [[ "$WANDB_ENABLE" == "true" && -z "${WANDB_API_KEY}" ]]; then
+    # 集群节点通常没跑过 `wandb login`，没有 key 会卡在交互式提示上直到任务超时，
+    # 与其那样不如现在就说清楚。
+    echo "错误：--wandb_enable true 但没找到 API key。"
+    echo "      请任选一种：export WANDB_API_KEY=xxx / 写进 ~/.wandb_key / 写进 ./wandb.key"
+    echo "      （或者加 --wandb_enable false 关掉）"
     exit 1
 fi
 
@@ -200,8 +231,8 @@ torchrun \
     --output_dir="$OUTPUT_DIR" \
     --log_dir="$LOG_DIR" \
     --task_type=$TASK_TYPE \
-    --wandb.enable=true \
-    --wandb.project="robo_contrast" \
+    --wandb.enable=$WANDB_ENABLE \
+    --wandb.project="$WANDB_PROJECT" \
     --job_name="$JOB_NAME" \
     --weight_resume=true \
     --resume=false \
