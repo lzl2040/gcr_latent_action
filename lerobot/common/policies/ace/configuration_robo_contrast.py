@@ -95,7 +95,22 @@ class RoboContrastConfig(PreTrainedConfig):
     # blank reading. Roughly half of our tactile pad-frames are dead -- see `doc/results.md`
     # §10.5. Set to 0 to disable the check.
     tactile_dead_std: float = 0.002
+    # How the temporal window is measured. This is a *stage* switch, not a tuning knob.
+    #
+    # ``"duration"`` -- contrastive pre-training. The window is a fixed number of seconds and
+    #   is resampled onto the ``chunk_size`` token grid, so every dataset explains the same
+    #   amount of elapsed time regardless of fps. Timesteps are strided (30 fps) or repeated
+    #   (fractal, 9 distinct frames in 32 slots); that redundancy is the price of a fixed token
+    #   count, and it is fine here because nothing is being *executed* -- the physical branch is
+    #   only ever pooled into an embedding.
+    # ``"frames"`` -- downstream VLA / action-chunk training. Offsets are the consecutive frames
+    #   ``0..chunk_size-1``, which is what a policy that actually emits an action sequence needs:
+    #   the chunk must be executable at the dataset's own control rate, and a resampled grid
+    #   would either skip commands or emit duplicates. Duration equalisation is meaningless
+    #   there, since the chunk length *is* the action horizon.
+    window_mode: str = "duration"
     # Length of the window in *seconds*, converted to a raw frame count per dataset.
+    # Only read when ``window_mode="duration"``.
     #
     # A fixed frame count is the wrong unit for this mixture. Its fps spans 10x (fractal is
     # 3 fps, most of the rest is 30), so a 16-frame window means 5.3 s on fractal and 0.53 s on
@@ -210,6 +225,10 @@ class RoboContrastConfig(PreTrainedConfig):
         # `frame_horizon` deliberately stays None here: the window is derived per dataset from
         # `chunk_seconds`, and defaulting it to `chunk_size` would silently pin every dataset
         # back to a fixed frame count.
+        if self.window_mode not in ("duration", "frames"):
+            raise ValueError(
+                f"`window_mode` must be 'duration' or 'frames', got {self.window_mode!r}."
+            )
         if self.chunk_size % self.group_size != 0:
             raise ValueError(
                 f"`chunk_size` ({self.chunk_size}) must be divisible by `group_size` "

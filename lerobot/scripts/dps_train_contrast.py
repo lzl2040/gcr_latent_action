@@ -56,6 +56,15 @@ def init_logger(cfg):
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.addHandler(logging.StreamHandler())
+        # The library modules log the things worth auditing -- resolved temporal windows,
+        # skipped datasets, canonical-space fallbacks -- but only `__main__` was ever given a
+        # handler, so those records fell through to logging's lastResort handler and anything
+        # below WARNING was silently dropped. Configure the `lerobot` logger too, rather than
+        # the root, which would pull in INFO spam from torch/deepspeed/PIL.
+        lib_logger = logging.getLogger("lerobot")
+        lib_logger.setLevel(logging.INFO)
+        for h in logger.handlers:
+            lib_logger.addHandler(h)
     return logger
 
 

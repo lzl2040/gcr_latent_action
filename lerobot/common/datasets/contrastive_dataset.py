@@ -91,6 +91,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         policy_cfg = cfg.policy
         self.chunk_size = policy_cfg.chunk_size
+        # "duration" resolves the window from ``chunk_seconds`` per dataset; "frames" uses the
+        # consecutive frames 0..chunk_size-1, which is what downstream VLA training wants.
+        self.window_mode = getattr(policy_cfg, "window_mode", "duration")
         # Temporal window, expressed in seconds and resolved to a raw frame count per dataset
         # in ``_window_offsets``. ``frame_horizon`` overrides it with a fixed frame count.
         self.chunk_seconds = getattr(policy_cfg, "chunk_seconds", 1.6)
@@ -165,8 +168,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             fps_ds = float(ds_meta.fps)
             self.frame_horizons.append(horizon_ds)
             logger.info(
-                "%s: fps=%g -> window %d frames (%.2fs), resampled to %d steps",
-                dataset_name, fps_ds, horizon_ds, horizon_ds / fps_ds, self.chunk_size,
+                "%s: fps=%g -> %s window %d frames (%.2fs), %d steps",
+                dataset_name, fps_ds, self.window_mode, horizon_ds,
+                horizon_ds / fps_ds, self.chunk_size,
             )
             kept_weights.append(weight)
 
@@ -238,13 +242,20 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
     def _window_offsets(self, fps: float) -> tuple[list[int], int]:
         """``(frame_offsets, horizon)`` for one dataset, given its fps.
 
-        The window is a fixed *duration*, not a fixed frame count. A fixed frame count means
-        something different on every dataset -- 16 frames is 5.3 s at fractal's 3 fps and 0.53 s
-        at 30 fps -- so the perception side was being asked to explain wildly different amounts
-        of change depending on nothing but the recording rate.
+        Two modes, selected by ``policy.window_mode``, because contrastive pre-training and
+        downstream VLA training want genuinely different things from the same field.
 
-        ``horizon`` raw frames are covered, then resampled onto the fixed ``chunk_size`` token
-        grid. Two properties are deliberate:
+        ``"frames"`` is the ordinary action chunk: the consecutive frames ``0..chunk_size-1`` at
+        the dataset's own rate. A policy that *emits* an action sequence has to produce commands
+        the robot can execute back-to-back, so resampling would either skip commands or emit
+        duplicates. There is nothing to equalise -- the chunk length is the action horizon.
+
+        ``"duration"`` is for the contrastive stage, where the physical branch is never executed,
+        only pooled into an embedding that has to explain a visual change. There a fixed frame
+        count is the wrong unit: 16 frames is 5.3 s at fractal's 3 fps and 0.53 s at 30 fps, so
+        the perception side was being asked to explain wildly different amounts of change for no
+        reason but the recording rate. ``horizon`` raw frames are covered instead, then resampled
+        onto the fixed ``chunk_size`` grid. Two properties are deliberate:
 
         * **Nearest-frame, not interpolation in time.** Every returned offset is a real frame
           index, so ``delta_timestamps`` never asks the loader for a timestamp that falls
@@ -257,18 +268,28 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
           frames at 30 fps) and, worse, do so by a dataset-dependent amount, quietly breaking
           the correspondence this whole design rests on.
 
-        The returned length is always ``chunk_size``, whatever the dataset, so the physical
-        token count never varies.
+        The returned length is always ``chunk_size`` in both modes, so the physical token count
+        never varies with the dataset or the mode.
         """
+        # The caller turns every offset into a timestamp by dividing by fps, so a bad fps is
+        # fatal in both modes, not just the duration one.
+        fps = float(fps or 0.0)
+        if not fps > 0:
+            raise ValueError(f"fps must be positive to build a temporal window, got {fps!r}.")
+
+        if self.window_mode == "frames":
+            # `frame_horizon` still controls how far ahead the *pair* looks; it defaults to the
+            # end of the chunk so the image pair and the action chunk describe the same span.
+            horizon = (
+                int(self.frame_horizon_override)
+                if self.frame_horizon_override is not None
+                else self.chunk_size - 1
+            )
+            return list(range(self.chunk_size)), max(1, horizon)
+
         if self.frame_horizon_override is not None:
             horizon = int(self.frame_horizon_override)
         else:
-            fps = float(fps or 0.0)
-            if not fps > 0:
-                raise ValueError(
-                    f"fps must be positive to derive a duration-based window, got {fps!r}. "
-                    "Set policy.frame_horizon to pin a fixed frame count instead."
-                )
             exact = self.chunk_seconds * fps
             horizon = int(round(exact))
             horizon = max(self.chunk_frames_min, min(self.chunk_frames_max, horizon))

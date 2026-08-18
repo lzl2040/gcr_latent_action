@@ -117,7 +117,24 @@ dataset[(ds_idx, frame_idx)] # 显式指定数据集与帧，供 ContrastiveBatc
 | 触觉图像 | **视频** | `t`, `t+H` | 多帧 × 6 路解码正好砸在磁盘瓶颈上 |
 | RGB | **视频** | `t`, `t+H` | 感知侧本来就只需要两端 |
 
-#### 窗口是"时长"，不是"帧数"
+#### 窗口模式：`window_mode`
+
+窗口怎么取由 `policy.window_mode` 选择，这是个**阶段开关**，不是调参旋钮：
+
+| | `"duration"`（默认，对比预训练） | `"frames"`（下游 VLA） |
+| --- | --- | --- |
+| offsets | `round(i * H / (chunk_size - 1))` | `0..chunk_size-1`（连续帧） |
+| `H` | `clamp(round(chunk_seconds*fps), min, max)` | `frame_horizon`，否则 `chunk_size-1` |
+| fractal 窗口 | 8 帧 / 2.67s | 31 帧 / **10.33s** |
+| 30fps 窗口 | 48 帧 / 1.60s | 31 帧 / **1.03s** |
+| 物理 token 数 | 31 | 31 |
+
+对比学习阶段物理分支**不会被执行**，只是池化成一个要解释视觉变化的 embedding，所以重采样没有
+代价，等时长才让不同数据集可比。而 VLA 要**输出**动作序列，chunk 是机器人要连续执行的一串指令，
+重采样会在 30fps 上跳过指令、在 fractal 上吐出重复指令；那里"等时长"也没有意义，因为 chunk 长度
+本身就是动作 horizon。两种模式下物理 token 数都是 31，下游不用改任何东西。
+
+#### `"duration"` 模式：窗口是"时长"，不是"帧数"
 
 `H` **按数据集从时长换算**，不是固定帧数：
 
@@ -138,7 +155,7 @@ offsets = [round(i * H_ds / (chunk_size - 1)) for i in range(chunk_size)]
 | taco_play | 15 | 24 | 1.60s |
 | 其余（30fps） | 30 | 48 | 1.60s |
 
-启动时会把每个数据集解析出的窗口打到日志里。三个易错点：
+启动时会把每个数据集解析出的窗口打到日志里（注意：这行 INFO 之前一直没真正打出来——`init_logger` 只配置了 `__main__` logger，`lerobot.*` 的记录落到 `lastResort` handler，WARNING 以下全被丢掉，已修）。三个易错点：
 
 - **重采样是"最近帧"，不是时间插值。** 每个 offset 都是真实帧号，否则 `delta_timestamps`
   会向 loader 请求落在两帧之间的时间戳而触发容差报错。窗口短于 `chunk_size` 时 offset 重复，

@@ -946,6 +946,7 @@ pixel-MAE proxy, which §9 and §10.6 both show does not predict the training ob
 - Physical sequence is 31 tokens, unchanged; shapes are `action (32,40)`, `state (32,40)`,
   `tactile_signal (32,32)`, `tactile_image (6,2,3,112,112)`.
 - Resolved windows logged at startup: fractal 8, taco 24, everything else 48.
+  (This line did not actually print until the logging fix in S12.6 -- see there.)
 - End-to-end run clean through an eval cycle, 772M params, global batch 512 on 2x A6000.
 - **No slowdown: 2.82 s/step vs 2.90 s/step for the 16-frame baseline**, despite reading 3x
   more rows. State, action and tactile signal share a parquet row group, so the extra rows are
@@ -985,3 +986,43 @@ Two guards added at the same time, both about *arbitrary* datasets rather than t
 Also removed a duplicate fps source: the dataset loop derived the sampler's horizon from
 `info.json` while `_build_dataset` used `ds_meta.fps`. `_build_dataset` now returns the horizon
 it actually built the timestamps with, so the sampler cannot disagree with the loader.
+
+### 12.6 Duration windows are a stage switch, not the only mode
+
+Duration equalisation is right for *this* stage and wrong for the next one. The contrastive
+physical branch is never executed -- it is pooled into an embedding that has to explain a
+visual change -- so resampling costs nothing and equal duration is what makes datasets
+comparable. A downstream VLA that *emits* an action chunk needs the opposite: consecutive
+frames at the dataset's own control rate, because the chunk is a sequence of commands the
+robot executes back-to-back. Resampling there would skip commands at 30 fps and emit duplicate
+ones on fractal, and "equal duration" is meaningless when the chunk length *is* the action
+horizon.
+
+So `window_mode` selects between them:
+
+| | `"duration"` (default, stage 1) | `"frames"` (VLA) |
+| --- | --- | --- |
+| offsets | `round(i * H / (chunk_size - 1))` | `0..chunk_size-1` |
+| `H` | `clamp(round(chunk_seconds * fps), min, max)` | `frame_horizon`, else `chunk_size - 1` |
+| fractal window | 8 frames / 2.67 s | 31 frames / **10.33 s** |
+| 30 fps window | 48 frames / 1.60 s | 31 frames / **1.03 s** |
+| physical tokens | 31 | 31 |
+
+The last two rows are the point: the token count is invariant across both modes and every
+dataset, so nothing downstream changes, while the fps imbalance that motivated §12.1 is
+plainly visible in `"frames"` (10x spread) and gone in `"duration"`.
+
+Both modes verified end-to-end on `debug_research_data` (2 GPUs, global batch 512): grids
+correct at fps in {3, 15, 30}, `max(offsets) == H` in duration mode, offsets exactly
+consecutive in frames mode, fps <= 0 raising in *both* (the caller divides by fps regardless of
+mode, so the guard could not live in the duration branch alone). `trecon` and `tac_n` differ
+between the two runs, confirming the modes really do feed different data rather than silently
+collapsing to the same grid.
+
+**The startup log was invisible.** `init_logger` only ever configured the `__main__` logger, so
+every record from `lerobot.*` fell through to logging's `lastResort` handler, which drops
+anything below WARNING. The per-dataset "resolved window" line -- added precisely so this was
+auditable -- had never once printed; the only reason the clamp warning showed up is that it is
+a WARNING. Fixed by giving the `lerobot` package logger the same handlers (not the root logger,
+which would drag in INFO spam from torch/deepspeed/PIL). Worth remembering when trusting any
+other library-side INFO line in this repo: several of them have presumably never been seen.
