@@ -173,7 +173,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             self.true_fps.append(true_fps_ds)
             declared = float(ds_meta.fps)
             logger.info(
-                "%s: fps=%g%s -> %s window %d frames (%.2fs), %d steps",
+                "Dataset: %s: fps=%g%s -> %s window %d frames (%.2fs), %d steps",
                 dataset_name, true_fps_ds,
                 f" (declared {declared:g})" if true_fps_ds != declared else "",
                 self.window_mode, horizon_ds, horizon_ds / true_fps_ds, self.chunk_size,

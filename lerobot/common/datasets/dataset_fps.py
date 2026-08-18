@@ -27,12 +27,22 @@ from __future__ import annotations
 DATASET_TRUE_FPS: dict[str, float] = {
     # FTP-1: info.json says 30, actual capture is 10-15 Hz.
     "ftp_1_exUMI": 15.0,
-    "ftp_1_RH20TCfg5Franka": 15.0,
     "ftp_1_sharpa": 15.0,
     "ftp_1_sharpa_split_0": 15.0,
     "ftp_1_VisuoTactile_D-WHEEL": 15.0,
     "ftp_1_VisuoTactile_D-WHEEL_split_0": 15.0,
+    "ftp_1_VisuoTactile_QINGLOONG": 15.0,
+    "ftp_1_RH20TCfg5Franka": 15.0,
+    "ftp_1_RH20TCfg6ATIAxia": 15.0,
+    "ftp_1_RH20TCfg7Tactile": 15.0,
+    "ftp_1_VLA_touch": 15.0,
+    "ftp_1_ViTaMIn": 15.0,
+    "ftp_1_ViTaMIn": 15.0,
+    "ftp_1_Unit": 15.0,
     "ftp_1_RDP_Bimanual": 15.0,
+    "ftp_1_RDP": 15.0,
+    "ftp_1_FreeTacMan": 15.0,
+    "ftp_1_MotionTrans": 15.0,
 }
 
 

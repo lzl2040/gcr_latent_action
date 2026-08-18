@@ -428,7 +428,7 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     ],
     
     "research_data":[
-        ("fractal20220817_data", 1.0),                # Google RT-1 Robot Data (Large-Scale)
+        ("fractal20220817_data", 0.6),                # Google RT-1 Robot Data (Large-Scale)
         ("kuka", 0.5),
         ("bridge_orig", 0.5),                                   # Original Version of Bridge V2 from Project Website
         ("taco_play", 1.0),
@@ -464,10 +464,10 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("interna1_single_arm", 0.15),
         # ms_buy_data
         ("ms_data_scale", 0.2),
-        ("ms_data_xdof_1", 0.1),
-        ("ms_data_xdof_2", 0.1),
-        ("ms_data_xdof_3", 0.15),
-        ("ms_data_xdof_4", 0.15),
+        ("ms_data_xdof_1", 0.08),
+        ("ms_data_xdof_2", 0.08),
+        ("ms_data_xdof_3", 0.1),
+        ("ms_data_xdof_4", 0.1),
         # FTP-1
         ("ftp_1_RH20TCfg5Franka", 1.0),
         ("ftp_1_RH20TCfg6ATIAxia", 1.0),
@@ -476,26 +476,30 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("ftp_1_ViTaMIn", 1.0),
         ("ftp_1_VisuoTactile_QINGLOONG", 1.0),
         ("ftp_1_exUMI", 1.0),
-        ("ftp_1_Unit", 0.1),
-        ("ftp_1_RDP_Bimanual", 0.1),
-        ("ftp_1_RDP", 0.1),
-        ("ftp_1_FreeTacMan", 0.1),
-        ("ftp_1_MotionTrans", 0.1),
-        ("ftp_1_sharpa", 0.1),
-        ("ftp_1_VisuoTactile_D-WHEEL", 0.1)
+        ("ftp_1_Unit", 2.0),
+        ("ftp_1_RDP_Bimanual", 2.0),
+        ("ftp_1_RDP", 2.0),
+        ("ftp_1_FreeTacMan", 1.0),
+        ("ftp_1_MotionTrans", 1.0),
+        ("ftp_1_sharpa", 1.0),
+        ("ftp_1_VisuoTactile_D-WHEEL", 1.0)
     ],
     
     "debug_research_data":[
         ("fractal20220817_data", 1.0),
         ("taco_play", 1.0),
-        ("ms_data_xdof_3", 0.15),
+        ("ms_data_xdof_1", 0.01),
+        ("ms_data_xdof_2", 0.01),
+        ("ms_data_xdof_3", 0.1),
+        ("ftp_1_sharpa", 1.0),
+        ("ftp_1_VisuoTactile_D-WHEEL", 1.0)
         ("ftp_1_exUMI", 1.0),
         ("ftp_1_RH20TCfg5Franka", 1.0),
-        ("ftp_1_sharpa_split_0", 1.0),
-        ("ftp_1_VisuoTactile_D-WHEEL_split_0", 1.0),
+        # ("ftp_1_sharpa_split_0", 1.0),
+        # ("ftp_1_VisuoTactile_D-WHEEL_split_0", 1.0),
         ("ftp_1_RDP_Bimanual", 1.0),
-        ("open_neo_arx5_single", 0.5),
-        ("open_neo_aloha", 0.5)
+        # ("open_neo_arx5_single", 0.5),
+        # ("open_neo_aloha", 0.5)
     ],
     
     "debug":[
