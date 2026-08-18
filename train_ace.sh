@@ -53,12 +53,12 @@ CHUNK_SECONDS=1.6
 # 选 ftp1 时 FTP1_TACTILE_DIR 必须指向集群上 hpt_tokenizer/*.safetensors 所在目录，
 # 且 __post_init__ 会把触觉图像尺寸强制成 224。
 TACTILE_BACKBONE="resnet18"
-FTP1_TACTILE_DIR=""
+FTP1_TACTILE_DIR="/mnt/wangxiaofa/pt_weights/ftp1_v0426_50kstep/"
 # `--` 之后收集到这里，原样透传给训练脚本
 EXTRA_ARGS=()
 
 # 路径（集群挂载）
-PARENT_DIR_V21="/mnt/wangxiaofa/robot_dataset/lerobot-format-v21-ort6d/"
+PARENT_DIR_V21="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30-0710/"
 PARENT_DIR_V30="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30-0710/"
 # 逗号分隔的额外根目录，给不在上面两个挂载点里的数据集用（例如 OpenNeoData）
 PARENT_DIR_EXTRA="/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
