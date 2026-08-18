@@ -1087,3 +1087,55 @@ commit are not exactly comparable to those after.
 Caveat on the run itself: the machine was busy (three other users' jobs holding 15-45 GB), so
 this was validated **single-GPU at batch 256**, not the usual 2x512. That still clears the >=128
 single-card requirement, but it is not a throughput measurement.
+
+## 14. One fps was doing two jobs
+
+FTP-1's `info.json` declares 30 fps, but the data was captured at 10-15 Hz. The stored
+`timestamp` column is exactly 1/30 s apart, i.e. **synthesised from the declared rate rather
+than measured**, and consecutive rows repeat in several of the sets -- mean runs of 2.34
+identical frames in D-WHEEL and 2.10 in RDP_Bimanual, the signature of a slower stream written
+onto a 30 Hz index. (exUMI and sharpa show no repeats in `eef_pose`, so they were presumably
+interpolated instead; the duplication test cannot date them.)
+
+The loader was using the single declared fps for two jobs that only coincide when the label is
+right:
+
+- **Index fps** -- the time base the timestamps were written on. Frame `i` is at `i/30`, so
+  every `delta_timestamps` value *must* be built with 30 or the loader matches a different
+  frame, or none and trips its tolerance check.
+- **True fps** -- the capture rate. This decides how much wall-clock motion `H` frames cover,
+  and it is what `sample_rate` should report to the model.
+
+Conflating them meant `chunk_seconds=1.6` silently requested **3.2 s of robot motion** on every
+FTP-1 dataset while claiming 1.6 s, so the mixture was not temporally aligned after all -- the
+exact failure §12 was written to fix, hidden one level deeper in a mislabelled input.
+
+`dataset_fps.py` now holds a `DATASET_TRUE_FPS` table (all FTP-1 sets at 15.0), and
+`_build_dataset` keeps the two apart: `_window_offsets(true_fps)` for the frame count,
+`offset / index_fps` for the timestamps. FTP-1 now reads 24 frames spanning 1.60 s of true
+time, with the last stamp at 0.800 s -- a real stored frame.
+
+### 14.1 `sample_rate` had never been right
+
+`sample_rate` came from `item.get("fps", 10)`. The v3.0 loader sets `item["fps"]` from the
+*declared* fps (30, wrong for FTP-1); **the v2.1 loader never sets it at all**, so every v2.1
+dataset silently fell back to the default 10 -- fractal (3 fps) and taco_play (15 fps) included.
+The `sample_rate_embed` bucket was therefore wrong for 7 of the 10 datasets in the mixture, and
+constant across the two whose rates differ by 5x. It now comes from `self.true_fps[ds_idx]`.
+
+Verified per dataset after the change: fractal 3, taco 15, ms_data 30, all five FTP-1 sets 15,
+both OpenNeo sets 30.
+
+### 14.2 Verified
+
+- All 10 datasets of `debug_research_data` load, including the newly added `ftp_1_exUMI`;
+  30 steps run and exit 0.
+- Resolved windows: FTP-1 `fps=15 (declared 30) -> 24 frames (1.60s)`, OpenNeo and ms_data 48,
+  taco 24, fractal 8.
+- Timestamps still land on real frames: max offset 24 / 30 fps = 0.800 s.
+- `tac_n` ~154 per step, i.e. tactile is still being read at the new window.
+
+Not measured: whether 15.0 is the right number for each FTP-1 set individually. The duplication
+statistics suggest they differ (D-WHEEL ~12.8, RDP_Bimanual ~14.3, RH20T ~18.9), but a single
+15.0 was chosen deliberately to get the mixture running; `DATASET_TRUE_FPS` is per dataset, so
+refining it later is a one-line change each.

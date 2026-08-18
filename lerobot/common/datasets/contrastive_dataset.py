@@ -36,6 +36,7 @@ import torch
 import torch.nn.functional as F
 from tabulate import tabulate
 
+from lerobot.common.datasets.dataset_fps import resolve_true_fps
 from lerobot.common.datasets.canonical_space import (
     CANON_DIM,
     MAX_TACTILE_SIGNAL_DIM,
@@ -102,6 +103,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.frame_horizon_override = getattr(policy_cfg, "frame_horizon", None)
         # Filled in per dataset as they are built, so the resolved windows can be logged.
         self.frame_horizons: list[int] = []
+        # Wall-clock capture rate per dataset, which is not always the declared one.
+        self.true_fps: list[float] = []
         self.tactile_img_size = getattr(policy_cfg, "tactile_img_size", 64)
         self.tactile_dead_std = getattr(policy_cfg, "tactile_dead_std", 0.002)
         self.max_tactile_views = min(getattr(policy_cfg, "max_tactile_views", MAX_TACTILE_VIEWS), MAX_TACTILE_VIEWS)
@@ -147,7 +150,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 state_dim=self._feature_dim(info, "observation.state"),
             )
 
-            dataset, ds_meta, img_keys, horizon_ds = self._build_dataset(
+            dataset, ds_meta, img_keys, horizon_ds, true_fps_ds = self._build_dataset(
                 cfg, dataset_name, data_root, version, spec
             )
             if dataset is None:
@@ -164,13 +167,16 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             self.episode_ranges.append(self._build_episode_ranges(dataset, version))
             # The horizon recorded here is the one ``_build_dataset`` actually read with, not a
             # recomputation: the sampler trims episodes by it, so a second derivation from a
-            # second fps source could silently disagree with the window the loader used.
-            fps_ds = float(ds_meta.fps)
+            # second fps source could silently disagree with the window the loader used. The
+            # same applies to the true fps, which `sample_rate` is built from.
             self.frame_horizons.append(horizon_ds)
+            self.true_fps.append(true_fps_ds)
+            declared = float(ds_meta.fps)
             logger.info(
-                "%s: fps=%g -> %s window %d frames (%.2fs), %d steps",
-                dataset_name, fps_ds, self.window_mode, horizon_ds,
-                horizon_ds / fps_ds, self.chunk_size,
+                "%s: fps=%g%s -> %s window %d frames (%.2fs), %d steps",
+                dataset_name, true_fps_ds,
+                f" (declared {declared:g})" if true_fps_ds != declared else "",
+                self.window_mode, horizon_ds, horizon_ds / true_fps_ds, self.chunk_size,
             )
             kept_weights.append(weight)
 
@@ -328,7 +334,18 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         repo_id = f"bulldog-{dataset_name}"
         meta_cls = LeRobotDatasetMetadata if version == "v2.1" else LeRobotDatasetMetadataV30
         ds_meta = meta_cls(repo_id, root=data_root)
-        fps = ds_meta.fps
+        # Two different fps, and conflating them is a silent data bug.
+        #
+        # ``index_fps`` is what info.json declares, and it is the time base the ``timestamp``
+        # column was written on: frame ``i`` sits at ``i / index_fps``. Every delta_timestamp we
+        # hand the loader must be built with it, or we match the wrong frame.
+        #
+        # ``true_fps`` is the rate the data was really captured at. It decides how much
+        # wall-clock motion a window of ``H`` frames covers, and it is what ``sample_rate``
+        # should report. The two agree for most datasets but not for FTP-1, which declares 30
+        # while capturing at 10-15 Hz -- see ``dataset_fps.py``.
+        index_fps = float(ds_meta.fps)
+        true_fps = resolve_true_fps(dataset_name, index_fps)
 
         img_keys = self._resolve_image_keys(dataset_name, None, ds_meta=ds_meta)
         rgb_keys = [img_keys["primary"]] if img_keys["primary"] else []
@@ -359,8 +376,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # ``resolve_delta_timestamps``: that helper builds a consecutive-frame chunk from
         # ``action_delta_indices``, which would put the action on a different time base to the
         # state and the image pair it is supposed to explain.
-        offsets, horizon = self._window_offsets(fps)
-        chunk_stamps = [o / fps for o in offsets]
+        offsets, horizon = self._window_offsets(true_fps)
+        chunk_stamps = [o / index_fps for o in offsets]
         for key in wanted_action_keys:
             if key in ds_meta.features:
                 delta_timestamps[key] = chunk_stamps
@@ -378,7 +395,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # at t+8, the frame at t shows no contact at all). But decoding 16 frames x 4 pads on a
         # spinning disk is exactly where this pipeline is already bottlenecked, so two frames
         # buy "before contact -> after contact" at 2x the decode cost instead of 16x.
-        pair_stamps = [0.0, horizon / fps]
+        pair_stamps = [0.0, horizon / index_fps]
         for key in rgb_keys:
             if key in ds_meta.video_keys:
                 delta_timestamps[key] = pair_stamps
@@ -399,10 +416,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 dataset = LeRobotDatasetV30(repo_id, video_return_type="uint8", **common)
         except Exception as exc:  # noqa: BLE001 - a broken dataset must not kill the whole mixture
             logger.warning("Failed to open %s (%s): %s", dataset_name, data_root, exc)
-            return None, None, None, None
+            return None, None, None, None, None
 
         dataset.video_keys_to_decode = rgb_keys + tac_img_keys
-        return dataset, ds_meta, img_keys, horizon
+        return dataset, ds_meta, img_keys, horizon, true_fps
 
     def _resolve_image_keys(self, dataset_name, dataset, ds_meta=None) -> dict:
         """Map the OXE ``primary``/``secondary``/``wrist`` roles onto real dataset keys."""
@@ -783,7 +800,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "tactile_sensor_id": sensor_id,
             "tactile_img_mean": sensor_mean,
             "tactile_img_std": sensor_std,
-            "sample_rate": torch.tensor(int(item.get("fps", 10)), dtype=torch.long),
+            # Not `item["fps"]`: the v2.1 loader never sets it (so every v2.1 dataset silently
+            # reported 10) and the v3.0 loader sets it from the *declared* fps, which is wrong
+            # for FTP-1. `self.true_fps` is the rate the data was actually captured at.
+            "sample_rate": torch.tensor(int(round(self.true_fps[ds_idx])), dtype=torch.long),
             "dataset_id": torch.tensor(ds_idx, dtype=torch.long),
             "episode_uid": torch.tensor(ds_idx * 1_000_000 + episode_index, dtype=torch.long),
             "frame_index": torch.tensor(frame_idx, dtype=torch.long),
