@@ -188,13 +188,13 @@ fi
 echo "nodes=${NNODES} rank=${NODE_RANK} gpus/node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 
 # ---------------------------------------------------------------- 执行训练命令
-torchrun \
-    --nnodes=$NNODES \
-    --nproc_per_node=$NPROC_PER_NODE \
-    --node_rank=$NODE_RANK \
-    --master_addr=$MASTER_ADDR \
-    --master_port=$MASTER_PORT \
-    lerobot/scripts/dps_train_contrast.py \
+# torchrun \
+#     --nnodes=$NNODES \
+#     --nproc_per_node=$NPROC_PER_NODE \
+#     --node_rank=$NODE_RANK \
+#     --master_addr=$MASTER_ADDR \
+#     --master_port=$MASTER_PORT \
+python lerobot/scripts/dps_train_contrast.py \
     --deepspeed="$DS_CONFIG" \
     --policy.type="robo_contrast" \
     --policy.vision_model_name="$VISION_MODEL" \
