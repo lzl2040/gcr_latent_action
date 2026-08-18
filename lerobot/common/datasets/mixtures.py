@@ -489,9 +489,12 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("fractal20220817_data", 1.0),
         ("taco_play", 1.0),
         ("ms_data_xdof_3", 0.15),
-        ("ftp_1_RH20TCfg5Franka", 0.1),
-        ("ftp_1_sharpa_split_0", 0.1),
-        ("ftp_1_VisuoTactile_D-WHEEL_split_0", 0.1)
+        ("ftp_1_RH20TCfg5Franka", 1.0),
+        ("ftp_1_sharpa_split_0", 1.0),
+        ("ftp_1_VisuoTactile_D-WHEEL_split_0", 1.0),
+        ("ftp_1_RDP_Bimanual", 1.0),
+        ("open_neo_arx5_single", 0.5),
+        ("open_neo_aloha", 0.5)
     ],
     
     "debug":[

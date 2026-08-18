@@ -492,6 +492,39 @@ PHYSICAL_SPECS: dict[str, dict] = {
             "observation.images.tactile_right_1",
         ],
     },
+    # open_neo_data
+    "open_neo_aloha": {
+        "action": [
+            _seg("action.eef_pose", 0, 20, 0),
+            _seg("action", 0, 7, 20),
+            _seg("action", 7, 14, 28),
+        ],
+        "state": [
+            _seg("observation.eef_pose", 0, 20, 0),
+            _seg("observation.state", 0, 7, 20),
+            _seg("observation.state", 7, 14, 28),
+        ],
+        "tactile_image": [
+            "observation.images.left_wrist_left_tactile",
+            "observation.images.left_wrist_right_tactile",
+            "observation.images.right_wrist_left_tactile",
+            "observation.images.right_wrist_right_tactile"
+        ],
+    },
+    "open_neo_arx5_single": {
+        "action": [
+            _seg("action.eef_pose", 0, 10, 0),
+            _seg("action", 0, 7, 20),
+        ],
+        "state": [
+            _seg("observation.eef_pose", 0, 10, 0),
+            _seg("observation.state", 0, 7, 20),
+        ],
+        "tactile_image": [
+            "observation.images.left_wrist_left_tactile",
+            "observation.images.left_wrist_right_tactile"
+        ],
+    }
 }
 
 # ms_data_xdof_5, ms_data_xdof_2,  ms_data_xdof_3

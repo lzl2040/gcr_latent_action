@@ -221,7 +221,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
     # ------------------------------------------------------------------
     @staticmethod
     def _resolve_root(cfg, relative_root: str) -> str | None:
-        for parent in (cfg.dataset.parent_dir_v21, cfg.dataset.parent_dir_v30):
+        for parent in (cfg.dataset.parent_dir_v21, cfg.dataset.parent_dir_v30, "/media/v-wangxiaofa/新加卷/lerobot_data"):
             if parent is None:
                 continue
             candidate = os.path.join(parent, relative_root)

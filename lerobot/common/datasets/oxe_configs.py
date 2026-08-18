@@ -1230,5 +1230,20 @@ OXE_DATASET_CONFIGS = {
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS,
-    }
+    },
+    # open neo data
+    "open_neo_aloha": {
+        "image_obs_keys": {"primary": "third_view", "secondary": "left_wrist_view", "wrist": "right_wrist_view"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6_AND_JOINT,
+        "action_encoding": ActionEncoding.EEF_R6_AND_JOINT,
+    },
+    "open_neo_arx5_single": {
+        "image_obs_keys": {"primary": "third_view", "secondary": None, "wrist": "left_wrist_view"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6_AND_JOINT,
+        "action_encoding": ActionEncoding.EEF_R6_AND_JOINT,
+    },
 }
