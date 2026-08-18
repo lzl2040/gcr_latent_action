@@ -415,7 +415,17 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             else:
                 dataset = LeRobotDatasetV30(repo_id, video_return_type="uint8", **common)
         except Exception as exc:  # noqa: BLE001 - a broken dataset must not kill the whole mixture
-            logger.warning("Failed to open %s (%s): %s", dataset_name, data_root, exc)
+            # The message alone is often useless -- `datasets` reports "An error occurred while
+            # generating the dataset" and keeps the real cause in the chained traceback. Emit it
+            # when DEBUG is on (scripts/probe_contrastive_dataset.py --debug), not during
+            # training, where ten datasets' tracebacks would bury the summary.
+            logger.warning(
+                "Failed to open %s (%s): %s",
+                dataset_name,
+                data_root,
+                exc,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
             return None, None, None, None, None
 
         dataset.video_keys_to_decode = rgb_keys + tac_img_keys
