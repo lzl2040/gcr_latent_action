@@ -28,6 +28,7 @@ Guarding against tactile domination
 
 from __future__ import annotations
 
+import itertools
 import math
 import os
 from collections import deque
@@ -370,8 +371,13 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         dtype = self.visual_proj.weight.dtype
         batch = image_t0.shape[0]
 
+        # The pixels are consumed by the vision backbone, not by `visual_proj`; a frozen
+        # backbone is exactly the kind of module a mixed-precision backend may leave in a
+        # different dtype than the trainable trunk.
+        pixel_dtype = _module_dtype(self.vision_backbone, default=dtype)
         pixels = torch.cat(
-            [self._to_pixel_values(image_t0, dtype), self._to_pixel_values(image_t1, dtype)], dim=0
+            [self._to_pixel_values(image_t0, pixel_dtype), self._to_pixel_values(image_t1, pixel_dtype)],
+            dim=0,
         )
         patches = self._encode_vision(pixels).to(dtype)
         p0, p1 = patches[:batch], patches[batch:]
@@ -455,6 +461,22 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
 # ---------------------------------------------------------------------------
 # physical side
 # ---------------------------------------------------------------------------
+def _module_dtype(module: nn.Module, default: torch.dtype = torch.float32) -> torch.dtype:
+    """The dtype a tensor must have to be fed to ``module``.
+
+    Read it off the module that actually consumes the tensor, never off a neighbouring one.
+    Mixed-precision backends do not cast a model uniformly: several keep normalisation layers
+    in fp32 while casting Linear and Conv weights to bf16, so a LayerNorm's dtype says nothing
+    about the convolution two lines below it. Inferring one from the other produced
+    ``Input type (torch.cuda.FloatTensor) and weight type (CUDABFloat16Type) should be the
+    same`` on the cluster while being silently correct on a box that casts everything.
+    """
+    for tensor in itertools.chain(module.parameters(), module.buffers()):
+        if tensor.is_floating_point():
+            return tensor.dtype
+    return default
+
+
 def _freeze_batchnorm(module: nn.Module) -> nn.Module:
     """Replace every ``BatchNorm2d`` with a ``FrozenBatchNorm2d`` carrying the same statistics."""
     import torchvision
@@ -521,12 +543,14 @@ class TactileImageEncoder(nn.Module):
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """``(B, V, 3, H, W)`` uint8 -> per-view embedding ``(B, V, out_dim)`` and feature map."""
         b, v = images.shape[:2]
-        dtype = self.proj.weight.dtype if isinstance(self.proj, nn.Linear) else self.norm.weight.dtype
+        conv_dtype = _module_dtype(self.stem)
         x = images.reshape(b * v, *images.shape[2:]).to(dtype=torch.float32) / 255.0
-        x = ((x - self.mean) / self.std).to(dtype)
+        x = ((x - self.mean) / self.std).to(conv_dtype)
         feat_map = self.layers(self.stem(x))
         pooled = F.adaptive_avg_pool2d(feat_map, 1).flatten(1)
-        emb = self.norm(self.proj(pooled))
+        # The head may sit in a different dtype than the convolutions (see `_module_dtype`).
+        head_dtype = self.proj.weight.dtype if isinstance(self.proj, nn.Linear) else self.norm.weight.dtype
+        emb = self.norm(self.proj(pooled.to(head_dtype)))
         return emb.view(b, v, -1), feat_map
 
 
@@ -776,7 +800,9 @@ class PhysicalEncoder(nn.Module):
                 sel_pair = self.tactile_cnn(sel_images, sensor_ids, sel_mean, sel_std)
             sel_pair = sel_pair.to(dtype)
         else:
-            sel_pair = self.tactile_cnn(sel_images)[0]
+            # Same `.to(dtype)` as the FTP-1 branch above: the encoder's output dtype follows
+            # its own head, which need not match the trunk that consumes it.
+            sel_pair = self.tactile_cnn(sel_images)[0].to(dtype)
         sel_feats = sel_pair[:, 0]
         sel_delta = sel_pair[:, 1] - sel_pair[:, 0]
         if not has_tactile:
