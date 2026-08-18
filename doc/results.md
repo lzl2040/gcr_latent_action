@@ -1026,3 +1026,64 @@ auditable -- had never once printed; the only reason the clamp warning showed up
 a WARNING. Fixed by giving the `lerobot` package logger the same handlers (not the root logger,
 which would drag in INFO spam from torch/deepspeed/PIL). Worth remembering when trusting any
 other library-side INFO line in this repo: several of them have presumably never been seen.
+
+## 13. Adding the OpenNeo datasets
+
+`open_neo_aloha` (12210 episodes / 17.0M frames, 4 tactile pads) and `open_neo_arx5_single`
+(5178 / 8.3M, 2 pads), both 30 fps and both on an external mount. Three things blocked them,
+none of which announced itself clearly.
+
+**The dataset root is nested one level deeper than `vla2root.json` says.** `OpenNeoData/aloha`
+contains `aloha/`, which is the actual dataset. `_resolve_root` tested `os.path.exists` on the
+directory, so it happily returned the outer one and the failure surfaced much later as
+`FileNotFoundError: .../OpenNeoData/arx5_single/meta/info.json` -- which reads like missing data
+rather than a wrong path. It now tests for `meta/info.json` and falls back to `<root>/<name>`,
+so the resolution either finds a real dataset or reports the dataset as not found.
+
+**The hard-coded extra root became `dataset.parent_dir_extra`.** A third mount had been added
+inline in `_resolve_root`; it is now a comma-separated config field, set in `train_ace_local.sh`.
+
+**`datasets` 3.3.2 cannot read parquet written by `datasets` 4.x.** 4.x renamed the list feature
+`Sequence` -> `List` and embeds that name in the parquet's HuggingFace metadata. 3.x resolves an
+unknown `_type` with `globals().get(_type)`, which for `"List"` finds `typing.List` -- not a
+dataclass -- and dies with a bare `TypeError: must be called with a dataclass type or instance`
+from inside `dataclasses.fields`, with nothing in the traceback naming the feature, the file or
+the version. Our other v3.0 datasets carry *no* HuggingFace metadata at all, so they infer from
+the arrow schema and were never affected; this only appears on newly written data. Fixed by
+aliasing `List` to `Sequence` in `_FEATURE_TYPES` (`datasets_v30/io_utils.py`), which is what
+`generate_from_dict` already special-cases. Upgrading `datasets` was rejected: LeRobot 2.1 and
+3.0 paths both sit on 3.x, and this is a one-line name alias.
+
+### 13.1 The gripper was being mapped onto a joint slot
+
+Both OpenNeo arms ship `action`/`observation.state` as **6 joints + 1 gripper** per arm, not 7
+joints. `meta/stats.json` settles it: the last dim of each arm spans `[-0.004, 0.115]` (a
+gripper width in metres) while every other dim spans several radians.
+
+Sliced as a flat 7 (`_seg("action", 0, 7, 20)`), the gripper lands on canonical index 26, the
+`joint_6` slot, and the joint-space gripper slot 27 stays masked. That puts a gripper width on
+top of a genuine 7-DoF arm's last joint -- exactly the collision the slotted canonical space
+exists to prevent, and invisible downstream because the mask count is identical either way.
+
+The same bug was already present, and already annotated `# a little error, because final pos is
+gripper`, in `ms_data_xdof_2` (aliased by `ms_data_xdof_3`, which *is* in the mixture): its dims
+6 and 13 span `[0, 1.009]`, a normalised gripper. Fixed all of them to
+`joints -> [20:26]`, `gripper -> [27]`, `joints -> [28:34]`, `gripper -> [35]`. Verified the
+grippers now occupy 27/35 with the `joint_6` slots empty, and that the total live-slot count is
+unchanged (34 bimanual, 17 single-arm), so only the *meaning* of the layout moved.
+
+Note this changes `ms_data_xdof_3`'s input layout, so `contra_loss` numbers from before this
+commit are not exactly comparable to those after.
+
+### 13.2 Verified
+
+- All 9 datasets in `debug_research_data` load; the mixture trains 40 steps and runs an eval
+  cycle cleanly, exit 0.
+- `tac_n` rises from ~75 to ~154 per step, i.e. the new tactile pads are actually being read.
+- Windows resolve as expected: both OpenNeo sets 30 fps -> 48 frames / 1.60 s.
+- Sample shapes unchanged: `action (32,40)`, `state (32,40)`, `tactile_signal (32,32)`,
+  `tactile_image (6,2,3,112,112)`; aloha masks 4 pads live, arx5 2.
+
+Caveat on the run itself: the machine was busy (three other users' jobs holding 15-45 GB), so
+this was validated **single-GPU at batch 256**, not the usual 2x512. That still clears the >=128
+single-card requirement, but it is not a throughput measurement.

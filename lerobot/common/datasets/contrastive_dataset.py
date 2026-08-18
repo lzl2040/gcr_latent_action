@@ -221,12 +221,28 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
     # ------------------------------------------------------------------
     @staticmethod
     def _resolve_root(cfg, relative_root: str) -> str | None:
-        for parent in (cfg.dataset.parent_dir_v21, cfg.dataset.parent_dir_v30, "/media/v-wangxiaofa/新加卷/lerobot_data"):
-            if parent is None:
+        """First root under which ``relative_root`` is an actual LeRobot dataset.
+
+        The test is ``meta/info.json``, not mere directory existence. Datasets are often nested
+        one level deeper than the path in ``vla2root.json`` suggests (``OpenNeoData/aloha`` in
+        fact contains ``aloha/``), and an existence check happily returns that outer directory,
+        so the failure surfaces much later as a confusing FileNotFoundError on info.json rather
+        than as "this dataset was not found".
+        """
+        extra = getattr(cfg.dataset, "parent_dir_extra", "") or ""
+        parents = [cfg.dataset.parent_dir_v21, cfg.dataset.parent_dir_v30]
+        parents += [p.strip() for p in extra.split(",") if p.strip()]
+        for parent in parents:
+            if not parent:
                 continue
             candidate = os.path.join(parent, relative_root)
-            if os.path.exists(candidate):
+            if os.path.exists(os.path.join(candidate, "meta", "info.json")):
                 return candidate
+            # Tolerate the common one-level nesting (``<root>/<name>/<name>``) rather than
+            # making every such dataset need a hand-edited path.
+            nested = os.path.join(candidate, os.path.basename(relative_root))
+            if os.path.exists(os.path.join(nested, "meta", "info.json")):
+                return nested
         return None
 
     @staticmethod

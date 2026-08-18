@@ -46,6 +46,9 @@ class DatasetConfig:
     parent_dir: str = "/mnt/wangxiaofa/robot_dataset/lerobot-format/"
     parent_dir_v21: str = "/mnt/wangxiaofa/robot_dataset/lerobot-format/"
     parent_dir_v30: str = "/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/"
+    # Extra roots searched after the two above, for datasets that live on a different mount
+    # (an external disk, a blob mirror). Comma-separated so it can be set from the CLI.
+    parent_dir_extra: str = ""
     calvin_sub_task: int | None = 0
 
 

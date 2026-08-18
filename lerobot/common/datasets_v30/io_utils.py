@@ -44,6 +44,28 @@ from lerobot.common.datasets_v30.utils import (
 from lerobot.common.datasets_v30.utils_2 import SuppressProgressBars
 
 
+def _register_list_feature_alias() -> None:
+    """Let `datasets` 3.x read parquet written by `datasets` 4.x.
+
+    4.x renamed the list feature from ``Sequence`` to ``List`` and embeds that name in the
+    parquet's HuggingFace metadata. 3.x resolves an unknown ``_type`` via
+    ``globals().get(_type)``, which for ``"List"`` finds ``typing.List`` -- not a dataclass --
+    and dies with a bare ``TypeError: must be called with a dataclass type or instance``, miles
+    from the actual cause. Datasets written without that metadata (most of ours) are unaffected,
+    which is why this only shows up on newly added ones.
+
+    ``Sequence`` is the 3.x spelling of the same thing, and ``generate_from_dict`` already
+    special-cases it, so aliasing the name is enough.
+    """
+    from datasets.features import features as _features
+
+    if "List" not in _features._FEATURE_TYPES:
+        _features._FEATURE_TYPES["List"] = _features.Sequence
+
+
+_register_list_feature_alias()
+
+
 def get_parquet_file_size_in_mb(parquet_path: str | Path) -> float:
     metadata = pq.read_metadata(parquet_path)
     total_uncompressed_size = 0

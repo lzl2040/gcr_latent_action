@@ -215,13 +215,21 @@ PHYSICAL_SPECS: dict[str, dict] = {
     "ms_data_xdof_2": {
         "action": [
             _seg("action.ee_ort6d_pos", 0, 20, 0),
-            _seg("action.joint_position", 0, 7, 20), # a little error, because final pos is gripper
-            _seg("action.joint_position", 7, 14, 28),
+            # 6 joints + a gripper per arm, not 7 joints: dim 6 and dim 13 measure [0, 1.0]
+            # (normalised gripper) while every real joint spans several radians. Mapping the
+            # gripper onto the `joint_6` slot would put it on top of a genuine 7-DoF arm's
+            # last joint, which is precisely what this canonical space exists to prevent.
+            _seg("action.joint_position", 0, 6, 20),
+            _seg("action.joint_position", 6, 7, 27),
+            _seg("action.joint_position", 7, 13, 28),
+            _seg("action.joint_position", 13, 14, 35),
         ],
         "state": [
             _seg("observations.ee_ort6d_pos", 0, 20, 0),
-            _seg("observations.joint_position", 0, 7, 20),
-            _seg("observations.joint_position", 7, 14, 28),
+            _seg("observations.joint_position", 0, 6, 20),
+            _seg("observations.joint_position", 6, 7, 27),
+            _seg("observations.joint_position", 7, 13, 28),
+            _seg("observations.joint_position", 13, 14, 35),
         ],
     },
     ## YAM_Station_MERGED
@@ -492,17 +500,24 @@ PHYSICAL_SPECS: dict[str, dict] = {
             "observation.images.tactile_right_1",
         ],
     },
-    # open_neo_data
+    # open_neo_data. Both are 6 joints + a gripper per arm (verified from meta/stats.json: the
+    # last dim of each arm spans [-0.004, 0.115] m -- a gripper width -- while the joints span
+    # several radians), so the gripper goes in the joint-space gripper slot (27 / 35), not in
+    # the `joint_6` slot it would land in if the arm were sliced as a flat 7.
     "open_neo_aloha": {
         "action": [
             _seg("action.eef_pose", 0, 20, 0),
-            _seg("action", 0, 7, 20),
-            _seg("action", 7, 14, 28),
+            _seg("action", 0, 6, 20),
+            _seg("action", 6, 7, 27),
+            _seg("action", 7, 13, 28),
+            _seg("action", 13, 14, 35),
         ],
         "state": [
             _seg("observation.eef_pose", 0, 20, 0),
-            _seg("observation.state", 0, 7, 20),
-            _seg("observation.state", 7, 14, 28),
+            _seg("observation.state", 0, 6, 20),
+            _seg("observation.state", 6, 7, 27),
+            _seg("observation.state", 7, 13, 28),
+            _seg("observation.state", 13, 14, 35),
         ],
         "tactile_image": [
             "observation.images.left_wrist_left_tactile",
@@ -514,11 +529,13 @@ PHYSICAL_SPECS: dict[str, dict] = {
     "open_neo_arx5_single": {
         "action": [
             _seg("action.eef_pose", 0, 10, 0),
-            _seg("action", 0, 7, 20),
+            _seg("action", 0, 6, 20),
+            _seg("action", 6, 7, 27),
         ],
         "state": [
             _seg("observation.eef_pose", 0, 10, 0),
-            _seg("observation.state", 0, 7, 20),
+            _seg("observation.state", 0, 6, 20),
+            _seg("observation.state", 6, 7, 27),
         ],
         "tactile_image": [
             "observation.images.left_wrist_left_tactile",

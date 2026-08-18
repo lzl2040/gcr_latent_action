@@ -43,6 +43,7 @@ deepspeed --master_port=${MASTER_PORT} lerobot/scripts/dps_train_contrast.py \
     --dataset.processor="/Data/lzl/huggingface/InternVL3_5-2B-HF" \
     --dataset.parent_dir_v21="/Data/lerobot_data_ort6d" \
     --dataset.parent_dir_v30="/Data/lerobot_data_ort6d/v30" \
+    --dataset.parent_dir_extra="/media/v-wangxiaofa/新加卷/lerobot_data" \
     --dataset.video_backend="torchcodec" \
     --data_mix="debug_research_data" \
     --dataset.sample_ratio=5 \
