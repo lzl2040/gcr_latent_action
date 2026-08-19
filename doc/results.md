@@ -1139,3 +1139,76 @@ Not measured: whether 15.0 is the right number for each FTP-1 set individually. 
 statistics suggest they differ (D-WHEEL ~12.8, RDP_Bimanual ~14.3, RH20T ~18.9), but a single
 15.0 was chosen deliberately to get the mixture running; `DATASET_TRUE_FPS` is per dataset, so
 refining it later is a one-line change each.
+
+## 15. The video backend was decoding black frames, slowly
+
+Reported symptom: on the cluster, raising the share of `ftp_1_sharpa` and
+`ftp_1_VisuoTactile_D-WHEEL` to 60% made training crawl -- `updt_s:124.5 data_s:38.6` at
+batch 512. Two independent bugs were behind it, both from `video_backend` defaulting to
+`pyav` (`lerobot/configs/default.py`).
+
+### 15.1 Where the time went
+
+`scripts/profile_contrastive_step.py` runs the real dataset and model with CUDA-synchronised
+timers per submodule. Per sample, decoding only:
+
+| dataset | streams/sample | pyav | torchcodec |
+|---|---|---|---|
+| `ftp_1_sharpa` | 7 (1 RGB + 6 pads) | 2911 ms | 202 ms |
+| `ftp_1_VisuoTactile_D-WHEEL` | 5 | 438 ms | 74 ms |
+| `ftp_1_exUMI` | 3 | 189 ms | 49 ms |
+| `fractal20220817_data` | 1 | 44 ms | 17 ms |
+| `taco_play` | 1 | 11 ms | 11 ms |
+
+The cost is *opening* a decoder, not decoding. v3.0 stores every episode of a camera in one
+mp4; `ftp_1_sharpa`'s tactile files hold 1,175,891 frames each. Measured directly with
+torchcodec on such a file: cold open + 2 frames = 73 ms, reusing the decoder = 0.8 ms.
+`decode_video_frames_torchcodec` keeps an LRU of 100 open decoders
+(`VideoDecoderCache`); `decode_video_frames_torchvision` has no cache and builds a
+`VideoReader` per call. Multiply by 6 pads per sample and that is the whole step.
+
+End to end, batch 128, 12 workers, same mixture and model:
+
+| backend | step | dataloading | forward | backward |
+|---|---|---|---|---|
+| pyav | 5.010 s | 4.121 s (82%) | 0.391 s | 0.459 s |
+| torchcodec | 0.861 s | 0.000 s | 0.374 s | 0.454 s |
+
+At batch 256 dataloading is still fully hidden (1.634 s/step, all compute), so 12 workers
+keep up on local SSD. Cluster storage is slower, which is why the reported number was 124 s
+rather than ~17 s.
+
+### 15.2 The worse bug: the frames were black
+
+`pyav` ignores `video_return_type`. `LeRobotDatasetV30` asks for uint8 and got float in
+`[0, 1]`. Neither consumer noticed:
+
+- A frame already at the target size passed through `_resize_rgb` unchanged, so a float in
+  `[0, 1]` reached `_to_pixel_values`, which divides by 255. DINOv3 saw an image 255x too
+  dark.
+- A frame needing a resize was cast to uint8, truncating every pixel to **0**. So did every
+  tactile pad in `_build_tactile_images`.
+
+Measured before the fix: `fractal20220817_data` `image_t0` was uint8 with range `[0, 1]` and
+mean 0.000 -- literally black; `ftp_1_RH20TCfg5Franka` and `ftp_1_exUMI` were float32
+`[0, 1]`; every tactile pad of `ftp_1_sharpa` was dead-masked, because a black image has no
+spatial variance and §11's test correctly rejected it. `taco_play` was fine only because its
+images do not come from a video.
+
+So the perception branch had been training on black frames for every v3.0 dataset, and the
+tactile image branch on nothing at all. `tac_n` went from 57.7 to ~180 per 256-row batch once
+the frames were real.
+
+The fix converts on the way in (`MultiModalContrastiveDataset._as_uint8`) rather than
+trusting the backend, and keys off the **dtype** -- the actual contract -- not the observed
+range, which would misfire on a genuinely dark frame. Both backends now yield identical
+pixels (verified per dataset: means agree exactly).
+
+### 15.3 What to watch
+
+- `data_s` only measures rank 0's own wait. Under ZeRO the other ranks block in the
+  all-reduce instead, and that time is charged to `updt_s`. A loader problem can therefore
+  present as a slow *update*, which is what happened here.
+- The remaining tactile cost is the pad count, not the config: 6 pads x 2 frames per sample.
+  If a dataset with many pads ever dominates again, `max_tactile_views` is the dial, and the
+  profiler prints the pad count per step to tell you whether it is worth turning.
