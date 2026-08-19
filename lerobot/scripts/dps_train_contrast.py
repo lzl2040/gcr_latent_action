@@ -311,7 +311,7 @@ def train(cfg: TrainPipelineConfig):
                 model_engine.save_checkpoint(save_dir=cfg.output_dir, client_state=client_state)
 
             if rank == 0 and cfg.log_freq > 0 and step % cfg.log_freq == 0:
-                logger.info(train_tracker)
+                # logger.info(train_tracker)
                 if wandb_logger:
                     wandb_log_dict = train_tracker.to_dict()
                     if output_dict:
