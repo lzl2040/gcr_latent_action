@@ -1140,75 +1140,78 @@ statistics suggest they differ (D-WHEEL ~12.8, RDP_Bimanual ~14.3, RH20T ~18.9),
 15.0 was chosen deliberately to get the mixture running; `DATASET_TRUE_FPS` is per dataset, so
 refining it later is a one-line change each.
 
-## 15. The video backend was decoding black frames, slowly
+## 15. Why a tactile-heavy mixture is slow
 
-Reported symptom: on the cluster, raising the share of `ftp_1_sharpa` and
-`ftp_1_VisuoTactile_D-WHEEL` to 60% made training crawl -- `updt_s:124.5 data_s:38.6` at
-batch 512. Two independent bugs were behind it, both from `video_backend` defaulting to
-`pyav` (`lerobot/configs/default.py`).
+Reported symptom: on the cluster, raising `ftp_1_sharpa` and
+`ftp_1_VisuoTactile_D-WHEEL` to 60% of the mixture gave `updt_s:124.5 data_s:38.6` at batch
+512. The investigation produced one finding that explains it, and one that turned out to be
+about a code path the training scripts do not use. Both are recorded, the second one
+explicitly as a correction, because it was briefly believed to be the answer.
 
-### 15.1 Where the time went
+### 15.1 The answer: the loader is the bottleneck, and pads are video streams
 
-`scripts/profile_contrastive_step.py` runs the real dataset and model with CUDA-synchronised
-timers per submodule. Per sample, decoding only:
+Every tactile pad is a separate video stream, decoded at both ends of the window. So a
+`ftp_1_sharpa` sample costs **7** decodes (1 RGB + 6 pads) where a `taco_play` sample costs
+1. Sustained loader throughput, measured with `scripts/profile_contrastive_step.py
+--loader_only` on a mixture that is 60% sharpa + D-WHEEL, batch 128, 12 workers, local SSD:
 
-| dataset | streams/sample | pyav | torchcodec |
+| `max_tactile_views` | streams/sample (sharpa) | samples/s | ms/sample |
 |---|---|---|---|
-| `ftp_1_sharpa` | 7 (1 RGB + 6 pads) | 2911 ms | 202 ms |
-| `ftp_1_VisuoTactile_D-WHEEL` | 5 | 438 ms | 74 ms |
-| `ftp_1_exUMI` | 3 | 189 ms | 49 ms |
-| `fractal20220817_data` | 1 | 44 ms | 17 ms |
-| `taco_play` | 1 | 11 ms | 11 ms |
+| 6 | 7 | 48.7 | 20.5 |
+| 3 | 4 | 111.7 | 9.0 |
+| 1 | 2 | 166.0 | 6.0 |
 
-The cost is *opening* a decoder, not decoding. v3.0 stores every episode of a camera in one
-mp4; `ftp_1_sharpa`'s tactile files hold 1,175,891 frames each. Measured directly with
-torchcodec on such a file: cold open + 2 frames = 73 ms, reusing the decoder = 0.8 ms.
-`decode_video_frames_torchcodec` keeps an LRU of 100 open decoders
-(`VideoDecoderCache`); `decode_video_frames_torchvision` has no cache and builds a
-`VideoReader` per call. Multiply by 6 pads per sample and that is the whole step.
+The model needs 149 samples/s to stay busy at batch 128 (0.86 s/step). At 6 pads the loader
+delivers a third of that, so **the step is loader-bound by ~3x even on local SSD**. At batch
+512 that is ~10.5 s/step of loading against ~3.4 s of compute. The cluster's ~160 s implies
+its storage is roughly 15x slower per sample than local SSD, which is the expected shape for
+a blob/NFS mount: sharpa is 53 GB across 267 mp4 files, and a cold decoder open has to pull
+the index of a file holding 1.2M frames.
 
-End to end, batch 128, 12 workers, same mixture and model:
+Measurement trap, hit twice: `dataloading` in the training log (and in the profiler) reads
+**0.000 s** for the first few steps no matter how slow the loader is, because
+`num_workers x prefetch_factor` = 48 batches are already queued. Any throughput claim needs
+more steps than the prefetch depth -- hence `--loader_only --steps 110 --warmup 60`. A
+6-step run "proving" the loader keeps up proves nothing.
 
-| backend | step | dataloading | forward | backward |
-|---|---|---|---|---|
-| pyav | 5.010 s | 4.121 s (82%) | 0.391 s | 0.459 s |
-| torchcodec | 0.861 s | 0.000 s | 0.374 s | 0.454 s |
+Second trap: `data_s` only measures rank 0's own wait. Under ZeRO the other ranks block in
+the all-reduce instead, and that time is charged to `updt_s`. A loader problem therefore
+presents as a slow *update*, which is exactly how this was reported.
 
-At batch 256 dataloading is still fully hidden (1.634 s/step, all compute), so 12 workers
-keep up on local SSD. Cluster storage is slower, which is why the reported number was 124 s
-rather than ~17 s.
+Knobs, in order of leverage:
 
-### 15.2 The worse bug: the frames were black
+1. `max_tactile_views` (`--policy.max_tactile_views`): 6 -> 3 is 2.3x. Direct, and costs
+   pads.
+2. Stage the FTP-1 datasets on node-local disk. The gap between 20.5 ms and the cluster's
+   implied ~300 ms is storage, not code.
+3. `LEROBOT_VIDEO_DECODER_CACHE_SIZE` (already 256 in both launch scripts). With the real
+   sampler's episode locality, a cache of 100 misses 12.1% of the time and spends 23% of
+   load time on cold opens; 400 misses 4.4% and spends 6.9%. Each cached decoder costs
+   ~6.5 MB of RSS **per worker**, so 400 x 12 workers is ~31 GB.
+4. `--num_workers`.
 
-`pyav` ignores `video_return_type`. `LeRobotDatasetV30` asks for uint8 and got float in
-`[0, 1]`. Neither consumer noticed:
+### 15.2 Correction: the pyav findings do not apply to the training scripts
 
-- A frame already at the target size passed through `_resize_rgb` unchanged, so a float in
-  `[0, 1]` reached `_to_pixel_values`, which divides by 255. DINOv3 saw an image 255x too
-  dark.
-- A frame needing a resize was cast to uint8, truncating every pixel to **0**. So did every
-  tactile pad in `_build_tactile_images`.
+`DatasetConfig.video_backend` defaulted to `pyav`, and on that path:
 
-Measured before the fix: `fractal20220817_data` `image_t0` was uint8 with range `[0, 1]` and
-mean 0.000 -- literally black; `ftp_1_RH20TCfg5Franka` and `ftp_1_exUMI` were float32
-`[0, 1]`; every tactile pad of `ftp_1_sharpa` was dead-masked, because a black image has no
-spatial variance and §11's test correctly rejected it. `taco_play` was fine only because its
-images do not come from a video.
+- pyav rebuilds a `VideoReader` per call with no decoder cache, so `ftp_1_sharpa` cost
+  2911 ms/sample against torchcodec's 202 ms (random access; ~65 ms under the real sampler's
+  locality).
+- pyav **ignores `video_return_type`**, so the uint8 that `LeRobotDatasetV30` asks for came
+  back as float in `[0, 1]`. A frame already at the target size then reached
+  `_to_pixel_values`, which divides by 255, so the backbone saw an image 255x too dark; a
+  frame needing a resize was cast to uint8 and truncated to exactly **0**, and so was every
+  tactile pad. Measured: `fractal20220817_data` `image_t0` uint8 with range `[0, 1]`, mean
+  0.000 -- literally black.
 
-So the perception branch had been training on black frames for every v3.0 dataset, and the
-tactile image branch on nothing at all. `tac_n` went from 57.7 to ~180 per 256-row batch once
-the frames were real.
+Both are real and both are fixed (default is now `torchcodec`; `_as_uint8` converts on the
+way in, keyed off dtype rather than observed range). **But neither ever affected a training
+run**: `train_ace.sh` and `train_ace_local.sh` have always passed
+`--dataset.video_backend=torchcodec`, and under torchcodec every dataset already returns
+uint8, so `_as_uint8` is a no-op there. The fix matters for anything that does *not* go
+through those two scripts -- `scripts/probe_contrastive_dataset.py`,
+`scripts/profile_contrastive_step.py`, and any new entry point that takes the config default.
 
-The fix converts on the way in (`MultiModalContrastiveDataset._as_uint8`) rather than
-trusting the backend, and keys off the **dtype** -- the actual contract -- not the observed
-range, which would misfire on a genuinely dark frame. Both backends now yield identical
-pixels (verified per dataset: means agree exactly).
-
-### 15.3 What to watch
-
-- `data_s` only measures rank 0's own wait. Under ZeRO the other ranks block in the
-  all-reduce instead, and that time is charged to `updt_s`. A loader problem can therefore
-  present as a slow *update*, which is what happened here.
-- The remaining tactile cost is the pad count, not the config: 6 pads x 2 frames per sample.
-  If a dataset with many pads ever dominates again, `max_tactile_views` is the dial, and the
-  profiler prints the pad count per step to tell you whether it is worth turning.
+Related correction: `tac_n` rising from 57.7 to ~180 per 256-row batch was **not** caused by
+this fix. `mixtures.py` was edited between the two runs, raising sharpa and D-WHEEL from 0.5
+to 1.0.

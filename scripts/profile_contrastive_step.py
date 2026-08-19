@@ -114,6 +114,8 @@ def build_config(args) -> _Cfg:
         tactile_backbone=args.tactile_backbone,
         ftp1_tactile_dir=args.ftp1_tactile_dir,
     )
+    if args.max_tactile_views is not None:
+        policy.max_tactile_views = args.max_tactile_views
     dataset = DatasetConfig(repo_id="profile")
     dataset.dataset_size_one_epoch = args.batch_size * (args.steps + 2)
     dataset.parent_dir_v21 = args.parent_dir_v21
@@ -135,6 +137,10 @@ def main() -> int:
     p.add_argument("--warmup", type=int, default=2, help="steps excluded from the averages")
     p.add_argument("--num_workers", type=int, default=12)
     p.add_argument("--video_backend", default=None, help="override DatasetConfig.video_backend")
+    p.add_argument("--max_tactile_views", type=int, default=None,
+                   help="pads per sample; each one is an extra video stream to decode")
+    p.add_argument("--loader_only", action="store_true",
+                   help="skip the model; measure what the loader alone can deliver")
     p.add_argument("--chunk_size", type=int, default=32)
     p.add_argument("--group_size", type=int, default=4)
     p.add_argument("--chunk_seconds", type=float, default=1.6)
@@ -187,6 +193,24 @@ def main() -> int:
         persistent_workers=args.num_workers > 0,
         prefetch_factor=4 if args.num_workers > 0 else None,
     )
+
+    if args.loader_only:
+        # The question "can the loader keep up?" is separable from "is the model slow?", and
+        # on a network filesystem it is usually the only one that matters. Answer it without
+        # paying for a 772M-parameter model or a GPU.
+        step, seen = 0, 0
+        start = time.perf_counter()
+        for batch in loader:
+            seen += batch["observation.state"].shape[0]
+            step += 1
+            if step == args.warmup:  # exclude worker start-up and the first prefetch
+                start, seen = time.perf_counter(), 0
+            if step >= args.steps:
+                break
+        elapsed = time.perf_counter() - start
+        print(f"\nloader only: {seen / max(elapsed, 1e-9):.1f} 样本/秒 "
+              f"({1000 * elapsed / max(seen, 1):.1f} ms/样本, {args.num_workers} workers)")
+        return 0
 
     policy = make_policy(cfg=cfg.policy, device="cpu", ds_meta=dataset.meta)
     device = torch.device("cuda")
