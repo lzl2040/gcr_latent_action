@@ -41,10 +41,11 @@ azcopy 二进制: 默认自动下载到脚本同目录的 ./azcopy（已有则�
 """
 
 import argparse
+import errno
 import logging
 import os
 import re
-import stat
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -194,18 +195,44 @@ def ensure_azcopy(azcopy_bin: Path) -> Path:
         tmp_path = Path(tmp.name)
     try:
         urllib.request.urlretrieve(AZCOPY_DOWNLOAD_URL, tmp_path)
+        # 必须先写到同目录下的唯一临时名再 os.replace: 若直接写最终路径，
+        # 内核在写句柄彻底释放前会让 execve 返回 ETXTBSY(Text file busy)，
+        # 多进程同时安装时也会互相踩到对方还没写完的二进制。
+        staging = azcopy_bin.parent / f".azcopy.{os.getpid()}.tmp"
         with tarfile.open(tmp_path, "r:gz") as tf:
             member = next(m for m in tf.getmembers() if m.name.endswith("/azcopy"))
-            member.name = "azcopy"  # 拍平目录结构
-            tf.extract(member, azcopy_bin.parent, filter="data")
-        extracted = azcopy_bin.parent / "azcopy"
-        extracted.chmod(extracted.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        if extracted != azcopy_bin:
-            extracted.rename(azcopy_bin)
+            src = tf.extractfile(member)
+            if src is None:
+                raise RuntimeError("azcopy 压缩包中未找到可读的 azcopy 二进制")
+            with open(staging, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+                dst.flush()
+                os.fsync(dst.fileno())
+        staging.chmod(0o755)
+        os.replace(staging, azcopy_bin)  # 原子替换，最终路径是全新 inode
         logger.info(f"azcopy 已安装到: {azcopy_bin}")
+        _wait_executable(azcopy_bin)
         return azcopy_bin
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+def _wait_executable(azcopy: Path, attempts: int = 10, delay: float = 1.0) -> None:
+    """探测二进制确实可以 exec，遇 ETXTBSY 则退避重试。
+
+    某些共享/同步的文件系统（如 amlt 的 /scratch/amlt_code）在文件刚写完后
+    仍可能有别的进程持有写句柄，此时 execve 返回 ETXTBSY。
+    """
+    for i in range(attempts):
+        try:
+            subprocess.run([str(azcopy), "--version"], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except OSError as e:
+            if e.errno != errno.ETXTBSY or i == attempts - 1:
+                raise
+            logger.warning(f"{azcopy} 仍被占用 (ETXTBSY)，{delay}s 后重试 ({i + 1}/{attempts})")
+            time.sleep(delay)
 
 
 # ============================================================================
