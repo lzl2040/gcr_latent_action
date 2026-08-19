@@ -477,12 +477,49 @@ def _module_dtype(module: nn.Module, default: torch.dtype = torch.float32) -> to
     return default
 
 
-def _freeze_batchnorm(module: nn.Module) -> nn.Module:
-    """Replace every ``BatchNorm2d`` with a ``FrozenBatchNorm2d`` carrying the same statistics."""
-    import torchvision
+class _FrozenBatchNorm2d(nn.Module):
+    """BatchNorm2d with frozen statistics that runs in whatever dtype its input arrives in.
 
+    ``torchvision.ops.misc.FrozenBatchNorm2d`` stores ``weight``/``bias``/``running_*`` as
+    *buffers* and has no parameters at all. A mixed-precision backend that casts parameters
+    but leaves buffers alone therefore turns it into an fp32 island in a bf16 network: it
+    accepts the bf16 activation, promotes it against its fp32 statistics and hands fp32 to the
+    next convolution, which fails with
+
+        Input type (torch.cuda.FloatTensor) and weight type (CUDABFloat16Type) should be the
+        same
+
+    inside ``torchvision/models/resnet.py``, several layers away from anything we wrote.
+    Casting the statistics to the activation's dtype at call time makes the module immune to
+    however the surrounding framework decided to split parameters from buffers.
+
+    The buffer names match torchvision's, so checkpoints stay interchangeable.
+    """
+
+    def __init__(self, num_features: int, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.register_buffer("weight", torch.ones(num_features))
+        self.register_buffer("bias", torch.zeros(num_features))
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # The statistics are folded in fp32 -- rsqrt of a small variance in bf16 loses real
+        # precision -- and only the resulting affine is cast down to meet the activation.
+        scale = self.weight.float() * (self.running_var.float() + self.eps).rsqrt()
+        bias = self.bias.float() - self.running_mean.float() * scale
+        shape = (1, -1) + (1,) * (x.dim() - 2)
+        return x * scale.to(x.dtype).view(shape) + bias.to(x.dtype).view(shape)
+
+    def extra_repr(self) -> str:
+        return f"{self.weight.shape[0]}, eps={self.eps}"
+
+
+def _freeze_batchnorm(module: nn.Module) -> nn.Module:
+    """Replace every ``BatchNorm2d`` with a ``_FrozenBatchNorm2d`` carrying the same statistics."""
     if isinstance(module, nn.BatchNorm2d):
-        frozen = torchvision.ops.misc.FrozenBatchNorm2d(module.num_features, eps=module.eps)
+        frozen = _FrozenBatchNorm2d(module.num_features, eps=module.eps)
         frozen.weight.data.copy_(module.weight.data)
         frozen.bias.data.copy_(module.bias.data)
         frozen.running_mean.data.copy_(module.running_mean.data)
