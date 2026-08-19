@@ -37,7 +37,16 @@ class DatasetConfig:
     revision: str | None = None
     use_imagenet_stats: bool = True
     balance_dataset_weights: bool = True
-    video_backend: str = "pyav"
+    # torchcodec, not pyav. Two reasons, both measured on the FTP-1 datasets:
+    #   * pyav ignores `video_return_type`, so a caller that asks for uint8 frames silently
+    #     gets float32 in [0, 1] instead. Anything that then treats them as [0, 255] pixels
+    #     -- e.g. an ImageNet normalisation that divides by 255 -- sees a black image.
+    #   * pyav cannot seek accurately, so `decode_video_frames_torchvision` sets
+    #     `keyframes_only=True` and returns the nearest *keyframe* rather than the nearest
+    #     frame, and it rebuilds a reader per call. On a v3.0 file holding 1.2M frames that
+    #     costs ~0.5 s per stream per sample; the cached torchcodec decoder costs ~1 ms.
+    # torchvision's video API is deprecated upstream as well.
+    video_backend: str = "torchcodec"
     default_image_size: int = 224
     default_channel_size: int = 3
     sample_ratio: float = 1.0

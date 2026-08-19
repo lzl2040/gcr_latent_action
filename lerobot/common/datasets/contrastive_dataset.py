@@ -24,6 +24,7 @@ Indexing supports two forms:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import math
@@ -108,6 +109,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.tactile_img_size = getattr(policy_cfg, "tactile_img_size", 64)
         self.tactile_dead_std = getattr(policy_cfg, "tactile_dead_std", 0.002)
         self.max_tactile_views = min(getattr(policy_cfg, "max_tactile_views", MAX_TACTILE_VIEWS), MAX_TACTILE_VIEWS)
+        self._video_backend = self._resolve_video_backend(cfg.dataset.video_backend)
         self.use_wrist_image = getattr(policy_cfg, "use_wrist_image", False)
 
         mixture_spec = OXE_NAMED_MIXTURES[data_mix]
@@ -330,6 +332,26 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         offsets = [round(i * horizon / denom) for i in range(self.chunk_size)]
         return offsets, horizon
 
+    @staticmethod
+    def _resolve_video_backend(requested: str) -> str:
+        """``torchcodec`` unless it is genuinely unavailable.
+
+        Falling back silently would be worse than failing: the pyav path is ~25x slower on
+        the FTP-1 v3.0 files *and* returns a different dtype, so a run that quietly used it
+        would look like a slow run rather than a broken one. Say so loudly instead.
+        """
+        if requested != "torchcodec":
+            logger.warning(
+                "video_backend=%r: pyav ignores the uint8 request and cannot seek accurately; "
+                "torchcodec is strongly preferred for this pipeline.",
+                requested,
+            )
+            return requested
+        if importlib.util.find_spec("torchcodec") is None:
+            logger.warning("torchcodec is not installed; falling back to pyav (slow, and seeks to keyframes only).")
+            return "pyav"
+        return requested
+
     def _build_dataset(self, cfg, dataset_name, data_root, version, spec):
         repo_id = f"bulldog-{dataset_name}"
         meta_cls = LeRobotDatasetMetadata if version == "v2.1" else LeRobotDatasetMetadataV30
@@ -407,7 +429,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 root=data_root,
                 delta_timestamps=delta_timestamps or None,
                 image_transforms=None,  # applied per-modality in this class
-                video_backend=cfg.dataset.video_backend,
+                video_backend=self._video_backend,
                 dataset_name=dataset_name,
             )
             if version == "v2.1":
@@ -619,8 +641,28 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         return self._to_canonical(item, ds_idx, frame_idx)
 
+    @staticmethod
+    def _as_uint8(image: torch.Tensor) -> torch.Tensor:
+        """Frames as uint8 in ``[0, 255]``, whichever convention the decoder used.
+
+        The two return types in this codebase are uint8 in ``[0, 255]`` and float in
+        ``[0, 1]`` (see ``video_return_type``), and which one comes back depends on the
+        backend as much as on the request -- pyav ignores ``video_return_type`` entirely.
+        Casting a ``[0, 1]`` float straight to uint8 truncates every pixel to 0, and leaving
+        it as a float sends a 255x-too-dark image to a normalisation that divides by 255.
+        Both failures are silent: the loss still goes down, on black images.
+
+        Keying off the dtype rather than the observed range is deliberate. A range test
+        ("max <= 1 means [0, 1]") would misfire on a genuinely dark frame, and the dtype is
+        the actual contract.
+        """
+        if image.is_floating_point():
+            image = (image.clamp(0.0, 1.0) * 255.0).round()
+        return image.to(torch.uint8)
+
     def _resize_rgb(self, image: torch.Tensor) -> torch.Tensor:
         size = self.cfg.dataset.image_transforms.img_size
+        image = self._as_uint8(image)
         if image.shape[-1] == size and image.shape[-2] == size:
             return image
         return F.interpolate(
@@ -764,6 +806,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             if frame.shape[0] < 2:
                 frame = frame[:1].expand(2, -1, -1, -1)
             frame = frame[:2]
+            frame = self._as_uint8(frame)
             frame = F.interpolate(
                 frame.float(), size=(size, size), mode="bilinear", align_corners=False
             )
