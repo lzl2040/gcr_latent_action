@@ -44,27 +44,42 @@ _KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "tactile_image")
 
 
 def init_logger(cfg):
+    rank = int(os.environ.get("RANK", 0))
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
-    if int(os.environ.get("RANK", 0)) == 0:
-        formatter = logging.Formatter(
-            "[%(asctime)s] [rank: 0] [%(levelname)s] - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-        )
+    formatter = logging.Formatter(
+        f"[%(asctime)s] [rank: {rank}] [%(levelname)s] - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    handlers: list[logging.Handler] = []
+    if rank == 0:
         log_path = Path(cfg.log_dir) / f"contrast/{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(log_path)
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        logger.addHandler(logging.StreamHandler())
-        # The library modules log the things worth auditing -- resolved temporal windows,
-        # skipped datasets, canonical-space fallbacks -- but only `__main__` was ever given a
-        # handler, so those records fell through to logging's lastResort handler and anything
-        # below WARNING was silently dropped. Configure the `lerobot` logger too, rather than
-        # the root, which would pull in INFO spam from torch/deepspeed/PIL.
-        lib_logger = logging.getLogger("lerobot")
-        lib_logger.setLevel(logging.INFO)
-        for h in logger.handlers:
-            lib_logger.addHandler(h)
+        handlers.append(logging.FileHandler(log_path))
+        handlers.append(logging.StreamHandler())
+    else:
+        # The other ranks say the same things at the same time; keep only what signals
+        # trouble, otherwise every message is repeated once per GPU.
+        console = logging.StreamHandler()
+        console.setLevel(logging.WARNING)
+        handlers.append(console)
+    for h in handlers:
+        h.setFormatter(formatter)
+
+    # The library modules log the things worth auditing -- resolved temporal windows,
+    # skipped datasets, canonical-space fallbacks -- but only `__main__` was ever given a
+    # handler, so those records fell through to logging's lastResort handler and anything
+    # below WARNING was silently dropped. Configure the `lerobot` logger too, rather than
+    # the root, which would pull in INFO spam from torch/deepspeed/PIL.
+    lib_logger = logging.getLogger("lerobot")
+    lib_logger.setLevel(logging.INFO)
+    for target in (logger, lib_logger):
+        for h in handlers:
+            target.addHandler(h)
+        # `cfg.validate()` reaches for the module-level `logging.warning`, which quietly runs
+        # `basicConfig()` and leaves a handler on the root logger. Records propagating up
+        # would then be emitted a second time in logging's default format. Terminate here:
+        # these two loggers already have handlers of their own.
+        target.propagate = False
     return logger
 
 
@@ -311,7 +326,7 @@ def train(cfg: TrainPipelineConfig):
                 model_engine.save_checkpoint(save_dir=cfg.output_dir, client_state=client_state)
 
             if rank == 0 and cfg.log_freq > 0 and step % cfg.log_freq == 0:
-                # logger.info(train_tracker)
+                logger.info(train_tracker)
                 if wandb_logger:
                     wandb_log_dict = train_tracker.to_dict()
                     if output_dict:
