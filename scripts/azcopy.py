@@ -36,6 +36,23 @@
     # 注意: 上传时 SAS token 需要写权限（sp 含 cw）；azcopy 同样会在
     # 目标 URL 父路径下重建本地叶子目录名
 
+单文件传输（--mode file，也可让 --mode auto 自动判断）:
+    # 下载单个文件，--dst 是完整的本地文件路径
+    python download_blob_azcopy.py --mode file \
+        --src "https://<账号>.blob.core.windows.net/<容器>/meta/info.json" \
+        --dst /scratch/data/info.json --sas "$AZURE_BLOB_SAS_TOKEN"
+
+    # --dst 末尾加 "/" 表示"放进这个目录"，文件名沿用源文件名
+    python download_blob_azcopy.py --mode file \
+        --src ".../meta/info.json" --dst /scratch/data/meta/ ...
+
+    # 上传单个文件（--src 是文件时 --mode auto 会自动识别）
+    python download_blob_azcopy.py --upload --msi \
+        --src /scratch/lerobot_out/meta/info.json \
+        --dst "https://<账号>.blob.core.windows.net/<容器>/lerobot_ftp/X/meta/info.json"
+    # 单文件模式下 --dst 就是完整目标路径, 末段与源文件名不同即为重命名;
+    # 想保留原名并放进某目录, 在 --dst 末尾加 "/"
+
 azcopy 二进制: 默认自动下载到脚本同目录的 ./azcopy（已有则复用），
 可用 --azcopy-bin 指定已有二进制路径。
 """
@@ -275,24 +292,24 @@ def azcopy_login_msi(azcopy: Path) -> None:
 
 def run_azcopy_copy(azcopy: Path, src: str, target: str, overwrite: str = "ifSourceNewer",
                     cap_mbps: float = None, extra_args: list = None,
-                    use_msi: bool = False) -> None:
+                    use_msi: bool = False, recursive: bool = True) -> None:
     """
     执行 azcopy copy，带重试与断点续传（参考 download_azure_azcopy.py 的重试逻辑）:
-      - 首次: azcopy copy <src> <target> --recursive=true
+      - 首次: azcopy copy <src> <target> [--recursive=true]
       - 失败重试时优先 azcopy jobs resume <jobId>，resume 失败则重新 copy
         （--overwrite=ifSourceNewer 保证已传输的文件不会重传）
 
-    src / target 为 azcopy 的最终参数（下载: blob URL → 本地目录;
-    上传: 本地目录 → blob URL），调用方负责按 azcopy 目录语义换算好。
+    src / target 为 azcopy 的最终参数（下载: blob URL → 本地路径;
+    上传: 本地路径 → blob URL），调用方负责按 azcopy 目录语义换算好。
+    recursive=False 用于单文件传输（azcopy 对单文件不接受 --recursive）。
     """
     env = dict(os.environ)
     if use_msi:
         env["AZCOPY_AUTO_LOGIN_TYPE"] = "MSI"
 
-    cmd_base = [
-        str(azcopy), "copy", src, target,
-        "--recursive=true", f"--overwrite={overwrite}",
-    ]
+    cmd_base = [str(azcopy), "copy", src, target, f"--overwrite={overwrite}"]
+    if recursive:
+        cmd_base.append("--recursive=true")
     if cap_mbps:
         cmd_base.append(f"--cap-mbps={cap_mbps}")
     cmd_base += (extra_args or [])
@@ -375,6 +392,57 @@ def _url_parent(url: str) -> str:
     parent = no_query.rstrip("/").rsplit("/", 1)[0]
     return parent + sep + query
 
+
+def _url_join(url: str, name: str) -> str:
+    """在 blob URL 末尾追加一段路径（保留 query string，如 SAS token）。"""
+    no_query, sep, query = url.partition("?")
+    return no_query.rstrip("/") + "/" + name + sep + query
+
+
+def _url_leaf(url: str) -> str:
+    """取 blob URL 的最后一段（去掉 query string）。"""
+    return url.partition("?")[0].rstrip("/").rsplit("/", 1)[-1]
+
+
+def run_azcopy_download_file(azcopy: Path, url: str, dst: Path, as_dir: bool,
+                             overwrite: str = "ifSourceNewer", cap_mbps: float = None,
+                             extra_args: list = None, use_msi: bool = False) -> Path:
+    """
+    下载单个 blob。与目录模式不同，这里不做父路径换算:
+      - as_dir=True（--dst 以 / 结尾或已是本地目录）: 目标是目录，azcopy 自动补源文件名
+      - as_dir=False: --dst 就是完整的本地文件路径，可顺便重命名
+    返回最终落地的本地文件路径。
+    """
+    if as_dir:
+        target_dir = dst.resolve()
+        final = target_dir / _url_leaf(url)
+    else:
+        final = dst.resolve()
+        target_dir = final.parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+    run_azcopy_copy(azcopy, url, str(final), overwrite, cap_mbps, extra_args,
+                    use_msi, recursive=False)
+    return final
+
+
+def run_azcopy_upload_file(azcopy: Path, local_file: Path, url: str, as_dir: bool,
+                           overwrite: str = "ifSourceNewer", cap_mbps: float = None,
+                           extra_args: list = None, use_msi: bool = False) -> str:
+    """
+    上传单个文件。与目录模式不同，这里不做父路径换算:
+      - as_dir=True（--dst 以 / 结尾）: 目标是"目录"，自动补上本地文件名
+      - as_dir=False: --dst 就是完整的目标 blob URL，可顺便重命名
+    返回最终写入的 blob URL（不含 SAS）。
+    """
+    local_file = local_file.resolve()
+    if not local_file.is_file():
+        raise ValueError(f"上传源必须是已存在的文件: {local_file}")
+    final = _url_join(url, local_file.name) if as_dir else url
+    run_azcopy_copy(azcopy, str(local_file), final, overwrite, cap_mbps, extra_args,
+                    use_msi, recursive=False)
+    return final.partition("?")[0]
+
+
 # FTP_SUBSET_ROOT = Path("/mnt/in_agibot/robot_dataset/ftp-1-unzip/FTP-1-Dataset")
 # OUTPUT_ROOT = Path("/mnt/in_agibot/robot_dataset/lerobot-format-v30/FTP-1")
 # ============================================================================
@@ -391,12 +459,16 @@ def main():
     )
     parser.add_argument("--src", required=True,
                         help="源: 完整 blob URL，或容器内路径（需配合 --account/--container）。"
-                             "--upload 模式下为本地目录")
+                             "--upload 模式下为本地目录或文件")
     parser.add_argument("--dst", required=True,
-                        help="本地目标目录（azcopy 会在其父目录下重建源叶子目录名）。"
+                        help="本地目标（目录模式下 azcopy 会在其父目录下重建源叶子目录名；"
+                             "文件模式下就是完整的目标文件路径，末尾加 / 则视为目录）。"
                              "--upload 模式下为 blob URL / 容器内路径")
+    parser.add_argument("--mode", default="auto", choices=["auto", "dir", "file"],
+                        help="传输单位: dir=整个目录（默认行为），file=单个文件，"
+                             "auto=自动判断（上传看本地是不是文件；下载看源末段有没有扩展名）")
     parser.add_argument("--upload", action="store_true",
-                        help="上传模式: --src 为本地目录, --dst 为 blob 目标。"
+                        help="上传模式: --src 为本地目录/文件, --dst 为 blob 目标。"
                              "SAS token 需要写权限（sp 含 cw）")
     parser.add_argument("--account", default=None, help="Azure 存储账号名（src 非完整 URL 时必填）")
     parser.add_argument("--container", default=None, help="Blob 容器名（src 非完整 URL 时必填）")
@@ -436,35 +508,75 @@ def main():
     if not args.msi:
         url = append_sas(url, args.sas)
 
+    # ---- 判定传输单位: 目录还是单文件 ----
+    if args.mode == "auto":
+        if args.upload:
+            is_file = Path(args.src).is_file()
+        else:
+            # 下载时无法 stat 远端，用"源末段是否带扩展名"猜；猜错可用 --mode 覆盖
+            is_file = bool(Path(_url_leaf(args.src)).suffix)
+        logger.info(f"--mode auto 判定为{'单文件' if is_file else '目录'}传输"
+                    f"（可用 --mode file/--mode dir 强制覆盖）")
+    else:
+        is_file = args.mode == "file"
+
+    # --dst 末尾带 / 表示"放进这个目录"，否则视为完整目标路径（可重命名）
+    dst_is_dir = args.dst.rstrip().endswith("/")
+    if is_file and not args.upload and not dst_is_dir and Path(args.dst).is_dir():
+        dst_is_dir = True  # 下载时 --dst 已经是个本地目录，按目录处理
+
     if args.upload:
         local_src = Path(args.src)
-        if not local_src.is_dir():
-            parser.error(f"--upload 模式下 --src 必须是已存在的本地目录: {local_src}")
-        # 防呆: azcopy 会在目标 URL 父路径下重建本地叶子目录名
-        dst_leaf = blob_ref.split("?", 1)[0].rstrip("/").split("/")[-1]
-        if dst_leaf != local_src.name:
-            logger.warning(
-                f"--dst URL 的最后一段 '{dst_leaf}' 与本地目录名 '{local_src.name}' 不一致: "
-                f"文件将上传到 {_url_parent(url)}/{local_src.name} "
-                f"（若这正是预期位置请忽略）"
-            )
-        logger.info(f"上传: {local_src} → {url}（azcopy 实际写入其父路径，自动带上叶子目录名）")
+        if is_file:
+            if not local_src.is_file():
+                parser.error(f"--mode file 下 --src 必须是已存在的本地文件: {local_src}")
+            final_url = _url_join(url, local_src.name) if dst_is_dir else url
+            if not dst_is_dir and _url_leaf(url) != local_src.name:
+                logger.warning(
+                    f"--dst 末段 '{_url_leaf(url)}' 与本地文件名 '{local_src.name}' 不同, "
+                    f"上传后会被重命名；若想放进该目录请在 --dst 末尾加 '/'"
+                )
+            logger.info(f"上传文件: {local_src} → {final_url.partition('?')[0]}")
+        else:
+            if not local_src.is_dir():
+                parser.error(f"--upload 目录模式下 --src 必须是已存在的本地目录: {local_src}"
+                             f"（若要传单个文件请加 --mode file）")
+            # 防呆: azcopy 会在目标 URL 父路径下重建本地叶子目录名
+            dst_leaf = _url_leaf(blob_ref)
+            if dst_leaf != local_src.name:
+                logger.warning(
+                    f"--dst URL 的最后一段 '{dst_leaf}' 与本地目录名 '{local_src.name}' 不一致: "
+                    f"文件将上传到 {_url_parent(url)}/{local_src.name} "
+                    f"（若这正是预期位置请忽略）"
+                )
+            logger.info(f"上传: {local_src} → {url}（azcopy 实际写入其父路径，自动带上叶子目录名）")
         # 上传默认监控本地源所在磁盘
         default_monitor = str(local_src.resolve().parent)
     else:
-        # 防呆: azcopy 会在 dst 的父目录下重建源叶子目录名,
-        # 若 dst 叶子名与源不一致, 最终落点可能不是用户预期的位置
         dst_path = Path(args.dst)
-        src_leaf = args.src.split("?", 1)[0].rstrip("/").split("/")[-1]
-        if dst_path.name != src_leaf:
-            logger.warning(
-                f"--dst 的最后一段 '{dst_path.name}' 与源目录名 '{src_leaf}' 不一致: "
-                f"文件将下载到 {dst_path.resolve().parent / src_leaf} "
-                f"（若这正是预期位置请忽略）"
-            )
-        logger.info(f"下载: {args.src}")
-        logger.info(f"目标: {dst_path}（azcopy 实际写入其父目录，自动带上叶子目录名）")
-        default_monitor = str(dst_path.resolve().parent)
+        if is_file:
+            final_path = dst_path / _url_leaf(args.src) if dst_is_dir else dst_path
+            if not dst_is_dir and final_path.name != _url_leaf(args.src):
+                logger.warning(
+                    f"--dst 末段 '{final_path.name}' 与源文件名 '{_url_leaf(args.src)}' 不同, "
+                    f"下载后会被重命名；若想放进该目录请在 --dst 末尾加 '/'"
+                )
+            logger.info(f"下载文件: {args.src}")
+            logger.info(f"目标: {final_path}")
+            default_monitor = str(final_path.resolve().parent)
+        else:
+            # 防呆: azcopy 会在 dst 的父目录下重建源叶子目录名,
+            # 若 dst 叶子名与源不一致, 最终落点可能不是用户预期的位置
+            src_leaf = _url_leaf(args.src)
+            if dst_path.name != src_leaf:
+                logger.warning(
+                    f"--dst 的最后一段 '{dst_path.name}' 与源目录名 '{src_leaf}' 不一致: "
+                    f"文件将下载到 {dst_path.resolve().parent / src_leaf} "
+                    f"（若这正是预期位置请忽略）"
+                )
+            logger.info(f"下载: {args.src}")
+            logger.info(f"目标: {dst_path}（azcopy 实际写入其父目录，自动带上叶子目录名）")
+            default_monitor = str(dst_path.resolve().parent)
 
     # 启动后台资源监控（默认监控下载目标/上传源所在路径）
     monitor_paths = args.monitor_path if args.monitor_path is not None else [default_monitor]
@@ -482,9 +594,15 @@ def main():
 
     t0 = time.perf_counter()
     try:
-        if args.upload:
+        if args.upload and is_file:
+            run_azcopy_upload_file(azcopy, Path(args.src), url, dst_is_dir, args.overwrite,
+                                   args.cap_mbps, args.extra_args, args.msi)
+        elif args.upload:
             run_azcopy_upload(azcopy, Path(args.src), url, args.overwrite,
                               args.cap_mbps, args.extra_args, args.msi)
+        elif is_file:
+            run_azcopy_download_file(azcopy, url, Path(args.dst), dst_is_dir, args.overwrite,
+                                     args.cap_mbps, args.extra_args, args.msi)
         else:
             run_azcopy_download(azcopy, url, Path(args.dst), args.overwrite,
                                 args.cap_mbps, args.extra_args, args.msi)
