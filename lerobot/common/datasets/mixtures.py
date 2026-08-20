@@ -459,15 +459,15 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("interna1_dual_arm_0", 0.05),
         # ("interna1_dual_arm_1", 0.05),
         # ("interna1_dual_arm_2", 0.05),
-        ("interna1_dual_arm_3", 0.05),
+        ("interna1_dual_arm_3", 0.1),
         # ("interna1_dual_arm_4", 0.1),
         # ("interna1_single_arm", 0.15),
         # ms_buy_data
         ("ms_data_scale", 0.2),
-        ("ms_data_xdof_1", 0.08),
-        ("ms_data_xdof_2", 0.08),
-        ("ms_data_xdof_3", 0.1),
-        ("ms_data_xdof_4", 0.1),
+        ("ms_data_xdof_1", 0.1),
+        ("ms_data_xdof_2", 0.1),
+        ("ms_data_xdof_3", 0.12),
+        ("ms_data_xdof_4", 0.12),
         # FTP-1
         ("ftp_1_RH20TCfg5Franka", 1.0),
         ("ftp_1_RH20TCfg6ATIAxia", 1.0),
@@ -481,8 +481,8 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("ftp_1_RDP", 2.0),
         ("ftp_1_FreeTacMan", 1.0),
         ("ftp_1_MotionTrans", 1.0),
-        ("ftp_1_sharpa", 1.0),
-        ("ftp_1_VisuoTactile_D-WHEEL", 1.0)
+        ("ftp_1_sharpa", 0.5),
+        ("ftp_1_VisuoTactile_D-WHEEL", 0.5)
     ],
     
     "debug_research_data":[
