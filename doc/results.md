@@ -1266,3 +1266,37 @@ cross-file inconsistency (survives v2.1, will break once merged).
 
 The fix is upstream of the loader: re-encode the 376 episodes to the declared 720x1280 (or
 re-declare and downscale the rest) **before** converting to v3.0.
+
+### 16.1 Re-encoding the odd videos
+
+`scripts/reencode_video_resolution.py` normalises the offenders. Defaults match the repo's
+`encode_video_frames`: `libsvtav1`, `yuv420p`, `crf 30`, `g 2`. The keyframe density of the
+output matches the source exactly (150 keyframes over 299 frames, i.e. one every 2 frames),
+so random access costs the same as before.
+
+Frame count and frame rate are re-probed after encoding and must match the source, because
+`episodes.jsonl` lengths and the `timestamp` column are built on them; a mismatch aborts that
+file with the original untouched. Output goes to a temp name in the same directory and is
+only `os.replace`d in after the dimensions, frame count, fps and a torchcodec batch decode all
+pass. Originals are moved to `<root>/.reencode_backup` unless `--no-backup`.
+
+Direction: bring the 376 minority files **up** to the declared 720x1280 rather than pulling
+3230 files down. `--strategy stretch` (default) ignores the 4:3 -> 16:9 aspect change on
+purpose — the loader ends with a plain `F.interpolate(..., size=(size, size))` to a square, so
+aspect ratio is discarded downstream anyway, and stretching makes the 376 geometrically
+consistent with the other 3230 `camera_top` videos rather than consistent with nothing.
+`--strategy pad` / `--crop` are there if that trade is not wanted.
+
+Verified on this dataset:
+
+- 376/376 re-encoded in 4m06s at `--workers 12`; every frame count preserved.
+- Concatenating a fixed episode with a native 1280x720 one — the v3.0 merge, simulated —
+  now decodes; the same concat with the backed-up original still throws.
+- `check_video_resolution_consistency.py` returns 0: `camera_top` is 720x1280 x 3606.
+- Through the real `MultiModalContrastiveDataset` path: 306 frames covering both reported
+  indices and the whole 640x480 span, zero `Failed to read` warnings.
+- Failure path: with a bogus `--vcodec`, all originals kept their md5 and the backup dir
+  stayed empty.
+
+Backups came to 283 MB. The re-encoded files are larger than the originals (1.39 MB vs
+0.92 MB for a 299-frame episode) since they now carry 2.25x the pixels.
