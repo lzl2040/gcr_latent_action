@@ -1215,3 +1215,54 @@ through those two scripts -- `scripts/probe_contrastive_dataset.py`,
 Related correction: `tac_n` rising from 57.7 to ~180 per 256-row batch was **not** caused by
 this fix. `mixtures.py` was edited between the two runs, raising sharpa and D-WHEEL from 0.5
 to 1.0.
+
+## 16. A resolution mismatch that only bites after the v3.0 merge
+
+Training on the cluster kept logging
+
+```
+Failed to read robomind_franka_3rgb[127063]:
+    Expected pre-allocated tensor of shape 480x640x3, got [720, 1280, 3]
+```
+
+The message is easy to read backwards. From torchcodec's `CpuDeviceInterface.cpp`:
+
+```cpp
+"Expected pre-allocated tensor of shape ", outputDims.height, "x", outputDims.width,
+"x3, got ", shape
+```
+
+`outputDims` comes from the **actual decoded frame**; `shape` is the tensor the **batch API
+pre-allocated from stream metadata**. So it means metadata claims 720x1280 while the frame
+really decodes at 480x640 — not the other way round. torchcodec says as much in a comment:
+stream metadata cannot express a variable-resolution stream, and `get_frames_at` allocates
+the whole batch up front from that metadata. Single-frame indexing sizes itself from the
+frame and keeps working, which is why the file looks fine when poked by hand.
+
+Reproduced exactly by concatenating one 1280x720 and one 640x480 episode with `ffmpeg -c copy`
+and calling `get_frames_at` across the seam — same error string, character for character.
+
+`RoboMind_full/franka_3rgb` turns out to have **376 of 3606 `camera_top` videos at 640x480**
+while `info.json` declares 720x1280 and the other 3230 are 1280x720. The odd ones sit in
+blocks: episodes 892-988, 1022-1078, 1169-1178, 1190-1401. Both frame indices in the warnings
+land inside them (127063 -> episode 917, 194891 -> episode 1251).
+
+Every individual file is internally consistent, so **the local v2.1 copy — one mp4 per episode —
+decodes without complaint**. The v3.0 conversion packs many episodes into one mp4 per camera;
+any output file spanning a resolution boundary becomes variable-resolution and fails. Same
+bytes, different layout, different outcome. Mixed resolutions would also break collation.
+
+`scripts/check_video_resolution_consistency.py` checks this. It handles both layouts (v2.1
+`episodes.jsonl` plus the path template, v3.0 `meta/episodes/**/*.parquet`), and reports:
+
+1. stream-level resolution histogram per video key, flagged against `info.json`;
+2. per-file variable-resolution detection — torchcodec runs the same batch call training does,
+   then falls back to single-frame decoding to show where the resolution changes.
+   `--exhaustive` swaps sampling for a full ffprobe frame walk;
+3. `--frames 127063 194891` maps the indices from a warning back to episode and video file.
+
+10818 files in 72 s at `--workers 24`. Exit code 1 = a file is internally broken, 2 = only
+cross-file inconsistency (survives v2.1, will break once merged).
+
+The fix is upstream of the loader: re-encode the 376 episodes to the declared 720x1280 (or
+re-declare and downscale the rest) **before** converting to v3.0.
