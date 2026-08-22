@@ -103,5 +103,8 @@
     "ftp_1_sharpa_split_0": "FTP-1/sharpa_split_0",
     "ftp_1_VisuoTactile_D-WHEEL_split_0": "FTP-1/VisuoTactile_D-WHEEL_split_0",
     "open_neo_arx5_single": "OpenNeoData/arx5_single",
-    "open_neo_aloha": "OpenNeoData/aloha"
+    "open_neo_aloha": "OpenNeoData/aloha",
+    "open_neo_arx5": "OpenNeoData/arx5",
+    "open_neo_flexiv": "OpenNeoData/flexiv",
+    "open_neo_ur": "OpenNeoData/ur"
 }

@@ -482,7 +482,12 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("ftp_1_FreeTacMan", 1.0),
         ("ftp_1_MotionTrans", 1.0),
         ("ftp_1_sharpa", 0.5),
-        ("ftp_1_VisuoTactile_D-WHEEL", 0.5)
+        ("ftp_1_VisuoTactile_D-WHEEL", 0.5),
+        # open neo data
+        ("open_neo_arx5_single", 0.1),
+        ("open_neo_aloha", 0.1),
+        ("open_neo_arx5", 0.1),
+        ("open_neo_ur", 0.1),
     ],
     
     "debug_research_data":[

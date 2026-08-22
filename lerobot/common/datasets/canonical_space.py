@@ -504,6 +504,7 @@ PHYSICAL_SPECS: dict[str, dict] = {
     # last dim of each arm spans [-0.004, 0.115] m -- a gripper width -- while the joints span
     # several radians), so the gripper goes in the joint-space gripper slot (27 / 35), not in
     # the `joint_6` slot it would land in if the arm were sliced as a flat 7.
+    # 10 million
     "open_neo_aloha": {
         "action": [
             _seg("action.eef_pose", 0, 20, 0),
@@ -526,6 +527,7 @@ PHYSICAL_SPECS: dict[str, dict] = {
             "observation.images.right_wrist_right_tactile"
         ],
     },
+    # 8 million
     "open_neo_arx5_single": {
         "action": [
             _seg("action.eef_pose", 0, 10, 0),
@@ -541,7 +543,64 @@ PHYSICAL_SPECS: dict[str, dict] = {
             "observation.images.left_wrist_left_tactile",
             "observation.images.left_wrist_right_tactile"
         ],
-    }
+    },
+    # 70 million
+    "open_neo_arx5": {
+        "action": [
+            _seg("action.eef_pose", 0, 20, 0),
+            _seg("action", 0, 6, 20),
+            _seg("action", 6, 7, 27),
+            _seg("action", 7, 13, 28),
+            _seg("action", 13, 14, 35),
+        ],
+        "state": [
+            _seg("observation.eef_pose", 0, 20, 0),
+            _seg("observation.state", 0, 6, 20),
+            _seg("observation.state", 6, 7, 27),
+            _seg("observation.state", 7, 13, 28),
+            _seg("observation.state", 13, 14, 35),
+        ],
+        "tactile_image": [
+            "observation.images.left_wrist_left_tactile",
+            "observation.images.left_wrist_right_tactile",
+            "observation.images.right_wrist_left_tactile",
+            "observation.images.right_wrist_right_tactile"
+        ],
+    },
+    # 40 million
+    "open_neo_flexiv": {
+        "action": [
+            _seg("action.eef_pose", 0, 10, 0),
+            _seg("action", 0, 6, 20),
+            _seg("action", 6, 7, 27),
+        ],
+        "state": [
+            _seg("observation.eef_pose", 0, 10, 0),
+            _seg("observation.state", 0, 6, 20),
+            _seg("observation.state", 6, 7, 27),
+        ],
+        "tactile_image": [
+            "observation.images.left_wrist_left_tactile",
+            "observation.images.left_wrist_right_tactile"
+        ],
+    },
+    # 70 million
+    "open_neo_ur": {
+        "action": [
+            _seg("action.eef_pose", 0, 10, 0),
+            _seg("action", 0, 6, 20),
+            _seg("action", 6, 7, 27),
+        ],
+        "state": [
+            _seg("observation.eef_pose", 0, 10, 0),
+            _seg("observation.state", 0, 6, 20),
+            _seg("observation.state", 6, 7, 27),
+        ],
+        "tactile_image": [
+            "observation.images.left_wrist_left_tactile",
+            "observation.images.left_wrist_right_tactile"
+        ],
+    },
 }
 
 # ms_data_xdof_5, ms_data_xdof_2,  ms_data_xdof_3
