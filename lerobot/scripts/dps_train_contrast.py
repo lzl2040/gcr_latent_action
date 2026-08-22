@@ -227,7 +227,6 @@ def train(cfg: TrainPipelineConfig):
 
     step = 0
     cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
-    client_state = {"step": step}
     if cfg.weight_resume:
         logger.info(f"Resuming training from {cfg.output_dir}")
         load_path, loaded_state = model_engine.load_checkpoint(
@@ -237,8 +236,13 @@ def train(cfg: TrainPipelineConfig):
             load_module_strict=False,
         )
         if load_path is not None and loaded_state is not None:
-            client_state = loaded_state
-            step = client_state.get("step", 0)
+            # load_checkpoint returns every non-DeepSpeed-owned key it finds in the
+            # checkpoint, which includes internal metadata such as
+            # `checkpoint_parallel_dimensions` that newer DeepSpeed writes on save but
+            # does not filter out on load. Feeding that dict back into save_checkpoint
+            # raises "client_state contains reserved checkpoint key", so only pick out
+            # the fields this script actually owns.
+            step = loaded_state.get("step", 0)
             logger.info(f"Resumed training from step {step}")
 
     train_metrics = {
@@ -321,9 +325,9 @@ def train(cfg: TrainPipelineConfig):
             if cfg.save_checkpoint and (step % cfg.save_freq == 0 or step == cfg.steps):
                 logger.info(f"Checkpoint policy after step {step}")
                 os.makedirs(cfg.output_dir, exist_ok=True)
-                client_state["step"] = step
-                client_state["epoch"] = epoch
-                model_engine.save_checkpoint(save_dir=cfg.output_dir, client_state=client_state)
+                model_engine.save_checkpoint(
+                    save_dir=cfg.output_dir, client_state={"step": step, "epoch": epoch}
+                )
 
             if rank == 0 and cfg.log_freq > 0 and step % cfg.log_freq == 0:
                 logger.info(train_tracker)

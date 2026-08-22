@@ -319,25 +319,19 @@ def train(cfg: TrainPipelineConfig):
         # ckpt_list = os.listdir(ckpt_path)
         # latest_ckpt = sorted(ckpt_list, key=lambda x: int(x.split("step")[-1]))[-1]
         # checkpoint_path = os.path.join(ckpt_path, latest_ckpt)
-        load_path, client_state = model_engine.load_checkpoint(
+        load_path, loaded_state = model_engine.load_checkpoint(
             ckpt_path,
             load_optimizer_states=True,
             load_lr_scheduler_states=True,
             load_module_strict=False
         )
-        if load_path is not None:
-            step = client_state['step']
+        if load_path is not None and loaded_state is not None:
+            # load_checkpoint hands back DeepSpeed's own metadata too (e.g.
+            # `checkpoint_parallel_dimensions`), which save_checkpoint refuses to accept
+            # back, so only read the fields this script owns.
+            step = loaded_state.get('step', step)
             logger.info(f"Resumed training from step {step}")
-    else:
-        client_state = {
-            'step': step
-        }
-    
-    if client_state is None:
-        client_state = {
-            'step': step
-        }
-    
+
     # Metrics setup
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
@@ -417,11 +411,9 @@ def train(cfg: TrainPipelineConfig):
                 logger.info(f"Checkpoint policy after step {step}")
                 # checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
                 os.makedirs(cfg.output_dir, exist_ok=True)
-                client_state['step'] = step
-                client_state["epoch"] = epoch
                 model_engine.save_checkpoint(
                     save_dir=cfg.output_dir,
-                    client_state=client_state
+                    client_state={'step': step, 'epoch': epoch}
                 )
                 logger.info(f"Checkpoint policy after step {step} completed.")
             

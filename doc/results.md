@@ -1300,3 +1300,46 @@ Verified on this dataset:
 
 Backups came to 283 MB. The re-encoded files are larger than the originals (1.39 MB vs
 0.92 MB for a 299-frame episode) since they now carry 2.25x the pixels.
+
+## 17. A resume path that only breaks on the second checkpoint
+
+Saving on the cluster died with:
+
+```
+KeyError: 'client_state contains reserved checkpoint key: checkpoint_parallel_dimensions.
+           This key is used internally by DeepSpeed checkpoint metadata.'
+```
+
+The trigger was `dps_train_contrast.py`, which on resume did `client_state = loaded_state`
+and then re-saved that same dict at every checkpoint.
+
+`DeepSpeedEngine._load_checkpoint` does not return the client state as it was written. It
+returns *everything in the checkpoint that is not on a hardcoded blacklist*:
+
+```python
+deepspeed_states = ['module', 'sparse_tensor_module_names', 'skipped_steps',
+                    'global_steps', 'dp_world_size', 'mp_world_size',
+                    'data_sampler', 'random_ltd']
+client_state = {k: v for k, v in checkpoint.items() if k not in deepspeed_states}
+```
+
+The blacklist is incomplete, so DeepSpeed's own bookkeeping leaks into the value handed to
+the caller. Measured on a real engine (0.18.4, ZeRO-1): we passed in `{step, epoch}` and got
+back ten keys — `buffer_names`, `ds_config`, `ds_version`, `frozen_param_fragments`,
+`frozen_param_shapes`, `global_samples`, `param_shapes`, `shared_params` on top of ours.
+Note `frozen_param_fragments`: that is tensor data, and the old code was re-saving it inside
+`client_state` on every checkpoint.
+
+Newer DeepSpeed writes `checkpoint_parallel_dimensions` into the checkpoint on save and
+guards against receiving it on save, but never added it to the load blacklist. So it leaks
+out, goes straight back in, and the guard fires. Grafting that behaviour onto the local
+0.18.4 reproduces it exactly: the key does come back through `load_checkpoint`, the old
+pattern raises the identical `KeyError`, and reading only `step` saves cleanly and resumes.
+
+Why it never showed up locally: local DeepSpeed is 0.18.4, which has no such key, and it
+only fires on the *second* save of a run that resumed — a fresh run never touches the path.
+
+Fix: treat the return value of `load_checkpoint` as read-only, pull out only the fields the
+script owns, and build a fresh dict for every save. Same bug was live in `dps_train_ace.py`;
+`dps_train_ace_lam.py` has its save commented out and `ddp_train.py` already built a fresh
+dict each time.
