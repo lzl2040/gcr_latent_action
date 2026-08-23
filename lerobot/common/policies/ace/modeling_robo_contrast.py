@@ -374,12 +374,15 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         tokens = out.last_hidden_state
         return tokens.detach() if self.freeze_text else tokens
 
-    def forward(self, image_t0, image_t1, texts, has_text=None) -> torch.Tensor:
+    def forward(self, image_t0, image_t1, texts, has_text=None, probe: bool = False):
         """``has_text``: per-sample 0/1: 0 means the sample carries no real instruction.
 
         Stage-1 video pre-training runs largely on caption-free data, so this is the common
         case there rather than an edge case. ``None`` means "assume every sample has text",
         which keeps the contrastive stage's behaviour unchanged.
+
+        ``probe`` adds the (cheap, no-grad, diagnostic-only) change-query ablation described
+        in ``_recon_loss``. Returns ``(embedding, recon_loss, aux)``.
         """
         device = self.visual_proj.weight.device
         dtype = self.visual_proj.weight.dtype
@@ -463,12 +466,27 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         embedding = self.out_proj(queries.mean(dim=1))
 
         recon_loss = None
+        aux: dict[str, float] = {}
         if self.predictor is not None and self.training:
-            recon_loss = self._recon_loss(v0, queries, text_tokens, text_mask, p1)
-        return embedding, recon_loss
+            recon_loss, aux = self._recon_loss(v0, queries, text_tokens, text_mask, p1, probe=probe)
+        return embedding, recon_loss, aux
 
-    def _recon_loss(self, v0, queries, text_tokens, text_mask, p1) -> torch.Tensor:
-        """Predict the frame-``t+H`` patch features and score them against the real ones."""
+    def _recon_loss(self, v0, queries, text_tokens, text_mask, p1, probe: bool = False):
+        """Predict the frame-``t+H`` patch features and score them against the real ones.
+
+        Returns ``(loss, aux)``.
+
+        The failure mode this objective has to be watched for is that most of ``p1`` is
+        predictable from ``v0`` alone -- background, table, static objects -- so the predictor
+        can drive the loss down while ignoring the change queries entirely, which are the only
+        thing being pre-trained *for* stage 2. The loss curve looks healthy either way.
+
+        ``probe`` measures it directly: rerun the prediction with each sample's queries
+        replaced by another sample's. If the queries carry information about this pair, that
+        substitution must hurt. ``percep_query_gain`` is the increase in loss; a value near
+        zero means the change queries are decorative and the pre-training is not transferring
+        anything the contrastive stage will care about.
+        """
         memory = torch.cat([queries, text_tokens], dim=1)
         if text_mask is not None:
             query_mask = torch.ones(
@@ -483,7 +501,17 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         # path into it, so the pair cannot collapse onto a constant the way a jointly trained
         # student/teacher would.
         target = self.target_norm(p1.detach().float())
-        return F.smooth_l1_loss(pred, target)
+        loss = F.smooth_l1_loss(pred, target)
+
+        aux: dict[str, float] = {}
+        if probe and queries.shape[0] > 1:
+            with torch.no_grad():
+                # Roll rather than a random permutation: it is guaranteed to be derangement-like
+                # (no sample keeps its own queries), which a random shuffle is not.
+                shuffled = torch.cat([queries.roll(1, dims=0), text_tokens], dim=1)
+                bad = self.predictor(v0, shuffled, memory_mask).float()
+                aux["percep_query_gain"] = (F.smooth_l1_loss(bad, target) - loss).item()
+        return loss, aux
 
 
 # ---------------------------------------------------------------------------
@@ -963,7 +991,9 @@ class RoboContrast(PreTrainedPolicy):
         config.validate_features()
 
         self.perception_encoder = PerceptionEncoder(config)
-        self.physical_encoder = PhysicalEncoder(config)
+        # Stage 1 never touches the physical branch; not building it saves both its parameters
+        # and the ZeRO bookkeeping for a module that would receive no gradient on any rank.
+        self.physical_encoder = None if config.perception_only else PhysicalEncoder(config)
         self.logit_scale = nn.Parameter(torch.log(torch.tensor(1.0 / config.temperature)))
         self._max_logit_scale = math.log(config.logit_scale_max)
 
@@ -1003,11 +1033,11 @@ class RoboContrast(PreTrainedPolicy):
         raise NotImplementedError("RoboContrast is a representation-learning model, not a controller.")
 
     # -- embeddings --------------------------------------------------------
-    def encode_perception(self, batch) -> tuple[torch.Tensor, torch.Tensor | None]:
-        emb, recon_loss = self.perception_encoder(
-            batch["image_t0"], batch["image_t1"], batch["task"], batch.get("has_text")
+    def encode_perception(self, batch, probe: bool = False):
+        emb, recon_loss, aux = self.perception_encoder(
+            batch["image_t0"], batch["image_t1"], batch["task"], batch.get("has_text"), probe=probe
         )
-        return F.normalize(emb.float(), dim=-1), recon_loss
+        return F.normalize(emb.float(), dim=-1), recon_loss, aux
 
     def encode_physical(self, batch) -> tuple[torch.Tensor, torch.Tensor | None]:
         emb, recon_loss = self.physical_encoder(batch)
@@ -1027,7 +1057,11 @@ class RoboContrast(PreTrainedPolicy):
         return same_episode & close
 
     def forward(self, batch, task_type: str = "train_contrastive", step: int = 0):
-        perception, percep_recon = self.encode_perception(batch)
+        if task_type == "train_perception":
+            return self._perception_forward(batch, step)
+        perception, percep_recon, percep_aux = self.encode_perception(
+            batch, probe=self._should_probe(step)
+        )
         physical, tactile_recon = self.encode_physical(batch)
 
         rank, world_size = _rank_world()
@@ -1096,4 +1130,31 @@ class RoboContrast(PreTrainedPolicy):
             "tactile_sig_gate": torch.tanh(self.physical_encoder.tactile_signal_gate).item(),
             "tactile_img_gate": torch.tanh(self.physical_encoder.tactile_image_gate).item(),
         }
+        loss_dict.update(percep_aux)
         return loss, loss_dict
+
+    def _should_probe(self, step: int) -> bool:
+        freq = self.config.query_probe_freq
+        return freq > 0 and step % freq == 0
+
+    def _perception_forward(self, batch, step: int):
+        """Stage-1: train the perception branch on its reconstruction objective alone.
+
+        No physical modality is touched, so this runs on plain video. The loss is exactly the
+        term the contrastive stage already carries as ``percep_recon_loss``, at weight 1.0 --
+        the point of the stage is to spend the whole budget on it while action-bearing data is
+        scarce, then hand the weights over.
+
+        ``percep_query_gain`` is the metric that decides whether the stage worked. It is
+        probed on a schedule rather than every step because it costs a second predictor pass.
+        """
+        _, recon, aux = self.encode_perception(batch, probe=self._should_probe(step))
+        if recon is None:
+            raise RuntimeError(
+                "Perception pre-training needs the reconstruction head. Set "
+                "perception_recon_weight > 0 (it builds the predictor) and keep the policy in "
+                "train mode."
+            )
+        loss_dict = {"percep_recon_loss": recon.item()}
+        loss_dict.update(aux)
+        return recon, loss_dict

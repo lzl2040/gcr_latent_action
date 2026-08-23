@@ -153,7 +153,7 @@ def evaluate(model_engine, loaders: dict[str, DataLoader], move_batch) -> dict[s
 
         for batch in loader:
             batch = move_batch(batch, device)
-            perception, _ = policy.encode_perception(batch)
+            perception, _, _ = policy.encode_perception(batch)
             physical, _ = policy.encode_physical(batch)
 
             n = perception.shape[0]

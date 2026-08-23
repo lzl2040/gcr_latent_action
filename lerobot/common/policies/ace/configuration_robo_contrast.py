@@ -51,6 +51,21 @@ class RoboContrastConfig(PreTrainedConfig):
     # actually encode the change instead of whatever shortcut the contrastive loss tolerates.
     num_predictor_layers: int = 3
     perception_recon_weight: float = 1.0
+    # Stage-1 pre-training: build only the perception branch, so plain video can be used and
+    # the physical branch's ~350M parameters are neither allocated nor handed to the optimizer.
+    # The resulting checkpoint is a strict subset of the stage-2 one, so it loads with
+    # ``load_module_strict=False`` and the physical branch starts from scratch as intended.
+    perception_only: bool = False
+    # How often to measure whether the change queries are actually being used (0 = never).
+    # This costs one extra no-grad predictor pass, so it is sampled rather than continuous.
+    # Read ``percep_query_gain``: near zero means the predictor is solving the reconstruction
+    # from frame t alone and the queries -- the entire point of the pre-training -- are dead.
+    query_probe_freq: int = 50
+    # Stage-1 only: "primary" reads one camera per dataset, "all" makes every non-tactile
+    # camera a separate stream. "all" multiplies the usable video and adds viewpoint
+    # diversity at no extra cost per sample, since each view is its own dataset object and
+    # decodes only itself.
+    perception_camera_mode: str = "primary"
     # Keep every k-th patch token of each frame when building the evidence bank (1 = keep all).
     patch_token_stride: int = 1
 

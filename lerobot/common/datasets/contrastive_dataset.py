@@ -596,7 +596,15 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             else:
                 features[key] = value
         if img_feature is None:
-            img_feature = {"dtype": "video", "shape": (224, 224, 3), "names": None, "info": {}}
+            # `names` must be present: `dataset_to_policy_features` indexes it to decide
+            # whether the shape is HWC or CHW, so a None here fails with an opaque
+            # "'NoneType' object is not subscriptable" rather than a missing-metadata error.
+            img_feature = {
+                "dtype": "video",
+                "shape": (224, 224, 3),
+                "names": ["height", "width", "channel"],
+                "info": {},
+            }
         img_size = cfg.dataset.image_transforms.img_size
         img_feature = dict(img_feature)
         img_feature["shape"] = (img_size, img_size, 3)

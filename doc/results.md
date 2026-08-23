@@ -1565,3 +1565,96 @@ FTP-1 ViT had collapsed on its own sensor (spread `-0.0000`, auc 0.496). It had 
 open with a pre-contact idle stretch: sharpa's first 96 frames have a pixel std of **3e-4**
 and a frame-to-frame std of 2e-5, i.e. a still image. Both scripts now sample with
 `np.linspace` over the whole episode, and both say so in their docstrings.
+
+## 20. Stage-1: pre-training perception on video alone
+
+Action-bearing data is a minority of the video that exists, but the perception branch does
+not need actions: its reconstruction objective (predict the frame-`t+H` patch features from
+frame `t`, the instruction and the change queries) is self-supervised on any two frames. So
+it is now trained first on plain video, and the physical branch is introduced afterwards.
+
+`lerobot/common/datasets/perception_dataset.py` reads two frames of one camera and nothing
+else -- no canonical projection, no normalisation statistics, no tactile, no `get_spec`. A
+dataset with no `action`, no `observation.state` and no `OXE_DATASET_CONFIGS` entry is a
+first-class citizen. Entry point: `train_perception_local.sh`.
+
+### Read `qgain`, not the loss
+
+The failure mode of this objective is that most of frame `t+H` is predictable from frame `t`
+alone -- background, table, static objects -- so the predictor can drive the loss down while
+ignoring the change queries, which are the only thing being pre-trained *for* stage 2. The
+loss curve looks healthy either way. This is the same shape of problem as the tactile gate in
+§19: a term that appears to be training something while contributing no gradient to it.
+
+`percep_query_gain` measures it directly: rerun the prediction with each sample's change
+queries replaced by another sample's (a `roll`, so no sample keeps its own), and report how
+much worse the reconstruction gets. Measured over a 500-step run at batch 128:
+
+| step | 25 | 50 | 100 | 200 | 300 | 400 | 500 |
+|---|---|---|---|---|---|---|---|
+| loss | 0.417 | 0.302 | 0.230 | 0.139 | 0.105 | 0.090 | 0.083 |
+| qgain | 0.0001 | 0.0013 | 0.0155 | 0.0387 | 0.0421 | 0.0492 | **0.0525** |
+
+The ratio `qgain/loss` goes from 0.0003 to **0.63**: by step 500, handing a sample another
+sample's queries costs 63% of the remaining loss. The queries are carrying pair-specific
+information, so the objective is doing what it was designed to do. Note that at step 25
+`qgain` was 0.0001 -- indistinguishable from "the queries are dead". Judging this metric
+early would have produced the wrong conclusion in either direction.
+
+The probe costs one extra no-grad predictor pass, so it is sampled (`query_probe_freq=50`)
+rather than run every step.
+
+### Missing language is a modality, not an empty string
+
+Plenty of video has no instruction, and converted datasets often fill the column with `""`,
+`"none"`, `"n/a"` or the dataset's own name. Feeding those to the text tower is not harmless:
+they embed to a perfectly ordinary but *constant* vector, so "this dataset has no language"
+becomes a fingerprint the contrastive stage can read instead of looking at the images.
+
+`lerobot/common/datasets/instruction_text.py` holds the single shared rule
+(`is_real_instruction`). Samples that fail it carry `has_text=0`; the encoder then masks
+their text tokens out of every attention and seeds the change queries from a learned
+`null_text` vector, exactly as the physical branch already does for its missing modalities.
+Per-dataset text coverage is printed in the dataset table.
+
+Verified: `has_text=None` is bit-identical to all-ones (so stage 2 is unchanged); a no-text
+sample's output is **exactly** independent of its caption (maxdiff 0.0, i.e. no leakage);
+mixed batches are row-wise correct; `null_text` receives gradient and moved off zero
+(norm 0.0124 after 500 steps). All current mixtures report `has_text=1.0` throughout, so the
+change is a no-op on today's data and a guard for the video corpora stage 1 is aimed at.
+
+### Degenerate pairs are sampled away, not masked
+
+Frames near the end of an episode have no partner at `t+H`; clamping gives `image_t1 ==
+image_t0`, a target the predictor hits by copying its input. Stage 1 samples only from frames
+whose partner lands inside the same episode (episode drawn proportionally to its trimmed
+length, then a uniform offset -- uniform over valid frames without materialising them).
+Measured on the mixture: `pair_is_valid` 1.0, zero identical pairs.
+
+### Two stages, one temporal window
+
+The pair-horizon rule now lives in `resolve_pair_horizon` and is shared by both loaders. A
+perception encoder pre-trained on 1.0 s pairs and fine-tuned against 2.0 s action chunks
+would be describing a different physical event than the one it was taught to describe, and
+nothing in either pipeline would report it. The extraction was verified identical to the
+previous inline rule across 2304 parameter combinations.
+
+### Cost, and the transfer
+
+574M total / 206M learnable (the physical branch is not built at all under
+`policy.perception_only=true`). At batch 128 on one GPU: **2.22 GB peak**, 1.13 s/step,
+`data_s` 0.001 -- the loader is fully hidden behind the step. Batch 128 is nowhere near the
+memory limit here.
+
+The checkpoint is a strict subset of the stage-2 one. Loading it into a full `RoboContrast`:
+0 unexpected keys, 388 missing keys (all `physical_encoder.*` plus `logit_scale`), and all
+765 perception tensors transfer exactly, of which 715 differ from a fresh init. Pass it with
+`--policy.pretrained_path=<...>/mp_rank_00_model_states.pt`.
+
+### A latent bug found on the way
+
+`_build_unified_meta`'s fallback image feature had `names: None`, which
+`dataset_to_policy_features` indexes to decide HWC vs CHW. It had never fired because the
+contrastive loader always passes a real dataset's features. Stage 1 hit it and got
+`'NoneType' object is not subscriptable`. Fixed in the fallback, and stage 1 also passes
+real features now.

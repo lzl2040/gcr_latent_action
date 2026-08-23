@@ -80,6 +80,11 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
     _resolve_image_keys = MultiModalContrastiveDataset._resolve_image_keys
     _resize_rgb = MultiModalContrastiveDataset._resize_rgb
     _extract_frames = MultiModalContrastiveDataset._extract_frames
+    # ``make_policy`` dimensions the policy from dataset metadata, and this builds the same
+    # synthetic canonical-space metadata the contrastive loader uses. Stage 1 never reads an
+    # action, but the policy config still validates its feature spec, and reusing this keeps
+    # the two stages' feature definitions identical rather than nearly identical.
+    _build_unified_meta = MultiModalContrastiveDataset._build_unified_meta
 
     def __init__(
         self,
@@ -139,6 +144,7 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
         self.text_coverage: list[float] = []
         self.source_names: list[str] = []
         kept_weights: list[float] = []
+        meta_features = None
 
         for dataset_name, weight in zip(included_datasets, mixture_weights, strict=True):
             if dataset_name not in vla2data_root:
@@ -156,6 +162,8 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
             entries = self._build_dataset(cfg, dataset_name, data_root, version)
             if not entries:
                 continue
+            if meta_features is None:
+                meta_features = dict(entries[0][1].features)
             # Cameras of one dataset share its mixture weight instead of multiplying it; a
             # three-camera dataset should not become three times as likely as a one-camera
             # dataset purely because of how it was recorded.
@@ -226,6 +234,9 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
 
         self.id2dataset = self._build_sampling_plan(seed)
         self.dataset_len = len(self.id2dataset)
+        self.meta = self._build_unified_meta(cfg, meta_features)
+        # Episode count is reported for logging only; stage 1 draws frames, not episodes.
+        self.num_episodes = max(sum(len(r) for r in self.episode_ranges), 1)
 
     # ------------------------------------------------------------------
     # construction
