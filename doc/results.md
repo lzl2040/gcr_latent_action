@@ -1420,3 +1420,21 @@ All 17 tactile datasets in `canonical_space.py` resolve with zero warnings, no d
 statistics, and view counts that match the registry. Through the real dataset,
 `ftp_1_RDP_Bimanual` now yields one live view instead of two, dispatched to MCTac, with the
 measured z-score, and pixel means around 130 rather than a black frame.
+
+### 18.1 After RDP arrived
+
+`ftp_1_RDP` was inferred rather than measured in the previous section because the data was not
+held locally. It is now, and the inference holds: `tactile_left_0` measures
+`[0.0340, 0.0427, 0.1176]` with std `[0.2491, 0.2497, 0.2521]` over 600 frames spanning all 140
+episodes, against FTP-1's published RDP/MCTac `[0.0392, 0.0525, 0.1232]` / `[0.2522, 0.2524,
+0.2519]`. Mean absolute error 0.0069; the published GelSight for the same domain is 0.55 away.
+So the single pad our conversion keeps is the MCTac, and unlike `RDP_Bimanual` our copy of RDP
+*is* the copy FTP-1 measured -- its published statistics are used unchanged.
+
+The dead pad was re-checked with a stronger tool than the sampling used before. `ffmpeg
+blackdetect` over the whole of `RDP_Bimanual`'s `tactile_right_0` returns a single interval,
+`black_start:0 black_end:773.333333`, against a file duration of `00:12:53.37` (773.37 s): every
+one of the 23201 frames, not a sampled subset. The same scan of `tactile_left_0` returns no
+black interval at all. The key exists, but there is nothing behind it, so it stays out of
+`canonical_space.py`. If upstream FTP-1 has real pixels for that pad, the fix is to re-convert
+the dataset, not to re-list this file.

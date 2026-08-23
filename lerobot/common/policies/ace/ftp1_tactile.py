@@ -127,8 +127,10 @@ FTP1_TACTILE_DATASETS: dict[str, dict] = {
         # `tactile_left_0`, and canonical_space.py documents that rig as the MCTac camera.
         # Listing only the pad we actually have keeps the positional assignment honest and
         # stops the truncation path from silently handing this dataset the GelSight tokenizer.
-        # Unverified by measurement -- this dataset is not in the local mixture -- but the same
-        # pad in RDP_Bimanual measures as an MCTac, and the two come from the same rig.
+        # Measured over 600 frames spanning all 140 episodes, the pad is
+        # (0.0340, 0.0427, 0.1176) with std (0.2491, 0.2497, 0.2521), which is 0.0069 from the
+        # published MCTac below and 0.55 from the published GelSight -- so it is the MCTac,
+        # and unlike RDP_Bimanual our copy does match the copy FTP-1 measured.
         "sensors": ["MCTac"],
         "stats": {
             "GelSightMini": _stats([-0.567995, -0.307983, -0.287494], [0.210233, 0.138887, 0.211952]),
@@ -137,12 +139,14 @@ FTP1_TACTILE_DATASETS: dict[str, dict] = {
     },
     # Our copy is not the copy FTP-1 measured, so the published statistics for this domain do
     # not describe it and are kept only for reference. Measured over 600 frames spanning all
-    # 50 episodes, `tactile_left_0` is (0.013, 0.008, 0.090) with std 0.243, which is 0.034
-    # from RDP's *MCTac* and 0.81 from the GelSight statistics FTP-1 published for this domain
-    # -- so the pad is an MCTac and the numbers below are ours, not FTP-1's.
-    # `tactile_right_0` is dead: every frame is uniform black (ffprobe reports Y constant at
-    # 16 across the whole file, 2.8 MB against 16 MB for the live pad), so it is not listed as
-    # a tactile view in canonical_space.py at all.
+    # 50 episodes, `tactile_left_0` is (0.013, 0.008, 0.090) with std 0.243, which is 0.028
+    # from RDP's *measured* MCTac and 0.81 from the GelSight statistics FTP-1 published for
+    # this domain -- so the pad is an MCTac and the numbers below are ours, not FTP-1's.
+    # `tactile_right_0` exists as a key but carries nothing: ffmpeg `blackdetect` over the
+    # whole file reports a single black interval covering all 773.37 s of it, i.e. every one
+    # of the 23201 frames (2.8 MB against 16 MB for the live pad). It is therefore not listed
+    # as a tactile view in canonical_space.py. If the upstream FTP-1 release has real pixels
+    # for that pad, the fix is to re-convert it, not to re-enable this file.
     "ftp_1_RDP_Bimanual": {
         "sensors": ["MCTac"],
         "stats": {

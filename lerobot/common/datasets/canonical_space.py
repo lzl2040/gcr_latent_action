@@ -329,8 +329,11 @@ PHYSICAL_SPECS: dict[str, dict] = {
     
     "ftp_1_RDP_Bimanual": {
         # 双臂 eef pose (20)；每侧 1 路 MCTac 触觉相机 + 1 路夹爪力。
-        # 右侧触觉相机整份数据都是纯黑（ffprobe: Y 恒为 16；文件 2.8MB vs 左侧 16MB），
-        # 是一路坏掉的流，因此不列为触觉视图；右臂夹爪力信号本身正常，保留。
+        # 右侧触觉相机整份数据都是纯黑：ffmpeg blackdetect 在整个文件上只报出一段
+        # black_start:0 black_end:773.33，而文件总长就是 773.37s，即 23201 帧无一例外
+        # （文件 2.8MB vs 左侧 16MB）。这是一路空流，因此不列为触觉视图；
+        # 右臂夹爪力信号本身正常（-0.66~57.01，2116 个不同取值），保留。
+        # 若上游 FTP-1 该 pad 有真实像素，应重新转换，而不是把这个文件加回来。
         "action": [
             _seg("action.eef_pose", 0, 10, 0),
             _seg("action.eef_pose", 10, 20, 10),
