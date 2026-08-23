@@ -280,6 +280,14 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         nn.init.normal_(self.evidence_type_embed.weight, std=0.02)
 
         self.change_queries = nn.Parameter(torch.randn(config.num_change_queries, dim) * 0.02)
+        # What seeds the change queries when a sample has no instruction. Feeding the empty
+        # string instead would be subtly wrong twice over: the tokenizer's BOS/EOS still pool
+        # to a non-zero, *arbitrary* vector, and that vector is identical for every caption-free
+        # sample, which makes "this dataset has no language" a constant the contrastive stage
+        # can read off as a dataset fingerprint. A dedicated learned vector says "no
+        # instruction" explicitly, and starting it at zero means the queries begin as the bare
+        # learned prototypes -- the honest prior for an unconditioned sample.
+        self.null_text = nn.Parameter(torch.zeros(dim))
         # Trunk: joint vision-vision-difference-language reasoning over the full evidence bank.
         self.evidence_blocks = nn.ModuleList(
             [
@@ -366,7 +374,13 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         tokens = out.last_hidden_state
         return tokens.detach() if self.freeze_text else tokens
 
-    def forward(self, image_t0, image_t1, texts) -> torch.Tensor:
+    def forward(self, image_t0, image_t1, texts, has_text=None) -> torch.Tensor:
+        """``has_text``: per-sample 0/1: 0 means the sample carries no real instruction.
+
+        Stage-1 video pre-training runs largely on caption-free data, so this is the common
+        case there rather than an edge case. ``None`` means "assume every sample has text",
+        which keeps the contrastive stage's behaviour unchanged.
+        """
         device = self.visual_proj.weight.device
         dtype = self.visual_proj.weight.dtype
         batch = image_t0.shape[0]
@@ -384,6 +398,16 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
 
         input_ids, text_mask = self.tokenize(texts, device)
         text_tokens = self.text_proj(self.text_norm(self._encode_text(input_ids).to(dtype)))
+
+        # Drop the caption-free samples' text tokens out of every attention that reads them.
+        # The evidence bank always keeps its visual tokens unmasked, so no row can end up
+        # fully masked -- which would make the softmax return NaN rather than "ignore this".
+        keep_text = None
+        if has_text is not None:
+            keep_text = has_text.to(device=device).reshape(-1, 1) > 0.5
+            if text_mask is None:
+                text_mask = torch.ones(batch, text_tokens.shape[1], device=device, dtype=torch.long)
+            text_mask = text_mask * keep_text.to(text_mask.dtype)
 
         v0 = self.visual_proj(self.vision_norm(p0))
         v1 = self.visual_proj(self.vision_norm(p1))
@@ -426,6 +450,10 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
             text_pooled = text_tokens.mean(dim=1)
 
         queries = self.change_queries.unsqueeze(0).expand(batch, -1, -1).to(dtype)
+        if keep_text is not None:
+            # A fully-masked caption pools to exactly zero above, so this substitutes the
+            # learned null-instruction vector rather than adding it to garbage.
+            text_pooled = torch.where(keep_text, text_pooled, self.null_text.to(dtype).expand(batch, -1))
         queries = queries + text_pooled.unsqueeze(1)
 
         for block in self.blocks:
@@ -977,7 +1005,7 @@ class RoboContrast(PreTrainedPolicy):
     # -- embeddings --------------------------------------------------------
     def encode_perception(self, batch) -> tuple[torch.Tensor, torch.Tensor | None]:
         emb, recon_loss = self.perception_encoder(
-            batch["image_t0"], batch["image_t1"], batch["task"]
+            batch["image_t0"], batch["image_t1"], batch["task"], batch.get("has_text")
         )
         return F.normalize(emb.float(), dim=-1), recon_loss
 

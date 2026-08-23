@@ -38,6 +38,7 @@ import torch.nn.functional as F
 from tabulate import tabulate
 
 from lerobot.common.datasets.dataset_fps import resolve_true_fps
+from lerobot.common.datasets.instruction_text import is_real_instruction
 from lerobot.common.datasets.canonical_space import (
     CANON_DIM,
     MAX_TACTILE_SIGNAL_DIM,
@@ -71,6 +72,55 @@ def _to_tensor(value) -> torch.Tensor | None:
         return torch.as_tensor(value)
     except Exception:  # noqa: BLE001 - defensive: heterogeneous raw dataset payloads
         return None
+
+
+def resolve_pair_horizon(
+    fps: float,
+    *,
+    window_mode: str,
+    chunk_size: int,
+    chunk_seconds: float,
+    chunk_frames_min: int,
+    chunk_frames_max: int,
+    frame_horizon: int | None = None,
+) -> int:
+    """How many frames ahead the second image of a pair sits, at this dataset's fps.
+
+    Shared by the contrastive dataset and the vision-only perception dataset so the two
+    training stages cannot drift apart. A perception encoder pre-trained on 1.0s pairs and
+    then fine-tuned against 2.0s action chunks would be reading a different physical event
+    than the one it was taught to describe, and nothing in either pipeline would report it.
+
+    In ``"duration"`` mode the window is a wall-clock span, so a 5 fps and a 30 fps dataset
+    cover the same amount of motion. ``chunk_frames_min``/``chunk_frames_max`` cap the cost of
+    that promise; when the clamp binds, the promise is broken and we say so.
+    """
+    fps = float(fps or 0.0)
+    if not fps > 0:
+        raise ValueError(f"fps must be positive to build a temporal window, got {fps!r}.")
+
+    if window_mode == "frames":
+        # `frame_horizon` still controls how far ahead the *pair* looks; it defaults to the
+        # end of the chunk so the image pair and the action chunk describe the same span.
+        horizon = int(frame_horizon) if frame_horizon is not None else chunk_size - 1
+        return max(1, horizon)
+
+    if frame_horizon is not None:
+        return max(1, int(frame_horizon))
+
+    exact = chunk_seconds * fps
+    horizon = max(chunk_frames_min, min(chunk_frames_max, int(round(exact))))
+    # Outside [chunk_frames_min, chunk_frames_max] the clamp wins and the window is no longer
+    # `chunk_seconds` long, so datasets stop sharing a temporal receptive field. That is a
+    # deliberate cost cap, not a bug, but it should never be silent.
+    if abs(horizon - exact) > 0.5:
+        logger.warning(
+            "fps=%g wants a %.1f-frame window for %.2fs but the clamp gives %d frames "
+            "(%.2fs); this dataset does not share the mixture's temporal window. "
+            "Widen chunk_frames_min/max if that matters.",
+            fps, exact, chunk_seconds, horizon, horizon / fps,
+        )
+    return max(1, horizon)
 
 
 class MultiModalContrastiveDataset(torch.utils.data.Dataset):
@@ -297,37 +347,18 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         """
         # The caller turns every offset into a timestamp by dividing by fps, so a bad fps is
         # fatal in both modes, not just the duration one.
-        fps = float(fps or 0.0)
-        if not fps > 0:
-            raise ValueError(f"fps must be positive to build a temporal window, got {fps!r}.")
-
+        horizon = resolve_pair_horizon(
+            fps,
+            window_mode=self.window_mode,
+            chunk_size=self.chunk_size,
+            chunk_seconds=self.chunk_seconds,
+            chunk_frames_min=self.chunk_frames_min,
+            chunk_frames_max=self.chunk_frames_max,
+            frame_horizon=self.frame_horizon_override,
+        )
         if self.window_mode == "frames":
-            # `frame_horizon` still controls how far ahead the *pair* looks; it defaults to the
-            # end of the chunk so the image pair and the action chunk describe the same span.
-            horizon = (
-                int(self.frame_horizon_override)
-                if self.frame_horizon_override is not None
-                else self.chunk_size - 1
-            )
-            return list(range(self.chunk_size)), max(1, horizon)
+            return list(range(self.chunk_size)), horizon
 
-        if self.frame_horizon_override is not None:
-            horizon = int(self.frame_horizon_override)
-        else:
-            exact = self.chunk_seconds * fps
-            horizon = int(round(exact))
-            horizon = max(self.chunk_frames_min, min(self.chunk_frames_max, horizon))
-            # Outside [chunk_frames_min, chunk_frames_max] the clamp wins and the window is no
-            # longer `chunk_seconds` long, so datasets stop sharing a temporal receptive field.
-            # That is a deliberate cost cap, not a bug, but it should never be silent.
-            if abs(horizon - exact) > 0.5:
-                logger.warning(
-                    "fps=%g wants a %.1f-frame window for %.2fs but the clamp gives %d frames "
-                    "(%.2fs); this dataset does not share the mixture's temporal window. "
-                    "Widen chunk_frames_min/max if that matters.",
-                    fps, exact, self.chunk_seconds, horizon, horizon / fps,
-                )
-        horizon = max(1, horizon)
         denom = max(1, self.chunk_size - 1)
         offsets = [round(i * horizon / denom) for i in range(self.chunk_size)]
         return offsets, horizon
@@ -836,12 +867,17 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         task = item.get("task", "")
         if isinstance(task, (list, tuple)):
             task = task[0] if task else ""
+        task = str(task)
+        # Same rule and same two fields as the stage-1 perception loader, so a perception
+        # branch pre-trained there meets an identical batch schema here.
+        has_text = is_real_instruction(task, self.dataset_names[ds_idx])
 
         return {
             "image_t0": image_t0,
             "image_t1": image_t1,
             "pair_is_valid": torch.tensor(pair_valid, dtype=torch.float32),
-            "task": str(task),
+            "task": task if has_text else "",
+            "has_text": torch.tensor(float(has_text), dtype=torch.float32),
             "action": action,
             "action_mask": action_mask,
             "observation.state": state,
