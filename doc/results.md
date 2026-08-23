@@ -1343,3 +1343,80 @@ Fix: treat the return value of `load_checkpoint` as read-only, pull out only the
 script owns, and build a fresh dict for every save. Same bug was live in `dps_train_ace.py`;
 `dps_train_ace_lam.py` has its save commented out and `ddp_train.py` already built a fresh
 dict each time.
+
+## 18. What the tactile normalisation warnings were hiding
+
+A full-mixture run logged five warnings from `ftp1_tactile.py`:
+
+```
+ftp_1_RDP exposes 1 tactile view(s) but FTP-1 lists 2; using the first 1.
+open_neo_arx5_single has 2 tactile image view(s) but no FTP-1 sensor entry; falling back
+  to GelSightMini with an identity z-score. Add it to FTP1_TACTILE_DATASETS.
+open_neo_aloha ...   open_neo_arx5 ...   open_neo_ur ...
+```
+
+Neither is cosmetic. The per-view sensor id selects which pretrained ViT tokenizer a pad is
+dispatched to, and the z-score is applied before it, so a wrong entry means real tactile
+pixels are pushed through the wrong tokenizer at the wrong scale.
+
+`scripts/measure_tactile_stats.py` recomputes the statistics the way FTP-1 defines them
+(per-channel mean/std of `uint8/255*2-1`, no channel flip) and ranks the result against every
+published statistic, which is how an unlabelled pad gets identified. Validated against two
+domains whose true values are known: `VisuoTactile_D-WHEEL` measures
+`[-0.4093, -0.2086, -0.2254]` against a published `[-0.4103, -0.2010, -0.2186]` (mean absolute
+error 0.005) and `sharpa` `-0.841` against `-0.868`; in both cases the nearest-neighbour
+ranking puts the dataset's own sensor first.
+
+### The OpenNeo pads are not GelSights
+
+| dataset | measured mean | measured std | nearest published |
+|---|---|---|---|
+| `open_neo_aloha` | 0.083, 0.096, 0.073 | 0.341, 0.335, 0.320 | RDP / MCTac, 0.046 |
+| `open_neo_arx5_single` | 0.132, 0.111, 0.087 | 0.337, 0.328, 0.306 | RDP / MCTac, 0.063 |
+| `open_neo_ur` | 0.086, 0.083, 0.061 | 0.342, 0.331, 0.314 | RDP / MCTac, 0.047 |
+
+Within each rig the pads agree to within 0.013, so one statistic per dataset is enough. Of all
+seven published sensors, GelSight Mini -- the value the fallback was choosing -- is the
+*farthest* from these at 0.34-0.37, about seven times worse than MCTac. `open_neo_arx5` is not
+held locally and reuses `open_neo_arx5_single` (same rig, bimanual); `open_neo_flexiv` is not
+held either and has no sibling, so it gets the average of the three measured rigs.
+
+### `ftp_1_RDP` was being handed the wrong tokenizer
+
+FTP-1 lists two pads for this domain, `[GelSightMini, MCTac]`, and our conversion keeps one.
+The truncation path takes *the first*, so it picked the GelSight -- but `canonical_space.py`
+documents that rig's single camera as the MCTac. Fixed by listing only the pad we have.
+
+`ftp_1_RDP_Bimanual` is the same story with a measurement to back it: its `tactile_left_0`
+measures `[0.013, 0.008, 0.090]` with std `0.243`, which is 0.034 from RDP's MCTac
+(`[0.039, 0.053, 0.123]`, std `0.252`) and 0.81 from the GelSight statistics FTP-1 published
+for this very domain. Our copy is not the copy FTP-1 measured, so its published numbers were
+replaced with ours.
+
+### One of its pads is dead
+
+`ftp_1_RDP_Bimanual`'s `tactile_right_0` is uniform black for all 23201 frames. ffprobe's
+`signalstats` reports Y constant at 16 -- limited-range black -- and the file is 2.8 MB against
+16 MB for the live pad. It is now dropped from `canonical_space.py`. The right arm's
+gripper-force *signal* is fine (range -0.66 to 57.01, 2116 distinct values) and is kept.
+
+This mattered more than it looks: the dataset sits at weight 2.0 in the mixture, so a constant
+image was being fed to the contrastive objective, and every sample paid for a second tactile
+video decode -- the exact cost that section 15 identified as the loader bottleneck.
+
+### A float32 trap in the measurement itself
+
+The first run reported `tactile_right_0` as mean -0.557, std 0.830 rather than the obvious
+-1.0, std 0.0. `np.ndarray.sum` inherits the array's dtype, and a float32 accumulator stops
+growing once the running total passes `2**24`: summing 30105600 pixels that are all exactly
+-1.0 saturates at -16777216, and `-16777216/30105600 = -0.5573`, matching the reported figure
+to four decimals. It only appears with large per-call batches, which is why the smaller
+validation runs looked correct. Summing with `dtype=np.float64` fixes it; the regression test
+is that an all -1.0 array must give mean -1.0 and std 0.0 exactly.
+
+### After
+
+All 17 tactile datasets in `canonical_space.py` resolve with zero warnings, no degenerate
+statistics, and view counts that match the registry. Through the real dataset,
+`ftp_1_RDP_Bimanual` now yields one live view instead of two, dispatched to MCTac, with the
+measured z-score, and pixel means around 130 rather than a black frame.

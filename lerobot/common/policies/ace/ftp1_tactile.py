@@ -123,23 +123,30 @@ FTP1_TACTILE_DATASETS: dict[str, dict] = {
         "stats": {"FreeTacMan": _stats([-0.003485, -0.288809, 0.003777], [0.368280, 0.326942, 0.320351])},
     },
     "ftp_1_RDP": {
-        "sensors": ["GelSightMini", "MCTac"],
+        # FTP-1 records a GelSight and an MCTac here, but our conversion keeps a single pad,
+        # `tactile_left_0`, and canonical_space.py documents that rig as the MCTac camera.
+        # Listing only the pad we actually have keeps the positional assignment honest and
+        # stops the truncation path from silently handing this dataset the GelSight tokenizer.
+        # Unverified by measurement -- this dataset is not in the local mixture -- but the same
+        # pad in RDP_Bimanual measures as an MCTac, and the two come from the same rig.
+        "sensors": ["MCTac"],
         "stats": {
             "GelSightMini": _stats([-0.567995, -0.307983, -0.287494], [0.210233, 0.138887, 0.211952]),
             "MCTac": _stats([0.039227, 0.052511, 0.123231], [0.252232, 0.252368, 0.251900]),
         },
     },
-    # FTP-1 records four pads here (GelSight + MCTac on each hand) but our conversion keeps only
-    # one per hand, so the pads are assumed to be the first of each hand, i.e. the GelSight.
-    # Treat this as unverified: the measured channel mean of our ``tactile_left_0`` is
-    # (0.019, 0.014, 0.086), which is nowhere near this dataset's GelSight (-0.85, -0.74, -0.73)
-    # and in fact matches the *RDP* domain's MCTac (0.039, 0.053, 0.123) almost exactly. Our
-    # copy of this dataset does not appear to be the copy FTP-1 measured. See doc/results.md.
+    # Our copy is not the copy FTP-1 measured, so the published statistics for this domain do
+    # not describe it and are kept only for reference. Measured over 600 frames spanning all
+    # 50 episodes, `tactile_left_0` is (0.013, 0.008, 0.090) with std 0.243, which is 0.034
+    # from RDP's *MCTac* and 0.81 from the GelSight statistics FTP-1 published for this domain
+    # -- so the pad is an MCTac and the numbers below are ours, not FTP-1's.
+    # `tactile_right_0` is dead: every frame is uniform black (ffprobe reports Y constant at
+    # 16 across the whole file, 2.8 MB against 16 MB for the live pad), so it is not listed as
+    # a tactile view in canonical_space.py at all.
     "ftp_1_RDP_Bimanual": {
-        "sensors": ["GelSightMini", "GelSightMini"],
+        "sensors": ["MCTac"],
         "stats": {
-            "GelSightMini": _stats([-0.848931, -0.741139, -0.726261], [0.233784, 0.346916, 0.380943]),
-            "MCTac": _stats([-0.617898, -0.618343, -0.589424], [0.516095, 0.514927, 0.550842]),
+            "MCTac": _stats([0.013404, 0.008264, 0.089951], [0.243333, 0.241419, 0.244142]),
         },
     },
     "ftp_1_sharpa": {
@@ -177,6 +184,42 @@ FTP1_TACTILE_DATASETS: dict[str, dict] = {
     "ftp_1_exUMI": {
         "sensors": ["exUMI"],
         "stats": {"exUMI": _stats([-0.974438, -0.977952, 0.224915], [0.071599, 0.058624, 0.179451])},
+    },
+    # --- Datasets FTP-1 never trained on -------------------------------------------------
+    # OpenNeo is not one of FTP-1's domains, so there is nothing to transcribe. These numbers
+    # were measured from our own copies with scripts/measure_tactile_stats.py, using the same
+    # definition FTP-1 uses (per-channel mean/std of uint8/255*2-1). Each rig's pads agree with
+    # one another to within 0.013, so a single per-dataset statistic is used.
+    #
+    # The sensor is not documented anywhere we have, and it is not a GelSight: of every
+    # published statistic, GelSight Mini is the *farthest* from these (0.34-0.37), while MCTac
+    # is by far the nearest (0.046-0.063). MCTac is therefore the tokenizer these pads are
+    # dispatched to. Treat the identity as inferred from appearance, not confirmed.
+    "open_neo_aloha": {
+        "sensors": ["MCTac"] * 4,
+        "stats": {"MCTac": _stats([0.083175, 0.096035, 0.072995], [0.341184, 0.335290, 0.320280])},
+    },
+    "open_neo_arx5_single": {
+        "sensors": ["MCTac"] * 2,
+        "stats": {"MCTac": _stats([0.132388, 0.111184, 0.086841], [0.337444, 0.327955, 0.305640])},
+    },
+    # Not held locally, so this one is not measured. It is the bimanual build of the same ARX5
+    # rig as open_neo_arx5_single, so that rig's statistics are reused.
+    "open_neo_arx5": {
+        "sensors": ["MCTac"] * 4,
+        "stats": {"MCTac": _stats([0.132388, 0.111184, 0.086841], [0.337444, 0.327955, 0.305640])},
+    },
+    "open_neo_ur": {
+        "sensors": ["MCTac"] * 2,
+        "stats": {"MCTac": _stats([0.086441, 0.082853, 0.060759], [0.342134, 0.331121, 0.313760])},
+    },
+    # Also not held locally, and unlike arx5 it has no measured sibling, so it gets the average
+    # of the three OpenNeo rigs we did measure. Those three agree to within 0.05 of each other,
+    # so this is a much better prior than the identity fallback; replace it with a real
+    # measurement once the data is available.
+    "open_neo_flexiv": {
+        "sensors": ["MCTac"] * 2,
+        "stats": {"MCTac": _stats([0.100668, 0.096691, 0.073532], [0.340254, 0.331455, 0.313227])},
     },
 }
 

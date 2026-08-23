@@ -328,7 +328,9 @@ PHYSICAL_SPECS: dict[str, dict] = {
     },
     
     "ftp_1_RDP_Bimanual": {
-        # 双臂 eef pose (20)；每侧 1 路 MCTac 触觉相机 + 1 路夹爪力
+        # 双臂 eef pose (20)；每侧 1 路 MCTac 触觉相机 + 1 路夹爪力。
+        # 右侧触觉相机整份数据都是纯黑（ffprobe: Y 恒为 16；文件 2.8MB vs 左侧 16MB），
+        # 是一路坏掉的流，因此不列为触觉视图；右臂夹爪力信号本身正常，保留。
         "action": [
             _seg("action.eef_pose", 0, 10, 0),
             _seg("action.eef_pose", 10, 20, 10),
@@ -339,7 +341,6 @@ PHYSICAL_SPECS: dict[str, dict] = {
         ],
         "tactile_image": [
             "observation.images.tactile_left_0",
-            "observation.images.tactile_right_0",
         ],
         "tactile_signal": [
             "observation.state.tactile_left_gripperforce_flexivgripper",   # (1, 1)
