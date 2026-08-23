@@ -1438,3 +1438,130 @@ one of the 23201 frames, not a sampled subset. The same scan of `tactile_left_0`
 black interval at all. The key exists, but there is nothing behind it, so it stays out of
 `canonical_space.py`. If upstream FTP-1 has real pixels for that pad, the fix is to re-convert
 the dataset, not to re-list this file.
+
+## 19. The tactile reconstruction loss was two orders of magnitude too small
+
+`PhysicalEncoder` trains the tactile ResNet with a reconstruction head borrowed from UniVTAC.
+The head was there from the start, but it was not teaching the encoder anything, and the
+reason is arithmetic rather than architectural.
+
+### Why it mattered more than it looks
+
+`tactile_image_gate` is initialised to zero and the tokens are scaled by `tanh(gate)`, so
+while the gate is closed `∂L_contrastive/∂view_feats` is *exactly* zero. That is deliberate --
+the reconstruction loss is supposed to shape the features until they are worth attending to --
+but it means the reconstruction term is the **only** gradient reaching the tactile encoder at
+the start of training. Whatever that term is worth is what the encoder learns.
+
+### What it was worth
+
+Gel images occupy a narrow slice of `[0, 1]`. Measured per-channel pixel std across our
+tactile datasets:
+
+| dataset | pixel mean | pixel std |
+| --- | --- | --- |
+| sharpa | 0.089 | 0.110 |
+| D-WHEEL | 0.289 / 0.410 / 0.416 | 0.107 / 0.094 / 0.102 |
+| neo_aloha | 0.510 / 0.549 / 0.551 | 0.201 / 0.169 / 0.157 |
+| neo_ur | 0.551 / 0.544 / 0.540 | 0.180 / 0.175 / 0.161 |
+
+So an MSE computed on the raw `[0, 1]` target bottoms out at the variance of that slice.
+Measured at the 28x28 the loss actually uses (`scripts/tactile_recon_floor.py`), the MSE a
+decoder reaches by emitting **one fixed image** is 0.0015-0.015. At
+`tactile_recon_weight=0.1` that is a contribution of ~1e-3 against a contrastive loss of ~7.6.
+The `trecon:0.1997` seen at step 20 is not evidence to the contrary -- the decoder ends in a
+bare `Conv2d`, so its initial output is ~0 against a target whose mean is ~0.45, giving
+MSE ~0.2. It falls to ~0.01 within a few hundred steps and then stops mattering.
+
+### The target is not the problem, the scale is
+
+Worth checking before turning the weight up: subtracting each *episode's* own mean image
+instead of the global one removes everything explained by episode identity (gel wear,
+lighting, sensor). What survives can only come from the contact.
+
+| dataset | fraction of the 28x28 objective that survives | 
+| --- | --- |
+| sharpa | 83-96% |
+| D-WHEEL | 58-74% |
+| neo_ur | 26-31% |
+
+Downsampling to 28x28 does not destroy the contact information the way it looks like it
+should. The objective is pointing at the right thing; there is simply almost none of it.
+
+### The fix
+
+`_tactile_recon_loss` now z-scores the target with the per-dataset per-channel statistics the
+batch already carries (`tactile_img_mean` / `tactile_img_std`, shifted from FTP-1's `[-1, 1]`
+convention into `[0, 1]`). No dataloader change was needed -- those fields were already
+emitted unconditionally at `contrastive_dataset.py:854` and simply ignored on the ResNet path.
+
+Measured end to end on a real 16-sample batch of `ftp_1_sharpa_split_0` +
+`ftp_1_VisuoTactile_D-WHEEL_split_0` (53 live pads):
+
+| | target variance | constant-predictor floor |
+| --- | --- | --- |
+| raw `[0, 1]` | 0.027 | 0.022 |
+| z-scored | 2.374 | 1.834 |
+
+That is 85x more gradient. The weighted term goes from ~1e-3 to 0.285 against a contrastive
+loss of ~7.6, i.e. from 0.01% of the objective to ~3.6%. 22 `tactile_cnn` parameter tensors
+receive gradient, total norm 0.154. A batch with every pad masked still returns exactly
+`0.00000000` and back-propagates cleanly.
+
+Because the target is now unbounded, the decoder's missing final `Sigmoid` (UniVTAC's
+`RGBDecoder` has one) is correct rather than an oversight, and is now documented as such.
+
+### Per dataset, not global
+
+A single pooled tactile z-score does *not* work, and the reason is a nice trap. Pooled over
+all tactile datasets the statistics are mean `[0.398, 0.426, 0.424]`, std
+`[0.240, 0.228, 0.222]` -- almost exactly ImageNet's `[0.229, 0.224, 0.225]`, because most of
+the pooled variance is *between* datasets rather than within them. A global z-score would
+therefore leave sharpa's target at 0.23 variance and neo_aloha's at 0.55 instead of 1. It
+recovers 19-55x of the available 85-100x; per-dataset recovers all of it.
+
+The same arithmetic explains why the **encoder input** normalisation does not matter. Five
+schemes measured on identical frames through the same frozen ResNet
+(`scripts/tactile_feature_probe.py` metrics, averaged over 5 datasets):
+
+| input normalisation | spread | rho | auc |
+| --- | --- | --- | --- |
+| raw `[0, 1]` (UniVTAC's choice) | 0.081 | 0.206 | 0.739 |
+| ImageNet (ours) | 0.104 | 0.202 | 0.742 |
+| one global tactile z-score | 0.104 | 0.203 | 0.743 |
+| per-dataset | 0.112 | 0.216 | 0.748 |
+| per-sample | 0.128 | 0.210 | 0.743 |
+
+All within noise. The input only needs to be in roughly the right range and a pretrained
+ResNet absorbs the rest; the reconstruction *target* needs unit variance within each dataset
+because the gradient is directly proportional to it. Two different requirements that look
+like the same knob.
+
+### The FTP-1 ViT is not the OOD risk it appears to be
+
+`config.__post_init__` forces `tactile_recon_weight = 0` for `tactile_backbone="ftp1"`,
+because a frozen tower has nothing to shape, so none of the above applies to that path. The
+open question there was different: the tower's tokenizers were trained on FTP-1's sensors,
+and OpenNeo is not one of them. Measured with `scripts/tactile_feature_probe.py`:
+
+| dataset | sensor | FTP-1 ViT spread / rho / auc | ImageNet ResNet spread / rho / auc |
+| --- | --- | --- | --- |
+| sharpa *(in-domain)* | SharpaWave | 0.033 / 0.053 / 0.500 | 0.210 / 0.056 / 0.505 |
+| D-WHEEL *(in-domain)* | OpenLoongVTouch | 0.203 / 0.140 / 0.790 | 0.022 / 0.117 / 0.703 |
+| neo_ur *(unseen)* | MCTac | 0.100 / 0.374 / 0.688 | 0.067 / 0.277 / 0.832 |
+
+The ViT responds to OpenNeo at least as strongly and as structurally as to sensors it was
+trained on. All these pads are marker-gel optical sensors with the same image formation, and
+the tokenizers are evidently not as sensor-specific as the per-sensor dispatch implies.
+
+The genuine finding is elsewhere in that table: **on sharpa both encoders sit at chance**
+(auc 0.500 / 0.505, rho ~0.05). That is a property of the data, not the encoders -- sharpa's
+tactile *images* barely move. Its signal channel is the one carrying information.
+
+### A trap in measuring any of this
+
+The first version of the probe sampled each episode's first 96 frames and reported that the
+FTP-1 ViT had collapsed on its own sensor (spread `-0.0000`, auc 0.496). It had not. Episodes
+open with a pre-contact idle stretch: sharpa's first 96 frames have a pixel std of **3e-4**
+and a frame-to-frame std of 2e-5, i.e. a still image. Both scripts now sample with
+`np.linspace` over the whole episode, and both say so in their docstrings.

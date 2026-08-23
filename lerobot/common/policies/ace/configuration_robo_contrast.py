@@ -162,6 +162,9 @@ class RoboContrastConfig(PreTrainedConfig):
     # The reconstruction head only exists to shape the tactile features. A frozen FTP-1 tower
     # has no features to shape, so `__post_init__` switches this off for backbone="ftp1" --
     # otherwise we would pay for a decoder whose gradient reaches nothing.
+    # The target is z-scored per dataset (see `_tactile_recon_loss`), so this weight applies to
+    # a loss of order 1. Against a raw-[0, 1] target it would have applied to a loss that
+    # bottoms out near 0.01, i.e. it would have been ~0.001 in effect.
     tactile_recon_weight: float = 0.1
     tactile_recon_size: int = 28
     # UniVTAC trains its tactile backbone with a dedicated (much lower) learning rate; the

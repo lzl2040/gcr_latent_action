@@ -599,6 +599,10 @@ class TactileReconHead(nn.Module):
     for real sensors we keep the one head whose supervision is always available. The point is
     not the reconstruction itself but that the tactile features are shaped by an objective of
     their own instead of being dragged around by the contrastive gradient.
+
+    The target is z-scored per dataset before the MSE; see ``_tactile_recon_loss``. That is
+    what makes this head do anything at all, so the output is deliberately unbounded -- no
+    sigmoid, unlike UniVTAC's ``RGBDecoder``, which predicts into [0, 1].
     """
 
     def __init__(self, in_dim: int, out_size: int = 28):
@@ -854,7 +858,19 @@ class PhysicalEncoder(nn.Module):
         if self.tactile_recon is not None and self.training:
             # Reconstruct the frame at ``t`` only -- the head exists to shape the features, and
             # doubling it over both frames would double its cost for no extra supervision.
-            recon_loss = self._tactile_recon_loss(sel_feats, sel_images[:, 0])
+            # The dataset ships FTP-1's statistics in its [-1, 1] convention
+            # (``x/255*2-1``); the target here is in [0, 1], so shift them across. A dataset
+            # with no registry entry gets the identity default (mean 0, std 1 in [-1, 1]),
+            # which maps to 0.5/0.5 here -- not unit variance, but a graceful ~4x rather than
+            # the 80x the correct statistics give.
+            sel_mean = batch["tactile_img_mean"].to(device).reshape(-1, 3)[selected]
+            sel_std = batch["tactile_img_std"].to(device).reshape(-1, 3)[selected]
+            recon_loss = self._tactile_recon_loss(
+                sel_feats,
+                sel_images[:, 0],
+                (sel_mean.float() + 1.0) * 0.5,
+                (sel_std.float() * 0.5).clamp_min(1e-3),
+            )
             if not has_tactile:
                 recon_loss = recon_loss * 0.0
 
@@ -878,12 +894,31 @@ class PhysicalEncoder(nn.Module):
 
         return self.out_proj(self.out_norm(tokens[:, 0])), recon_loss
 
-    def _tactile_recon_loss(self, valid_feats, valid_images) -> torch.Tensor:
-        """MSE between the decoded and the true tactile image (UniVTAC's `rgb` head)."""
+    def _tactile_recon_loss(self, valid_feats, valid_images, mean, std) -> torch.Tensor:
+        """MSE between the decoded and the true tactile image (UniVTAC's `rgb` head).
+
+        ``mean``/``std`` are the per-dataset per-channel pixel statistics, in [0, 1] space,
+        for each selected pad. Z-scoring the target is not cosmetic: gel images occupy a very
+        narrow slice of [0, 1] (measured per-channel pixel std 0.079-0.125 across our tactile
+        datasets), so a raw-[0, 1] MSE bottoms out around 0.003-0.015 -- the value a decoder
+        reaches by emitting one fixed image. At ``tactile_recon_weight=0.1`` that contributes
+        ~1e-3 against a contrastive loss of ~7.6, i.e. nothing. Dividing by the per-dataset
+        std brings the target to unit variance and the objective back into a range where its
+        gradient competes; see ``scripts/tactile_recon_floor.py``, which measures both.
+
+        Statistics are per dataset rather than global on purpose. A single pooled tactile
+        z-score is numerically almost identical to ImageNet's (measured pooled std
+        0.240/0.228/0.222 vs 0.229/0.224/0.225) because most of the pooled variance is
+        *between* datasets, so it would leave sharpa's target at 0.23 variance and
+        neo_aloha's at 0.55 instead of 1.
+        """
         pred = self.tactile_recon(valid_feats).float()
         size = self.config.tactile_recon_size
         target = valid_images.float() / 255.0
         target = F.interpolate(target, size=(size, size), mode="bilinear", align_corners=False)
+        # Downsampling is linear and the z-score is a per-channel affine map, so the two
+        # commute; normalising afterwards just touches fewer pixels.
+        target = (target - mean.view(-1, 3, 1, 1)) / std.view(-1, 3, 1, 1)
         return F.mse_loss(pred, target)
 
 
