@@ -1658,3 +1658,65 @@ The checkpoint is a strict subset of the stage-2 one. Loading it into a full `Ro
 contrastive loader always passes a real dataset's features. Stage 1 hit it and got
 `'NoneType' object is not subscriptable`. Fixed in the fallback, and stage 1 also passes
 real features now.
+
+## 21. The tactile window's interior is not redundant, and reading it is nearly free
+
+§9.1 read the tactile cameras at `t` and `t + horizon` only, and was explicit that this was
+"cost, not principle": a contact transient is a few frames wide, so two endpoint samples can
+**straddle** it and see almost nothing. The stated price of fixing it was "2x the decode
+cost". Both halves of that sentence turned out to be measurable, and one of them is wrong.
+
+`scripts/tactile_midframe_probe.py` samples windows from episode interiors (never prefixes --
+see §19's trap) and asks whether the two interior frames hold anything the endpoints do not.
+All ratios are against `mean|t1 - t0|`, the change the current design already sees.
+
+| dataset | pad | lerp | noise | rcorr | straddle | frac | live/dead |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| D-WHEEL | left_0 | 0.885 | 0.545 | +0.651 | 0.981 | 0.32 | 72/0 |
+| D-WHEEL | right_0 | 0.843 | 0.445 | +0.718 | 0.902 | 0.31 | 72/0 |
+| sharpa | left_0 | 0.656 | 0.358 | +0.752 | 0.604 | 0.05 | 42/30 |
+| sharpa | right_0 | 0.557 | 0.133 | +0.937 | 0.407 | 0.04 | 48/24 |
+| RDP_Bimanual | left_0 | 0.740 | 0.310 | +0.817 | 0.707 | 0.17 | 12/0 |
+| exUMI | right_0 | 0.720 | 0.267 | +0.825 | 0.670 | 0.06 | 36/0 |
+| **overall (12 live pads)** | | **0.737** | **0.311** | **+0.798** | **0.707** | **0.12** | |
+
+`lerp` is the residual after linearly interpolating the endpoints. On its own it proves
+nothing -- no smooth predictor fits noise, so a noisy pad scores high for free. The control is
+`noise`, the one-frame difference, and `rcorr`, the correlation between the residual at `mid`
+and at `mid+1`. Independent noise decorrelates in one frame. **The residual is 2.4x the noise
+floor and correlates at +0.80 across adjacent frames**, so what the endpoints miss is
+structured deformation, not sensor noise. `straddle > 1` in 12% of windows overall and
+**24-32% on D-WHEEL**: the interior is further from *both* endpoints than they are from each
+other, which is exactly the failure §9.1 predicted, at a rate worth caring about.
+
+### 21.1 Decode cost is dominated by seeking, not by frames returned
+
+The "2x" was an assumption that decode cost is linear in frames. It is not.
+
+| dataset | cold 2 -> 4 frames | warm 2 -> 4 frames |
+| --- | --- | --- |
+| D-WHEEL | 631 -> 591 ms (**0.94x**) | 2.3 -> 4.5 ms (1.94x) |
+| RDP_Bimanual | 81 -> 82 ms (**1.01x**) | 1.2 -> 2.0 ms (1.65x) |
+| exUMI | 488 -> 547 ms (**1.12x**) | 6.8 -> 13.2 ms (1.94x) |
+
+Cold opens a decoder per window (a cache miss); warm reuses one (a hit). Cold is where the
+pipeline actually lives, and cold is **100x more expensive in absolute terms** -- 80-630 ms
+against 1-7 ms. In that regime the two extra frames are free, because the decoder has already
+seeked to a keyframe and decoded forward across the span; the interior frames are being
+decoded and thrown away today. Only on a cache hit does the cost approach the assumed 2x, and
+there the absolute number is a few milliseconds.
+
+So §9.1's cost argument does not survive measurement, and by the same reasoning its "16x" for
+a full-rate read is likely also far too pessimistic.
+
+### 21.2 The dead-pad rule discards exactly the events this would recover
+
+`_build_tactile_images` masks a pad when the spatial std of **both endpoints** is below
+`tactile_dead_std`. A pad whose only contact happens in the window interior is flat at both
+ends, so it is currently marked dead and dropped -- the straddled event is not merely
+unobserved, it is what causes the whole pad to be discarded. Any move to four frames must
+widen this test to all four, and doing so is a second, independent reason to make the change.
+
+Not addressed by more frames: sharpa's pads are dead in 30-71 of 72 sampled windows, and §19
+measured its tactile *images* at chance for both encoders. The gains here concentrate on
+D-WHEEL, RDP and exUMI.
