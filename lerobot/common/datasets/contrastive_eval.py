@@ -24,7 +24,29 @@ Two splits are built:
 
 Accuracy is computed *within* each batch on a single rank, never across an all-gather. That
 keeps the task a fixed N-way retrieval no matter how many GPUs the run used, so numbers stay
-comparable across differently-sized runs.
+comparable across differently-sized runs. With the default 256-frame batches, chance is
+1/256 = 0.0039.
+
+Metrics per split:
+
+``acc``
+    Retrieval accuracy: for each perception embedding, does its own physical embedding score
+    highest among the 256 in the batch? False negatives (same episode, nearby frame) are
+    masked out of the candidates first, exactly as in training.
+``pos_sim``
+    Mean cosine similarity of the matched pair. Both towers are L2-normalised, so this is in
+    [-1, 1].
+``neg_sim``
+    Mean cosine similarity over the negatives that actually enter the InfoNCE denominator.
+``gap``
+    ``pos_sim - neg_sim``. **Read this, not pos_sim.** ``pos_sim`` on its own cannot tell a
+    model that has learned to align the two towers from one that maps every input to nearly
+    the same direction -- both drive it towards 1. Only the gap separates them.
+``erank_perception`` / ``erank_physical``
+    Entropy-based effective rank of each tower's embeddings, on the same scale as
+    ``projection_dim`` (512). Detects dimensional collapse, which ``acc`` can hide: measured
+    on synthetic data, ``pos_sim`` around 0.98 corresponds to an effective rank near 1, i.e.
+    the embeddings occupy a single direction plus a thin residual.
 
 A caveat worth stating plainly: these frames are drawn from the training mixture, not from a
 withheld set of episodes. At the scale these runs reach (~0.6 epoch over 36M frames) the
@@ -133,6 +155,23 @@ def build_eval_loaders(
 
 
 @torch.no_grad()
+def _effective_rank(gram: torch.Tensor) -> float:
+    """Entropy-based effective rank of a second-moment matrix.
+
+    ``exp(H(p))`` where ``p`` is the eigenvalue spectrum normalised to sum to 1. Equals ``d``
+    when the embeddings spread evenly over all ``d`` directions and ``1`` when they collapse
+    onto a single one, so it reads on the same scale as ``projection_dim``.
+    """
+    ev = torch.linalg.eigvalsh(gram.double().cpu()).clamp(min=0.0)
+    total = ev.sum()
+    if total <= 0:
+        return 0.0
+    p = ev / total
+    p = p[p > 0]
+    return float(torch.exp(-(p * p.log()).sum()))
+
+
+@torch.no_grad()
 def evaluate(model_engine, loaders: dict[str, DataLoader], move_batch) -> dict[str, float]:
     """Score every fixed batch and return flat ``eval/<split>_<metric>`` values.
 
@@ -150,6 +189,10 @@ def evaluate(model_engine, loaders: dict[str, DataLoader], move_batch) -> dict[s
         hits = torch.zeros((), device=device, dtype=torch.float64)
         rows = torch.zeros((), device=device, dtype=torch.float64)
         pos_sim = torch.zeros((), device=device, dtype=torch.float64)
+        neg_sim = torch.zeros((), device=device, dtype=torch.float64)
+        neg_pairs = torch.zeros((), device=device, dtype=torch.float64)
+        gram_p: torch.Tensor | None = None
+        gram_r: torch.Tensor | None = None
 
         for batch in loader:
             batch = move_batch(batch, device)
@@ -157,7 +200,7 @@ def evaluate(model_engine, loaders: dict[str, DataLoader], move_batch) -> dict[s
             physical, _ = policy.encode_physical(batch)
 
             n = perception.shape[0]
-            logits = perception @ physical.t()
+            sim = perception @ physical.t()
             episode_uid = batch["episode_uid"].to(device).long().reshape(-1)
             frame_index = batch["frame_index"].to(device).long().reshape(-1)
             labels = torch.arange(n, device=device)
@@ -165,21 +208,47 @@ def evaluate(model_engine, loaders: dict[str, DataLoader], move_batch) -> dict[s
                 episode_uid, frame_index, episode_uid, frame_index
             )
             invalid[labels, labels] = False
-            logits = logits.masked_fill(invalid, float("-inf"))
+            logits = sim.masked_fill(invalid, float("-inf"))
 
             hits += (logits.argmax(dim=-1) == labels).sum().double()
             rows += n
             pos_sim += (perception * physical).sum(-1).sum().double()
 
+            # The negatives that actually enter the InfoNCE denominator: off-diagonal and not
+            # discarded as a false negative. `pos_sim` alone cannot distinguish a model that
+            # aligns the two towers from one that maps everything to a single direction --
+            # both give pos_sim -> 1. The gap against `neg_sim` is what separates them.
+            competing = ~invalid
+            competing[labels, labels] = False
+            neg_sim += sim[competing].sum().double()
+            neg_pairs += competing.sum().double()
+
+            # Second-moment matrices, accumulated to report effective rank below. Dimensional
+            # collapse (embeddings spanning far fewer than `projection_dim` directions) can
+            # coexist with a healthy pos/neg gap, so it is worth measuring separately.
+            p64, r64 = perception.double(), physical.double()
+            gram_p = p64.t() @ p64 if gram_p is None else gram_p + p64.t() @ p64
+            gram_r = r64.t() @ r64 if gram_r is None else gram_r + r64.t() @ r64
+
         if dist.is_initialized():
-            stacked = torch.stack([hits, rows, pos_sim])
+            stacked = torch.stack([hits, rows, pos_sim, neg_sim, neg_pairs])
             dist.all_reduce(stacked)
-            hits, rows, pos_sim = stacked[0], stacked[1], stacked[2]
+            hits, rows, pos_sim, neg_sim, neg_pairs = (stacked[i] for i in range(5))
+            if gram_p is not None:
+                dist.all_reduce(gram_p)
+                dist.all_reduce(gram_r)
 
         denom = max(rows.item(), 1.0)
+        mean_pos = pos_sim.item() / denom
+        mean_neg = neg_sim.item() / max(neg_pairs.item(), 1.0)
         metrics[f"eval/{name}_acc"] = hits.item() / denom
-        metrics[f"eval/{name}_pos_sim"] = pos_sim.item() / denom
+        metrics[f"eval/{name}_pos_sim"] = mean_pos
+        metrics[f"eval/{name}_neg_sim"] = mean_neg
+        metrics[f"eval/{name}_gap"] = mean_pos - mean_neg
         metrics[f"eval/{name}_rows"] = rows.item()
+        if gram_p is not None:
+            metrics[f"eval/{name}_erank_perception"] = _effective_rank(gram_p)
+            metrics[f"eval/{name}_erank_physical"] = _effective_rank(gram_r)
 
     if was_training:
         model_engine.train()
