@@ -65,7 +65,9 @@ def train(cfg: TrainPipelineConfig):
 
     os.environ.setdefault("DECORD_LOG_LEVEL", "error")
     deepspeed.init_distributed()
-    logger = init_logger(cfg)
+    # Its own log subdirectory: the two stages are launched with the same `--log_dir`, and
+    # timestamp-named files from both would otherwise interleave in one folder.
+    logger = init_logger(cfg, subdir="perception")
 
     rank = int(os.environ.get("RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))

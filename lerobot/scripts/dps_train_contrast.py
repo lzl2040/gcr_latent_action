@@ -43,7 +43,7 @@ from lerobot.configs.train import TrainPipelineConfig
 _KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "tactile_image")
 
 
-def init_logger(cfg):
+def init_logger(cfg, subdir: str = "contrast"):
     rank = int(os.environ.get("RANK", 0))
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
@@ -52,7 +52,7 @@ def init_logger(cfg):
     )
     handlers: list[logging.Handler] = []
     if rank == 0:
-        log_path = Path(cfg.log_dir) / f"contrast/{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_path = Path(cfg.log_dir) / f"{subdir}/{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(log_path))
         handlers.append(logging.StreamHandler())
