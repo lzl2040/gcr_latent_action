@@ -49,6 +49,10 @@ from lerobot.common.policies.factory import make_policy  # noqa: E402
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig  # noqa: E402
 from lerobot.configs.default import DatasetConfig  # noqa: E402
 
+# Kept as a module constant because the loader-only measurement has to know how deep the
+# prefetch buffer is in order to skip past it; see the comment there.
+PREFETCH_FACTOR = 4
+
 
 @dataclass
 class _Cfg:
@@ -113,11 +117,18 @@ def build_config(args) -> _Cfg:
         chunk_seconds=args.chunk_seconds,
         tactile_backbone=args.tactile_backbone,
         ftp1_tactile_dir=args.ftp1_tactile_dir,
+        tactile_frames=args.tactile_frames,
+        tactile_tokens_per_pad=args.tactile_tokens_per_pad,
     )
     if args.max_tactile_views is not None:
         policy.max_tactile_views = args.max_tactile_views
     dataset = DatasetConfig(repo_id="profile")
-    dataset.dataset_size_one_epoch = args.batch_size * (args.steps + 2)
+    # ``--loader_only`` has to run past the prefetch buffer before it measures anything, so the
+    # epoch must be long enough to supply those extra batches as well as the timed ones.
+    steps = args.steps
+    if args.loader_only:
+        steps = max(steps, max(args.warmup, args.num_workers * PREFETCH_FACTOR + 2) + 20)
+    dataset.dataset_size_one_epoch = args.batch_size * (steps + 2)
     dataset.parent_dir_v21 = args.parent_dir_v21
     dataset.parent_dir_v30 = args.parent_dir_v30
     if args.parent_dir_extra and hasattr(dataset, "parent_dir_extra"):
@@ -145,6 +156,10 @@ def main() -> int:
     p.add_argument("--group_size", type=int, default=4)
     p.add_argument("--chunk_seconds", type=float, default=1.6)
     p.add_argument("--tactile_backbone", default="resnet18", choices=["resnet18", "ftp1"])
+    p.add_argument("--tactile_frames", type=int, default=4,
+                   help="frames read per pad; the loader decodes them and the CNN runs once per frame")
+    p.add_argument("--tactile_tokens_per_pad", type=int, default=2,
+                   help="tokens each pad contributes after the temporal fusion")
     p.add_argument("--ftp1_tactile_dir", default="/Data/lzl/huggingface/ftp1_v0426_50kstep")
     p.add_argument("--vision_model", default="/Data/lzl/huggingface/dinov3-vitb16-pretrain-lvd1689m")
     p.add_argument("--text_model", default="/Data/lzl/huggingface/siglip2-base-patch16-224")
@@ -191,25 +206,43 @@ def main() -> int:
         dataset=dataset, batch_sampler=sampler, num_workers=args.num_workers,
         pin_memory=True, collate_fn=contrastive_collate_fn,
         persistent_workers=args.num_workers > 0,
-        prefetch_factor=4 if args.num_workers > 0 else None,
+        prefetch_factor=PREFETCH_FACTOR if args.num_workers > 0 else None,
     )
 
     if args.loader_only:
         # The question "can the loader keep up?" is separable from "is the model slow?", and
         # on a network filesystem it is usually the only one that matters. Answer it without
         # paying for a 772M-parameter model or a GPU.
+        #
+        # The trap here is the prefetch buffer. The workers start filling it at ``iter()`` and
+        # hold ``num_workers * prefetch_factor`` batches -- 48 at the defaults. A run of 10
+        # steps therefore never touches a decoder at all: it drains a queue that was filled
+        # while the process was still starting up, and reports memory bandwidth. That is not a
+        # small bias, it is the difference between 900 and 1_300_000 samples/s (both measured).
+        # Steady state only begins once the buffer is empty, which takes as many steps as the
+        # buffer is deep, so the timed window has to start after that.
+        prefetch_depth = args.num_workers * PREFETCH_FACTOR if args.num_workers > 0 else 0
+        warmup = max(args.warmup, prefetch_depth + 2)
+        if args.steps <= warmup:
+            print(f"[loader_only] --steps {args.steps} is inside the {prefetch_depth}-batch prefetch "
+                  f"buffer and would measure the queue, not the decoder; raising to {warmup + 20}.")
+        steps = max(args.steps, warmup + 20)
         step, seen = 0, 0
         start = time.perf_counter()
         for batch in loader:
             seen += batch["observation.state"].shape[0]
             step += 1
-            if step == args.warmup:  # exclude worker start-up and the first prefetch
+            if step == warmup:  # buffer drained; from here the loader is producing, not replaying
                 start, seen = time.perf_counter(), 0
-            if step >= args.steps:
+            if step >= steps:
                 break
+        if step < steps:
+            print(f"[loader_only] epoch ended after {step} batches; increase "
+                  f"--steps or the mixture size for a steady-state number.")
         elapsed = time.perf_counter() - start
         print(f"\nloader only: {seen / max(elapsed, 1e-9):.1f} 样本/秒 "
-              f"({1000 * elapsed / max(seen, 1):.1f} ms/样本, {args.num_workers} workers)")
+              f"({1000 * elapsed / max(seen, 1):.1f} ms/样本, {args.num_workers} workers, "
+              f"{step - warmup} steps timed after a {prefetch_depth}-batch warmup)")
         return 0
 
     policy = make_policy(cfg=cfg.policy, device="cpu", ds_meta=dataset.meta)
@@ -300,8 +333,9 @@ def main() -> int:
         print(f"{label:<28s} {secs:7.3f} s  ({100 * secs / max(total_step, 1e-9):5.1f}%)")
     print(f"{'-' * 62}\n{'每步合计':<26s} {total_step:7.3f} s")
     if pads["batches"]:
-        print(f"\n触觉 pad：每步送进 backbone {pads['selected'] / n:.0f} 个 pad-pair "
-              f"（= {2 * pads['selected'] / n:.0f} 张图），mask 存活 {pads['rows'] / n:.0f}")
+        print(f"\n触觉 pad：每步送进 backbone {pads['selected'] / n:.0f} 个 pad "
+              f"（每 pad {args.tactile_frames} 帧 = {args.tactile_frames * pads['selected'] / n:.0f} 张图），"
+              f"mask 存活 {pads['rows'] / n:.0f}")
     return 0
 
 

@@ -683,6 +683,43 @@ class TactileReconHead(nn.Module):
         return x
 
 
+class TactilePadTemporal(nn.Module):
+    """Fuse one pad's ``F`` frame features into ``T`` tokens.
+
+    The pad is the unit of fusion, not the batch: each pad is a separate physical contact
+    surface, so mixing pads here would force the module to disentangle "which finger" before
+    it can describe "what happened", and the physical transformer downstream already has a
+    per-pad embedding for exactly that. Keeping fusion inside the pad also leaves the
+    per-pad mask semantics untouched -- a dead pad is still replaced wholesale by the
+    ``missing`` token, which is not expressible once pads are pooled together.
+
+    Frames are marked with a learned temporal embedding and read by ``T`` learned queries in a
+    single self-attention block over ``T + F`` tokens. The queries are what leaves; the frame
+    tokens are scratch. ``F`` is 4, so the attention is negligible next to the ResNet passes
+    that produced its input.
+
+    The first query is initialised to read the window start and the second the change across
+    it, matching what the previous ``[feat_t, feat_t1 - feat_t]`` concatenation encoded, so
+    ``T = 2`` starts from the old behaviour and is free to depart from it.
+    """
+
+    def __init__(self, dim: int, num_frames: int, num_tokens: int, num_heads: int = 8, dropout: float = 0.0):
+        super().__init__()
+        self.num_frames = num_frames
+        self.num_tokens = num_tokens
+        self.frame_embed = nn.Parameter(torch.randn(1, num_frames, dim) * 0.02)
+        self.query = nn.Parameter(torch.randn(1, num_tokens, dim) * 0.02)
+        self.block = SelfAttentionBlock(dim, num_heads, dropout)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, feats: torch.Tensor) -> torch.Tensor:
+        """``(N, F, D) -> (N, T, D)``."""
+        x = feats + self.frame_embed.to(feats.dtype)
+        q = self.query.to(feats.dtype).expand(feats.shape[0], -1, -1)
+        out = self.block(torch.cat([q, x], dim=1))
+        return self.norm(out[:, : self.num_tokens])
+
+
 class PhysicalEncoder(nn.Module):
     """Encodes state + action chunk + tactile into one embedding, tolerating missing modalities.
 
@@ -744,7 +781,16 @@ class PhysicalEncoder(nn.Module):
             )
         else:
             self.tactile_cnn = TactileImageEncoder(config.tactile_feat_dim, config.tactile_pretrained)
-        self.tactile_img_proj = nn.Linear(config.tactile_feat_dim * 2, dim)
+        self.tactile_frames = config.tactile_frames
+        self.tactile_tokens_per_pad = config.tactile_tokens_per_pad
+        self.tactile_temporal = TactilePadTemporal(
+            config.tactile_feat_dim,
+            config.tactile_frames,
+            config.tactile_tokens_per_pad,
+            num_heads=8,
+            dropout=config.dropout,
+        )
+        self.tactile_img_proj = nn.Linear(config.tactile_feat_dim, dim)
         self.tactile_recon = (
             TactileReconHead(config.tactile_feat_dim, config.tactile_recon_size)
             if config.tactile_recon_weight > 0
@@ -757,6 +803,9 @@ class PhysicalEncoder(nn.Module):
         # Which finger/pad a tactile token came from. UniVTAC has no such embedding because it
         # always sees a fixed sensor set; our datasets ship 0, 1, 4 or 6 pads.
         self.tactile_view_embed = nn.Embedding(config.max_tactile_views, dim)
+        # Which of a pad's tokens this is. Without it the two tokens of a pad are distinguished
+        # only by their content, and both carry the same view embedding.
+        self.tactile_token_embed = nn.Embedding(config.tactile_tokens_per_pad, dim)
         self.sample_rate_embed = nn.Embedding(64, dim)
         # Learned stand-ins used when a modality is absent or dropped.
         self.missing_embed = nn.Embedding(5, dim)
@@ -858,11 +907,14 @@ class PhysicalEncoder(nn.Module):
         # initialised gate, the modality dropout and the reduced tactile learning rate are what
         # stop these extra tokens from taking over.
         #
-        # Each pad arrives as two frames, and the token is built from ``[feat_t, feat_t1 -
-        # feat_t]``. The difference term is the point: a grasp that closes mid-window is
-        # invisible at ``t`` alone, and the contrastive target is the *change* over the window.
-        # Folding the pair into one token per pad keeps the tactile cameras level with the
-        # three chunked streams instead of doubling their share of the sequence.
+        # Each pad arrives as ``tactile_frames`` samples spread across the window, fused inside
+        # the pad by ``TactilePadTemporal`` into ``tactile_tokens_per_pad`` tokens. The window
+        # interior is the point: a grasp that closes and settles mid-window is invisible at both
+        # endpoints, and doc/results.md §21 measured that what the endpoints miss is structured
+        # deformation rather than noise. Two tokens per pad give the transformer separate access
+        # to the contact's state and its evolution, which a single projected concatenation mixes
+        # before attention can see it -- at the price of raising the tactile image share of the
+        # sequence from 19% to 32%, which is why ``tactile_tokens_per_pad`` is a knob.
         num_views = tac_images.shape[1]
         any_view = (tac_img_mask.sum(dim=-1, keepdim=True) > 0).to(dtype)
         keep_tac_img = self._maybe_drop(any_view, self.config.modality_dropout_tactile)
@@ -883,7 +935,7 @@ class PhysicalEncoder(nn.Module):
         if not has_tactile:
             selected = torch.zeros(1, dtype=torch.long, device=device)
         sel_images = flat_images[selected]
-        # ``sel_images`` is (N, 2, 3, H, W); the encoder treats the frame axis as its view axis.
+        # ``sel_images`` is (N, F, 3, H, W); the encoder treats the frame axis as its view axis.
         if self.use_ftp1_tactile:
             # The FTP-1 tower has one tokenizer per physical sensor, so it additionally needs
             # to know which sensor each selected pad came from and the per-dataset z-score
@@ -901,19 +953,25 @@ class PhysicalEncoder(nn.Module):
             # its own head, which need not match the trunk that consumes it.
             sel_pair = self.tactile_cnn(sel_images)[0].to(dtype)
         sel_feats = sel_pair[:, 0]
-        sel_delta = sel_pair[:, 1] - sel_pair[:, 0]
         if not has_tactile:
+            sel_pair = sel_pair * 0.0
             sel_feats = sel_feats * 0.0
-            sel_delta = sel_delta * 0.0
-        sel_joint = torch.cat([sel_feats, sel_delta], dim=-1)
+        # ``(N, F, D) -> (N, T, D)``: the window's frames are fused inside the pad, so a pad
+        # stays one maskable unit and the tokens that leave describe the contact rather than
+        # individual frames.
+        sel_tokens = self.tactile_temporal(sel_pair)
 
-        feat_dim = sel_joint.shape[-1]
-        view_feats = torch.zeros(b * num_views, feat_dim, device=device, dtype=sel_joint.dtype)
-        view_feats = view_feats.index_put((selected,), sel_joint)
-        img_tokens = self.tactile_img_proj(view_feats.view(b, num_views, feat_dim))
+        tok_per_pad, feat_dim = self.tactile_tokens_per_pad, sel_tokens.shape[-1]
+        view_feats = torch.zeros(
+            b * num_views, tok_per_pad, feat_dim, device=device, dtype=sel_tokens.dtype
+        )
+        view_feats = view_feats.index_put((selected,), sel_tokens)
+        img_tokens = self.tactile_img_proj(view_feats.view(b, num_views * tok_per_pad, feat_dim))
         if self.tactile_recon is not None and self.training:
             # Reconstruct the frame at ``t`` only -- the head exists to shape the features, and
-            # doubling it over both frames would double its cost for no extra supervision.
+            # running it over all ``tactile_frames`` would multiply its cost by that factor for
+            # supervision of the same kind. ``sel_feats`` is frame 0's feature, taken before the
+            # temporal fusion, so the pixel target ``sel_images[:, 0]`` is the matching frame.
             # The dataset ships FTP-1's statistics in its [-1, 1] convention
             # (``x/255*2-1``); the target here is in [0, 1], so shift them across. A dataset
             # with no registry entry gets the identity default (mean 0, std 1 in [-1, 1]),
@@ -932,17 +990,22 @@ class PhysicalEncoder(nn.Module):
 
         img_tokens = torch.tanh(self.tactile_image_gate).to(dtype) * img_tokens
         # A pad that this dataset does not have is replaced by the learned "missing" token, so
-        # a 4-pad dataset and a 0-pad dataset produce sequences of the same shape.
-        view_keep = (keep_tac_img * tac_img_mask).unsqueeze(-1)
+        # a 4-pad dataset and a 0-pad dataset produce sequences of the same shape. The mask is
+        # per pad, so it repeats across that pad's tokens.
+        view_keep = (keep_tac_img * tac_img_mask).repeat_interleave(tok_per_pad, dim=1).unsqueeze(-1)
         img_tokens = view_keep * img_tokens + (1 - view_keep) * missing[self.MOD_TAC_IMG]
-        view_ids = torch.arange(num_views, device=device)
+        view_ids = torch.arange(num_views, device=device).repeat_interleave(tok_per_pad)
+        token_ids = torch.arange(tok_per_pad, device=device).repeat(num_views)
         img_tokens = (
-            img_tokens + self.tactile_view_embed(view_ids).to(dtype).unsqueeze(0) + mod[self.MOD_TAC_IMG]
+            img_tokens
+            + self.tactile_view_embed(view_ids).to(dtype).unsqueeze(0)
+            + self.tactile_token_embed(token_ids).to(dtype).unsqueeze(0)
+            + mod[self.MOD_TAC_IMG]
         )
 
         # -- transformer ---------------------------------------------------
-        # 1 CLS + G state + G action + G tactile signal + V tactile image tokens, where
-        # G = chunk_size / group_size and V = max_tactile_views.
+        # 1 CLS + G state + G action + G tactile signal + V*T tactile image tokens, where
+        # G = chunk_size / group_size, V = max_tactile_views, T = tactile_tokens_per_pad.
         cls = (self.cls_token.to(dtype).expand(b, -1, -1) + mod[self.MOD_CLS])
         tokens = torch.cat([cls, state_tokens, action_tokens, signal_tokens, img_tokens], dim=1)
         for block in self.blocks:

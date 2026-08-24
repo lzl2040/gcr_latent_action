@@ -157,6 +157,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # Wall-clock capture rate per dataset, which is not always the declared one.
         self.true_fps: list[float] = []
         self.tactile_img_size = getattr(policy_cfg, "tactile_img_size", 64)
+        self.tactile_frames = max(2, int(getattr(policy_cfg, "tactile_frames", 2)))
         self.tactile_dead_std = getattr(policy_cfg, "tactile_dead_std", 0.002)
         self.max_tactile_views = min(getattr(policy_cfg, "max_tactile_views", MAX_TACTILE_VIEWS), MAX_TACTILE_VIEWS)
         self._video_backend = self._resolve_video_backend(cfg.dataset.video_backend)
@@ -442,18 +443,22 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 delta_timestamps[key] = chunk_stamps
 
         # The video streams are read at the two ends of the window only. For RGB that is the
-        # whole design; for tactile cameras it is a deliberate compromise. Tactile carries
-        # contact events -- grasp closure, slip, impact -- which are things that *happen during*
-        # the window, so a single frame at ``t`` can miss the entire signal (if the grasp closes
-        # at t+8, the frame at t shows no contact at all). But decoding 16 frames x 4 pads on a
-        # spinning disk is exactly where this pipeline is already bottlenecked, so two frames
-        # buy "before contact -> after contact" at 2x the decode cost instead of 16x.
+        # whole design; for the tactile cameras it used to be a compromise, and doc/results.md
+        # §21 measured that the compromise was not worth making: the interior of the window
+        # carries structured deformation the endpoints cannot reconstruct (residual 2.4x the
+        # one-frame noise floor, correlated at +0.80 across adjacent frames), and reading it
+        # costs 0.94-1.12x rather than the assumed 2x, because decode time is dominated by
+        # seeking to a keyframe and decoding across the span -- the interior frames are already
+        # being decoded and discarded. Tactile therefore reads ``tactile_frames`` evenly spaced
+        # samples; RGB stays at the pair.
         pair_stamps = [0.0, horizon / index_fps]
         for key in rgb_keys:
             if key in ds_meta.video_keys:
                 delta_timestamps[key] = pair_stamps
+        n_tac = self.tactile_frames
+        tac_stamps = [horizon * i / ((n_tac - 1) * index_fps) for i in range(n_tac)]
         for key in tac_img_keys:
-            delta_timestamps[key] = pair_stamps
+            delta_timestamps[key] = tac_stamps
 
         try:
             common = dict(
@@ -817,7 +822,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         return sensor_id, mean, std
 
     def _build_tactile_images(self, item, spec):
-        """``(V, 2, 3, S, S)``: each pad at ``t`` and at ``t + horizon``.
+        """``(V, F, 3, S, S)``: each pad sampled at ``F`` points across the window.
 
         Pads whose frames carry no spatial structure are masked out here. A large share of our
         tactile pixels are dead: ``sharpa``'s six pads are blank 38-100% of the time and
@@ -828,13 +833,19 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         The test is the *spatial* std within each channel, not the std over the whole frame: a
         pad that is uniformly some non-black colour is spatially dead but has a non-zero global
-        std, so a global test would let it through. A pad is dropped only when **both** frames
-        are flat -- one flat and one live is a contact onset or release, which is exactly the
-        kind of event this branch exists to capture.
+        std, so a global test would let it through.
+
+        A pad is dropped only when **every** sampled frame is flat. Testing the two endpoints
+        alone -- which is what this did while only the endpoints were read -- discards exactly
+        the events the interior frames exist to catch: a contact that begins and ends inside
+        the window leaves both endpoints flat, so the pad was marked dead and the event was not
+        merely unobserved but the *cause* of the whole pad being thrown away
+        (``doc/results.md`` §21.2).
         """
         size = self.tactile_img_size
+        n_frames = self.tactile_frames
         dead_std = self.tactile_dead_std
-        views = torch.zeros(self.max_tactile_views, 2, 3, size, size, dtype=torch.uint8)
+        views = torch.zeros(self.max_tactile_views, n_frames, 3, size, size, dtype=torch.uint8)
         mask = torch.zeros(self.max_tactile_views, dtype=torch.float32)
         for slot, key in enumerate(tactile_image_keys(spec)[: self.max_tactile_views]):
             frame = item.get(key)
@@ -842,9 +853,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 continue
             if frame.ndim == 3:  # (C, H, W) -- no window was read
                 frame = frame.unsqueeze(0)
-            if frame.shape[0] < 2:
-                frame = frame[:1].expand(2, -1, -1, -1)
-            frame = frame[:2]
+            if frame.shape[0] < n_frames:
+                frame = frame[:1].expand(n_frames, -1, -1, -1)
+            frame = frame[:n_frames]
             frame = self._as_uint8(frame)
             frame = F.interpolate(
                 frame.float(), size=(size, size), mode="bilinear", align_corners=False
@@ -853,7 +864,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             if dead_std > 0:
                 # Scale to [0, 1] so the threshold is expressed in the same units as the
                 # measured distributions; one 8-bit grey level is 1/255 = 0.0039.
-                spatial_std = (frame / 255.0).reshape(2, 3, -1).std(dim=-1).max()
+                spatial_std = (frame / 255.0).reshape(n_frames, 3, -1).std(dim=-1).max()
                 if spatial_std.item() < dead_std:
                     continue
             mask[slot] = 1.0

@@ -38,7 +38,10 @@ batch = {
     "tactile_signal": torch.randn(B, S, cfg.max_tactile_signal_dim).cuda(),
     "tactile_signal_mask": torch.ones(B).cuda(),
     "tactile_image": torch.randint(
-        0, 255, (B, V, 2, 3, cfg.tactile_img_size, cfg.tactile_img_size), dtype=torch.uint8
+        0,
+        255,
+        (B, V, cfg.tactile_frames, 3, cfg.tactile_img_size, cfg.tactile_img_size),
+        dtype=torch.uint8,
     ).cuda(),
     "tactile_image_mask": torch.ones(B, V).cuda(),
     "tactile_sensor_id": torch.zeros(B, V, dtype=torch.long).cuda(),

@@ -1720,3 +1720,70 @@ widen this test to all four, and doing so is a second, independent reason to mak
 Not addressed by more frames: sharpa's pads are dead in 30-71 of 72 sampled windows, and §19
 measured its tactile *images* at chance for both encoders. The gains here concentrate on
 D-WHEEL, RDP and exUMI.
+
+## 22. Four tactile frames with intra-pad fusion: what it cost and what it bought
+
+§21 established that the window interior carries structured deformation and that reading it is
+nearly free at the decoder. This section is the implementation and its measured cost.
+
+**Design.** Each pad now reads `tactile_frames=4` evenly spaced frames over the chunk instead of
+the two endpoints. A new `TactilePadTemporal` module fuses them *inside the pad* -- learned frame
+embeddings, `T` learned queries, one self-attention block over the `T+F` tokens -- and emits
+`tactile_tokens_per_pad=2` tokens. Fusing inside the pad rather than pooling all pads into a
+shared set of tokens keeps one pad = one maskable unit, so `tactile_image_mask` keeps its meaning
+and a dataset with no pads still produces a fixed-shape sequence.
+
+Physical sequence length is `1 + 3*chunk_size/group_size + max_tactile_views * tactile_tokens_per_pad`:
+37 at `T=2`, 31 at `T=1` (the old two-frame behaviour).
+
+**Cost, `debug_research_data`, batch 128, one A100, resnet18 tactile backbone, no DeepSpeed:**
+
+| | `tactile_frames=2` | `tactile_frames=4` | ratio |
+|---|---|---|---|
+| total step | 0.999 s | 1.041 s | **1.04x** |
+| tactile image backbone | 0.041 s | 0.077 s | 1.88x |
+| tactile recon head | 0.008 s | 0.007 s | 0.9x |
+| perception encoder | 0.362 s | 0.459 s* | -- |
+| loader alone (samples/s) | 77.2 / 117.0 | 104.2 / 108.6 | **no difference** |
+
+\* run-to-run noise; the perception branch is untouched by this change.
+
+The backbone cost doubles as expected -- it runs once per frame -- but it is only 7.4% of the
+step, so the total is +4%. Parameters grow 772M -> 774M (the fusion block is ~2M).
+
+**The loader row was nearly reported wrong.** `--loader_only` originally timed 10 batches after a
+3-batch warmup, but the DataLoader holds `num_workers * prefetch_factor = 48` batches, filled
+while the process was still starting. The timed window therefore drained a queue at memory speed
+and never touched a decoder. It reported 108 samples/s and 6293 samples/s for the same
+configuration on consecutive runs, and once 1_300_000 samples/s -- a number that should have been
+impossible to publish. The fix is to skip past the buffer depth before starting the clock. With
+that, both settings land at 77-117 samples/s and the *within*-setting spread exceeds the
+*between*-setting difference, which is what §21's cold-decode measurement predicted.
+
+Two lessons that generalise: a throughput measurement shorter than the prefetch buffer measures
+the buffer, and an A/B run in a fixed order on a caching filesystem measures the cache. Both were
+caught only by alternating the order and sanity-checking against a physical bound.
+
+**The widened dead-pad rule buys less than hoped.** §21.2 noted the liveness test looked at both
+endpoints only, so a pad whose sole contact is interior was discarded. Testing all four frames
+fixes that, and a unit test confirms the behaviour: a pad flat at both endpoints but live at
+frames 1-2 is now kept, while a fully flat pad is still dropped. But on this mixture the surviving
+pad count barely moves -- 312 vs 308, 292 vs 290, 432 vs 432, 60 vs 61 across matched steps, about
++0.6%. "Live only in the interior" is much rarer than the 0.24-0.32 straddle fraction suggests,
+because straddling a transient usually still leaves one endpoint in contact. The fix is correct
+and free; it is not a source of data.
+
+**Verified properties** (`tactile_tokens_per_pad` 1 and 2 both):
+- a masked pad is exactly inert -- scribbling its pixels changes the output by 0.000e+00;
+- an unmasked pad in the same batch, given the same scribble, does change it (2.2e-3);
+- interior frames alone change the output (3.1e-3), on par with the endpoint-only control (1.5e-3),
+  which is the whole point of the change and does not hold trivially.
+
+Note when testing this path: `tactile_image_gate` is initialised to 0 and the forward applies
+`tanh(gate)`, so at initialisation no tactile pixel can reach the output. Any black-box probe must
+set the gate to 1 first or it measures 0.0 everywhere and looks like a bug.
+
+**Still open.** Whether `tactile_tokens_per_pad=2` helps at all is untested -- it raises the
+tactile image share of the physical sequence from 19% to 32%, while §8 deliberately held tactile
+level and roughly half of pad-frames are dead. That needs an A/B against `=1` read through the
+§20 `gap`/`erank` metrics, not through the loss.

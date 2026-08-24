@@ -77,7 +77,7 @@ class RoboContrastConfig(PreTrainedConfig):
     n_action_steps: int = 16
     # Frames per grouped token. ``chunk_size / group_size`` tokens are emitted for each of
     # state, action and tactile signal, so this sets the physical sequence length:
-    # ``1 + 3 * chunk_size / group_size + max_tactile_views``.
+    # ``1 + 3 * chunk_size / group_size + max_tactile_views * tactile_tokens_per_pad``.
     #
     # Only the *ratio* matters for the token budget. An earlier experiment found group_size 4
     # worse than 2 (contrastive loss 4.14 vs 3.71, doc/results.md S9.4), but that was at a fixed
@@ -99,7 +99,30 @@ class RoboContrastConfig(PreTrainedConfig):
     # Must not exceed canonical_space.MAX_TACTILE_VIEWS, which the dataset clamps against.
     # 6 covers `ftp_1_sharpa`'s three pads per hand; datasets with fewer fill the spare slots
     # with the learned `missing` token.
+    #
+    # Note the truncation `tactile_image_keys(spec)[:max_tactile_views]` keeps the first N keys
+    # in *sorted* order, which is unrelated to which pads are live. Lowering this drops
+    # `right_*` before `left_*`, so on sharpa 4 would discard `right_1` (43/72 windows live)
+    # while keeping `left_2` (14/72). Measure before trimming -- see doc/results.md §21.
     max_tactile_views: int = 6
+    # Frames read per tactile pad, spread evenly over the window. Two endpoints straddle a
+    # contact transient: measured over 12 live pads, the interpolation residual at the interior
+    # is 2.4x the one-frame noise floor and correlates at +0.80 across adjacent frames, so what
+    # the endpoints miss is structured deformation rather than noise, and in 12% of windows
+    # (24-32% on D-WHEEL) the interior is further from *both* endpoints than they are from each
+    # other. Four frames is nearly free on the decode side because cost is dominated by seeking
+    # to a keyframe, not by frames returned (0.94-1.12x cold). See doc/results.md §21.
+    tactile_frames: int = 4
+    # Tokens emitted per pad after the intra-pad temporal fusion. 1 concatenates the fused
+    # state and dynamics into a single token; 2 gives the physical transformer separate access
+    # to "what is being touched" and "how the contact evolved", which it cannot recover from
+    # the concatenation because the projection mixes them before attention sees them.
+    #
+    # This is the tactile share of the physical sequence: at 6 pads the image stream is
+    # 6/31 = 19% of the tokens at 1, and 12/37 = 32% at 2. Keep it a knob -- doc/results.md §8
+    # deliberately held tactile level with the chunked streams, and roughly half our pad-frames
+    # are dead, so a larger share is not obviously better.
+    tactile_tokens_per_pad: int = 2
     # ResNet-18 downsamples by 32, so 112 gives a 4x4 map (64 would give a useless 2x2).
     # Forced to 224 by ``__post_init__`` when ``tactile_backbone="ftp1"``, which is the
     # resolution its positional embedding was trained at.
@@ -273,6 +296,14 @@ class RoboContrastConfig(PreTrainedConfig):
         if self.tactile_backbone not in ("resnet18", "ftp1"):
             raise ValueError(
                 f"`tactile_backbone` must be 'resnet18' or 'ftp1', got {self.tactile_backbone!r}."
+            )
+        if self.tactile_frames < 2:
+            raise ValueError(
+                f"`tactile_frames` must be at least 2 (the window endpoints), got {self.tactile_frames}."
+            )
+        if self.tactile_tokens_per_pad not in (1, 2):
+            raise ValueError(
+                f"`tactile_tokens_per_pad` must be 1 or 2, got {self.tactile_tokens_per_pad}."
             )
         if self.tactile_backbone == "ftp1":
             # Nested `--policy.ftp1_tactile_sensors="['A','B']"` is not parsed as a list:
