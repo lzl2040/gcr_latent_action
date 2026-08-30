@@ -34,11 +34,35 @@ class RoboContrastConfig(PreTrainedConfig):
     # makes "the instruction selects which change matters" work.
     vision_model_name: str = "/Data/lzl/huggingface/dinov3-vitb16-pretrain-lvd1689m"
     text_model_name: str = "/Data/lzl/huggingface/siglip2-base-patch16-224"
+    # Which vision tower to read frames with. "dinov3" is the branch's original 86M ViT-B/16;
+    # "cosmos3" is the 412M vision tower of Cosmos-Reason3-Edge, which is the encoder stage 2
+    # would reuse via `export_model --vit-checkpoint-path`. Loading it is not a drop-in: the
+    # checkpoint stores its patch embedding as a Linear over flattened patches and omits
+    # SigLIP's attention-pooling head, so see `cosmos3_encoders.py` for the remapping.
+    #
+    # The text tower stays SigLIP2 in both cases. Cosmos3's own text tower is a 2.2B LLM in
+    # `transformer/`; it blows the parameter budget and measured ~0.3s on a 1.04s step, for a
+    # part of the model that is frozen and currently costs 0.013s.
+    vision_backbone: str = "dinov3"
+    cosmos3_dir: str = "/Data/lzl/huggingface/Cosmos3-Edge"
     freeze_vision_encoder: bool = True
     freeze_text_encoder: bool = True
     text_max_length: int = 32
     # Number of latent "what changed?" queries used to read the two-frame visual evidence.
     num_change_queries: int = 16
+    # How many vectors each branch is summarised into for the contrastive loss.
+    #   1  -- the perception side averages its change queries into one embedding and the
+    #         physical side reads its single CLS token; similarity is a plain dot product.
+    #   >1 -- neither side pools. The physical branch carries `num_cls_tokens` CLS tokens and
+    #         the perception branch projects its change queries down to the same count, and
+    #         similarity becomes ColBERT-style late interaction (max over physical tokens,
+    #         summed over perception tokens).
+    # The motivation for >1 is that a single vector forces one embedding to describe an entire
+    # 32-step chunk, so a chunk containing two distinct sub-motions can only be represented by
+    # their average. Late interaction lets separate tokens specialise and match independently.
+    # It is not free: similarity becomes an O(K^2) einsum per pair instead of a matmul, and the
+    # loss no longer has a single embedding to monitor, so watch `gap` rather than `pos_sim`.
+    num_cls_tokens: int = 1
     # Self-attention layers run over the evidence bank ([v0, v1, v1-v0, text]) *before* the
     # change queries read it. This is where most of the perception capacity lives: it is the
     # only place where a parameter sees all ~620 tokens rather than 16 queries.
@@ -51,6 +75,21 @@ class RoboContrastConfig(PreTrainedConfig):
     # actually encode the change instead of whatever shortcut the contrastive loss tolerates.
     num_predictor_layers: int = 3
     perception_recon_weight: float = 1.0
+    # What the predictor reconstructs.
+    #   "vision" -- the vision tower's own frame-(t+H) features. Self-consistent and free: the
+    #               features are already computed for the evidence bank.
+    #   "vae"    -- the Cosmos3 (Wan2.2) VAE latent of frame t+H. Costs an extra 150M-parameter
+    #               encoder pass, but ties the perception trunk to the *generator's* latent
+    #               space, which is what a stage-2 Cosmos world model actually consumes.
+    # The two targets happen to be shape-compatible: at 256x256 with patch 16 the ViT emits a
+    # 16x16 token grid and the VAE's 16x spatial compression produces a 16x16 latent grid, so
+    # "vae" is a per-token regression to 48 channels rather than a pooled global objective.
+    perception_recon_target: str = "vision"
+    # Frames fed to the causal VAE when building a "vae" target. Repeating a still frame is
+    # *measurably* a no-op -- T=1 and T=4 produce bit-identical latents (cos-sim 1.0000) --
+    # because the causal encoder pads its own history. Left configurable, but raising it only
+    # multiplies VAE compute for the same target.
+    vae_repeat_frames: int = 1
     # Stage-1 pre-training: build only the perception branch, so plain video can be used and
     # the physical branch's ~350M parameters are neither allocated nor handed to the optimizer.
     # The resulting checkpoint is a strict subset of the stage-2 one, so it loads with
@@ -296,6 +335,29 @@ class RoboContrastConfig(PreTrainedConfig):
         if self.tactile_backbone not in ("resnet18", "ftp1"):
             raise ValueError(
                 f"`tactile_backbone` must be 'resnet18' or 'ftp1', got {self.tactile_backbone!r}."
+            )
+        if self.vision_backbone not in ("dinov3", "cosmos3"):
+            raise ValueError(
+                f"`vision_backbone` must be 'dinov3' or 'cosmos3', got {self.vision_backbone!r}."
+            )
+        if self.perception_recon_target not in ("vision", "vae"):
+            raise ValueError(
+                "`perception_recon_target` must be 'vision' or 'vae', got "
+                f"{self.perception_recon_target!r}."
+            )
+        if self.perception_recon_target == "vae" and self.vae_repeat_frames < 1:
+            raise ValueError(
+                f"`vae_repeat_frames` must be at least 1, got {self.vae_repeat_frames}."
+            )
+        if self.num_cls_tokens < 1:
+            raise ValueError(f"`num_cls_tokens` must be at least 1, got {self.num_cls_tokens}.")
+        if self.num_cls_tokens > self.num_change_queries:
+            # The perception side projects `num_change_queries` queries down to
+            # `num_cls_tokens` vectors, so asking for more summary tokens than there is
+            # evidence to summarise would just duplicate information.
+            raise ValueError(
+                f"`num_cls_tokens` ({self.num_cls_tokens}) must not exceed "
+                f"`num_change_queries` ({self.num_change_queries})."
             )
         if self.tactile_frames < 2:
             raise ValueError(

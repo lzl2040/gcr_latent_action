@@ -63,6 +63,10 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Sampler
 
 from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler
+from lerobot.common.policies.ace.modeling_robo_contrast import (
+    paired_similarity,
+    pairwise_similarity,
+)
 
 
 class _FixedBatchSampler(Sampler):
@@ -200,7 +204,7 @@ def evaluate(model_engine, loaders: dict[str, DataLoader], move_batch) -> dict[s
             physical, _ = policy.encode_physical(batch)
 
             n = perception.shape[0]
-            sim = perception @ physical.t()
+            sim = pairwise_similarity(perception, physical)
             episode_uid = batch["episode_uid"].to(device).long().reshape(-1)
             frame_index = batch["frame_index"].to(device).long().reshape(-1)
             labels = torch.arange(n, device=device)
@@ -212,7 +216,7 @@ def evaluate(model_engine, loaders: dict[str, DataLoader], move_batch) -> dict[s
 
             hits += (logits.argmax(dim=-1) == labels).sum().double()
             rows += n
-            pos_sim += (perception * physical).sum(-1).sum().double()
+            pos_sim += paired_similarity(perception, physical).sum().double()
 
             # The negatives that actually enter the InfoNCE denominator: off-diagonal and not
             # discarded as a false negative. `pos_sim` alone cannot distinguish a model that
@@ -226,7 +230,11 @@ def evaluate(model_engine, loaders: dict[str, DataLoader], move_batch) -> dict[s
             # Second-moment matrices, accumulated to report effective rank below. Dimensional
             # collapse (embeddings spanning far fewer than `projection_dim` directions) can
             # coexist with a healthy pos/neg gap, so it is worth measuring separately.
-            p64, r64 = perception.double(), physical.double()
+            # With multiple summary tokens every token is treated as its own sample: a K>1
+            # model that gave all K tokens the same direction would be collapsed in exactly
+            # the sense this metric is meant to catch.
+            p64 = perception.double().reshape(-1, perception.shape[-1])
+            r64 = physical.double().reshape(-1, physical.shape[-1])
             gram_p = p64.t() @ p64 if gram_p is None else gram_p + p64.t() @ p64
             gram_r = r64.t() @ r64 if gram_r is None else gram_r + r64.t() @ r64
 

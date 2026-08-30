@@ -47,6 +47,9 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 # SigLIP2 which uses 0.5/0.5.
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+# SigLIP-family towers (including Cosmos3's) are trained on symmetric [-1, 1] inputs.
+SIGLIP_MEAN = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1)
+SIGLIP_STD = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1)
 
 
 def _all_gather_detached(tensor: torch.Tensor) -> torch.Tensor:
@@ -72,6 +75,33 @@ def _rank_world() -> tuple[int, int]:
     if dist.is_available() and dist.is_initialized():
         return dist.get_rank(), dist.get_world_size()
     return 0, 1
+
+
+def pairwise_similarity(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Similarity between every row of ``a`` and every row of ``b``.
+
+    ``(N, D) x (M, D) -> (N, M)`` is the ordinary single-vector case: a dot product of two
+    already-L2-normalised embeddings.
+
+    ``(N, K, D) x (M, J, D) -> (N, M)`` is ColBERT-style late interaction: each of ``a``'s K
+    tokens finds its best match among ``b``'s J tokens, and those matches are averaged. This
+    lets a chunk containing two distinct sub-motions be represented by two tokens that match
+    independently, instead of by their average -- which is the whole reason for K > 1.
+
+    The mean (rather than ColBERT's sum) is deliberate: it keeps the result in [-1, 1] exactly
+    as the K=1 dot product is, so `logit_scale` and `temperature` stay calibrated and a K
+    sweep does not silently rescale the loss.
+    """
+    if a.dim() == 2:
+        return a @ b.t()
+    return torch.einsum("nkd,mjd->nmkj", a, b).amax(dim=-1).mean(dim=-1)
+
+
+def paired_similarity(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Row-wise similarity of matched pairs: ``(N, ...) -> (N,)``. Diagnostics only."""
+    if a.dim() == 2:
+        return (a * b).sum(-1)
+    return torch.einsum("nkd,njd->nkj", a, b).amax(dim=-1).mean(dim=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +264,29 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         if not os.path.exists(text_name):
             text_name = "google/siglip2-base-patch16-224"
 
-        self.vision_backbone = AutoModel.from_pretrained(vision_name, dtype=torch.float32)
+        self.backbone_kind = config.vision_backbone
+        if self.backbone_kind == "cosmos3":
+            from .cosmos3_encoders import build_cosmos3_vision
+
+            self.vision_backbone, _, self.image_size = build_cosmos3_vision(config.cosmos3_dir)
+            # This tower emits patch tokens only -- there is no CLS and no register token to
+            # strip -- and it was trained with SigLIP's symmetric [-1, 1] normalisation, not
+            # ImageNet's. Getting either wrong puts the input off-distribution for weights we
+            # are not training, which is silent: the model still runs, just worse.
+            self.num_prefix_tokens = 0
+            self.pixel_mean, self.pixel_std = SIGLIP_MEAN, SIGLIP_STD
+        else:
+            self.vision_backbone = AutoModel.from_pretrained(vision_name, dtype=torch.float32)
+            # DINOv3 prepends one CLS token and `num_register_tokens` register tokens; only the
+            # patch tokens are spatially meaningful, so the prefix is dropped.
+            self.num_prefix_tokens = 1 + int(
+                getattr(self.vision_backbone.config, "num_register_tokens", 0)
+            )
+            self.image_size = 224
+            self.pixel_mean, self.pixel_std = IMAGENET_MEAN, IMAGENET_STD
+
         # Only SigLIP2's *text* tower is kept; dropping its vision tower saves 93M frozen
-        # parameters that DINOv3 now replaces.
+        # parameters that the vision backbone now replaces.
         text_full = AutoModel.from_pretrained(text_name, dtype=torch.float32)
         self.text_backbone = text_full.text_model
         del text_full
@@ -246,9 +296,6 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         vision_dim = self.vision_backbone.config.hidden_size
         text_dim = self.text_backbone.config.hidden_size
         self.vision_dim = vision_dim
-        # DINOv3 prepends one CLS token and `num_register_tokens` register tokens; only the
-        # patch tokens are spatially meaningful, so the prefix is dropped.
-        self.num_prefix_tokens = 1 + int(getattr(self.vision_backbone.config, "num_register_tokens", 0))
         dim = config.hidden_dim
         self.patch_stride = max(1, config.patch_token_stride)
 
@@ -309,38 +356,108 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
             nn.GELU(),
             nn.Linear(dim, config.projection_dim),
         )
+        # Pool the change queries down to `num_cls_tokens` summary vectors. A learned mixing
+        # matrix over the query axis, initialised to a uniform 1/Q, means K=1 reproduces the
+        # previous `queries.mean(dim=1)` exactly at init -- so switching this on cannot by
+        # itself change the K=1 result -- while K>1 lets each output token learn to draw on a
+        # different subset of queries instead of being handed an arbitrary slice of them.
+        self.num_cls_tokens = config.num_cls_tokens
+        self.query_pool = nn.Parameter(
+            torch.full(
+                (config.num_change_queries, config.num_cls_tokens),
+                1.0 / config.num_change_queries,
+            )
+        )
 
         self.recon_weight = config.perception_recon_weight
+        # The reconstruction target is either the vision tower's own frame-(t+H) features or
+        # the Cosmos3/Wan2.2 VAE latent of that frame. They are interchangeable because the
+        # two grids coincide: both the ViT and the VAE divide the image into 16-pixel cells,
+        # so each patch token has exactly one latent cell, and "predict t+H" stays a per-token
+        # regression in either case -- only the channel count changes.
+        self.recon_target = config.perception_recon_target
+        self.vae = None
+        target_dim = vision_dim
+        if self.predictor_enabled(config) and self.recon_target == "vae":
+            from .cosmos3_encoders import build_cosmos3_vae
+
+            vae, z_dim, _, lat_mean, lat_std = build_cosmos3_vae(config.cosmos3_dir)
+            for p in vae.parameters():
+                p.requires_grad = False
+            vae.eval()
+            self.vae = vae
+            self.vae_repeat_frames = config.vae_repeat_frames
+            target_dim = z_dim
+            # Wan2.2's published per-channel latent statistics. Without them the 48 channels
+            # differ in scale by over an order of magnitude and the loss is dominated by
+            # whichever few happen to be largest -- the same failure section 19 hit with
+            # unnormalised tactile targets.
+            self.register_buffer("vae_latent_mean", lat_mean.view(1, 1, -1), persistent=False)
+            self.register_buffer("vae_latent_std", lat_std.view(1, 1, -1), persistent=False)
+
         self.predictor = (
             ChangePredictor(
                 dim,
-                vision_dim,
+                target_dim,
                 config.num_predictor_layers,
                 config.fusion_num_heads,
                 config.dropout,
                 use_checkpointing=config.gradient_checkpointing,
             )
-            if config.num_predictor_layers > 0 and config.perception_recon_weight > 0
+            if self.predictor_enabled(config)
             else None
         )
         # Targets are normalised per token before the loss (as in I-JEPA), so the objective is
         # about the *pattern* of the feature vector rather than its magnitude, which otherwise
         # dominates the L1 and is trivially predictable from frame t.
-        self.target_norm = nn.LayerNorm(vision_dim, elementwise_affine=False)
+        self.target_norm = nn.LayerNorm(target_dim, elementwise_affine=False)
 
-    # -- raw input handling -------------------------------------------------
     @staticmethod
-    def _to_pixel_values(images: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-        """uint8 ``(B, 3, H, W)`` in ``[0, 255]`` -> ImageNet-normalised float tensor.
+    def predictor_enabled(config: RoboContrastConfig) -> bool:
+        return config.num_predictor_layers > 0 and config.perception_recon_weight > 0
+
+    def _vae_target(self, image_t1: torch.Tensor) -> torch.Tensor:
+        """Frame ``t+H`` -> ``(B, N, z_dim)`` VAE latent tokens on the ViT's patch grid.
+
+        The VAE is causal and pads its own temporal history, so a single frame already yields
+        one latent frame; ``vae_repeat_frames`` is kept only because the config exposes it and
+        was measured to change nothing (T=1 and T=4 give bit-identical latents).
+        """
+        dtype = _module_dtype(self.vae, default=torch.float32)
+        size = self.image_size
+        x = image_t1.to(dtype=torch.float32)
+        if x.shape[-1] != size or x.shape[-2] != size:
+            x = F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False)
+        # The Wan VAE consumes [-1, 1], which is exactly the SigLIP normalisation.
+        x = (x / 255.0 - 0.5) / 0.5
+        video = x.to(dtype).unsqueeze(2)
+        if self.vae_repeat_frames > 1:
+            video = video.repeat(1, 1, self.vae_repeat_frames, 1, 1)
+        with torch.no_grad():
+            latent = self.vae.encode(video).latent_dist.mean  # (B, z, 1, h, w)
+        latent = latent[:, :, 0].flatten(2).transpose(1, 2)  # (B, h*w, z)
+        latent = (latent.float() - self.vae_latent_mean) / self.vae_latent_std
+        if self.patch_stride > 1:
+            # Both grids are row-major over the same 16-pixel cells, so the identical stride
+            # keeps the predicted tokens and the target tokens pointing at the same cells.
+            latent = latent[:, :: self.patch_stride, :]
+        return latent    # -- raw input handling -------------------------------------------------
+    def _to_pixel_values(self, images: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        """uint8 ``(B, 3, H, W)`` in ``[0, 255]`` -> normalised float tensor.
+
+        Resolution and normalisation follow the *backbone*, not the dataset: the loader emits
+        224px but Cosmos3's tower was trained at 256px with symmetric normalisation, and
+        feeding it 224px ImageNet-normalised input degrades frozen weights silently.
 
         Doing this on-device replaces the previous PIL round-trip, which was the single most
         expensive step of the old training loop.
         """
         x = images.to(dtype=torch.float32)
-        if x.shape[-1] != 224 or x.shape[-2] != 224:
-            x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
-        mean = IMAGENET_MEAN.to(device=x.device, dtype=x.dtype)
-        std = IMAGENET_STD.to(device=x.device, dtype=x.dtype)
+        size = self.image_size
+        if x.shape[-1] != size or x.shape[-2] != size:
+            x = F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False)
+        mean = self.pixel_mean.to(device=x.device, dtype=x.dtype)
+        std = self.pixel_std.to(device=x.device, dtype=x.dtype)
         x = (x / 255.0 - mean) / std
         return x.to(dtype=dtype)
 
@@ -463,15 +580,26 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
             queries = block(queries, evidence, evidence_mask)
 
         queries = self.out_norm(queries)
-        embedding = self.out_proj(queries.mean(dim=1))
+        # (B, Q, D) -> (B, K, D): one summary vector per contrastive token.
+        pooled = torch.einsum("bqd,qk->bkd", queries, self.query_pool.to(dtype))
+        embedding = self.out_proj(pooled)
+        if self.num_cls_tokens == 1:
+            embedding = embedding.squeeze(1)
 
         recon_loss = None
         aux: dict[str, float] = {}
         if self.predictor is not None and self.training:
-            recon_loss, aux = self._recon_loss(v0, queries, text_tokens, text_mask, p1, probe=probe)
+            if self.recon_target == "vae":
+                target = self._vae_target(image_t1).to(dtype)
+            else:
+                # From the frozen backbone and detached: there is no trainable path into the
+                # target, so the pair cannot collapse onto a constant the way a jointly
+                # trained student/teacher would.
+                target = p1.detach()
+            recon_loss, aux = self._recon_loss(v0, queries, text_tokens, text_mask, target, probe=probe)
         return embedding, recon_loss, aux
 
-    def _recon_loss(self, v0, queries, text_tokens, text_mask, p1, probe: bool = False):
+    def _recon_loss(self, v0, queries, text_tokens, text_mask, target, probe: bool = False):
         """Predict the frame-``t+H`` patch features and score them against the real ones.
 
         Returns ``(loss, aux)``.
@@ -497,10 +625,13 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
             memory_mask = None
 
         pred = self.predictor(v0, memory, memory_mask).float()
-        # The target comes from the frozen backbone and is detached: there is no trainable
-        # path into it, so the pair cannot collapse onto a constant the way a jointly trained
-        # student/teacher would.
-        target = self.target_norm(p1.detach().float())
+        if pred.shape[1] != target.shape[1]:
+            raise RuntimeError(
+                f"Reconstruction grid mismatch: predictor emits {pred.shape[1]} tokens but the "
+                f"'{self.recon_target}' target has {target.shape[1]}. The two must index the "
+                "same 16-pixel cells of the same image."
+            )
+        target = self.target_norm(target.float())
         loss = F.smooth_l1_loss(pred, target)
 
         aux: dict[str, float] = {}
@@ -797,7 +928,11 @@ class PhysicalEncoder(nn.Module):
             else None
         )
 
-        self.cls_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
+        # `num_cls_tokens` read-out tokens. They are *not* tied together: each is a separate
+        # learned vector, so with K>1 they can specialise on different parts of the chunk
+        # (e.g. an approach phase and a grasp) rather than being forced to average them.
+        self.num_cls_tokens = config.num_cls_tokens
+        self.cls_token = nn.Parameter(torch.randn(1, config.num_cls_tokens, dim) * 0.02)
         self.modality_embed = nn.Embedding(5, dim)
         self.group_pos_embed = nn.Embedding(self.num_groups, dim)
         # Which finger/pad a tactile token came from. UniVTAC has no such embedding because it
@@ -1004,14 +1139,17 @@ class PhysicalEncoder(nn.Module):
         )
 
         # -- transformer ---------------------------------------------------
-        # 1 CLS + G state + G action + G tactile signal + V*T tactile image tokens, where
+        # K CLS + G state + G action + G tactile signal + V*T tactile image tokens, where
         # G = chunk_size / group_size, V = max_tactile_views, T = tactile_tokens_per_pad.
         cls = (self.cls_token.to(dtype).expand(b, -1, -1) + mod[self.MOD_CLS])
         tokens = torch.cat([cls, state_tokens, action_tokens, signal_tokens, img_tokens], dim=1)
         for block in self.blocks:
             tokens = block(tokens)
 
-        return self.out_proj(self.out_norm(tokens[:, 0])), recon_loss
+        summary = self.out_proj(self.out_norm(tokens[:, : self.num_cls_tokens]))
+        if self.num_cls_tokens == 1:
+            summary = summary.squeeze(1)
+        return summary, recon_loss
 
     def _tactile_recon_loss(self, valid_feats, valid_images, mean, std) -> torch.Tensor:
         """MSE between the decoded and the true tactile image (UniVTAC's `rgb` head).
@@ -1140,8 +1278,8 @@ class RoboContrast(PreTrainedPolicy):
         all_frame_index = _all_gather_detached(frame_index)
 
         logit_scale = self.logit_scale.clamp(max=self._max_logit_scale).exp().float()
-        logits_p2r = logit_scale * perception @ all_physical.t()
-        logits_r2p = logit_scale * physical @ all_perception.t()
+        logits_p2r = logit_scale * pairwise_similarity(perception, all_physical)
+        logits_r2p = logit_scale * pairwise_similarity(physical, all_perception)
 
         labels = torch.arange(local_bs, device=device) + rank * local_bs
         invalid = self._false_negative_mask(episode_uid, frame_index, all_episode_uid, all_frame_index)
@@ -1166,7 +1304,7 @@ class RoboContrast(PreTrainedPolicy):
         with torch.no_grad():
             correct = (logits_p2r.argmax(dim=-1) == labels).float()
             acc = correct.mean()
-            pos_sim = (perception * physical).sum(-1).mean()
+            pos_sim = paired_similarity(perception, physical).mean()
             # Retrieval accuracy restricted to the rows that actually carry tactile.
             # The tactile datasets are only ~2.7% of this mixture, so the aggregate accuracy
             # is nearly blind to anything the tactile path does: a change that helped tactile
