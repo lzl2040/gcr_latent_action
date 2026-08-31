@@ -8,12 +8,13 @@ run on this branch produces the same model it did before:
 
 | config | values | default |
 |---|---|---|
-| `vision_backbone` | `dinov3`, `cosmos3` | `dinov3` |
+| `vision_backbone` | `dinov3`, `cosmos3`, `qwen3vl` | `dinov3` |
 | `perception_recon_target` | `vision`, `vae` | `vision` |
 | `num_cls_tokens` | `1`, or any `K ≤ num_change_queries` | `1` |
 
-Supporting knobs: `cosmos3_dir` (weights, default `/Data/lzl/huggingface/Cosmos3-Edge`)
-and `vae_repeat_frames` (default `1`; see "Repeating frames is a no-op" below).
+Supporting knobs: `cosmos3_dir` (weights, default `/Data/lzl/huggingface/Cosmos3-Edge`),
+`qwen3vl_dir` (default `/Data/lzl/huggingface/Qwen3-VL-4B-Instruct`) and
+`vae_repeat_frames` (default `1`; see "Repeating frames is a no-op" below).
 
 Regenerate every table here with `python scripts/dump_module_params.py`. Do not hand-edit
 them — a stale parameter table is worse than no table.
@@ -46,21 +47,29 @@ them — a stale parameter table is worse than no table.
 | &nbsp;&nbsp;`out_proj` | 1.6M | 1.6M |
 | **total** | **774.4M** | **406.5M** |
 
-### `vision_backbone=cosmos3`
+Switching `vision_backbone` changes only the `vision_backbone` row (and `predictor` by
+±0.2M, since the reconstruction head's width follows the tower); every other row is
+identical. The `vae` target adds a frozen 149.6M VAE encoder. See the summary table below
+rather than repeating the breakdown four times.
+
+### `vision_backbone=cosmos3` / `qwen3vl`
 
 Only the perception branch changes; the physical branch is identical in every row.
 
-| configuration | perception | physical | total | trainable |
-|---|---:|---:|---:|---:|
-| `dinov3` + `vision` | 573.5M | 200.9M | **774.4M** | **406.5M** |
-| `cosmos3` + `vision` | 901.3M | 200.9M | **1102.2M** | **407.3M** |
-| `cosmos3` + `vae` | 1049.8M | 200.9M | **1250.7M** | **406.1M** |
+| configuration | perception | physical | total | trainable | step @ bs128 |
+|---|---:|---:|---:|---:|---:|
+| `dinov3` + `vision` | 573.5M | 200.9M | **774.4M** | **406.5M** | 1.02 s |
+| `cosmos3` + `vision` | 901.3M | 200.9M | **1102.2M** | **407.3M** | 1.71 s |
+| `cosmos3` + `vae` | 1049.8M | 200.9M | **1250.7M** | **406.1M** | — |
+| `qwen3vl` + `vision` | 794.6M | 200.9M | **995.5M** | **407.0M** | 1.70 s |
+| `qwen3vl` + `vae` | 943.3M | 200.9M | **1144.2M** | **406.0M** | — |
 
-The deltas are entirely frozen: `vision_backbone` 85.7M → 412.6M, plus a 149.6M VAE
-encoder for the `vae` target. Trainable capacity stays at ~406M in every combination and
-is split almost exactly in half between the two branches (205M / 201M), which is the
-budget the design targets. Total parameters exceed the original 500–800M envelope, but
-those are frozen feature extractors, not capacity the model is free to use.
+The deltas are entirely frozen: `vision_backbone` 85.7M → 412.6M (cosmos3) or 306.2M
+(qwen3vl), plus a 149.6M VAE encoder for the `vae` target. Trainable capacity stays at
+~406M in every combination and is split almost exactly in half between the two branches
+(205M / 201M), which is the budget the design targets. Total parameters exceed the original
+500–800M envelope, but those are frozen feature extractors, not capacity the model is free
+to use.
 
 **The largest frozen module is the SigLIP2 text tower at 282.3M** — over three times
 DINOv3's vision tower. It is kept because its text embedding is already aligned to a
@@ -105,6 +114,87 @@ Two consequences handled elsewhere in the code:
 `self.pixel_mean/std`, so resolution and normalisation follow the *backbone* rather than
 the dataset. Feeding a SigLIP-family tower 224px ImageNet-normalised input is silently
 wrong — it still runs, it is just off-distribution for weights that are never trained.
+
+### 2b. Qwen3-VL (`vision_backbone=qwen3vl`)
+
+`build_qwen3vl_vision()` in `lerobot/common/policies/ace/qwen3vl_encoder.py`.
+
+**First, a correction that motivated this backbone.** Cosmos3-Edge is *not* a Qwen3-VL
+derivative. It is `model_type: cosmos3_edge`, a bespoke NVIDIA Mixture-of-Transformers; its
+text tower uses `relu2` with vocab 131072, where Qwen3 uses `silu` with vocab 151936. The
+NVIDIA line that *is* built on Qwen is **Cosmos-Reason** — HF's metadata for
+`nvidia/Cosmos-Reason2-8B` carries `base_model:finetune:Qwen/Qwen3-VL-8B-Instruct`. So
+there was no "Qwen3-VL increment" inside Cosmos3 to strip; this is a different backbone,
+not a cleaner version of the same one. The block hyperparameters coincide because both
+adopt the so400m recipe, but the weights are not interchangeable.
+
+**Which size.** Qwen3-VL ships only two ViT variants: 2B/4B share a 1024-wide, 24-layer
+tower, and 8B and above share a 1152-wide, 27-layer one (the same shape as Cosmos3-Edge's).
+The 2B and 4B `vision_config`s differ *only* in `out_hidden_size` (2048 vs 2560), which
+feeds the merger — and the merger MLP is dropped here, so **the trunk we use is 306.2M and
+shape-identical in both**. Byte-comparing visual tensors from the two repos shows matching
+names and shapes but different values, i.e. they were trained separately. 4B is the default
+because it costs exactly the same to run and was co-trained with a stronger LLM. Neither
+matches Cosmos3-Edge's 412.6M/1152-d; true parity would be the 8B tower, and switching is a
+directory change since the loader reads the tower shape from the checkpoint.
+
+Three properties of this tower are silent if handled wrong, so each is asserted by
+`scripts/check_qwen3vl_vision.py` rather than assumed:
+
+| trap | why it matters | check |
+|---|---|---|
+| forward takes **pre-flattened patches** `(seq, 3·2·16·16)` + a `grid_thw` table, not `pixel_values` | we must patchify by hand | vs Qwen's own image processor: 5.9e-08 |
+| patches are ordered **by 2×2 merge block**, not row-major | token *i* would not be image location *i*, breaking the evidence stream's core property that `v1[i]-v0[i]` is "what changed at location *i*", and misaligning the VAE target | perturb one image cell, confirm the most-changed token is the matching row-major index |
+| the tower ends in a **merger that pools 2×2 patches** (256→64 tokens) | destroys the spatial grid and the width | only `merger.norm` is kept |
+
+Keeping `merger.norm` loses nothing: it is a `LayerNorm(hidden_size)` applied per token
+*before* the pooling reshape, so it is the tower's own trained output norm at full
+resolution. The DeepStack heads (81.8M) are dropped — they exist to inject intermediate
+layers into the first three LLM layers, and there is no LLM here. That does mean the
+features are not quite everything Qwen's pretraining optimised the tower to emit.
+
+**Performance.** Out of the box this tower cost **1.95 s/step** against DINOv3's 1.02 s,
+even though it is *smaller* than Cosmos3-Edge (306M vs 413M), which ran in 0.71 s. That
+disproportion was the signal to profile inside the tower rather than accept it:
+
+| stage | ms (256-image batch) | share |
+|---|---:|---:|
+| transformer blocks | 764.6 | 76.4% |
+| `fast_pos_embed_interpolate` | 144.0 | 14.4% |
+| `rot_pos_emb` | 64.9 | 6.5% |
+| `patch_embed` | 22.0 | 2.2% |
+
+Two fixes, both **algebraic no-ops verified bit-identical** (rel diff `0.0` in fp32 *and*
+bf16) against the stock implementation:
+
+1. **Batched attention.** The non-FlashAttention path splits the concatenated sequence into
+   one SDPA call *per image* — ~6k tiny kernel launches per forward at batch 256. Every
+   frame here is the same fixed resolution, so block-diagonal attention *is* batched
+   attention; we reshape to `(B, H, n, d)` and issue one call. Non-uniform batches fall back
+   to the stock loop, so mixed-resolution input stays correct, just slow.
+2. **Grid caches.** `fast_pos_embed_interpolate` and `rot_pos_emb` are pure functions of a
+   grid that never changes, yet are recomputed every step — 21% of the forward spent
+   producing constants. Now memoised. The pos-embed cache **disables itself when
+   `pos_embed.weight` is trainable**, so unfreezing the tower cannot silently pin the
+   position embedding; a gradient check covers exactly that.
+
+Result: vision **0.94 → 0.70 s**, step **1.95 → 1.70 s** at batch 256 — now on par with
+Cosmos3-Edge per parameter. The remaining gap to DINOv3 (1.70 vs 1.02 s) is the honest cost
+of a 306M tower at 256 tokens versus an 86M tower at 196.
+
+**Environment note.** `grid_thw` is built on the CPU on purpose: `rot_pos_emb` calls
+`torch.prod` on it, and an int64 `prod` on CUDA routes through torch's nvrtc jiterator,
+which fails on this host (`libnvrtc-builtins.so.13.0` not found). The tensor is `(B, 3)`, so
+computing it on the host is free.
+
+| | DINOv3 | Cosmos3 | Qwen3-VL |
+|---|---|---|---|
+| trunk params | 86M | 412.6M | **306.2M** |
+| hidden / layers | 768 / 12 | 1152 / 27 | **1024 / 24** |
+| input resolution | 224 | 256 | **256** |
+| normalisation | ImageNet | 0.5 / 0.5 | **0.5 / 0.5** |
+| patch tokens | 196 | 256 | **256** |
+| per-token feature L2 | 12.6 | 59.7 | **9.95** |
 
 ---
 
@@ -205,12 +295,28 @@ the sense that metric exists to catch.
 
 | check | result |
 |---|---|
-| All 8 `backbone × target × K` combinations build, forward, backward | pass (`scripts/smoke_cosmos3_contrast.py`) |
+| All 12 `backbone × target × K` combinations build, forward, backward | pass (`scripts/smoke_cosmos3_contrast.py`) |
 | `dinov3/vision/K=1` reproduces the pre-change parameter split | 774.4M / 406.5M, exact |
 | `K=1` similarity is bit-identical to the old formula | max abs diff 0.0 |
 | Degenerate `K=4` reduces to `K=1` | max abs diff 5.6e-08 |
 | End-to-end `train_ace_local.sh`, `cosmos3` + `vae` + `K=4` | 12 steps + eval + checkpoint, clean exit |
 | Single-GPU batch size at the heaviest configuration | **256** (requirement: ≥128) |
+
+Qwen3-VL adds its own suite (`scripts/check_qwen3vl_vision.py`), since that tower is driven
+through a hand-written interface where a mistake would degrade features without ever
+raising:
+
+| check | result |
+|---|---|
+| Our patchification vs Qwen's own image processor | max abs diff 5.9e-08 |
+| Merge-block → row-major reorder | max abs diff 0.0 |
+| Batch and order independence (no cross-image attention leak) | 5.9e-05 / 0.0 |
+| Perturbing image cell *i* moves token *i* the most (4 cells probed) | pass |
+| Optimized path vs stock, fp32 and bf16 | rel diff 0.0 (both) |
+| Cached call is stable across repeats | rel diff 0.0 |
+| `pos_embed` still receives gradient when unfrozen | pass |
+| All 4 `target × K` combinations build, forward, backward | pass |
+| End-to-end `train_ace_local.sh`, `qwen3vl` | 407.0M / 995.5M, batch **256**, clean exit |
 
 ---
 

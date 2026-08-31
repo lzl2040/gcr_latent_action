@@ -68,7 +68,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--backbone", nargs="*", default=["dinov3", "cosmos3"])
+    ap.add_argument("--backbone", nargs="*", default=["dinov3", "cosmos3", "qwen3vl"])
     ap.add_argument("--target", nargs="*", default=["vision", "vae"])
     ap.add_argument("--k", nargs="*", type=int, default=[1, 4])
     args = ap.parse_args()

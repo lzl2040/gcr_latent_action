@@ -42,7 +42,12 @@ def main():
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
 
-    for backbone, target in (("dinov3", "vision"), ("cosmos3", "vision"), ("cosmos3", "vae")):
+    for backbone, target in (
+        ("dinov3", "vision"),
+        ("cosmos3", "vision"),
+        ("cosmos3", "vae"),
+        ("qwen3vl", "vision"),
+    ):
         cfg = RoboContrastConfig()
         cfg.vision_backbone = backbone
         cfg.perception_recon_target = target
