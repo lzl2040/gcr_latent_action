@@ -28,7 +28,9 @@ def check_patch_order(model_dir: str, size: int) -> None:
     img = torch.randint(0, 255, (1, 3, size, size), dtype=torch.uint8)
     ref = proc(images=[img[0].permute(1, 2, 0).numpy()], do_resize=False, return_tensors="pt")
 
-    x = (img.float() / 255.0 - 0.5) / 0.5
+    mean = torch.tensor(proc.image_mean).view(1, 3, 1, 1)
+    std = torch.tensor(proc.image_std).view(1, 3, 1, 1)
+    x = (img.float() * proc.rescale_factor - mean) / std
     p, m, tp, c = 16, 2, 2, 3
     b, _, h, w = x.shape
     gh, gw = h // p, w // p
@@ -140,6 +142,31 @@ def check_batched_attention(model_dir: str, size: int, device: str) -> None:
             print(f"  {tag} tower: {(time.perf_counter() - t0) / 5 * 1000:7.1f} ms / {x.shape[0]} images")
 
 
+def check_normalization(model_dir: str) -> None:
+    """The model's pixel normalisation must match this checkpoint's preprocessor config.
+
+    Worth testing rather than trusting: `Qwen2VLImageProcessorFast` hard-codes
+    OPENAI_CLIP mean/std as the *class* default (what Qwen2-VL used), and only
+    `preprocessor_config.json` overrides it to 0.5 for Qwen3-VL. Reading the defaults off
+    the transformers source, or copying constants from Qwen2-VL code, silently feeds a
+    frozen tower out-of-distribution input.
+    """
+    from transformers import AutoImageProcessor
+
+    from lerobot.common.policies.ace.modeling_robo_contrast import SIGLIP_MEAN, SIGLIP_STD
+
+    proc = AutoImageProcessor.from_pretrained(model_dir)
+    want_mean = [round(float(v), 6) for v in proc.image_mean]
+    want_std = [round(float(v), 6) for v in proc.image_std]
+    got_mean = [round(float(v), 6) for v in SIGLIP_MEAN.flatten()]
+    got_std = [round(float(v), 6) for v in SIGLIP_STD.flatten()]
+    ok = want_mean == got_mean and want_std == got_std and abs(proc.rescale_factor - 1 / 255) < 1e-9
+    print(
+        f"  normalisation matches checkpoint  : model {got_mean}/{got_std} vs "
+        f"processor {want_mean}/{want_std}  {'OK' if ok else 'FAIL'}"
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model_dir", default="/Data/lzl/huggingface/Qwen3-VL-4B-Instruct")
@@ -149,6 +176,7 @@ def main():
     model, dim, size = build_qwen3vl_vision(args.model_dir)
     model = model.to(args.device).eval()
     print(f"\nhidden={dim} image={size} tokens={(size // 16) ** 2}\n")
+    check_normalization(args.model_dir)
     check_patch_order(args.model_dir, size)
     check_independence(model, size, args.device)
     check_spatial_grid(model, size, args.device)

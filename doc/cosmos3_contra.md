@@ -143,7 +143,7 @@ Three properties of this tower are silent if handled wrong, so each is asserted 
 
 | trap | why it matters | check |
 |---|---|---|
-| forward takes **pre-flattened patches** `(seq, 3·2·16·16)` + a `grid_thw` table, not `pixel_values` | we must patchify by hand | vs Qwen's own image processor: 5.9e-08 |
+| forward takes **pre-flattened patches** `(seq, 3·2·16·16)` + a `grid_thw` table, not `pixel_values` | we must patchify by hand | vs Qwen's own image processor: 1.2e-07 |
 | patches are ordered **by 2×2 merge block**, not row-major | token *i* would not be image location *i*, breaking the evidence stream's core property that `v1[i]-v0[i]` is "what changed at location *i*", and misaligning the VAE target | perturb one image cell, confirm the most-changed token is the matching row-major index |
 | the tower ends in a **merger that pools 2×2 patches** (256→64 tokens) | destroys the spatial grid and the width | only `merger.norm` is kept |
 
@@ -312,7 +312,8 @@ raising:
 
 | check | result |
 |---|---|
-| Our patchification vs Qwen's own image processor | max abs diff 5.9e-08 |
+| Model normalisation vs the checkpoint's preprocessor config | 0.5/0.5, match |
+| Our patchification vs Qwen's own image processor | max abs diff 1.2e-07 |
 | Merge-block → row-major reorder | max abs diff 0.0 |
 | Batch and order independence (no cross-image attention leak) | 5.9e-05 / 0.0 |
 | Perturbing image cell *i* moves token *i* the most (4 cells probed) | pass |

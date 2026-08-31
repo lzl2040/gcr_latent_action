@@ -47,7 +47,9 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 # SigLIP2 which uses 0.5/0.5.
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-# SigLIP-family towers (including Cosmos3's) are trained on symmetric [-1, 1] inputs.
+# Symmetric [-1, 1] inputs. Used by SigLIP-family towers (including Cosmos3's) and also by
+# Qwen3-VL, whose preprocessor_config.json sets mean=std=0.5 -- note this overrides the
+# OPENAI_CLIP defaults hard-coded on Qwen2VLImageProcessorFast, which Qwen2-VL did use.
 SIGLIP_MEAN = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1)
 SIGLIP_STD = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1)
 
