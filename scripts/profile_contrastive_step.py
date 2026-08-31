@@ -119,6 +119,8 @@ def build_config(args) -> _Cfg:
         ftp1_tactile_dir=args.ftp1_tactile_dir,
         tactile_frames=args.tactile_frames,
         tactile_tokens_per_pad=args.tactile_tokens_per_pad,
+        vision_backbone=args.vision_backbone,
+        perception_recon_target=args.perception_recon_target,
     )
     if args.max_tactile_views is not None:
         policy.max_tactile_views = args.max_tactile_views
@@ -162,6 +164,8 @@ def main() -> int:
                    help="tokens each pad contributes after the temporal fusion")
     p.add_argument("--ftp1_tactile_dir", default="/Data/lzl/huggingface/ftp1_v0426_50kstep")
     p.add_argument("--vision_model", default="/Data/lzl/huggingface/dinov3-vitb16-pretrain-lvd1689m")
+    p.add_argument("--vision_backbone", default="dinov3", choices=["dinov3", "cosmos3", "qwen3vl"])
+    p.add_argument("--perception_recon_target", default="vision", choices=["vision", "vae"])
     p.add_argument("--text_model", default="/Data/lzl/huggingface/siglip2-base-patch16-224")
     p.add_argument("--processor_path", default="/Data/lzl/huggingface/InternVL3_5-2B-HF")
     p.add_argument("--parent_dir_v21", default="/Data/lerobot_data_ort6d")
@@ -275,7 +279,8 @@ def main() -> int:
     phys.tactile_cnn.forward = counting_forward
 
     print(f"\nparams: {sum(p.numel() for p in policy.parameters()) / 1e6:.0f}M  "
-          f"batch={args.batch_size}  tactile_backbone={args.tactile_backbone}\n")
+          f"batch={args.batch_size}  tactile_backbone={args.tactile_backbone}  "
+          f"vision_backbone={args.vision_backbone}  recon={args.perception_recon_target}\n")
 
     step = 0
     wall = defaultdict(float)

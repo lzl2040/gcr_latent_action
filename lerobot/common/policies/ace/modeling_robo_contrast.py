@@ -275,6 +275,14 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
             # are not training, which is silent: the model still runs, just worse.
             self.num_prefix_tokens = 0
             self.pixel_mean, self.pixel_std = SIGLIP_MEAN, SIGLIP_STD
+        elif self.backbone_kind == "qwen3vl":
+            from .qwen3vl_encoder import build_qwen3vl_vision
+
+            self.vision_backbone, _, self.image_size = build_qwen3vl_vision(config.qwen3vl_dir)
+            # Patch tokens only, already reordered to row-major by the wrapper, and the same
+            # symmetric [-1, 1] normalisation SigLIP uses.
+            self.num_prefix_tokens = 0
+            self.pixel_mean, self.pixel_std = SIGLIP_MEAN, SIGLIP_STD
         else:
             self.vision_backbone = AutoModel.from_pretrained(vision_name, dtype=torch.float32)
             # DINOv3 prepends one CLS token and `num_register_tokens` register tokens; only the

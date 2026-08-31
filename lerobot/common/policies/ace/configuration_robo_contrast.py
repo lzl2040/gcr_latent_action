@@ -45,6 +45,11 @@ class RoboContrastConfig(PreTrainedConfig):
     # part of the model that is frozen and currently costs 0.013s.
     vision_backbone: str = "dinov3"
     cosmos3_dir: str = "/Data/lzl/huggingface/Cosmos3-Edge"
+    # Any local Qwen3-VL snapshot; the tower's width and depth are read from its own
+    # vision_config, so 2B/4B (1024-wide, 24 layers) and 8B/32B (1152-wide, 27 layers, the
+    # same shape as Cosmos3-Edge's tower) are a directory change apart. Only the shard
+    # holding `model.visual.*` is needed.
+    qwen3vl_dir: str = "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct"
     freeze_vision_encoder: bool = True
     freeze_text_encoder: bool = True
     text_max_length: int = 32
@@ -336,9 +341,10 @@ class RoboContrastConfig(PreTrainedConfig):
             raise ValueError(
                 f"`tactile_backbone` must be 'resnet18' or 'ftp1', got {self.tactile_backbone!r}."
             )
-        if self.vision_backbone not in ("dinov3", "cosmos3"):
+        if self.vision_backbone not in ("dinov3", "cosmos3", "qwen3vl"):
             raise ValueError(
-                f"`vision_backbone` must be 'dinov3' or 'cosmos3', got {self.vision_backbone!r}."
+                "`vision_backbone` must be 'dinov3', 'cosmos3' or 'qwen3vl', got "
+                f"{self.vision_backbone!r}."
             )
         if self.perception_recon_target not in ("vision", "vae"):
             raise ValueError(
