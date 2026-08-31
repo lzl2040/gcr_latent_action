@@ -153,6 +153,10 @@ resolution. The DeepStack heads (81.8M) are dropped — they exist to inject int
 layers into the first three LLM layers, and there is no LLM here. That does mean the
 features are not quite everything Qwen's pretraining optimised the tower to emit.
 
+The patch-ordering trap is written up in full — why we cannot call Qwen's own processor in
+the training loop, how the merge-block layout was derived, and how it is verified — in
+[`doc/problem_and_solution.md` §1](problem_and_solution.md).
+
 **Performance.** Out of the box this tower cost **1.95 s/step** against DINOv3's 1.02 s,
 even though it is *smaller* than Cosmos3-Edge (306M vs 413M), which ran in 0.71 s. That
 disproportion was the signal to profile inside the tower rather than accept it:
