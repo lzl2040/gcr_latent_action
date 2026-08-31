@@ -88,33 +88,94 @@ evidence bank 的尺寸也是固定的。让 processor 决定格点，等于让 
 自己实现就必须**逐位复刻**官方的内存布局——因为位置编码是按官方顺序训练出来的，顺序错了
 每个 patch 都会拿到别的位置的位置编码。
 
+#### 先约定符号
+
+官方源码和本仓库用到的变量含义如下（以我们的实际配置 256×256 输入为例）：
+
+| 变量 | 含义 | 我们的取值 |
+|---|---|---|
+| `b` / `batch_size` | 一个 batch 里的图像张数 | 例如 256 |
+| `c` / `channel` | 图像通道数 | 3（RGB） |
+| `p` / `patch_size` | 每个 patch 的边长（像素） | 16 |
+| `grid_h`（代码里 `gh`） | **格点**的行数 = 图像高 ÷ `p` | 256 ÷ 16 = 16 |
+| `grid_w`（代码里 `gw`） | 格点的列数 = 图像宽 ÷ `p` | 16 |
+| `grid_t` | **时间**方向的格点数 = 帧数 ÷ `temporal_patch_size` | 1（单张静止图） |
+| `temporal_patch_size`（检查脚本里 `tp`） | 时间方向每个 patch 吃几帧 | 2 |
+| `m` / `merge_size` | merger 做 2×2 池化时的块边长 | 2 |
+| `bh` | 块的行数 = `gh // m` | 16 ÷ 2 = 8 |
+| `bw` | 块的列数 = `gw // m` | 8 |
+| `mi` / `mj`（源码里的 `merge_h`/`merge_w`） | 块**内部**的行、列下标，取值 0..m-1 | 0 或 1 |
+| `seq_len` | 展平后的 token 数 = `grid_t · gh · gw` | 1 × 16 × 16 = 256 |
+
+关于 `grid_t`：Qwen 的这个塔图像和视频共用一套代码，所以时间维一直存在。视频有多帧时
+`grid_t > 1`；我们喂的是**单张静止图**，所以 `grid_t = 1`。但 `temporal_patch_size = 2`
+意味着每个 patch 在时间上要吃 2 帧，单图不够，于是官方把这一帧复制一份凑满
+（`patches[:, -1:].repeat(...)`）。这就是为什么每个 patch 的向量长度是
+`c · temporal_patch_size · p · p = 3 × 2 × 16 × 16 = 1536` 而不是 768。
+
+#### 什么是"行主序"
+
+**行主序（row-major）就是"从左到右、从上到下逐行扫描"的排列**——和读中文/英文的顺序一样。
+对一个 `gh × gw` 的格点，位于第 `r` 行第 `c` 列的格子，其行主序下标是：
+
+```
+index = r * gw + c
+```
+
+例如 16×16 的格点：格子 (0,0) → 0，(0,1) → 1，……，(0,15) → 15，然后换行，
+(1,0) → **16**，(1,1) → 17。
+
+这是绝大多数视觉模型（含 DINOv3、SigLIP、Cosmos3）patch token 的默认排列，也是本仓库其余
+部分默认的约定：`tokens[i]` 就是图像上第 `i` 个格子。VAE 的 16×16 latent 网格同样按行主序
+展平。
+
+#### Qwen 用的不是行主序
+
 读官方实现（`image_processing_qwen2_vl_fast.py:242-262`）：
 
 ```python
 patches = patches.view(
     batch_size, grid_t, temporal_patch_size, channel,
-    grid_h // merge_size, merge_size, patch_size,
-    grid_w // merge_size, merge_size, patch_size,
+    grid_h // merge_size, merge_size, patch_size,   # 行方向拆成: 块行 bh, 块内行 mi, 像素 p
+    grid_w // merge_size, merge_size, patch_size,   # 列方向拆成: 块列 bw, 块内列 mj, 像素 p
 )
 patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
-# -> (batch, grid_t, gh/m, gw/m, m, m, channel, temporal_patch_size, p, p)
+# -> (batch, grid_t, bh, bw, mi, mj, channel, temporal_patch_size, p, p)
 ```
 
-关键在这个 permute：token 维的展开顺序是 `grid_t, bh, bw, m_h, m_w`。也就是说，
-**它先按 2×2 的 merge block 走，再走 block 内部的 4 个格子**——这是为了让后面的 merger
-能直接 reshape 就完成 2×2 池化。
+关键是 permute 之后、参与展平的维度顺序是 `grid_t, bh, bw, mi, mj`。reshape 成一维时，
+**最右边的维度变化最快**，所以 token 的遍历顺序是：先固定一个 2×2 的块，走完块内 4 个格子，
+再换下一个块。这么设计是为了让后面的 merger 直接 reshape 就能完成 2×2 池化。
 
-这**不是**行主序。把 token 下标映射回图像格子（16×16 格点，m=2）：
+> ⚠️ **官方注释在这里有个命名陷阱。** 源码那行注释写的是
+> `(batch, grid_t, grid_h, grid_w, merge_h, merge_w, ...)`，但其中的 `grid_h`、`grid_w`
+> 指的是 `grid_h // merge_size`、`grid_w // merge_size`，也就是**块的行列数**（本文的
+> `bh`、`bw` = 8），而不是格点的行列数（16）。这个名字复用极易让人把布局误读成"在完整格点上
+> 的行主序"——正是这个坑最容易被漏掉的原因。本文一律用 `bh`/`bw` 指块数，避免歧义。
+
+用一个 **4×4 格点（`m=2`，即 2×2 个块）**的小例子看最清楚：
+
+```
+图像格点（(行,列)）        行主序下标            Qwen 的 token 编号
+  (0,0) (0,1) (0,2) (0,3)    0   1   2   3         t0  t1  t4  t5
+  (1,0) (1,1) (1,2) (1,3)    4   5   6   7         t2  t3  t6  t7
+  (2,0) (2,1) (2,2) (2,3)    8   9  10  11         t8  t9  t12 t13
+  (3,0) (3,1) (3,2) (3,3)   12  13  14  15         t10 t11 t14 t15
+```
+
+左上角那个 2×2 块占用了 `t0..t3`，而它们在行主序里是 0、1、**4**、**5** —— 不连续。
+
+回到真实的 16×16 格点：
 
 ```
 Qwen token 下标 : 0   1   2   3   4   5   6   7  ...
 实际图像格子     : 0   1  16  17   2   3  18  19  ...
 ```
 
-token 2 看着像"第 2 个格子"，实际是第 16 个格子（第 1 行第 0 列）。**256 个 token 里有
-224 个落在错误的位置上**；恰好重合的 32 个也不是随便哪里，而是偶数行最左两列和奇数行最右
-两列（`(0,0),(0,1),(1,14),(1,15),(2,0),(2,1),…`）——即两种排列在行首/行尾的交汇处，属于巧合
-而非任何有意义的规律。
+token 2 看着像"第 2 个格子"（第 0 行第 2 列），实际是第 16 个格子（第 1 行第 0 列）。
+**256 个 token 里有 224 个落在错误的位置上**；恰好重合的 32 个也不是随便哪里，而是偶数行最
+左两列和奇数行最右两列（`(0,0),(0,1),(1,14),(1,15),(2,0),(2,1),…`）——即两种排列在行首/行尾
+的交汇处，属于巧合而非任何有意义的规律。
 
 这个坑的危险之处在于它**完全不报错**：shape 是 `(B, 256, 1024)`，完全正确；训练照常进行；
 loss 照常下降。只是 `v1[i] - v0[i]` 变成了"位置 A 的新特征减去位置 B 的旧特征"，而 VAE 重建
@@ -126,26 +187,40 @@ loss 照常下降。只是 `v1[i] - v0[i]` 变成了"位置 A 的新特征减去
 
 ```python
 x = pixel_values.view(b, c, bh, m, p, bw, m, p)
-x = x.permute(0, 2, 5, 3, 6, 1, 4, 7)          # (b, bh, bw, m, m, c, p, p)
+#                     b  c  ↑行方向三级↑  ↑列方向三级↑
+#                           bh  mi p      bw  mj p
+x = x.permute(0, 2, 5, 3, 6, 1, 4, 7)          # (b, bh, bw, mi, mj, c, p, p)
 x = x.unsqueeze(6).expand(..., temporal_patch_size, ...)   # 静止帧填满时间维
 flat = x.reshape(b * gh * gw, c * temporal_patch_size * p * p)
 ```
 
-维度顺序 `(b, bh, bw, m_h, m_w, c, T, p, p)` 与官方 permute 的结果逐位对应。时间维的处理也
-与官方一致：官方对单图是 `patches[:, -1:].repeat(...)` 复制最后一帧，我们用 `expand` 重复同
-一帧，结果相同。
+第一行 `view` 把高、宽各拆成三级：高 = `bh`（块行）× `m`（块内行 `mi`）× `p`（块内像素行），
+宽同理。`permute` 再把它们排成 `(b, bh, bw, mi, mj, c, p, p)`——**前面的 `bh, bw, mi, mj`
+决定 token 顺序，后面的 `c, p, p` 是每个 token 的内容**。这个顺序与官方 permute 的结果逐位
+对应。
+
+时间维的处理也与官方一致：官方对单图是 `patches[:, -1:].repeat(...)` 复制最后一帧凑满
+`temporal_patch_size`，我们用 `expand` 重复同一帧，结果相同（由 §1.6 的数值比对确认）。
 
 **第二步，在塔的输出侧把顺序还原成行主序**，让模型其余部分完全不必知道这个塔的内部约定：
 
 ```python
 tokens = tokens.view(b, bh, bw, m, m, d).permute(0, 1, 3, 2, 4, 5).reshape(b, gh * gw, d)
-#                    (b, bh, m_h, bw, m_w, d) -> (b, gh, gw, d)
+#          view 后:  (b, bh, bw, mi, mj, d)      d = 特征维（1024）
+#       permute 后:  (b, bh, mi, bw, mj, d)
 ```
 
-把 `m_h` 挪到 `bh` 之后、`m_w` 挪到 `bw` 之后，就是标准的行主序展开。
+拆开看这个 permute 就是把**行方向的两级下标凑到一起、列方向的两级下标凑到一起**：
+
+- `bh` 与 `mi` 相邻 → 合起来就是真实行号 `r = bh * m + mi`（0..15）
+- `bw` 与 `mj` 相邻 → 合起来就是真实列号 `c = bw * m + mj`（0..15）
+
+于是 `(b, bh, mi, bw, mj, d)` 实际上就是 `(b, r, c, d)`，最后 `reshape(b, gh*gw, d)` 把
+`(r, c)` 按 `r * gw + c` 展平——这正是 §1.4 定义的行主序。
 
 注意这里的取舍：**位置编码必须按 Qwen 的顺序喂进去**（否则用错位置编码），**输出必须按行主序
-交出来**（否则下游用错位置）。两者缺一不可，不能只做一半。
+交出来**（否则下游用错位置）。两者缺一不可，不能只做一半——只做前者，下游全部错位；只做后者，
+每个 patch 拿到别人的位置编码。
 
 ### 1.6 验证：四层，每层都能独立失败
 
