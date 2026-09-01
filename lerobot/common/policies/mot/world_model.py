@@ -37,6 +37,47 @@ QWEN3VL_STD = 0.5
 
 
 @dataclass
+class TaskSpec:
+    """One entry of the Cosmos stage-2/stage-3 task family.
+
+    Every task is the *same* rectified-flow objective; they differ only in how many latent
+    frames start clean and whether the understanding stream gets an image. That is the whole
+    point of the per-frame sigma: one code path covers all five, instead of five branches that
+    can drift apart.
+
+    ``context`` counts *latent* frames, not pixel frames. Wan's VAE maps frame 0 to latent 0
+    on its own, so ``context=1`` is exactly "condition on the first frame" -- image-to-video.
+    ``latent_frames=None`` means "use whatever the clip provides".
+    """
+
+    context: int
+    image: bool
+    action: bool = False
+    latent_frames: int | None = None
+
+
+TASK_SPECS: dict[str, TaskSpec] = {
+    "t2i": TaskSpec(context=0, image=False, latent_frames=1),
+    "t2v": TaskSpec(context=0, image=False),
+    "i2v": TaskSpec(context=1, image=True),
+    "v2v": TaskSpec(context=2, image=True),
+    "action": TaskSpec(context=1, image=True, action=True),
+}
+
+# Stage-3 mix: action prediction is the objective, but the stage-2 tasks stay in to stop the
+# generative branch drifting while the action head trains.
+STAGE3_MIX = {"action": 0.5, "i2v": 0.2, "v2v": 0.15, "t2v": 0.1, "t2i": 0.05}
+STAGE2_MIX = {"t2i": 0.25, "t2v": 0.25, "i2v": 0.3, "v2v": 0.2}
+
+
+def sample_task(mix: dict[str, float], generator: torch.Generator | None = None) -> str:
+    names = list(mix)
+    weights = torch.tensor([mix[n] for n in names], dtype=torch.float32)
+    idx = int(torch.multinomial(weights, 1, generator=generator).item())
+    return names[idx]
+
+
+@dataclass
 class WorldModelConfig:
     mot: MoTConfig
     qwen3vl_dir: str = "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct"
@@ -135,18 +176,29 @@ class MoTWorldModel(nn.Module):
 
     # ------------------------------------------------------------------ und
 
-    def encode_und(self, pixel_values: torch.Tensor, text_ids: torch.Tensor):
-        """Build and run the understanding stream. Returns ``(kv, rope_und)``."""
-        with torch.no_grad():
-            vision_tokens = self.vision(self._to_pixel_values(pixel_values)).last_hidden_state
-        image_embeds = self.vision_merger(vision_tokens.to(self.vision_merger.norm.weight.dtype))
-        text_embeds = self.mot.embed_tokens(text_ids)
-        inputs_embeds = torch.cat([image_embeds, text_embeds], dim=1)
+    def encode_und(self, pixel_values: torch.Tensor | None, text_ids: torch.Tensor):
+        """Build and run the understanding stream. Returns ``(kv, rope_und)``.
 
+        ``pixel_values`` is optional: the text-to-image and text-to-video tasks have no input
+        frame, and feeding a blank one would spend a full vision-tower pass teaching the model
+        that "no image" looks like a particular grey rectangle.
+        """
+        device = text_ids.device
+        text_embeds = self.mot.embed_tokens(text_ids)
         n_text = text_ids.shape[1]
-        segments = [(1, self.vision_grid, self.vision_grid)] + [(1, 1, 1)] * n_text
-        pos = build_mrope_positions(segments, pixel_values.device)
-        pos = pos.unsqueeze(1).expand(3, pixel_values.shape[0], -1)
+
+        if pixel_values is None:
+            inputs_embeds = text_embeds
+            segments = [(1, 1, 1)] * n_text
+        else:
+            with torch.no_grad():
+                vision_tokens = self.vision(self._to_pixel_values(pixel_values)).last_hidden_state
+            image_embeds = self.vision_merger(vision_tokens.to(self.vision_merger.norm.weight.dtype))
+            inputs_embeds = torch.cat([image_embeds, text_embeds], dim=1)
+            segments = [(1, self.vision_grid, self.vision_grid)] + [(1, 1, 1)] * n_text
+
+        pos = build_mrope_positions(segments, device)
+        pos = pos.unsqueeze(1).expand(3, text_ids.shape[0], -1)
 
         run = self._forward_und_checkpointed if self.und_needs_grad else self._forward_und_nograd
         _, kv, rope = run(inputs_embeds, pos)
@@ -212,43 +264,81 @@ class MoTWorldModel(nn.Module):
     def forward(
         self,
         latents: torch.Tensor,
-        pixel_values: torch.Tensor,
+        pixel_values: torch.Tensor | None,
         text_ids: torch.Tensor,
         actions: torch.Tensor | None = None,
         domain_id: torch.Tensor | None = None,
+        task: str = "i2v",
     ) -> dict[str, torch.Tensor]:
-        """Rectified-flow training step. ``latents``: ``(B, C, T, H, W)`` clean VAE latents."""
+        """Rectified-flow training step. ``latents``: ``(B, C, T, H, W)`` clean VAE latents.
+
+        The noise level is per *frame*, not per sample: the first ``spec.context`` latent
+        frames stay at sigma=0, so they enter the transformer clean and are excluded from the
+        loss, while the rest get a shared sigma drawn per sample. Predicting a target the model
+        was handed exactly would otherwise dominate the average and read as progress.
+        """
+        if task not in TASK_SPECS:
+            raise ValueError(f"unknown task {task!r}; expected one of {sorted(TASK_SPECS)}")
+        spec = TASK_SPECS[task]
+
+        if spec.latent_frames is not None:
+            latents = latents[:, :, : spec.latent_frames]
         b, _, t_lat, _, _ = latents.shape
         device = latents.device
+        if spec.context >= t_lat:
+            raise ValueError(
+                f"task {task!r} wants {spec.context} context frames but the clip has {t_lat}"
+            )
+        if not spec.image:
+            pixel_values = None
+
+        # (B, T): 0 on context frames, one shared draw on the frames being predicted.
+        sigma_sample = torch.rand(b, device=device, dtype=latents.dtype)
+        frame_is_target = torch.zeros(b, t_lat, device=device, dtype=latents.dtype)
+        frame_is_target[:, spec.context :] = 1.0
+        sigma = sigma_sample.unsqueeze(1) * frame_is_target
 
         noise = torch.randn_like(latents)
-        sigma = torch.rand(b, device=device, dtype=latents.dtype)
-        s = sigma.view(b, 1, 1, 1, 1)
+        s = sigma.view(b, 1, t_lat, 1, 1)
         noisy = (1.0 - s) * latents + s * noise
         target = noise - latents
 
         gen_tokens = self.mot.proj_in(self.patchify(noisy))
         n_video = gen_tokens.shape[1]
+        # patchify is frame-major, so each latent frame owns a contiguous run of tokens.
+        tokens_per_frame = n_video // t_lat
+        token_sigma = sigma.repeat_interleave(tokens_per_frame, dim=1)
 
         n_action = 0
-        if actions is not None and self.config.mot.enable_action_gen:
+        want_action = spec.action and actions is not None and self.config.mot.enable_action_gen
+        if want_action:
             if domain_id is None:
                 domain_id = torch.zeros(b, dtype=torch.long, device=device)
             action_noise = torch.randn_like(actions)
-            sa = sigma.view(b, 1, 1)
+            sa = sigma_sample.view(b, 1, 1)
             noisy_actions = (1.0 - sa) * actions + sa * action_noise
             action_target = action_noise - actions
             action_tokens = self.mot.action_proj_in(noisy_actions, domain_id)
             action_tokens = action_tokens + self.mot.action_modality_embed
             gen_tokens = torch.cat([gen_tokens, action_tokens], dim=1)
             n_action = action_tokens.shape[1]
+            token_sigma = torch.cat(
+                [token_sigma, sigma_sample.unsqueeze(1).expand(b, n_action)], dim=1
+            )
 
         kv, rope_und = self.encode_und(pixel_values, text_ids)
         pos = self.gen_positions(t_lat, n_action, device).unsqueeze(1).expand(3, b, -1)
-        hidden = self.mot.forward_gen(gen_tokens, pos, kv, rope_und, sigma * 1000.0)
+        hidden = self.mot.forward_gen(gen_tokens, pos, kv, rope_und, token_sigma * 1000.0)
 
-        video_pred = self.mot.proj_out(hidden[:, :n_video])
-        loss_video = F.mse_loss(video_pred.float(), self.patchify(target).float())
+        video_pred = self.mot.proj_out(hidden[:, :n_video]).float()
+        video_target = self.patchify(target).float()
+        # Mean over the predicted frames only. Dividing by the target count rather than by the
+        # full token count keeps the loss scale comparable across tasks with different amounts
+        # of context, so t2v and v2v numbers can be read side by side.
+        loss_mask = frame_is_target.repeat_interleave(tokens_per_frame, dim=1).unsqueeze(-1).float()
+        loss_video = ((video_pred - video_target).pow(2) * loss_mask).sum() / loss_mask.sum().clamp(
+            min=1.0
+        ) / video_pred.shape[-1]
         out = {"loss_video": loss_video, "loss": loss_video}
 
         if n_action:

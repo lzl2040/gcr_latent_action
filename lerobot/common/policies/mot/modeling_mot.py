@@ -400,10 +400,21 @@ class MoTModel(nn.Module):
     ) -> torch.Tensor:
         rope_gen = self.rotary_emb(gen_position_ids)
         rope_gen = tuple(r.to(gen_hidden.dtype) for r in rope_gen)
-        t_emb = self.time_embedder(
-            timestep_embedding(timestep, self.config.time_embed_dim).to(gen_hidden.dtype)
-        )
-        hidden = gen_hidden + t_emb.unsqueeze(1)
+        # ``timestep`` is (B,) when every token shares a noise level, or (B, L) when it does
+        # not -- which is what the task family needs, since context frames stay clean at
+        # sigma=0 while the frames being predicted carry real noise.
+        if timestep.ndim == 1:
+            t_emb = self.time_embedder(
+                timestep_embedding(timestep, self.config.time_embed_dim).to(gen_hidden.dtype)
+            ).unsqueeze(1)
+        else:
+            bsz, seq = timestep.shape
+            t_emb = self.time_embedder(
+                timestep_embedding(timestep.reshape(-1), self.config.time_embed_dim).to(
+                    gen_hidden.dtype
+                )
+            ).view(bsz, seq, -1)
+        hidden = gen_hidden + t_emb
         use_ckpt = self.gradient_checkpointing and self.training
         for layer, (k_und, v_und) in zip(self.layers, kv, strict=True):
             if use_ckpt:
