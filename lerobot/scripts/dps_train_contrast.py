@@ -40,7 +40,7 @@ from lerobot.configs.train import TrainPipelineConfig
 
 # Images stay uint8 all the way to the GPU (4x less PCIe traffic than bf16) and are
 # normalised inside the model; index-like tensors must stay integral.
-_KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "tactile_image")
+_KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "image_clip", "tactile_image")
 
 
 def init_logger(cfg, subdir: str = "contrast"):

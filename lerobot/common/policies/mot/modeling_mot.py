@@ -65,9 +65,13 @@ class MoTConfig:
     # to_add_out bridge the two widths.  Only head_dim and num_key_value_heads are shared with
     # the und expert, because the two streams concatenate keys/values.  gen query heads must
     # stay a multiple of num_key_value_heads for GQA.
-    gen_hidden_size: int = 1536
-    gen_num_attention_heads: int = 8
-    gen_intermediate_size: int = 4096
+    #
+    # Defaults size the gen expert at 1.423B, matching Cosmos3-Edge's generation branch
+    # exactly (it runs 28 layers of 50.34M; we run 32 of 44.5M).  Cosmos keeps gen and und at
+    # 1:1 per layer, which for Phi's fatter layers would cost 3.22B -- see doc/phi4_mot.md.
+    gen_hidden_size: int = 2048
+    gen_num_attention_heads: int = 16
+    gen_intermediate_size: int = 7680
 
     # --- generation heads ---
     latent_channels: int = 48

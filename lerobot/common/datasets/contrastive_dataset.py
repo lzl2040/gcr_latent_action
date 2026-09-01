@@ -158,6 +158,16 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.true_fps: list[float] = []
         self.tactile_img_size = getattr(policy_cfg, "tactile_img_size", 64)
         self.tactile_frames = max(2, int(getattr(policy_cfg, "tactile_frames", 2)))
+        # Opt-in: policies that need a video clip rather than a pair set ``rgb_frames``.
+        # Absent it this stays 2 and the RGB read is unchanged.
+        self.rgb_frames = max(2, int(getattr(policy_cfg, "rgb_frames", 2)))
+        # Opt-out for policies that do not consume touch at all (the world-model stage-2 tasks
+        # are text/video only). Tactile is the most expensive thing in the batch -- a second
+        # video decode per sample on top of RGB -- so skipping it is worth a real flag rather
+        # than reading it and discarding it downstream. Default True keeps the contrastive
+        # path untouched. The tactile *fields* are still emitted, zero-filled and mask-0, so
+        # the batch schema does not change shape and collate/eval code keeps working.
+        self.use_tactile = bool(getattr(policy_cfg, "use_tactile", True))
         self.tactile_dead_std = getattr(policy_cfg, "tactile_dead_std", 0.002)
         self.max_tactile_views = min(getattr(policy_cfg, "max_tactile_views", MAX_TACTILE_VIEWS), MAX_TACTILE_VIEWS)
         self._video_backend = self._resolve_video_backend(cfg.dataset.video_backend)
@@ -240,7 +250,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # any metric computed over the whole mixture barely sees it; the evaluator uses this
         # to build a tactile-only split that can.
         self.has_tactile = np.array(
-            [bool(tactile_signal_keys(s)) or bool(tactile_image_keys(s)) for s in self.specs],
+            [
+                self.use_tactile and (bool(tactile_signal_keys(s)) or bool(tactile_image_keys(s)))
+                for s in self.specs
+            ],
             dtype=bool,
         )
 
@@ -408,6 +421,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         tac_img_keys = [k for k in tactile_image_keys(spec) if k in ds_meta.video_keys][
             : self.max_tactile_views
         ]
+        if not self.use_tactile:
+            tac_img_keys = []
 
         # Only the action sources this dataset's canonical spec actually reads are chunked;
         # chunking every ``action.*`` column (e.g. 44-dim hand joints) wastes a lot of IO.
@@ -439,7 +454,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             if key in ds_meta.features:
                 delta_timestamps[key] = chunk_stamps
         for key in tactile_signal_keys(spec):
-            if key in ds_meta.features:
+            if key in ds_meta.features and self.use_tactile:
                 delta_timestamps[key] = chunk_stamps
 
         # The video streams are read at the two ends of the window only. For RGB that is the
@@ -450,11 +465,16 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # costs 0.94-1.12x rather than the assumed 2x, because decode time is dominated by
         # seeking to a keyframe and decoding across the span -- the interior frames are already
         # being decoded and discarded. Tactile therefore reads ``tactile_frames`` evenly spaced
-        # samples; RGB stays at the pair.
-        pair_stamps = [0.0, horizon / index_fps]
+        # samples; RGB stays at the pair unless ``rgb_frames`` asks for a clip.
+        #
+        # RGB uses the same evenly-spaced formula as tactile, which at ``rgb_frames == 2``
+        # reduces exactly to the original ``[0.0, horizon / index_fps]`` pair -- so the default
+        # path is unchanged by construction rather than by a separate branch.
+        n_rgb = self.rgb_frames
+        rgb_stamps = [horizon * i / ((n_rgb - 1) * index_fps) for i in range(n_rgb)]
         for key in rgb_keys:
             if key in ds_meta.video_keys:
-                delta_timestamps[key] = pair_stamps
+                delta_timestamps[key] = rgb_stamps
         n_tac = self.tactile_frames
         tac_stamps = [horizon * i / ((n_tac - 1) * index_fps) for i in range(n_tac)]
         for key in tac_img_keys:
@@ -714,26 +734,49 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         ).squeeze(0).to(torch.uint8)
 
     def _extract_frames(self, item, primary_key):
-        """Return ``(image_t0, image_t1, pair_is_valid)`` as uint8 CHW tensors."""
+        """Return ``(image_t0, image_t1, clip, pair_is_valid)`` as uint8 CHW / TCHW tensors.
+
+        ``clip`` is ``None`` unless ``rgb_frames > 2``; the pair is always the window
+        endpoints, so a policy reading only ``image_t0``/``image_t1`` sees no change.
+        """
         size = self.cfg.dataset.image_transforms.img_size
         frames = item.get(primary_key) if primary_key else None
         if frames is None:
             zeros = torch.zeros(3, size, size, dtype=torch.uint8)
-            return zeros, zeros.clone(), 0.0
+            clip = (
+                torch.zeros(self.rgb_frames, 3, size, size, dtype=torch.uint8)
+                if self.rgb_frames > 2
+                else None
+            )
+            return zeros, zeros.clone(), clip, 0.0
 
+        clip = None
         if frames.ndim == 4:  # (T, C, H, W)
             first = frames[0]
             last = frames[-1] if frames.shape[0] > 1 else frames[0]
             is_pad = item.get(f"{primary_key}_is_pad")
             valid = 0.0 if (is_pad is not None and bool(is_pad[-1])) else 1.0
+            if self.rgb_frames > 2:
+                clip = torch.stack([self._resize_rgb(frames[i]) for i in range(frames.shape[0])])
         else:
             first = frames
             last = frames
             valid = 0.0
+            if self.rgb_frames > 2:
+                clip = self._resize_rgb(frames).unsqueeze(0).repeat(self.rgb_frames, 1, 1, 1)
 
         first = self._resize_rgb(first)
         last = self._resize_rgb(last)
-        return first, last, valid
+        if clip is not None and clip.shape[0] != self.rgb_frames:
+            # The loader is asked for exactly ``rgb_frames`` stamps, but a window running past
+            # the end of an episode comes back short. Repeating the last frame keeps the batch
+            # stackable; a ragged clip would kill the collate rather than one sample.
+            if clip.shape[0] > self.rgb_frames:
+                clip = clip[: self.rgb_frames]
+            else:
+                pad = clip[-1:].repeat(self.rgb_frames - clip.shape[0], 1, 1, 1)
+                clip = torch.cat([clip, pad], dim=0)
+        return first, last, clip, valid
 
     def _build_canonical_vector(self, item, instructions, norm, is_chunk: bool):
         width = CANON_DIM
@@ -781,6 +824,11 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         """
         chunk = self.chunk_size
         signal = torch.zeros(chunk, MAX_TACTILE_SIGNAL_DIM, dtype=torch.float32)
+        if not self.use_tactile:
+            # No window was requested for these columns, so what is left in ``item`` is a
+            # single frame. Broadcasting it over the chunk would look like a flat signal
+            # rather than an absent one; returning mask 0 says the truth.
+            return signal, torch.zeros((), dtype=torch.float32)
         found = False
         for key, offset, width in norm.get("slots", ()):
             value = _to_tensor(item.get(key))
@@ -847,6 +895,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         dead_std = self.tactile_dead_std
         views = torch.zeros(self.max_tactile_views, n_frames, 3, size, size, dtype=torch.uint8)
         mask = torch.zeros(self.max_tactile_views, dtype=torch.float32)
+        if not self.use_tactile:
+            return views, mask
         for slot, key in enumerate(tactile_image_keys(spec)[: self.max_tactile_views]):
             frame = item.get(key)
             if frame is None:
@@ -875,7 +925,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         norm = self.norm_stats[ds_idx]
         primary_key = self.image_key_maps[ds_idx]["primary"]
 
-        image_t0, image_t1, pair_valid = self._extract_frames(item, primary_key)
+        image_t0, image_t1, image_clip, pair_valid = self._extract_frames(item, primary_key)
         action, action_mask = self._build_canonical_vector(item, spec.get("action", []), norm["action"], True)
         state, state_mask = self._build_canonical_vector(item, spec.get("state", []), norm["state"], True)
         tactile_signal, tactile_signal_mask = self._build_tactile_signal(item, spec, norm["tactile_signal"])
@@ -891,7 +941,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # branch pre-trained there meets an identical batch schema here.
         has_text = is_real_instruction(task, self.dataset_names[ds_idx])
 
-        return {
+        out = {
             "image_t0": image_t0,
             "image_t1": image_t1,
             "pair_is_valid": torch.tensor(pair_valid, dtype=torch.float32),
@@ -901,13 +951,6 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "action_mask": action_mask,
             "observation.state": state,
             "state_mask": state_mask,
-            "tactile_signal": tactile_signal,
-            "tactile_signal_mask": tactile_signal_mask,
-            "tactile_image": tactile_image,
-            "tactile_image_mask": tactile_image_mask,
-            "tactile_sensor_id": sensor_id,
-            "tactile_img_mean": sensor_mean,
-            "tactile_img_std": sensor_std,
             # Not `item["fps"]`: the v2.1 loader never sets it (so every v2.1 dataset silently
             # reported 10) and the v3.0 loader sets it from the *declared* fps, which is wrong
             # for FTP-1. `self.true_fps` is the rate the data was actually captured at.
@@ -916,6 +959,33 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "episode_uid": torch.tensor(ds_idx * 1_000_000 + episode_index, dtype=torch.long),
             "frame_index": torch.tensor(frame_idx, dtype=torch.long),
         }
+        if self.use_tactile:
+            # Omitted rather than zero-filled when tactile is off: the padded view tensor is
+            # ~3.6 MB/sample, which is a few hundred MB of zeros per batch through collate and
+            # PCIe, and a consumer that expected touch should fail loudly instead of quietly
+            # training on blanks.
+            tactile_signal, tactile_signal_mask = self._build_tactile_signal(
+                item, spec, norm["tactile_signal"]
+            )
+            tactile_image, tactile_image_mask = self._build_tactile_images(item, spec)
+            sensor_id, sensor_mean, sensor_std = self.tactile_sensor_meta[ds_idx]
+            out.update(
+                {
+                    "tactile_signal": tactile_signal,
+                    "tactile_signal_mask": tactile_signal_mask,
+                    "tactile_image": tactile_image,
+                    "tactile_image_mask": tactile_image_mask,
+                    "tactile_sensor_id": sensor_id,
+                    "tactile_img_mean": sensor_mean,
+                    "tactile_img_std": sensor_std,
+                }
+            )
+        if image_clip is not None:
+            out["image_clip"] = image_clip
+        return out
+        if image_clip is not None:
+            out["image_clip"] = image_clip
+        return out
 
     # ------------------------------------------------------------------
     @property
