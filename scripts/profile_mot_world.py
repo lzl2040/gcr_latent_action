@@ -92,9 +92,15 @@ def main() -> int:
 
         t_cat = timeit(gen_cat_only, n=20, warmup=5)
 
-    und_flops = 2 * 3.836e9 * embeds.shape[1] * b
-    gen_flops = 2 * 613.8e6 * n_gen * b
+    # Derive both counts from the model rather than hardcoding them: a stale constant here
+    # silently rescales every TFLOP/s figure when the gen expert is resized.
+    rep = model.mot.param_report()
+    embed_params = model.mot.embed_tokens.weight.numel()
+    und_matmul = rep["und"] - embed_params  # the embedding is a lookup, not a matmul
+    und_flops = 2 * und_matmul * embeds.shape[1] * b
+    gen_flops = 2 * rep["gen"] * n_gen * b
     print(f"[shape] und tokens {embeds.shape[1]}, gen tokens {n_gen}, batch {b}")
+    print(f"[param] und matmul {und_matmul / 1e9:.3f}B, gen {rep['gen'] / 1e9:.3f}B")
     print(f"[time]  vision tower      {t_vision * 1000:8.1f} ms")
     print(f"[time]  und stack (32L)   {t_und * 1000:8.1f} ms   {und_flops / t_und / 1e12:6.1f} TFLOP/s")
     print(f"[time]  gen stack (32L)   {t_gen * 1000:8.1f} ms   {gen_flops / t_gen / 1e12:6.1f} TFLOP/s")

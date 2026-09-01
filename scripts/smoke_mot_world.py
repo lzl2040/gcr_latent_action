@@ -27,12 +27,16 @@ from lerobot.common.policies.mot.world_model import MoTWorldModel, WorldModelCon
 
 
 def build(args) -> MoTWorldModel:
-    mot = MoTConfig.from_phi_dir(
-        args.phi_dir,
-        gen_hidden_size=args.gen_hidden,
-        gen_num_attention_heads=args.gen_heads,
-        gen_intermediate_size=args.gen_intermediate,
-    )
+    overrides = {
+        k: v
+        for k, v in (
+            ("gen_hidden_size", args.gen_hidden),
+            ("gen_num_attention_heads", args.gen_heads),
+            ("gen_intermediate_size", args.gen_intermediate),
+        )
+        if v is not None
+    }
+    mot = MoTConfig.from_phi_dir(args.phi_dir, **overrides)
     cfg = WorldModelConfig(mot=mot, qwen3vl_dir=args.qwen3vl_dir,
                            freeze_vision_projector=args.freeze_projector)
     model = MoTWorldModel(cfg)
@@ -58,9 +62,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--phi_dir", default="/Data/lzl/huggingface/Phi-4-mini-instruct")
     ap.add_argument("--qwen3vl_dir", default="/Data/lzl/huggingface/Qwen3-VL-4B-Instruct")
-    ap.add_argument("--gen_hidden", type=int, default=1536)
-    ap.add_argument("--gen_heads", type=int, default=8)
-    ap.add_argument("--gen_intermediate", type=int, default=4096)
+    # Default to whatever MoTConfig says, so this script cannot silently keep testing an
+    # old gen size after the config moves.
+    ap.add_argument("--gen_hidden", type=int, default=None)
+    ap.add_argument("--gen_heads", type=int, default=None)
+    ap.add_argument("--gen_intermediate", type=int, default=None)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--latent_frames", type=int, default=2)
     ap.add_argument("--text_len", type=int, default=32)
@@ -101,7 +107,9 @@ def main() -> int:
     domain = torch.randint(0, cfg.mot.num_embodiment_domains, (b,), device=device)
 
     torch.cuda.reset_peak_memory_stats()
-    out = model(latents, images, text_ids, actions, domain)
+    # "action" is the only task that exercises every head, so the gradient-coverage check
+    # below is meaningful; the other four are covered by scripts/check_mot_tasks.py.
+    out = model(latents, images, text_ids, actions, domain, task="action")
     print(f"[forward] loss={out['loss'].item():.4f} video={out['loss_video'].item():.4f} "
           f"action={out['loss_action'].item():.4f}")
     out["loss"].backward()
@@ -127,7 +135,7 @@ def main() -> int:
     t0 = time.perf_counter()
     for _ in range(args.steps):
         opt.zero_grad(set_to_none=True)
-        loss = model(latents, images, text_ids, actions, domain)["loss"]
+        loss = model(latents, images, text_ids, actions, domain, task="action")["loss"]
         loss.backward()
         opt.step()
     torch.cuda.synchronize()

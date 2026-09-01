@@ -137,47 +137,62 @@ GEN 的空间坐标再乘 `vision_grid/latent_side`，否则 8×8 的 latent 只
 
 ## 3. 各模块参数量
 
+GEN 专家按 `d_gen=2048 / 16 头 / intermediate 7680` 配置，目的是让生成侧参数量与
+Cosmos3-Edge 的生成分支（实测 1.423 B）对齐。
+
 | 模块 | 参数 | 可训练 |
 |---|---|---|
 | Qwen3-VL ViT（4B 版视觉塔） | 306.2 M | ✗ |
 | VisionMerger（2×2 merge + 4096→3072→3072） | 22.0 M | ✓ |
 | Phi-4-mini und 专家（embed 614.6 M + 32×100.7 M） | 3.836 B | ✗ |
-| GEN 专家 32 层 | 604.1 M | ✓ |
-| `proj_in` / `proj_out`（192↔1536） | 0.59 M | ✓ |
-| `time_embedder`（256→1536→1536） | 2.76 M | ✓ |
-| `action_proj_in/out`（32 domain × 64↔1536） | 6.34 M | ✓ |
-| **合计** | **4.778 B** | **636 M（13.3%）** |
+| GEN 专家 32 层（44.045 M/层） | 1.409 B | ✓ |
+| `proj_in` / `proj_out`（192↔2048） | 0.79 M | ✓ |
+| `time_embedder`（256→2048→2048） | 4.72 M | ✓ |
+| `action_proj_in/out`（32 domain × 40↔2048） | 5.31 M | ✓ |
+| **合计** | **5.585 B** | **1.442 B（25.8%）** |
 
-GEN 单层 18.877 M 的构成：注意力 6.291 M（`add_q/add_k/add_v/to_add_out` 各 1.572 M）
-+ MLP 12.583 M（relu²，只有 up/down 两个矩阵）+ 5 个 norm 共 3456。
+`action_dim` 取 40 而不是 Cosmos 的 64：本仓库规范动作向量的宽度是
+`canonical_space.CANON_DIM = 40`，用 64 会让 per-domain 投影期待 loader 永远不会填的列。
 
 Wan VAE 704.7 M 冻结，不计入模型（作为数据侧的潜变量编码器）。
 
 ---
 
-## 4. 实测（batch 128，bf16，单张 48 GB 卡，机器共用）
+## 4. 实测
 
-阶段拆解（`scripts/profile_mot_world.py`，前向）：
+### 4.1 阶段拆解（`scripts/profile_mot_world.py`，batch 8，gen = 1.423 B）
 
-| 阶段 | 耗时 | 算力 |
-|---|---|---|
-| 视觉塔 | 465 ms | 43 TFLOP/s |
-| und 栈 32 层 | 1162 ms | **81 TFLOP/s** |
-| gen 栈 32 层 | 692 ms | 36 TFLOP/s |
+| 阶段 | 耗时 | 算力 | 占 A6000 可用峰值 |
+|---|---|---|---|
+| 视觉塔 | 33.7 ms | — | — |
+| und 栈 32 层 | 63.1 ms | **78.5 TFLOP/s** | ~101% |
+| gen 栈 32 层 | 69.9 ms | 52.1 TFLOP/s | 67% |
 
-und 已接近峰值，没有可榨的空间。gen 效率低是**结构固有**——它的矩阵小得多
-（1536/1024 vs Phi 的 3072/16384），不是实现问题。
+und/gen FLOP 比 1.36×，时间比 0.90×。
 
-整步（`scripts/smoke_mot_world.py`）：
+这里的"可用峰值"是 **77.4 TFLOP/s** 而不是官方标称的 155：RTX A6000 是 GA102，
+bf16 张量核在 FP32 累加下是半速率，而 PyTorch 的 bf16 矩阵乘正是 FP32 累加。
+und 实测 78.5 恰好压在这条线上，这既说明 und 没有可榨的空间，也反过来验证了
+FLOP 计数是对的。
+
+gen 仍比 und 低约三分之一，因为它的矩阵更小（2048/7680 vs Phi 的 3072/16384）；
+但把 `d_gen` 从 1536 加宽到 2048 后，这个差距已经从此前的 46% 收窄到 67%，
+说明加宽确实换来了效率而不只是参数量。
+
+> 注：`profile_mot_world.py` 早期版本把两侧参数量硬编码成常数，gen 扩容后没跟着变，
+> 一度把 gen 报成 23 TFLOP/s。现在两个数都从 `param_report()` 取，und 侧还扣掉了
+> embedding（查表不是矩阵乘）。本节数字是修正后的。
+
+### 4.2 整步（`scripts/smoke_mot_world.py`）
 
 | 配置 | s/step | 峰值显存 |
 |---|---|---|
-| 投影层可训练 + gen 检查点 | 7.125 | 21.4 GiB |
-| 投影层冻结（und 走 no_grad） + gen 检查点 | **4.514** | 18.8 GiB |
-| 不加 gen 检查点 | OOM | — |
+| batch 8，投影层可训练 + gen 检查点 | 0.622 | 21.2 GiB |
 
-由此得到一个可用的训练日程：**先让投影层穿过 Phi 热身若干步，再冻结它**，
-后续训练提速 1.58×。两个端点都是实测的。
+早期在 gen = 614 M 的配置下测过 batch 128：投影层可训练 7.125 s/step（21.4 GiB），
+冻结投影层 4.514 s/step（18.8 GiB），不加 gen 检查点则 OOM。由此得到的日程仍然成立：
+**先让投影层穿过 Phi 热身若干步，再冻结它**，后续提速 1.58×。gen 扩容后这两个端点
+没有重测，真实训练速度以 §7 的实测为准。
 
 ---
 
@@ -202,12 +217,132 @@ und 已接近峰值，没有可榨的空间。gen 效率低是**结构固有**�
 
 ---
 
-## 6. 还没做的
+## 6. 数据接入与任务族
 
-- **数据接入**。现有 dataset 给的是两帧 `image_t0/image_t1`（`chunk_seconds=1.6`）而非视频片段。
-  Wan VAE 在 T=1 时输出 1 个 latent 帧，所以 v1 可以直接做
-  "给定当前帧 + 语言 → 预测 1.6 s 后那帧的 latent + 动作"，无需改数据集；
-  多帧片段（T=1+4k）留到之后。
-- 文本侧目前用随机 id 冒烟，尚未接 Phi 的 tokenizer。
+### 6.1 loader：多帧片段 + 触觉可选
+
+两个开关都通过 `getattr(policy_cfg, ...)` 读取，默认值等于原行为，所以对比学习那条路
+一行都不用改。
+
+**`rgb_frames`（默认 2）**。原来 RGB 只读窗口两端：`pair_stamps = [0, horizon/index_fps]`。
+现在改用触觉相机早就在用的等距公式 `[horizon*i/((n-1)*index_fps)]`，它在 `n=2` 时
+**恰好还原成原式**——默认路径是被代数保住的，不是靠另开一个分支保住的。
+
+`_extract_frames` 额外返回整段 clip，`image_clip` 只在 `rgb_frames > 2` 时出现。
+`scripts/check_multiframe_dataset.py` 在 4 个数据集上实测：`clip[0]` 与 `image_t0`、
+`clip[-1]` 与 `image_t1` 逐像素差为 **0**，而中间帧与首帧的平均绝对差是 10–61，
+说明多出来的帧确实带信息，而不是端点的副本。
+
+**`use_tactile`（默认 True）**。关掉时触觉视频从 `video_keys_to_decode` 移除，
+触觉列不再申请时间窗，触觉字段**整个不出现在 batch 里**而不是填零：padded view 张量
+约 3.6 MB/样本，batch 128 就是几百 MB 的零在 collate 和 PCIe 上搬；而且误用应该立刻
+KeyError，而不是安静地在全零上训练。
+
+实测每样本读取耗时：
+
+| 路径 | ms/样本 |
+|---|---|
+| 原 2 帧 + 触觉 | 64.9 |
+| 9 帧 clip + 无触觉 | **37.2（0.57×）** |
+
+多读 4.5 倍 RGB 帧反而比原路径快 43%。这印证了 `doc/results.md` §21 的结论——解码时间被
+seek 关键帧和跨 span 解码主导，中间帧本来就在解、只是被丢掉——同时说明触觉才是 loader 的
+真正开销。
+
+### 6.2 Wan VAE
+
+`lerobot/common/policies/mot/vae_latents.py`，用 `Cosmos3-Edge/vae`
+（即 `Wan2.2-TI2V-5B` 的 `AutoencoderKLWan`，704.7 M 冻结）。两个实测确认的性质：
+
+- 时间 4× 压缩且首帧单独成一个 latent，所以 clip 必须是 **T = 1+4k**：
+  实测 T=1/5/9/17 → 1/2/3/5 个 latent 帧。长度不对会静默截断。
+- 空间 256→16，与 `latent_grid=16` 对齐；48 个通道对应 `proj_in` 的 192 = 48×2×2。
+
+latent 用 checkpoint 自带的 `latents_mean/std` 逐通道归一化。这一步不能省：该 checkpoint 的
+通道 std 跨越 0.35–1.17，不归一化的话 loss 会被少数几个通道支配。
+
+### 6.3 一条代码路径覆盖五个任务
+
+Cosmos 第二/三阶段的任务差别只有两点：**多少个 latent 帧是干净的**，以及
+**理解侧有没有输入图**。所以把噪声水平从 per-sample 改成 **per-frame** 之后，五个任务
+共用同一份 rectified-flow 代码，而不是五个会各自漂移的分支。
+
+| 任务 | context 帧 | und 输入图 | 动作 token |
+|---|---|---|---|
+| `t2i` | 0 | ✗ | ✗ |
+| `t2v` | 0 | ✗ | ✗ |
+| `i2v` | 1 | ✓ | ✗ |
+| `v2v` | 2 | ✓ | ✗ |
+| `action` | 1 | ✓ | ✓ |
+
+context 帧 σ=0，原样进 transformer 并**排除出 loss**；其余帧共享一次采样。loss 按目标
+token 数归一化而不是全部 token 数，所以 context 长度不同的任务数值可以横向比较。
+`forward_gen` 因此需要接受 `(B, L)` 形状的 timestep，`encode_und` 需要接受
+`pixel_values=None`（t2i/t2v 没有输入帧，喂一张空白图等于花一次完整 ViT 前向去教模型
+"没有图"长什么样）。
+
+验证方式（`scripts/check_mot_tasks.py`）：把 context 帧的 latent **放大 1000 倍**，
+泄漏就会变得无法忽视。五个任务的 loss 全部落在 **2.32–2.35**，即单位方差下
+E‖noise−latents‖²=2 的理论地板；若 mask 失效则是 1e6 量级。另用计数 hook 确认视觉塔
+恰好只在 i2v/v2v/action 运行。
+
+---
+
+## 7. 训练速度实测与集群外推
+
+`scripts/train_mot_world.py`：dataset → Wan VAE → MoT → AdamW，真实数据跑通，loss 下降
+（t2i 1.680 → 1.229）。batch 32、单张 RTX A6000、每任务 8 步：
+
+| 任务 | data | vae | model | step | clips/s |
+|---|---|---|---|---|---|
+| `t2i` | 9 ms | 1275 ms | 801 ms | 2085 ms | 15.35 |
+| `t2v` | 3 ms | 1275 ms | 1353 ms | 2631 ms | 12.16 |
+| `i2v` | 4 ms | 1275 ms | 2244 ms | 3522 ms | 9.09 |
+| `v2v` | 8 ms | 1277 ms | 2253 ms | 3537 ms | 9.05 |
+| `action` | 8 ms | 1280 ms | 2365 ms | 3654 ms | 8.76 |
+
+峰值显存 26.1 GiB。三点值得注意：
+
+- **data 只有几毫秒**：12 个 worker 的预取把 37 ms/样本完全藏在 GPU 计算后面。
+- **VAE 占 37%**，且与任务无关。真实训练应把 latent 预先缓存（1 万小时 ≈ **1.66 TB**，
+  放得下），这也是把三段计时分开报的原因——只有 model 那段会随显卡变快。
+- 分解自洽：`t2v − t2i` = 552 ms 对应 2 个额外 latent 帧；`i2v − t2v` = 891 ms 是视觉塔加
+  und 里的图像 token；`action − i2v` = 121 ms 是 32 个动作 token。i2v 与 v2v 计算量本就
+  相同，实测 2244 vs 2253 ms（差 0.4%），说明这批数字已经稳定。
+
+### 外推（`scripts/extrapolate_cluster.py`）
+
+1 万小时 @ 20 fps = 7.2e8 帧；按 1.6 s 不重叠窗口切分 = **2.25e7 个 clip**（每个 clip 覆盖
+32 帧时间线、实际读其中 9 帧）。
+
+锚点可信的关键：A6000 是 GA102，bf16 在 FP32 累加下**半速率**，可用峰值约 77 TFLOP/s
+而非官方标称的 155。之前测得 und 跑在 81 TFLOP/s，即基本打满硬件，这才让缩放有意义。
+
+16 卡、cached latents、stage-3 混合：
+
+| 设备 | batch/GPU | compute | comms | clips/s | 过一遍 1 万小时 |
+|---|---|---|---|---|---|
+| RTX A6000 | 32 | 2145 ms | 135 ms | 225 | 1.2 d |
+| A100-80GB | 128 | 2365 ms | 81 ms | 837 | **7.5 – 8.9 h** |
+| B200 | 128 | 537 ms | 32 ms | 3599 | **1.7 – 3.1 h** |
+
+在线跑 VAE 大约多 40–50%（A100 11.8–14.1 h，B200 2.7–4.9 h）。
+
+给的是区间不是单点：A100/B200 的效率是假设，不是实测。B200 区间刻意取得宽且下沿低
+（0.30–0.55），因为我们的 GEN 专家在 A6000 上就只跑到可用峰值的 67%（52.1 vs und 的
+78.5 TFLOP/s），而它跑不满的原因是矩阵偏小——张量核越大，这个缺口只会越明显。
+通信按 1.442 B 参数 bf16 全归约 = 2.88 GB 显式建模而不是塞进一个"扩展效率"常数：
+它是每步固定开销，占 A6000 一步的 4%、占 B200 一步的 19%，正是这个 regime 变化让大
+per-GPU batch 在 B200 上值 17%、在 A6000 上几乎不值钱。
+
+loader 上限 323 clips/s/GPU，即使 B200 也没有触到（150），所以视频解码不是瓶颈——
+这一点是算出来的，我原本以为会是。
+
+---
+
+## 8. 还没做的
+
+- 文本侧已接 Phi 的 tokenizer（`train_mot_world.py`），但冒烟脚本仍用随机 id。
 - 采样/推理循环（训练目标是 rectified flow，采样器还没写）。
-- 动作维度默认 64（对齐 Cosmos），接数据时要改成本仓库的规范动作维度。
+- latent 离线缓存（上面 1.66 TB 那条）还没实现，目前是在线编码。
+- 多卡：只在单卡验证过，ZeRO/DeepSpeed 接入未做。
