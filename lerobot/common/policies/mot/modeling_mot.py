@@ -25,6 +25,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from torch import nn
 
 # Phi-4-mini: head_dim 128, partial_rotary_factor 0.75 -> 96 rotary dims -> 48 frequencies.
@@ -348,6 +349,8 @@ class MoTModel(nn.Module):
         self.norm = RMSNorm(config.und_hidden_size, config.rms_norm_eps)
         self.norm_moe_gen = RMSNorm(config.gen_hidden_size, config.rms_norm_eps)
         self.rotary_emb = MRotaryEmbedding(config, attention_scaling)
+        # Set by the training wrapper; trades gen-expert recompute for activation memory.
+        self.gradient_checkpointing = False
 
         h_gen = config.gen_hidden_size
         self.proj_in = nn.Linear(config.patch_latent_dim, h_gen, bias=True)
@@ -397,8 +400,14 @@ class MoTModel(nn.Module):
             timestep_embedding(timestep, self.config.time_embed_dim).to(gen_hidden.dtype)
         )
         hidden = gen_hidden + t_emb.unsqueeze(1)
+        use_ckpt = self.gradient_checkpointing and self.training
         for layer, (k_und, v_und) in zip(self.layers, kv, strict=True):
-            hidden = layer.gen_forward(hidden, rope_gen, rope_und, k_und, v_und)
+            if use_ckpt:
+                hidden = torch.utils.checkpoint.checkpoint(
+                    layer.gen_forward, hidden, rope_gen, rope_und, k_und, v_und, use_reentrant=False
+                )
+            else:
+                hidden = layer.gen_forward(hidden, rope_gen, rope_und, k_und, v_und)
         return self.norm_moe_gen(hidden)
 
     # ------------------------------------------------------------------ loading
