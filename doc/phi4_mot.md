@@ -156,6 +156,35 @@ Cosmos3-Edge 的生成分支（实测 1.423 B）对齐。
 
 Wan VAE 704.7 M 冻结，不计入模型（作为数据侧的潜变量编码器）。
 
+### 3.1 可训练范围开关
+
+上表是默认档。哪些权重训练由 `WorldModelConfig.trainable_scope` 控制，作用在四组权重上
+（`TRAINABLE_SCOPES`，`world_model.py`）：
+
+| scope | vision | merger | und | gen | 可训练 | 说明 |
+|---|:-:|:-:|:-:|:-:|---|---|
+| `gen_only`（默认） | ✗ | ✓ | ✗ | ✓ | 1.445 B | Cosmos3 的做法 |
+| `freeze_vision` | ✗ | ✓ | ✓ | ✓ | 5.281 B | π0.5 的做法：只冻视觉塔 |
+| `all` | ✓ | ✓ | ✓ | ✓ | 5.588 B | 全训 |
+
+两条设计取舍：
+
+* **`k_norm_und_for_gen` 跟着 GEN 走，不跟 UND。** 它把 und 的 K 归一化后交给 gen 用，
+  只因为 gen 存在才存在。若按"属于 und 层"归类，冻结 und 时这个**两个专家之间的接口**
+  会被钉死在初始化的 scale 上。
+* **UND 冻结 ≠ UND 免费。** 可训练的 merger 在 und 之前，梯度必须穿过全部 32 层冻结的
+  Phi，所以 und 栈照样要建图（带检查点）。这也解释了下面 1.27× 这个比参数比小得多的数字。
+
+`freeze_vision_projector=True` 是叠加在 scope 之上的覆写：它让 `gen_only` 档下 und 栈能整段
+跑在 `no_grad` 里（实测 1.58×）；一旦 und 可训练，它就不再有加速作用。
+
+两个曾经的隐藏 bug（`scripts/check_trainable_scope.py` 会同时静态和动态地查）：
+
+* `encode_und` 里视觉塔外面套的是**无条件** `torch.no_grad()`。`scope="all"` 下每个 ViT
+  权重的 `requires_grad` 都是 `True`，却一个梯度也收不到，而 loss 照常下降——这种失败是
+  完全静默的。现已按 scope 开关。
+* `und_needs_grad` 原先只看 merger，und 可训练时 und 栈会被误判为不需要建图。
+
 ---
 
 ## 4. 实测
@@ -291,24 +320,54 @@ E‖noise−latents‖²=2 的理论地板；若 mask 失效则是 1e6 量级。
 ## 7. 训练速度实测与集群外推
 
 `scripts/train_mot_world.py`：dataset → Wan VAE → MoT → AdamW，真实数据跑通，loss 下降
-（t2i 1.680 → 1.229）。batch 32、单张 RTX A6000、每任务 8 步：
+（t2i 1.680 → 1.229）。batch 32、单张 RTX A6000、每任务 15 步、fused AdamW：
 
 | 任务 | data | vae | model | step | clips/s |
 |---|---|---|---|---|---|
-| `t2i` | 9 ms | 1275 ms | 801 ms | 2085 ms | 15.35 |
-| `t2v` | 3 ms | 1275 ms | 1353 ms | 2631 ms | 12.16 |
-| `i2v` | 4 ms | 1275 ms | 2244 ms | 3522 ms | 9.09 |
-| `v2v` | 8 ms | 1277 ms | 2253 ms | 3537 ms | 9.05 |
-| `action` | 8 ms | 1280 ms | 2365 ms | 3654 ms | 8.76 |
+| `t2i` | 1 ms | 1271 ms | 614 ms | 1886 ms | 16.97 |
+| `t2v` | 1 ms | 1271 ms | 1345 ms | 2617 ms | 12.23 |
+| `i2v` | 1 ms | 1272 ms | 2147 ms | 3421 ms | 9.36 |
+| `v2v` | 1 ms | 1274 ms | 2324 ms | 3599 ms | 8.89 |
+| `action` | 1 ms | 1275 ms | 2338 ms | 3615 ms | 8.85 |
 
 峰值显存 26.1 GiB。三点值得注意：
 
-- **data 只有几毫秒**：12 个 worker 的预取把 37 ms/样本完全藏在 GPU 计算后面。
+- **data 只有 1 ms**：12 个 worker 的预取把 37 ms/样本完全藏在 GPU 计算后面。
 - **VAE 占 37%**，且与任务无关。真实训练应把 latent 预先缓存（1 万小时 ≈ **1.66 TB**，
   放得下），这也是把三段计时分开报的原因——只有 model 那段会随显卡变快。
-- 分解自洽：`t2v − t2i` = 552 ms 对应 2 个额外 latent 帧；`i2v − t2v` = 891 ms 是视觉塔加
-  und 里的图像 token；`action − i2v` = 121 ms 是 32 个动作 token。i2v 与 v2v 计算量本就
-  相同，实测 2244 vs 2253 ms（差 0.4%），说明这批数字已经稳定。
+- 分解自洽：`t2v − t2i` = 731 ms 对应 2 个额外 latent 帧；`i2v − t2v` = 802 ms 是视觉塔加
+  und 里的图像 token；`action − i2v` = 191 ms 是 32 个动作 token。i2v 与 v2v 计算量本就
+  相同，实测 2147 vs 2324 ms（差 8%，同批噪声水平），说明这批数字可用。
+
+### 7.1 两种可训练范围的代价（`SCOPE=... bash scripts/bench_mot_scope.sh`）
+
+同一份代码路径（fused AdamW + `expandable_segments`）、batch 32、stage-3：
+
+| 任务 | `gen_only` | `freeze_vision` | 比值 |
+|---|---|---|---|
+| `t2i` | 614 ms | 1173 ms | 1.91× |
+| `t2v` | 1345 ms | 2069 ms | 1.54× |
+| `i2v` | 2147 ms | 2613 ms | 1.22× |
+| `v2v` | 2324 ms | 2613 ms | 1.12× |
+| `action` | 2338 ms | 3018 ms | 1.29× |
+| **混合加权** | **2112 ms** | **2689 ms** | **1.27×** |
+| 峰值显存 | 26.1 GiB | 40.9 GiB | +14.8 GiB |
+| 端到端（含 VAE） | 10.57 clips/s | 8.96 clips/s | 0.85× |
+
+**可训练参数涨 3.7×（1.45 B → 5.28 B），算力只涨 1.27×。** 原因在 §2.5：GEN 每层都读
+UND 的 K/V，所以两个档位里 und 的前向本来就要跑、而且本来就带检查点；训练 und 多出来的
+只是权重梯度那次 matmul，不是第二次前向。相对代价在 `t2i` 上最大（1.91×），因为那个任务
+GEN 侧的活最少，und 反向占比最高。
+
+显存这一侧才是真正的分界：5.28 B 可训练 = 参数 10.4 + 梯度 9.8 + AdamW 两个动量 19.7 GiB。
+第一次跑直接 OOM 在 `torch._foreach_sqrt` 上——多张量 AdamW 会额外开一份和状态等大的临时
+buffer。换成 `fused=True`（无临时 buffer）+ `PYTORCH_ALLOC_CONF=expandable_segments:True`
+后 batch 32 能压进 40.9 GiB，单卡 48 GiB 放得下，不强制要 ZeRO。
+注意动量是 bf16（跟随参数 dtype），真实长训要考虑 fp32 master weights + fp32 动量，
+那会再多约 59 GiB（master 19.7 + 两个动量各 19.7），届时必须 ZeRO 分片。
+
+`NO_OPT=1` 可以只测前反向（gen_only 15.0 GiB / freeze_vision 21.5 GiB），用来在放不下
+优化器状态的卡上比较纯计算。
 
 ### 外推（`scripts/extrapolate_cluster.py`）
 
@@ -320,20 +379,26 @@ E‖noise−latents‖²=2 的理论地板；若 mask 失效则是 1e6 量级。
 
 16 卡、cached latents、stage-3 混合：
 
-| 设备 | batch/GPU | compute | comms | clips/s | 过一遍 1 万小时 |
-|---|---|---|---|---|---|
-| RTX A6000 | 32 | 2145 ms | 135 ms | 225 | 1.2 d |
-| A100-80GB | 128 | 2365 ms | 81 ms | 837 | **7.5 – 8.9 h** |
-| B200 | 128 | 537 ms | 32 ms | 3599 | **1.7 – 3.1 h** |
+| scope | 设备 | batch/GPU | compute | comms | clips/s | 过一遍 1 万小时 |
+|---|---|---|---|---|---|---|
+| `gen_only` | RTX A6000 | 32 | 2112 ms | 135 ms | 228 | 1.1 d |
+| `gen_only` | A100-80GB | 128 | 2329 ms | 81 ms | 850 | **7.4 – 8.8 h** |
+| `gen_only` | B200 | 128 | 528 ms | 33 ms | 3651 | **1.7 – 3.1 h** |
+| `freeze_vision` | RTX A6000 | 32 | 2689 ms | 495 ms | 161 | 1.6 d |
+| `freeze_vision` | A100-80GB | 128 | 2965 ms | 297 ms | 628 | **10.0 – 11.8 h** |
+| `freeze_vision` | B200 | 128 | 673 ms | 119 ms | 2587 | **2.4 – 4.1 h** |
 
-在线跑 VAE 大约多 40–50%（A100 11.8–14.1 h，B200 2.7–4.9 h）。
+在线跑 VAE 大约多 40–50%（`gen_only` A100 11.6–13.9 h、B200 2.7–4.8 h；`freeze_vision`
+A100 14.2–16.9 h、B200 3.4–5.9 h）。
+
+**训 und 在集群上比在单卡上更贵。** 单卡是 1.27×，16 卡 A100 是 1.35×、B200 是 1.41×，
+因为全归约体积同步涨了 3.7×（2.89 → 10.56 GB）而算力被摊薄了：通信是每步固定开销，
+显卡越快占比越高。真要走 `freeze_vision`，ZeRO-2 的梯度分片和通信/反向重叠比换显卡更划算。
 
 给的是区间不是单点：A100/B200 的效率是假设，不是实测。B200 区间刻意取得宽且下沿低
 （0.30–0.55），因为我们的 GEN 专家在 A6000 上就只跑到可用峰值的 67%（52.1 vs und 的
 78.5 TFLOP/s），而它跑不满的原因是矩阵偏小——张量核越大，这个缺口只会越明显。
-通信按 1.442 B 参数 bf16 全归约 = 2.88 GB 显式建模而不是塞进一个"扩展效率"常数：
-它是每步固定开销，占 A6000 一步的 4%、占 B200 一步的 19%，正是这个 regime 变化让大
-per-GPU batch 在 B200 上值 17%、在 A6000 上几乎不值钱。
+通信按参数量 bf16 全归约显式建模，而不是塞进一个"扩展效率"常数。
 
 loader 上限 323 clips/s/GPU，即使 B200 也没有触到（150），所以视频解码不是瓶颈——
 这一点是算出来的，我原本以为会是。
@@ -345,4 +410,7 @@ loader 上限 323 clips/s/GPU，即使 B200 也没有触到（150），所以视
 - 文本侧已接 Phi 的 tokenizer（`train_mot_world.py`），但冒烟脚本仍用随机 id。
 - 采样/推理循环（训练目标是 rectified flow，采样器还没写）。
 - latent 离线缓存（上面 1.66 TB 那条）还没实现，目前是在线编码。
-- 多卡：只在单卡验证过，ZeRO/DeepSpeed 接入未做。
+- 多卡：只在单卡验证过，ZeRO/DeepSpeed 接入未做——`freeze_vision` 档下这是必需项而非
+  优化项（fp32 优化器状态放不下，且全归约体积 10.56 GB 需要和反向重叠）。
+- `scope="all"`（解冻视觉塔）代码路径已通过 `check_trainable_scope.py`，但没有实测速度，
+  也没有验证训练稳定性——视觉塔可训时 latent action 的表征塌缩风险还没评估。
