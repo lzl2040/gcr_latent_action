@@ -46,8 +46,19 @@ SCOPES = {
 MODEL_MS_B64 = {"t2i": 1066.0, "t2v": 2479.0, "i2v": 4033.0, "v2v": 4170.0, "action": 4420.0}
 
 VAE_MS = 1274.0  # task- and scope-independent: the same clip is encoded either way
-LOADER_MS_PER_SAMPLE = 37.2  # single worker, measured by check_multiframe_dataset.py
 NUM_WORKERS = 12
+
+# --- I/O, measured by scripts/measure_io.py ---------------------------------------------------
+# LOADER_MS_WARM is a *single* worker hitting the page cache on a local disk. It was the number
+# used in earlier revisions of this script and it is wildly optimistic for a cluster: /Data here
+# is /dev/sdc1, a Seagate ST16000NM000J with ROTA=1 -- a spinning disk. Reading cold, one worker
+# at a time, the same clip costs 780.8 ms, i.e. 21x more. A blobfuse/NFS mount sits in between:
+# no seek penalty, but a network round trip per read, and there are 6 read syscalls per clip.
+LOADER_MS_WARM = 37.2
+LOADER_MS_COLD_HDD = 780.8
+LOADER_MS_MOUNT = 200.0  # assumption for a blobfuse/NFS mount; the two above are measured
+BYTES_PER_CLIP = 677 * 1024
+READS_PER_CLIP = 6
 
 MIX = {"action": 0.5, "i2v": 0.2, "v2v": 0.15, "t2v": 0.1, "t2i": 0.05}  # world_model.STAGE3_MIX
 
@@ -116,24 +127,42 @@ def marginal_fit(scope: str) -> tuple[float, float]:
     return fixed, (w32 - fixed) / BATCH_REF
 
 
+def samples_by_convention() -> dict[str, tuple[float, str]]:
+    """How many training samples is "10,000 hours"? Three defensible answers, 32x apart.
+
+    Our sample is a 1.6 s window that READS 9 pixel frames and SPANS 32 of them, so the
+    conversion from "hours of video" to "optimizer steps" is a modelling choice, not a fact.
+    """
+    frames = HOURS * 3600 * FPS
+    clips = HOURS * 3600 / CHUNK_SECONDS
+    return {
+        "frames": (frames, "1 sample = 1 frame (7.2e8 / global batch)"),
+        "windows": (clips, f"1 sample = one non-overlapping {CHUNK_SECONDS}s window"),
+        "coverage": (clips * frames / (clips * PIXEL_FRAMES_PER_CLIP) ,
+                     "enough windows that every frame is read at least once"),
+    }
+
+
 def main() -> None:
     clips = HOURS * 3600 / CHUNK_SECONDS
     frames = HOURS * 3600 * FPS
-    loader_ceiling = NUM_WORKERS / (LOADER_MS_PER_SAMPLE / 1000.0)
     frames_seen = clips * PIXEL_FRAMES_PER_CLIP
+    conventions = samples_by_convention()
 
-    print(f"10,000 h @ {FPS} fps          : {frames:.3g} pixel frames on disk")
-    print(f"1 'epoch'                   : {clips:.3g} non-overlapping {CHUNK_SECONDS}s windows "
-          f"(= {frames:.3g} / {int(CHUNK_SECONDS * FPS)})")
-    print(f"                              but each window READS only {PIXEL_FRAMES_PER_CLIP} of "
-          f"the {int(CHUNK_SECONDS * FPS)} frames it spans,")
-    print(f"                              so one epoch touches {frames_seen:.3g} frames = "
-          f"{frames_seen / frames * 100:.0f}% of the corpus.")
-    print(f"                              Seeing every frame needs ~"
-          f"{frames / frames_seen:.1f} epochs.")
-    print(f"cached-latent footprint     : {clips * LATENT_BYTES_PER_CLIP / 1e12:.2f} TB")
-    print(f"loader ceiling              : {loader_ceiling:.0f} clips/s/GPU")
-    print(f"online VAE                  : {VAE_MS:.0f} ms per {BATCH_REF} clips\n")
+    print(f"10,000 h @ {FPS} fps          : {frames:.3g} pixel frames on disk\n")
+    print("One sample is a 1.6 s window that READS 9 frames and SPANS 32, so 'how many steps")
+    print("is 10,000 hours' has three defensible answers and they differ by 32x:")
+    for name, (n, why) in conventions.items():
+        print(f"  {name:>9s} : {n:9.3g} samples   {why}")
+    print(f"            'coverage' exists because one pass over the windows touches only "
+          f"{frames_seen / frames * 100:.0f}%")
+    print(f"            of the frames on disk ({frames_seen:.3g} of {frames:.3g}); full coverage "
+          f"needs {frames / frames_seen:.1f}x.")
+    print(f"\ncached-latent footprint     : {clips * LATENT_BYTES_PER_CLIP / 1e12:.2f} TB")
+    print(f"online VAE                  : {VAE_MS:.0f} ms per {BATCH_REF} clips")
+    print(f"per-clip I/O                : {BYTES_PER_CLIP / 1024:.0f} KiB in "
+          f"{READS_PER_CLIP} reads; {LOADER_MS_WARM:.0f} ms warm-local / "
+          f"{LOADER_MS_MOUNT:.0f} ms mount / {LOADER_MS_COLD_HDD:.0f} ms cold-HDD (1 worker)\n")
 
     for scope, (model_ms, trainable, peaks) in SCOPES.items():
         w32 = sum(MIX[t] * model_ms[t] for t in MIX)
@@ -153,7 +182,7 @@ def main() -> None:
         print(f"gradient all-reduce         : {grad_gb:.2f} GB -> {ring:.2f} GB moved per GPU\n")
 
         print(f"{'device':>11s} {'batch/GPU':>10s} {'mem':>18s} {'step':>9s} "
-              f"{'clips/s':>9s} {'1 epoch (cached)':>20s}")
+              f"{'clips/s':>9s} " + "".join(f"{k:>14s}" for k in conventions))
         for dev, (peak, (eff_lo, eff_hi), bw, mem) in DEVICES.items():
             for batch in (32, 64, 128):
                 need_ddp = state_gib(trainable, 1) + ACT_GIB_PER_CLIP * batch
@@ -164,32 +193,48 @@ def main() -> None:
                     tag, need = "ZeRO-2", need_z2
                 else:
                     print(f"{dev:>11s} {batch:10d} {'>' + f'{mem:.0f}G even w/ ZeRO-2':>18s}"
-                          f" {'-':>9s} {'-':>9s} {'infeasible':>20s}")
+                          f" {'-':>9s} {'-':>9s}" + f"{'infeasible':>14s}" * len(conventions))
                     continue
-                row = []
-                for eff in (eff_hi, eff_lo):
-                    ratio = (peak * eff) / DEVICES["RTX A6000"][0]
-                    compute_ms = (fixed_ms + per_clip_ms * batch) / ratio
-                    comms_ms = ring / bw * 1000.0 * (1 - OVERLAP)
-                    step_ms = compute_ms + comms_ms
-                    row.append((step_ms, batch / (step_ms / 1000.0) * GPUS))
-                (s_hi, t_hi), (s_lo, t_lo) = row
-                span = "" if eff_lo == eff_hi else f" - {fmt_time(clips / t_lo)}"
-                print(f"{dev:>11s} {batch:10d} {f'{need:.1f}G {tag}':>18s} {s_hi:7.0f}ms "
-                      f"{t_hi:9.0f} {fmt_time(clips / t_hi) + span:>20s}")
+                ratio = (peak * eff_hi) / DEVICES["RTX A6000"][0]
+                compute_ms = (fixed_ms + per_clip_ms * batch) / ratio
+                comms_ms = ring / bw * 1000.0 * (1 - OVERLAP)
+                step_ms = compute_ms + comms_ms
+                thru = batch / (step_ms / 1000.0) * GPUS
+                times = "".join(f"{fmt_time(n / thru):>14s}" for n, _ in conventions.values())
+                print(f"{dev:>11s} {batch:10d} {f'{need:.1f}G {tag}':>18s} {step_ms:7.0f}ms "
+                      f"{thru:9.0f}" + times)
         print()
 
+    print("##### can the filesystem keep up? #####")
+    print("A mounted store (blobfuse/NFS) has no seek penalty but pays a round trip per read,")
+    print("and we issue 6 reads per clip. What binds is latency and IOPS, not bandwidth.\n")
+    print(f"{'device':>11s} {'batch/GPU':>10s} {'clips/s/GPU':>12s} {'workers @200ms':>15s} "
+          f"{'MiB/s total':>12s} {'reads/s total':>14s}")
+    fixed_ms, per_clip_ms = marginal_fit("freeze_vision")
+    for dev, (peak, (eff_lo, eff_hi), bw, mem) in DEVICES.items():
+        for batch in (32,):
+            ratio = (peak * eff_hi) / DEVICES["RTX A6000"][0]
+            step_s = (fixed_ms + per_clip_ms * batch) / ratio / 1000.0
+            per_gpu = batch / step_s
+            workers = per_gpu * LOADER_MS_MOUNT / 1000.0
+            print(f"{dev:>11s} {batch:10d} {per_gpu:12.0f} {workers:15.0f} "
+                  f"{per_gpu * GPUS * BYTES_PER_CLIP / 2**20:12.0f} "
+                  f"{per_gpu * GPUS * READS_PER_CLIP:14.0f}")
+    print("\nCaching VAE latents offline removes the video decode entirely: the loader then")
+    print(f"reads {LATENT_BYTES_PER_CLIP / 1024:.0f} KiB of contiguous tensor per clip instead of "
+          "seeking into mp4s, which")
+    print("matters far more on a network mount than it does locally.\n")
+
     fv, go = SCOPES["freeze_vision"][1], SCOPES["gen_only"][1]
-    print(f"Two things decide whether freeze_vision is reachable at all:")
+    print("Two things decide whether freeze_vision is reachable at all:")
     print(f"  * Its resident state under DDP is {state_gib(fv, 1):.1f} GiB -- params, grads and")
-    print(f"    two bf16 Adam moments -- which does not fit a 40 GB A100 at ANY batch size.")
+    print("    two bf16 Adam moments -- which does not fit a 40 GB A100 at ANY batch size.")
     print(f"    ZeRO-2 across {GPUS} GPUs cuts that to {state_gib(fv, GPUS):.1f} GiB and it fits easily.")
     print(f"  * Its all-reduce is {fv / go:.1f}x gen_only's, so the scope costs 1.27x compute on")
     print("    one GPU but more than that on a cluster, and the gap widens as GPUs get faster.")
     print()
-    print("'1 epoch' means one pass over the 1.6 s windows, NOT over every frame -- see the")
-    print("frame-coverage line at the top. Ranges show the efficiency band, fastest first;")
-    print("A100/B200 efficiency is an assumption, the A6000 anchor is a measurement.")
+    print("Times use the optimistic end of each efficiency band; A100/B200 efficiency is an")
+    print("assumption, the A6000 anchor is a measurement.")
 
 
 if __name__ == "__main__":

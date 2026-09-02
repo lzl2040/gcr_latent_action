@@ -15,7 +15,7 @@ export WARMUP=${WARMUP:-3}
 export PER_TASK=${PER_TASK:-1}
 export STAGE=${STAGE:-3}
 
-python -u scripts/train_mot_world.py \
+python -u ${BENCH_SCRIPT:-scripts/train_mot_world.py} \
     --policy.type="robo_contrast" \
     --is_ft=false \
     --dataset.repo_id="whatever" \
