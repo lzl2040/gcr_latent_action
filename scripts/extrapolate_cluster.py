@@ -123,11 +123,16 @@ MIN_EXPOSED = 0.05  # the last gradient bucket, which starts only after backward
 # number of worker processes a node can afford -- an 8-GPU node with 96 vCPU gives 12 per GPU,
 # and that ceiling is what turns a fast GPU into an I/O-bound one.
 WORKERS_PER_GPU = 12
+# (per-clip loader latency ms, whether the VAE has to run online).
+# Reading raw video is not just slower I/O -- it also puts the Wan VAE encoder on the critical
+# path, and that cost is NOT in SCOPES: train_mot_world.py times data / vae / model separately
+# and SCOPES holds the model column only. VAE_MS is measured at BATCH_REF clips, forward-only
+# (the VAE is frozen), and it is serial in front of the MoT forward, so it adds to compute.
 IO_SCENARIOS = {
-    "local warm": LOADER_MS_WARM,     # measured, page cache hot -- what earlier revisions used
-    "blob video": LOADER_MS_MOUNT,    # 6 reads/clip, one network round trip each
-    "blob slow": 500.0,               # throttled or cold container
-    "blob latents": 60.0,             # 1 sequential 72 KiB read, no decode
+    "local warm": (LOADER_MS_WARM, True),
+    "blob video": (LOADER_MS_MOUNT, True),    # 6 reads/clip, one network round trip each
+    "blob slow": (500.0, True),               # throttled or cold container
+    "blob latents": (60.0, False),            # 1 sequential 72 KiB read, no decode, no VAE
 }
 
 TOTAL_PARAMS = 5.588e9
@@ -272,7 +277,7 @@ def main(hours: int) -> None:
           f"{READS_PER_CLIP} reads; {LOADER_MS_WARM:.0f} ms warm-local / "
           f"{LOADER_MS_MOUNT:.0f} ms mount / {LOADER_MS_COLD_HDD:.0f} ms cold-HDD (1 worker)")
     print(f"loader ceiling              : {WORKERS_PER_GPU} workers/GPU -> "
-          + ", ".join(f"{k} {WORKERS_PER_GPU / (v / 1000):.0f} clips/s"
+          + ", ".join(f"{k} {WORKERS_PER_GPU / (v[0] / 1000):.0f} clips/s"
                       for k, v in IO_SCENARIOS.items()))
     print(f"topology                    : {GPUS} GPUs = {GPUS // GPUS_PER_NODE} nodes x "
           f"{GPUS_PER_NODE}; NVLink {NVLINK_GBPS:.0f} GB/s/GPU, NIC per scenario\n")
@@ -304,12 +309,14 @@ def main(hours: int) -> None:
                 continue
             batch, need, tag = fit
             ratio = (peak * eff_hi) / DEVICES["RTX A6000"][0]
-            compute = (fixed_ms + per_clip_ms * batch) / ratio
+            model_c = (fixed_ms + per_clip_ms * batch) / ratio
+            vae_c = VAE_MS / BATCH_REF * batch / ratio
             for fabric, node_gbps in FABRICS.items():
-                intra, inter = comms_ms(trainable, node_gbps)
-                exposed = exposed_comms(intra + inter, compute)
-                for io_name, io_lat in (("blob video", IO_SCENARIOS["blob video"]),
-                                        ("blob latents", IO_SCENARIOS["blob latents"])):
+                for io_name in ("blob video", "blob latents"):
+                    io_lat, needs_vae = IO_SCENARIOS[io_name]
+                    compute = model_c + (vae_c if needs_vae else 0.0)
+                    intra, inter = comms_ms(trainable, node_gbps)
+                    exposed = exposed_comms(intra + inter, compute)
                     io = loader_ms(batch, io_lat)
                     step = max(compute + exposed, io)
                     bound = ("io" if io > compute + exposed
@@ -328,6 +335,11 @@ def main(hours: int) -> None:
     print("              the step gets short, and on a 100G VM it dominates outright")
     print(f"  io       -- {WORKERS_PER_GPU} workers/GPU at 200 ms/clip is "
           f"{WORKERS_PER_GPU / 0.2:.0f} clips/s/GPU; a B200 wants more")
+    print(f"\nRaw video also charges the online Wan VAE: {VAE_MS:.0f} ms per {BATCH_REF} clips "
+          f"on the A6000\n({VAE_MS / BATCH_REF:.1f} ms/clip, forward-only), which is on the "
+          "critical path and is scaled with the\nsame device ratio as the model -- optimistic "
+          "for a conv net, whose small spatial dims\nleave tensor cores emptier than the "
+          "transformer's matmuls do.")
     print()
     fv = SCOPES["freeze_vision"][1]
     for fabric, node_gbps in FABRICS.items():
