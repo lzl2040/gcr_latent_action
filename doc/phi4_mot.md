@@ -315,6 +315,34 @@ token 数归一化而不是全部 token 数，所以 context 长度不同的任�
 E‖noise−latents‖²=2 的理论地板；若 mask 失效则是 1e6 量级。另用计数 hook 确认视觉塔
 恰好只在 i2v/v2v/action 运行。
 
+### 6.4 action 是怎么训的
+
+**和视频用同一个 rectified-flow 目标，在同一次前向里联合去噪**，不是单独接一个回归头。
+
+```
+σ ~ U(0,1)                                  # 每个样本一次，视频目标帧和动作共用
+noisy_a = (1-σ)·a + σ·ε ,  target = ε - a   # 速度场，与视频侧完全同构
+tok_a   = action_proj_in(noisy_a, domain_id) + action_modality_embed
+gen_tokens = [视频 patch token ... , tok_a ...]     # 拼在一起进 GEN 流
+loss = loss_video + w · MSE(action_proj_out(h_a, domain_id), target)
+```
+
+四个设计点：
+
+1. **动作 token 拼进 GEN 序列，而不是另起一路。** GEN 的自注意力是双向的
+   （`is_causal=False`，见 `modeling_mot.py:302`），且每层都跨 `cat([k_und, k_gen])`，
+   所以 32 个动作 token 在每一层既能双向看全部视频 token、也能看到 und 侧的文本和
+   当前帧图像 K/V。动作和未来画面是被**联合**建模的，不是画面预测完再回归动作。
+2. **σ 与视频目标帧共享一次采样。** 推理时两者按同一条噪声调度一起去噪；如果各采各的，
+   模型在训练里就见不到"画面已经很清晰但动作还很糊"这类组合。
+3. **`action_proj_in/out` 是 per-domain 的**（32 个 embodiment domain 各一套 40↔2048）。
+   数据集的动作空间不统一（xyz+ort6d+gripper 与 joint 混杂），共享一套投影会让不同本体
+   的同一列含义打架；`domain_id` 由 loader 给出。
+4. **`action_modality_embed`** 是一个可学习偏置，让 GEN 流能区分动作 token 和视频 token
+   ——两者进来时都是 2048 维，没有这个偏置就只能靠位置编码去猜。
+
+动作只在 `task="action"` 上有 loss（`TaskSpec.action`），在 stage-3 混合里占 50%。
+
 ---
 
 ## 7. 训练速度实测与集群外推
@@ -371,29 +399,58 @@ buffer。换成 `fused=True`（无临时 buffer）+ `PYTORCH_ALLOC_CONF=expandab
 
 ### 外推（`scripts/extrapolate_cluster.py`）
 
-1 万小时 @ 20 fps = 7.2e8 帧；按 1.6 s 不重叠窗口切分 = **2.25e7 个 clip**（每个 clip 覆盖
-32 帧时间线、实际读其中 9 帧）。
+**先把"一个 epoch"说清楚**，这里我原来的措辞有误导：
+
+- 1 万小时 @ 20 fps = **7.2e8 帧**（磁盘上的量）。
+- 按 1.6 s 不重叠窗口切 = 7.2e8 / 32 = **2.25e7 个 clip**，这是我说的"一个 epoch"。
+- 但每个 clip 只**读它跨越的 32 帧里的 9 帧**。所以一个 epoch 实际只喂进 2.02e8 帧
+  = 全部数据的 **28%**。要让每一帧都被看到需要约 **3.6 个 epoch**。
+
+也就是说下面的"过一遍"是**窗口意义上的过一遍，不是每帧都看过**。
+
+**step 时间不与 batch 成正比。** 实测 batch 32 → 2112 ms、batch 64 → 3943 ms，翻倍只涨
+1.87×，因为有一个约 **281 ms 与 batch 无关的地板**（kernel launch + 优化器）。所以外推用
+`281 ms + 57.2 ms/clip` 拟合，而不是按比例放大——后者会把 batch 128 高估 13%。
 
 锚点可信的关键：A6000 是 GA102，bf16 在 FP32 累加下**半速率**，可用峰值约 77 TFLOP/s
-而非官方标称的 155。之前测得 und 跑在 81 TFLOP/s，即基本打满硬件，这才让缩放有意义。
+而非官方标称的 155。实测 und 跑在 78.5 TFLOP/s，即基本打满硬件，这才让缩放有意义。
+A100 / A6000 = 312 / 77.4 = 4.03×，乘效率 0.75–0.90 → **3.0–3.6×**。整条链就是：
 
-16 卡、cached latents、stage-3 混合：
+```
+A6000 batch32 在线VAE  43.0 h   (实测 3.52 s/step × 43,945 步)
+  ÷1.57  latent 预缓存 27.4 h
+  ÷3.63  换 A100      7.5 h
+```
 
-| scope | 设备 | batch/GPU | compute | comms | clips/s | 过一遍 1 万小时 |
+**显存是硬边界，而且我之前的表在这点上是错的。** 实测（47.6 GiB 卡）：
+
+| scope | b8 | b32 | b64 | b128 | DDP 常驻状态 | ZeRO-2 ×16 |
 |---|---|---|---|---|---|---|
-| `gen_only` | RTX A6000 | 32 | 2112 ms | 135 ms | 228 | 1.1 d |
-| `gen_only` | A100-80GB | 128 | 2329 ms | 81 ms | 850 | **7.4 – 8.8 h** |
-| `gen_only` | B200 | 128 | 528 ms | 33 ms | 3651 | **1.7 – 3.1 h** |
-| `freeze_vision` | RTX A6000 | 32 | 2689 ms | 495 ms | 161 | 1.6 d |
-| `freeze_vision` | A100-80GB | 128 | 2965 ms | 297 ms | 628 | **10.0 – 11.8 h** |
-| `freeze_vision` | B200 | 128 | 673 ms | 119 ms | 2587 | **2.4 – 4.1 h** |
+| `gen_only` | 20.4 G | 26.1 G | 35.0 G | **OOM** | 18.5 GiB | 10.9 GiB |
+| `freeze_vision` | 40.8 G | 40.9 G | **OOM** | — | **39.9 GiB** | 12.3 GiB |
 
-在线跑 VAE 大约多 40–50%（`gen_only` A100 11.6–13.9 h、B200 2.7–4.8 h；`freeze_vision`
-A100 14.2–16.9 h、B200 3.4–5.9 h）。
+常驻状态 = 参数 + 梯度 + 两个 bf16 动量。**`freeze_vision` 的 39.9 GiB 在 40 GB A100 上
+任何 batch 都放不下**（连一个样本都跑不了），必须 ZeRO-2 分片；分片后降到 12.3 GiB，
+反而很宽裕。`gen_only` 的 batch 128 需要 ~52 GiB，同样超出 40 GB 和 48 GiB。
 
-**训 und 在集群上比在单卡上更贵。** 单卡是 1.27×，16 卡 A100 是 1.35×、B200 是 1.41×，
-因为全归约体积同步涨了 3.7×（2.89 → 10.56 GB）而算力被摊薄了：通信是每步固定开销，
-显卡越快占比越高。真要走 `freeze_vision`，ZeRO-2 的梯度分片和通信/反向重叠比换显卡更划算。
+16 卡、cached latents、stage-3 混合（batch 取各设备放得下的最大值）：
+
+| scope | 设备 | batch/GPU | 显存 | step | clips/s | 过一遍窗口 |
+|---|---|---|---|---|---|---|
+| `gen_only` | RTX A6000 | 64 | 35.1 G DDP | 4079 ms | 251 | 1.0 d |
+| `gen_only` | A100-40GB | 64 | 35.1 G DDP | 1168 ms | 877 | **7.1 – 8.5 h** |
+| `gen_only` | A100-80GB | 128 | 51.8 G DDP | 2178 ms | 940 | **6.6 – 7.9 h** |
+| `gen_only` | B200 | 128 | 51.8 G DDP | 508 ms | 4030 | **1.6 – 2.8 h** |
+| `freeze_vision` | RTX A6000 | 32 | 40.9 G DDP | 3184 ms | 161 | 1.6 d |
+| `freeze_vision` | A100-40GB | 64 | 28.9 G **ZeRO-2** | 1702 ms | 602 | **10.4 – 12.1 h** |
+| `freeze_vision` | A100-80GB | 128 | 73.2 G DDP | 3030 ms | 676 | **9.2 – 10.9 h** |
+| `freeze_vision` | B200 | 128 | 73.2 G DDP | 739 ms | 2772 | **2.3 – 3.8 h** |
+
+在线跑 VAE（不缓存 latent）大约多 40–50%。
+
+**训 und 在集群上比在单卡上更贵。** 单卡 1.27×，16 卡 A100 1.46×、B200 1.45×，
+因为全归约体积同步涨了 3.7×（2.89 → 10.56 GB）而算力被摊薄：通信是每步固定开销，
+显卡越快占比越高。
 
 给的是区间不是单点：A100/B200 的效率是假设，不是实测。B200 区间刻意取得宽且下沿低
 （0.30–0.55），因为我们的 GEN 专家在 A6000 上就只跑到可用峰值的 67%（52.1 vs und 的
