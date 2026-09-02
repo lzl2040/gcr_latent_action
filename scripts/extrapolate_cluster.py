@@ -16,8 +16,10 @@ number and most often wrong. Two things are done here to avoid that:
 
 The anchor is a real measurement: scripts/train_mot_world.py at batch 32 on one RTX A6000.
 
-Run:  python scripts/extrapolate_cluster.py
+Run:  python scripts/extrapolate_cluster.py [--hours 10000]
 """
+
+import argparse
 
 # --- measured: scripts/train_mot_world.py, batch 32, 1x RTX A6000, 15 steps/task ------------
 # Both scopes were measured through the same code path (fused AdamW, expandable_segments), so
@@ -67,7 +69,7 @@ MIX = {"action": 0.5, "i2v": 0.2, "v2v": 0.15, "t2v": 0.1, "t2i": 0.05}  # world
 BYTES_PARAM = 2
 
 # --- dataset --------------------------------------------------------------------------------
-HOURS = 10_000
+HOURS = 10_000  # overridden by --hours
 FPS = 20
 CHUNK_SECONDS = 1.6
 PIXEL_FRAMES_PER_CLIP = 9
@@ -207,7 +209,7 @@ def samples_by_convention() -> dict[str, tuple[float, str]]:
     frames = HOURS * 3600 * FPS
     clips = HOURS * 3600 / CHUNK_SECONDS
     return {
-        "frames": (frames, "1 sample = 1 frame (7.2e8 / global batch)"),
+        "frames": (frames, f"1 sample = 1 frame ({frames:.3g} / global batch)"),
         "windows": (clips, f"1 sample = one non-overlapping {CHUNK_SECONDS}s window"),
         "coverage": (clips * frames / (clips * PIXEL_FRAMES_PER_CLIP) ,
                      "enough windows that every frame is read at least once"),
@@ -247,15 +249,18 @@ def best_batch(
     return None
 
 
-def main() -> None:
+def main(hours: int) -> None:
+    global HOURS
+    HOURS = hours
     clips = HOURS * 3600 / CHUNK_SECONDS
     frames = HOURS * 3600 * FPS
     frames_seen = clips * PIXEL_FRAMES_PER_CLIP
     conventions = samples_by_convention()
 
-    print(f"10,000 h @ {FPS} fps          : {frames:.3g} pixel frames on disk\n")
-    print("One sample is a 1.6 s window that READS 9 frames and SPANS 32, so 'how many steps")
-    print("is 10,000 hours' has three defensible answers and they differ by 32x:")
+    print(f"{HOURS:,} h @ {FPS} fps        : {frames:.3g} pixel frames on disk\n")
+    print(f"One sample is a {CHUNK_SECONDS} s window that READS {PIXEL_FRAMES_PER_CLIP} "
+          f"frames and SPANS {int(CHUNK_SECONDS * FPS)}, so 'how many steps")
+    print(f"is {HOURS:,} hours' has three defensible answers and they differ by 32x:")
     for name, (n, why) in conventions.items():
         print(f"  {name:>9s} : {n:9.3g} samples   {why}")
     print(f"            'coverage' exists because one pass over the windows touches only "
@@ -336,4 +341,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--hours", type=int, default=HOURS)
+    main(ap.parse_args().hours)
