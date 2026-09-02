@@ -106,9 +106,9 @@ def main() -> int:
     domain = torch.randint(0, cfg.mot.num_embodiment_domains, (b,), device=device)
 
     torch.cuda.reset_peak_memory_stats()
-    # "action" is the only task that exercises every head, so the gradient-coverage check
+    # "joint_action" is the only task that exercises every head, so the gradient-coverage check
     # below is meaningful; the other four are covered by scripts/check_mot_tasks.py.
-    out = model(latents, images, text_ids, actions, domain, task="action")
+    out = model(latents, images, text_ids, actions, domain, task="joint_action")
     print(f"[forward] loss={out['loss'].item():.4f} video={out['loss_video'].item():.4f} "
           f"action={out['loss_action'].item():.4f}")
     out["loss"].backward()
@@ -134,7 +134,7 @@ def main() -> int:
     t0 = time.perf_counter()
     for _ in range(args.steps):
         opt.zero_grad(set_to_none=True)
-        loss = model(latents, images, text_ids, actions, domain, task="action")["loss"]
+        loss = model(latents, images, text_ids, actions, domain, task="joint_action")["loss"]
         loss.backward()
         opt.step()
     torch.cuda.synchronize()

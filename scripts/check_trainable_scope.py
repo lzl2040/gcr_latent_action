@@ -113,7 +113,7 @@ def main() -> None:
             text_ids=text,
             actions=actions,
             domain_id=domain,
-            task="action",
+            task="joint_action",
         )
         out["loss"].backward()
 

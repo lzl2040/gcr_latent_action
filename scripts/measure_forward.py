@@ -55,7 +55,7 @@ def main() -> None:
     ap.add_argument("--action_len", type=int, default=32)
     ap.add_argument("--reps", type=int, default=6)
     ap.add_argument("--scopes", default="gen_only,freeze_vision")
-    ap.add_argument("--task", default="action")
+    ap.add_argument("--task", default="joint_action")
     ap.add_argument("--skip_opt", action="store_true",
                     help="skip the optimizer stage; its state does not fit when the card is shared")
     args = ap.parse_args()

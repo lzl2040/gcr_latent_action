@@ -132,8 +132,6 @@ TASK_MIXES: dict[str, dict[str, float]] = {
     # Everything action, for debugging the action path without generative noise in the loss.
     "action_only": {"policy": 0.5, "joint_action": 0.2, "inv_dyn": 0.2, "fwd_dyn": 0.1},
 }
-STAGE2_MIX = TASK_MIXES["stage2"]
-STAGE3_MIX = TASK_MIXES["stage3"]
 
 
 def parse_mix(spec: str) -> dict[str, float]:

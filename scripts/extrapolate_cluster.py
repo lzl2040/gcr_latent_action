@@ -31,13 +31,33 @@ SCOPES = {
     # ran and the smallest that did not. Extrapolating it linearly was wrong -- gen_only's peak
     # tracks activations while freeze_vision's is pinned by optimizer state, so they have
     # different slopes and only the measured points are trustworthy.
+    #
+    # fwd_dyn/inv_dyn/policy were added after the uncontended runs and could only be measured on
+    # a shared card. Rather than mix contended and uncontended numbers, they are *derived*: the
+    # same run also re-measured the five original tasks, giving a contention factor of
+    # 2914/2338 = 1.246 on joint_action (t2v/i2v/v2v agree at 1.17-1.25), and the new tasks are
+    # divided by it. joint_action, fwd_dyn and inv_dyn have identical 224-token GEN sequences,
+    # and indeed land within 3% of each other; policy's 96 tokens buy 32%, not 57%, because the
+    # UND expert -- not the GEN sequence -- is what dominates a training step.
     "gen_only": (
-        {"t2i": 614.0, "t2v": 1345.0, "i2v": 2147.0, "v2v": 2324.0, "action": 2338.0},
+        {
+            "t2i": 614.0, "t2v": 1345.0, "i2v": 2147.0, "v2v": 2324.0,
+            "joint_action": 2338.0,
+            "fwd_dyn": 2339.0, "inv_dyn": 2402.0, "policy": 1587.0,  # derived, see above
+        },
         1.445e9,
         {8: 20.4, 32: 26.1, 64: 35.0, 128: None},  # None = OOM on a 47.65 GiB A6000
     ),
+    # The three new tasks were never measured under freeze_vision; they carry gen_only's ratio to
+    # joint_action. That is mildly optimistic for policy: with the vision tower training, the UND
+    # side is an even larger share of the step, so shortening the GEN sequence saves relatively
+    # less than the 32% seen here.
     "freeze_vision": (
-        {"t2i": 1173.0, "t2v": 2069.0, "i2v": 2613.0, "v2v": 2613.0, "action": 3018.0},
+        {
+            "t2i": 1173.0, "t2v": 2069.0, "i2v": 2613.0, "v2v": 2613.0,
+            "joint_action": 3018.0,
+            "fwd_dyn": 3019.0, "inv_dyn": 3101.0, "policy": 2049.0,  # scaled, see above
+        },
         5.281e9,
         {8: 40.8, 32: 40.9, 64: None},
     ),
@@ -45,7 +65,11 @@ SCOPES = {
 # Second anchor at batch 64 (gen_only only; freeze_vision OOMs there). Used to fit the
 # marginal per-clip cost instead of assuming the step time is proportional to the batch --
 # it is not, there is a ~281 ms batch-independent floor of launch and optimizer overhead.
-MODEL_MS_B64 = {"t2i": 1066.0, "t2v": 2479.0, "i2v": 4033.0, "v2v": 4170.0, "action": 4420.0}
+MODEL_MS_B64 = {
+    "t2i": 1066.0, "t2v": 2479.0, "i2v": 4033.0, "v2v": 4170.0,
+    "joint_action": 4420.0,
+    "fwd_dyn": 4420.0, "inv_dyn": 4541.0, "policy": 3000.0,  # same ratios as batch 32
+}
 
 VAE_MS = 1274.0  # task- and scope-independent: the same clip is encoded either way
 NUM_WORKERS = 12
@@ -62,7 +86,10 @@ LOADER_MS_MOUNT = 200.0  # assumption for a blobfuse/NFS mount; the two above ar
 BYTES_PER_CLIP = 677 * 1024
 READS_PER_CLIP = 6
 
-MIX = {"action": 0.5, "i2v": 0.2, "v2v": 0.15, "t2v": 0.1, "t2i": 0.05}  # world_model.STAGE3_MIX
+MIX = {  # world_model.TASK_MIXES["stage3"]
+    "policy": 0.20, "i2v": 0.20, "v2v": 0.15, "joint_action": 0.15,
+    "inv_dyn": 0.10, "t2v": 0.10, "fwd_dyn": 0.05, "t2i": 0.05,
+}
 
 # bf16 bytes per trainable parameter that must live on the card, by parallelism strategy.
 # ddp: params(all) + grads + 2 Adam moments.  zero2: grads and moments sharded over GPUS.
