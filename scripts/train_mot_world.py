@@ -33,11 +33,10 @@ from lerobot.common.datasets.contrastive_dataset import (  # noqa: E402
 from lerobot.common.policies.mot.modeling_mot import MoTConfig  # noqa: E402
 from lerobot.common.policies.mot.vae_latents import WanLatentEncoder  # noqa: E402
 from lerobot.common.policies.mot.world_model import (  # noqa: E402
-    STAGE2_MIX,
-    STAGE3_MIX,
     TASK_SPECS,
     MoTWorldModel,
     WorldModelConfig,
+    parse_mix,
     sample_task,
 )
 from lerobot.configs import parser  # noqa: E402
@@ -150,7 +149,10 @@ def main(cfg: TrainPipelineConfig):
     if no_opt:
         print("NO_OPT=1: measuring forward+backward only, no optimizer state allocated")
 
-    mix = STAGE3_MIX if stage == "3" else STAGE2_MIX
+    # MIX takes a preset name ("stage2", "stage3", "action_only", "stage3_joint_only") or an
+    # explicit "policy=0.4,i2v=0.6" string; it defaults to the preset the stage implies.
+    mix = parse_mix(env("MIX", "stage3" if stage == "3" else "stage2", str))
+    print("task mix: " + "  ".join(f"{k}={v:.2f}" for k, v in sorted(mix.items())))
     task_cycle = list(TASK_SPECS) if per_task else None
     timer = Timer(device)
     losses = defaultdict(list)
@@ -220,10 +222,12 @@ def main(cfg: TrainPipelineConfig):
             timer.add("data/all", t_data)
             timer.add("vae/all", t_vae)
             timer.add("model/all", t_model)
-            losses[task].append(out["loss_video"].item())
+            for term in ("loss_video", "loss_action"):
+                if term in out:
+                    losses[f"{task}/{term}"].append(out[term].item())
         if step % 5 == 0:
             print(
-                f"step {step:3d} [{task:6s}] loss {out['loss'].item():7.3f}  "
+                f"step {step:3d} [{task:12s}] loss {out['loss'].item():7.3f}  "
                 f"data {t_data * 1e3:6.0f} ms  vae {t_vae * 1e3:6.0f} ms  model {t_model * 1e3:6.0f} ms"
                 + ("  (warmup)" if step < warmup else "")
             )
@@ -231,20 +235,23 @@ def main(cfg: TrainPipelineConfig):
 
     peak = torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0
     print(f"\npeak memory {peak:.1f} GiB at batch {batch_size}\n")
-    print(f"{'task':8s} {'data':>9s} {'vae':>9s} {'model':>9s} {'step':>9s} {'clip/s':>9s} {'loss':>8s}")
+    print(f"{'task':13s} {'data':>9s} {'vae':>9s} {'model':>9s} {'step':>9s} {'clip/s':>9s} {'L_video':>9s} {'L_act':>9s}")
     for task in TASK_SPECS:
         if timer.n[f"model/{task}"] == 0:
             continue
         d, v, m = (timer.mean(f"{k}/{task}") for k in ("data", "vae", "model"))
         step_s = d + v + m
-        mean_loss = sum(losses[task]) / max(1, len(losses[task]))
+        cells = []
+        for term in ("loss_video", "loss_action"):
+            vals = losses[f"{task}/{term}"]
+            cells.append(f"{sum(vals) / len(vals):9.3f}" if vals else f"{'-':>9s}")
         print(
-            f"{task:8s} {d * 1e3:8.0f}m {v * 1e3:8.0f}m {m * 1e3:8.0f}m {step_s * 1e3:8.0f}m "
-            f"{batch_size / step_s:9.2f} {mean_loss:8.3f}"
+            f"{task:13s} {d * 1e3:8.0f}m {v * 1e3:8.0f}m {m * 1e3:8.0f}m {step_s * 1e3:8.0f}m "
+            f"{batch_size / step_s:9.2f} " + " ".join(cells)
         )
     d, v, m = (timer.mean(f"{k}/all") for k in ("data", "vae", "model"))
     print(
-        f"{'ALL':8s} {d * 1e3:8.0f}m {v * 1e3:8.0f}m {m * 1e3:8.0f}m {(d + v + m) * 1e3:8.0f}m "
+        f"{'ALL':13s} {d * 1e3:8.0f}m {v * 1e3:8.0f}m {m * 1e3:8.0f}m {(d + v + m) * 1e3:8.0f}m "
         f"{batch_size / (d + v + m):9.2f}"
     )
     print(

@@ -104,23 +104,35 @@ def main() -> int:
         dt = time.perf_counter() - t0
         used_vision = vision_calls["n"] > before
 
-        loss = out["loss_video"].item()
+        # Which loss terms exist is itself part of the contract: a stream that is "clean" is
+        # conditioning, so it must NOT be a target, and a stream that is "absent" cannot be.
+        has_video = "loss_video" in out
+        has_action = "loss_action" in out
+        terms_ok = has_video == (spec.video == "noisy") and has_action == (
+            spec.action == "noisy"
+        )
+
+        loss = out["loss_video"].item() if has_video else float("nan")
         # Random init predicts ~0, so the target's own scale sets the floor:
-        # E||noise - latents||^2 ~ 2 per element on the *target* frames only.
-        mask_ok = loss < 100.0
+        # E||noise - latents||^2 ~ 2 per element on the *target* frames only. The context
+        # frames were scaled up by CONTEXT_SCALE, so if any of them leaked into the loss it
+        # would be enormous. Only meaningful where a video loss exists at all.
+        mask_ok = not has_video or loss < 100.0
         vision_ok = used_vision == spec.image
         grads = sum(
             1
             for n, p in model.named_parameters()
             if p.requires_grad and p.grad is not None and p.grad.abs().sum() > 0
         )
-        good = mask_ok and vision_ok and torch.isfinite(out["loss"]).item()
+        good = mask_ok and vision_ok and terms_ok and torch.isfinite(out["loss"]).item()
         ok &= good
         print(
-            f"[{task:6s}] ctx={spec.context} T={t_lat} img={int(spec.image)} act={int(spec.action)}  "
-            f"loss_video={loss:9.3f}"
-            + (f" loss_action={out['loss_action'].item():.3f}" if "loss_action" in out else "")
+            f"[{task:12s}] ctx={spec.context} T={t_lat} img={int(spec.image)} "
+            f"video={spec.video:6s} action={spec.action:6s}  "
+            + (f"loss_video={loss:9.3f}" if has_video else f"{'loss_video=--':>19s}")
+            + (f" loss_action={out['loss_action'].item():.3f}" if has_action else "")
             + f"  vision_ran={int(used_vision)}(want {int(spec.image)})"
+            f"  terms={'OK' if terms_ok else 'BAD'}"
             f"  grad_tensors={grads}  {dt * 1e3:6.0f} ms  {'OK' if good else 'FAIL'}"
         )
         if not mask_ok:

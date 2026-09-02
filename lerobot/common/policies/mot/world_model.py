@@ -22,6 +22,7 @@ import json
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -36,38 +37,128 @@ QWEN3VL_MEAN = 0.5
 QWEN3VL_STD = 0.5
 
 
+Role = Literal["noisy", "clean", "absent"]
+
+
 @dataclass
 class TaskSpec:
     """One entry of the Cosmos stage-2/stage-3 task family.
 
-    Every task is the *same* rectified-flow objective; they differ only in how many latent
-    frames start clean and whether the understanding stream gets an image. That is the whole
-    point of the per-frame sigma: one code path covers all five, instead of five branches that
-    can drift apart.
+    Every task is the *same* rectified-flow objective. What separates them is the **role** each
+    of the two streams plays, and there are only three possibilities per stream:
+
+    ``noisy``   sigma ~ U(0,1), enters the transformer noised, **is** the prediction target.
+    ``clean``   sigma = 0, enters the transformer as ground truth, excluded from the loss.
+    ``absent``  not in the sequence at all -- the model cannot see it and does not pay for it.
+
+    Crossing those roles over the two streams is what generates the whole family, including
+    forward and inverse dynamics, from one code path::
+
+        video \\ action   absent        clean          noisy
+        noisy            t2v/i2v/v2v   fwd_dyn        joint_action
+        clean            (no target)   --             inv_dyn
+        absent           --            --             policy
 
     ``context`` counts *latent* frames, not pixel frames. Wan's VAE maps frame 0 to latent 0
     on its own, so ``context=1`` is exactly "condition on the first frame" -- image-to-video.
-    ``latent_frames=None`` means "use whatever the clip provides".
+    Context frames are always clean and always excluded from the loss; ``video`` describes the
+    frames *after* the context. ``latent_frames=None`` means "use whatever the clip provides".
     """
 
     context: int
     image: bool
-    action: bool = False
+    video: Role = "noisy"
+    action: Role = "absent"
     latent_frames: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.video == "absent" and self.context == 0:
+            raise ValueError("a task with no video target needs at least one context frame")
+        if self.video != "noisy" and self.action != "noisy":
+            raise ValueError(
+                "at least one stream must be 'noisy', otherwise the task has no target"
+            )
 
 
 TASK_SPECS: dict[str, TaskSpec] = {
+    # --- stage 2: generation only -----------------------------------------------------------
     "t2i": TaskSpec(context=0, image=False, latent_frames=1),
     "t2v": TaskSpec(context=0, image=False),
     "i2v": TaskSpec(context=1, image=True),
     "v2v": TaskSpec(context=2, image=True),
-    "action": TaskSpec(context=1, image=True, action=True),
+    # --- stage 3: action ---------------------------------------------------------------------
+    # Joint denoising of future frames and action. The two sigmas are drawn *independently*,
+    # so the model sees clean-future/noisy-action and noisy-future/clean-action as well as the
+    # diagonal. Sharing one sigma, as this used to, trains only the diagonal and leaves
+    # deployment -- where the future does not exist, i.e. sigma_video = 1 -- undertrained.
+    "joint_action": TaskSpec(context=1, image=True, video="noisy", action="noisy"),
+    # Forward dynamics: given the true action, predict the frames it produces. The action is
+    # conditioning here, not a target, so it enters clean and takes no loss.
+    "fwd_dyn": TaskSpec(context=1, image=True, video="noisy", action="clean"),
+    # Inverse dynamics: given clean before-and-after frames, recover the action between them.
+    "inv_dyn": TaskSpec(context=1, image=True, video="clean", action="noisy"),
+    # Deployment condition: only the current observation exists. Future frames are dropped
+    # from the sequence entirely, which is also what makes this the cheap inference path --
+    # video tokens are ~6x the action tokens, so not generating them is most of the cost.
+    "policy": TaskSpec(context=1, image=True, video="absent", action="noisy"),
 }
 
-# Stage-3 mix: action prediction is the objective, but the stage-2 tasks stay in to stop the
-# generative branch drifting while the action head trains.
-STAGE3_MIX = {"action": 0.5, "i2v": 0.2, "v2v": 0.15, "t2v": 0.1, "t2i": 0.05}
-STAGE2_MIX = {"t2i": 0.25, "t2v": 0.25, "i2v": 0.3, "v2v": 0.2}
+TASK_MIXES: dict[str, dict[str, float]] = {
+    "stage2": {"t2i": 0.25, "t2v": 0.25, "i2v": 0.3, "v2v": 0.2},
+    # Stage 3: action is the objective, but the stage-2 tasks stay in to stop the generative
+    # branch drifting while the action head trains. The action budget is split across the four
+    # action tasks rather than spent entirely on the joint one, because `policy` is the only
+    # one that matches deployment and `inv_dyn`/`fwd_dyn` are the two halves of the dynamics
+    # the joint task has to learn implicitly.
+    "stage3": {
+        "policy": 0.2,
+        "joint_action": 0.15,
+        "inv_dyn": 0.1,
+        "fwd_dyn": 0.05,
+        "i2v": 0.2,
+        "v2v": 0.15,
+        "t2v": 0.1,
+        "t2i": 0.05,
+    },
+    # The old stage-3 mix, kept so measurements taken before the task family grew stay
+    # reproducible.
+    "stage3_joint_only": {
+        "joint_action": 0.5,
+        "i2v": 0.2,
+        "v2v": 0.15,
+        "t2v": 0.1,
+        "t2i": 0.05,
+    },
+    # Everything action, for debugging the action path without generative noise in the loss.
+    "action_only": {"policy": 0.5, "joint_action": 0.2, "inv_dyn": 0.2, "fwd_dyn": 0.1},
+}
+STAGE2_MIX = TASK_MIXES["stage2"]
+STAGE3_MIX = TASK_MIXES["stage3"]
+
+
+def parse_mix(spec: str) -> dict[str, float]:
+    """Resolve a preset name or an explicit ``"policy=0.4,i2v=0.6"`` string into a mix.
+
+    Weights are renormalised, so they can be given as counts or percentages.
+    """
+    if spec in TASK_MIXES:
+        return dict(TASK_MIXES[spec])
+    mix: dict[str, float] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, weight = part.partition("=")
+        name = name.strip()
+        if name not in TASK_SPECS:
+            raise ValueError(f"unknown task {name!r}; expected one of {sorted(TASK_SPECS)}")
+        mix[name] = float(weight) if weight else 1.0
+    if not mix:
+        raise ValueError(f"empty task mix {spec!r}")
+    total = sum(mix.values())
+    if total <= 0:
+        raise ValueError(f"task mix {spec!r} sums to {total}")
+    return {k: v / total for k, v in mix.items()}
 
 
 def sample_task(mix: dict[str, float], generator: torch.Generator | None = None) -> str:
@@ -334,8 +425,12 @@ class MoTWorldModel(nn.Module):
 
         The noise level is per *frame*, not per sample: the first ``spec.context`` latent
         frames stay at sigma=0, so they enter the transformer clean and are excluded from the
-        loss, while the rest get a shared sigma drawn per sample. Predicting a target the model
-        was handed exactly would otherwise dominate the average and read as progress.
+        loss. What happens to the rest, and to the action, is ``spec.video`` / ``spec.action``.
+
+        The two sigmas are drawn **independently**. Tying them, as an earlier version did, only
+        ever trains the diagonal sigma_video == sigma_action, so the model never learns to
+        produce an action when the future is unavailable -- which is precisely the deployment
+        condition (sigma_video = 1, or the frames simply absent).
         """
         if task not in TASK_SPECS:
             raise ValueError(f"unknown task {task!r}; expected one of {sorted(TASK_SPECS)}")
@@ -343,20 +438,23 @@ class MoTWorldModel(nn.Module):
 
         if spec.latent_frames is not None:
             latents = latents[:, :, : spec.latent_frames]
+        if spec.video == "absent":
+            latents = latents[:, :, : spec.context]
         b, _, t_lat, _, _ = latents.shape
         device = latents.device
-        if spec.context >= t_lat:
+        if spec.video != "absent" and spec.context >= t_lat:
             raise ValueError(
                 f"task {task!r} wants {spec.context} context frames but the clip has {t_lat}"
             )
         if not spec.image:
             pixel_values = None
 
-        # (B, T): 0 on context frames, one shared draw on the frames being predicted.
-        sigma_sample = torch.rand(b, device=device, dtype=latents.dtype)
+        # (B, T): 0 on context frames and on frames the task keeps clean, one draw elsewhere.
+        sigma_video = torch.rand(b, device=device, dtype=latents.dtype)
         frame_is_target = torch.zeros(b, t_lat, device=device, dtype=latents.dtype)
-        frame_is_target[:, spec.context :] = 1.0
-        sigma = sigma_sample.unsqueeze(1) * frame_is_target
+        if spec.video == "noisy":
+            frame_is_target[:, spec.context :] = 1.0
+        sigma = sigma_video.unsqueeze(1) * frame_is_target
 
         noise = torch.randn_like(latents)
         s = sigma.view(b, 1, t_lat, 1, 1)
@@ -370,12 +468,22 @@ class MoTWorldModel(nn.Module):
         token_sigma = sigma.repeat_interleave(tokens_per_frame, dim=1)
 
         n_action = 0
-        want_action = spec.action and actions is not None and self.config.mot.enable_action_gen
+        want_action = (
+            spec.action != "absent"
+            and actions is not None
+            and self.config.mot.enable_action_gen
+        )
         if want_action:
             if domain_id is None:
                 domain_id = torch.zeros(b, dtype=torch.long, device=device)
             action_noise = torch.randn_like(actions)
-            sa = sigma_sample.view(b, 1, 1)
+            # "clean" means the action is conditioning, not a target: sigma = 0 and no loss.
+            sigma_action = (
+                torch.rand(b, device=device, dtype=latents.dtype)
+                if spec.action == "noisy"
+                else torch.zeros(b, device=device, dtype=latents.dtype)
+            )
+            sa = sigma_action.view(b, 1, 1)
             noisy_actions = (1.0 - sa) * actions + sa * action_noise
             action_target = action_noise - actions
             action_tokens = self.mot.action_proj_in(noisy_actions, domain_id)
@@ -383,29 +491,39 @@ class MoTWorldModel(nn.Module):
             gen_tokens = torch.cat([gen_tokens, action_tokens], dim=1)
             n_action = action_tokens.shape[1]
             token_sigma = torch.cat(
-                [token_sigma, sigma_sample.unsqueeze(1).expand(b, n_action)], dim=1
+                [token_sigma, sigma_action.unsqueeze(1).expand(b, n_action)], dim=1
             )
 
         kv, rope_und = self.encode_und(pixel_values, text_ids)
         pos = self.gen_positions(t_lat, n_action, device).unsqueeze(1).expand(3, b, -1)
         hidden = self.mot.forward_gen(gen_tokens, pos, kv, rope_und, token_sigma * 1000.0)
 
-        video_pred = self.mot.proj_out(hidden[:, :n_video]).float()
-        video_target = self.patchify(target).float()
-        # Mean over the predicted frames only. Dividing by the target count rather than by the
-        # full token count keeps the loss scale comparable across tasks with different amounts
-        # of context, so t2v and v2v numbers can be read side by side.
-        loss_mask = frame_is_target.repeat_interleave(tokens_per_frame, dim=1).unsqueeze(-1).float()
-        loss_video = ((video_pred - video_target).pow(2) * loss_mask).sum() / loss_mask.sum().clamp(
-            min=1.0
-        ) / video_pred.shape[-1]
-        out = {"loss_video": loss_video, "loss": loss_video}
+        out: dict[str, torch.Tensor] = {}
+        total = None
+        if spec.video == "noisy":
+            video_pred = self.mot.proj_out(hidden[:, :n_video]).float()
+            video_target = self.patchify(target).float()
+            # Mean over the predicted frames only. Dividing by the target count rather than by
+            # the full token count keeps the loss scale comparable across tasks with different
+            # amounts of context, so t2v and v2v numbers can be read side by side.
+            loss_mask = (
+                frame_is_target.repeat_interleave(tokens_per_frame, dim=1).unsqueeze(-1).float()
+            )
+            loss_video = ((video_pred - video_target).pow(2) * loss_mask).sum() / loss_mask.sum(
+            ).clamp(min=1.0) / video_pred.shape[-1]
+            out["loss_video"] = loss_video
+            total = loss_video
 
-        if n_action:
+        if n_action and spec.action == "noisy":
             action_pred = self.mot.action_proj_out(hidden[:, n_video:], domain_id)
             loss_action = F.mse_loss(action_pred.float(), action_target.float())
             out["loss_action"] = loss_action
-            out["loss"] = loss_video + self.config.action_loss_weight * loss_action
+            weighted = self.config.action_loss_weight * loss_action
+            total = weighted if total is None else total + weighted
+
+        if total is None:  # __post_init__ rules this out; a guard beats a silent zero loss.
+            raise RuntimeError(f"task {task!r} produced no loss term")
+        out["loss"] = total
         return out
 
     # ------------------------------------------------------------------ reporting

@@ -290,19 +290,40 @@ seek 关键帧和跨 span 解码主导，中间帧本来就在解、只是被丢
 latent 用 checkpoint 自带的 `latents_mean/std` 逐通道归一化。这一步不能省：该 checkpoint 的
 通道 std 跨越 0.35–1.17，不归一化的话 loss 会被少数几个通道支配。
 
-### 6.3 一条代码路径覆盖五个任务
+### 6.3 一条代码路径覆盖八个任务
 
 Cosmos 第二/三阶段的任务差别只有两点：**多少个 latent 帧是干净的**，以及
-**理解侧有没有输入图**。所以把噪声水平从 per-sample 改成 **per-frame** 之后，五个任务
-共用同一份 rectified-flow 代码，而不是五个会各自漂移的分支。
+**理解侧有没有输入图**。所以把噪声水平从 per-sample 改成 **per-frame** 之后，所有任务
+共用同一份 rectified-flow 代码，而不是一堆会各自漂移的分支。
 
-| 任务 | context 帧 | und 输入图 | 动作 token |
+把这个思路推到底：**视频**和**动作**是两条独立的流，每条流各取三种角色之一——
+
+- `noisy`：σ~U(0,1) 加噪，**是预测目标**，出 loss；
+- `clean`：σ=0 原样输入，只作条件，**不出 loss**；
+- `absent`：根本不进序列。
+
+两条流的角色叉乘就长出了整个任务族，不用为每个任务写一段代码：
+
+| video \ action | `absent` | `clean` | `noisy` |
 |---|---|---|---|
-| `t2i` | 0 | ✗ | ✗ |
-| `t2v` | 0 | ✗ | ✗ |
-| `i2v` | 1 | ✓ | ✗ |
-| `v2v` | 2 | ✓ | ✗ |
-| `action` | 1 | ✓ | ✓ |
+| `noisy` | `t2i` `t2v` `i2v` `v2v` | `fwd_dyn` | `joint_action` |
+| `clean` | —（没有目标） | —（没有目标） | `inv_dyn` |
+| `absent` | — | — | `policy` |
+
+| 任务 | context 帧 | und 输入图 | video | action | GEN token 数 |
+|---|---|---|---|---|---|
+| `t2i` | 0 | ✗ | noisy | absent | 64 |
+| `t2v` | 0 | ✗ | noisy | absent | 192 |
+| `i2v` | 1 | ✓ | noisy | absent | 192 |
+| `v2v` | 2 | ✓ | noisy | absent | 192 |
+| `joint_action` | 1 | ✓ | noisy | noisy | 224 |
+| `fwd_dyn` | 1 | ✓ | noisy | clean | 224 |
+| `inv_dyn` | 3 | ✓ | clean | noisy | 224 |
+| `policy` | 1 | ✓ | absent | noisy | **96** |
+
+`TaskSpec.__post_init__` 拒绝两种非法组合：`video="absent"` 且 `context=0`（序列里啥都
+没有），以及两条流都不是 `noisy`（没有训练目标）。`forward()` 在一个 loss 项都没产生时
+直接 `RuntimeError`——宁可炸也不要静默地回一个 0 loss。
 
 context 帧 σ=0，原样进 transformer 并**排除出 loss**；其余帧共享一次采样。loss 按目标
 token 数归一化而不是全部 token 数，所以 context 长度不同的任务数值可以横向比较。
@@ -311,17 +332,21 @@ token 数归一化而不是全部 token 数，所以 context 长度不同的任�
 "没有图"长什么样）。
 
 验证方式（`scripts/check_mot_tasks.py`）：把 context 帧的 latent **放大 1000 倍**，
-泄漏就会变得无法忽视。五个任务的 loss 全部落在 **2.32–2.35**，即单位方差下
-E‖noise−latents‖²=2 的理论地板；若 mask 失效则是 1e6 量级。另用计数 hook 确认视觉塔
-恰好只在 i2v/v2v/action 运行。
+泄漏就会变得无法忽视。八个任务的 loss 全部落在 **2.3 附近**，即单位方差下
+E‖noise−latents‖²=2 的理论地板；若 mask 失效则是 1e6 量级。同时检查
+**出现了哪些 loss 项**与角色一致（`clean`/`absent` 的流不许有 loss），并用计数 hook 确认
+视觉塔恰好只在有 und 输入图的任务上运行。
+
+一个顺带的旁证：`joint_action` 有 372 个带梯度的张量，`fwd_dyn`/`inv_dyn`/`policy`
+都是 370。差的两个正是不出 loss 那条流的 `proj_out` 权重和 bias——角色确实生效了。
 
 ### 6.4 action 是怎么训的
 
-**和视频用同一个 rectified-flow 目标，在同一次前向里联合去噪**，不是单独接一个回归头。
+**和视频用同一个 rectified-flow 目标，在同一次前向里去噪**，不是单独接一个回归头。
 
 ```
-σ ~ U(0,1)                                  # 每个样本一次，视频目标帧和动作共用
-noisy_a = (1-σ)·a + σ·ε ,  target = ε - a   # 速度场，与视频侧完全同构
+σ_a ~ U(0,1)                                # action 流自己采，不跟视频共享
+noisy_a = (1-σ_a)·a + σ_a·ε ,  target = ε - a       # 速度场，与视频侧完全同构
 tok_a   = action_proj_in(noisy_a, domain_id) + action_modality_embed
 gen_tokens = [视频 patch token ... , tok_a ...]     # 拼在一起进 GEN 流
 loss = loss_video + w · MSE(action_proj_out(h_a, domain_id), target)
@@ -333,15 +358,75 @@ loss = loss_video + w · MSE(action_proj_out(h_a, domain_id), target)
    （`is_causal=False`，见 `modeling_mot.py:302`），且每层都跨 `cat([k_und, k_gen])`，
    所以 32 个动作 token 在每一层既能双向看全部视频 token、也能看到 und 侧的文本和
    当前帧图像 K/V。动作和未来画面是被**联合**建模的，不是画面预测完再回归动作。
-2. **σ 与视频目标帧共享一次采样。** 推理时两者按同一条噪声调度一起去噪；如果各采各的，
-   模型在训练里就见不到"画面已经很清晰但动作还很糊"这类组合。
-3. **`action_proj_in/out` 是 per-domain 的**（32 个 embodiment domain 各一套 40↔2048）。
+2. **`action_proj_in/out` 是 per-domain 的**（32 个 embodiment domain 各一套 40↔2048）。
    数据集的动作空间不统一（xyz+ort6d+gripper 与 joint 混杂），共享一套投影会让不同本体
    的同一列含义打架；`domain_id` 由 loader 给出。
-4. **`action_modality_embed`** 是一个可学习偏置，让 GEN 流能区分动作 token 和视频 token
+3. **`action_modality_embed`** 是一个可学习偏置，让 GEN 流能区分动作 token 和视频 token
    ——两者进来时都是 2048 维，没有这个偏置就只能靠位置编码去猜。
+4. **σ_video 和 σ_action 分开采。** 见下。
 
-动作只在 `task="action"` 上有 loss（`TaskSpec.action`），在 stage-3 混合里占 50%。
+#### 为什么必须把两个 σ 解耦
+
+最初只有一个 `action` 任务，视频目标帧和动作**共用同一次 σ 采样**。这看着"和推理一致"，
+实际上训练只覆盖了 (σ_video, σ_action) 平面上的**对角线**：
+
+- σ 很小时，未来帧几乎是干净的，动作可以直接从画面差里读出来——任务退化成逆动力学，
+  模型学到的是"看图倒推"而不是"预测该做什么"。
+- 而**部署时根本没有未来帧**，等价于 σ_video=1。这恰好是对角线上最靠边、样本最少、
+  最没训到的那一端。
+
+也就是说，动作的训练预算基本花在了推理时永远不会出现的条件上。解耦之后
+`sigma_video` 和 `sigma_action` 各采各的，再配上 `clean`/`absent` 两种角色，就得到了
+四个互补的动作任务：
+
+| 任务 | 给什么 | 要什么 | 作用 |
+|---|---|---|---|
+| `joint_action` | 当前帧 | 未来帧 + 动作，σ 独立 | 覆盖整个 σ 平面而不只是对角线 |
+| `fwd_dyn` | 当前帧 + **干净动作** | 未来帧 | 前向动力学：动作 → 后果 |
+| `inv_dyn` | **干净的**当前帧+未来帧 | 动作 | 逆动力学：把"看图倒推"独立出来，不再污染 policy |
+| `policy` | 只有当前帧 | 动作 | **和部署条件完全一致**，序列 96 token（对比 224） |
+
+`policy` 之所以便宜：latent 网格 16×16，`latent_patch_size=2` → 每帧 8×8=64 token。
+留 3 帧就是 192 video + 32 action = 224；`video="absent"` 砍掉未来帧后只剩 64+32=96。
+采样时 UND 侧 KV 只算一次，之后 N 步去噪只重跑 GEN——所以这 2.3× 是要乘以 N 的。
+
+#### 采样比例可配
+
+`TASK_MIXES` 里放了几个预设，也可以直接写权重（会自动归一化）：
+
+```bash
+MIX=stage3        bash scripts/bench_mot_scope.sh   # 预设
+MIX=action_only   bash scripts/bench_mot_scope.sh
+MIX="policy=3,fwd_dyn=1,i2v=1"  bash scripts/bench_mot_scope.sh   # → 0.6/0.2/0.2
+```
+
+| 预设 | 内容 |
+|---|---|
+| `stage2` | t2i .25 / t2v .25 / i2v .30 / v2v .20（没有动作，纯生成预训练） |
+| `stage3` | policy .20 / i2v .20 / v2v .15 / joint_action .15 / inv_dyn .10 / t2v .10 / fwd_dyn .05 / t2i .05 |
+| `stage3_joint_only` | 解耦之前的老配方，留作对照 |
+| `action_only` | policy .50 / joint_action .20 / inv_dyn .20 / fwd_dyn .10 |
+
+#### 实测（batch 4，A6000，`PER_TASK=1`，真实数据）
+
+```
+task               data       vae     model      step    clip/s   L_video     L_act
+t2i                  1m      188m      730m      918m      4.36     1.362         -
+t2v                  1m      212m      746m      959m      4.17     1.572         -
+i2v                  1m      203m     1044m     1247m      3.21     1.665         -
+v2v                  5m      204m      897m     1107m      3.61     1.773         -
+joint_action         1m      192m      973m     1166m      3.43     1.735     2.631
+fwd_dyn              1m      203m      903m     1107m      3.61     1.750         -
+inv_dyn              2m      207m      928m     1137m      3.52         -     2.301
+policy               1m      194m     1135m     1329m      3.01         -     2.189
+```
+
+L_video / L_act 出现的位置和角色表完全对上：`clean` 和 `absent` 的流没有 loss。
+
+**但 per-task 的 model 时间不要当真**：24 步 ÷ 8 任务 ≈ 每个任务 3 个样本，纯噪声；
+而且 GEN 序列只有 64–224 token，相比 UND 那侧（Phi-4-mini 3.8 B 跑文本+图像 token）
+根本不是瓶颈，所以训练时各任务每步开销大致是平的。`policy` 的 2.3× 便宜只在**推理**
+时兑现，因为那时 UND 只跑一次而 GEN 要跑 N 次。
 
 ---
 
