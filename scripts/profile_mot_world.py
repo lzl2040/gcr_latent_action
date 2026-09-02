@@ -47,7 +47,6 @@ def main() -> int:
     torch.manual_seed(0)
     mot = MoTConfig.from_phi_dir(args.phi_dir)
     model = MoTWorldModel(WorldModelConfig(mot=mot, qwen3vl_dir=args.qwen3vl_dir))
-    model.mot.freeze_und()
     model = model.to(device=device, dtype=dtype).eval()
 
     b = args.batch

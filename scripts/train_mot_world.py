@@ -77,6 +77,7 @@ def main(cfg: TrainPipelineConfig):
     qwen_dir = os.environ.get("QWEN_DIR", "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct")
     vae_dir = os.environ.get("VAE_DIR", "/Data/lzl/huggingface/Cosmos3-Edge/vae")
     per_task = os.environ.get("PER_TASK", "1") == "1"
+    scope = os.environ.get("SCOPE", "gen_only")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16
@@ -117,7 +118,9 @@ def main(cfg: TrainPipelineConfig):
     assert mot.latent_channels == vae.latent_channels, (
         f"MoT expects {mot.latent_channels} latent channels, VAE produces {vae.latent_channels}"
     )
-    model = MoTWorldModel(WorldModelConfig(mot=mot, qwen3vl_dir=qwen_dir)).to(device=device, dtype=dtype)
+    model = MoTWorldModel(
+        WorldModelConfig(mot=mot, qwen3vl_dir=qwen_dir, trainable_scope=scope)
+    ).to(device=device, dtype=dtype)
     model.load_pretrained()
     model.mot.gradient_checkpointing = True
     model.train()
@@ -125,12 +128,27 @@ def main(cfg: TrainPipelineConfig):
     rep = model.param_report()
     print(
         f"params: total {rep['total'] / 1e9:.3f}B  trainable {rep['trainable'] / 1e9:.3f}B  "
+        f"scope={scope}  "
         f"(vae {sum(p.numel() for p in vae.vae.parameters()) / 1e6:.0f}M frozen, not counted)"
     )
 
-    opt = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad], lr=1e-4, weight_decay=0.01
+    # A 5.28B-trainable scope needs ~43 GB of params+grads+Adam state, which does not fit on
+    # one 48 GiB card. NO_OPT=1 drops the optimizer so the forward/backward compute -- the part
+    # that a faster GPU or more GPUs actually changes -- can still be measured and compared
+    # across scopes; the optimizer state is ZeRO-sharded in any real run of this size anyway.
+    no_opt = os.environ.get("NO_OPT", "0") == "1"
+    opt = (
+        None
+        if no_opt
+        else torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=1e-4,
+            weight_decay=0.01,
+            fused=device.type == "cuda",
+        )
     )
+    if no_opt:
+        print("NO_OPT=1: measuring forward+backward only, no optimizer state allocated")
 
     mix = STAGE3_MIX if stage == "3" else STAGE2_MIX
     task_cycle = list(TASK_SPECS) if per_task else None
@@ -184,9 +202,14 @@ def main(cfg: TrainPipelineConfig):
             task=task,
         )
         out["loss"].backward()
-        torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
-        opt.step()
-        opt.zero_grad(set_to_none=True)
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        if opt is not None:
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        else:
+            for p in trainable:
+                p.grad = None
         timer.sync()
         t_model = time.perf_counter() - t0
 

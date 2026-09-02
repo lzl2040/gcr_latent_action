@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -78,14 +78,57 @@ def sample_task(mix: dict[str, float], generator: torch.Generator | None = None)
 
 
 @dataclass
+class TrainableScope:
+    """Which of the four weight groups take gradients.
+
+    The interesting choice is the understanding branch. Cosmos3 keeps it frozen, which is what
+    makes a from-scratch gen expert stable: gen attends over und's per-layer K/V at every
+    layer, so a moving und changes the input distribution of all 1.42B gen weights at once.
+    pi-0.5 takes the opposite view and trains everything except the vision encoder, on the
+    argument that the language model has to adapt to embodied data. Both are defensible; they
+    differ by ~3.8B optimizer parameters, so the choice is as much a memory decision as a
+    modelling one.
+    """
+
+    vision: bool  # Qwen3-VL ViT
+    merger: bool  # 2x2 vision merger into Phi's width
+    und: bool  # Phi-4-mini
+    gen: bool  # generation expert
+
+
+TRAINABLE_SCOPES: dict[str, TrainableScope] = {
+    # Cosmos3-style: only the generation side moves. Cheapest and the safest for a
+    # from-scratch gen expert.
+    "gen_only": TrainableScope(vision=False, merger=True, und=False, gen=True),
+    # pi-0.5-style: freeze the vision encoder, train the rest.
+    "freeze_vision": TrainableScope(vision=False, merger=True, und=True, gen=True),
+    "all": TrainableScope(vision=True, merger=True, und=True, gen=True),
+}
+
+
+@dataclass
 class WorldModelConfig:
     mot: MoTConfig
     qwen3vl_dir: str = "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct"
     vision_merge_size: int = 2
+    trainable_scope: str = "gen_only"
+    # Applied on top of the scope. Freezing the merger lets the und stack run under no_grad
+    # in the gen_only scope, which measured 1.58x faster; it does nothing once und is trained.
     freeze_vision_projector: bool = False
     und_grad_checkpointing: bool = True
     latent_grid: int = 16
     action_loss_weight: float = 1.0
+
+    def scope(self) -> TrainableScope:
+        if self.trainable_scope not in TRAINABLE_SCOPES:
+            raise ValueError(
+                f"unknown trainable_scope {self.trainable_scope!r}; "
+                f"expected one of {sorted(TRAINABLE_SCOPES)}"
+            )
+        s = TRAINABLE_SCOPES[self.trainable_scope]
+        if self.freeze_vision_projector:
+            s = replace(s, merger=False)
+        return s
 
 
 def build_mrope_positions(
@@ -150,29 +193,43 @@ class MoTWorldModel(nn.Module):
 
         vision, vision_dim, vision_image_size = build_qwen3vl_vision(config.qwen3vl_dir)
         self.vision = vision
-        self.vision.requires_grad_(False)
         self.vision_image_size = vision_image_size
         self.vision_merger = VisionMerger(
             vision_dim, config.mot.und_hidden_size, config.vision_merge_size
         )
-        if config.freeze_vision_projector:
-            self.vision_merger.requires_grad_(False)
 
         patch_size = json.loads((Path(config.qwen3vl_dir) / "config.json").read_text())["vision_config"][
             "patch_size"
         ]
         self.vision_grid = vision_image_size // int(patch_size) // config.vision_merge_size
         self.latent_side = config.latent_grid // config.mot.latent_patch_size
+        self.apply_trainable_scope()
 
     # ------------------------------------------------------------------ setup
 
+    def apply_trainable_scope(self) -> None:
+        """Set ``requires_grad`` across the four weight groups from the configured scope."""
+        s = self.config.scope()
+        self.vision.requires_grad_(s.vision)
+        self.vision_merger.requires_grad_(s.merger)
+        self.mot.set_und_trainable(s.und)
+        self.mot.set_gen_trainable(s.gen)
+
     def load_pretrained(self) -> None:
         self.mot.load_phi_weights()
-        self.mot.freeze_und()
+        self.apply_trainable_scope()
 
     @property
     def und_needs_grad(self) -> bool:
-        return any(p.requires_grad for p in self.vision_merger.parameters())
+        """Whether the und stack must build a graph.
+
+        True if und itself trains, or if anything feeding it does -- a trainable merger or
+        vision tower sits upstream, so their gradients only exist if und is differentiated
+        through. Getting this wrong is silent: no_grad here would leave those weights with
+        ``grad = None`` while the loss still fell on the gen expert alone.
+        """
+        s = self.config.scope()
+        return s.und or s.merger or s.vision
 
     # ------------------------------------------------------------------ und
 
@@ -191,7 +248,10 @@ class MoTWorldModel(nn.Module):
             inputs_embeds = text_embeds
             segments = [(1, 1, 1)] * n_text
         else:
-            with torch.no_grad():
+            # no_grad only when the tower is actually frozen; wrapping a trainable tower would
+            # silently starve it of gradients.
+            vision_trains = self.config.scope().vision
+            with torch.set_grad_enabled(vision_trains and torch.is_grad_enabled()):
                 vision_tokens = self.vision(self._to_pixel_values(pixel_values)).last_hidden_state
             image_embeds = self.vision_merger(vision_tokens.to(self.vision_merger.norm.weight.dtype))
             inputs_embeds = torch.cat([image_embeds, text_embeds], dim=1)

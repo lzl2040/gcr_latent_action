@@ -40,10 +40,9 @@ def build(args) -> MoTWorldModel:
     cfg = WorldModelConfig(mot=mot, qwen3vl_dir=args.qwen3vl_dir,
                            freeze_vision_projector=args.freeze_projector)
     model = MoTWorldModel(cfg)
+    # __init__ already applied the trainable scope; loading Phi weights re-applies it.
     if not args.random_init:
         model.load_pretrained()
-    else:
-        model.mot.freeze_und()
     return model
 
 

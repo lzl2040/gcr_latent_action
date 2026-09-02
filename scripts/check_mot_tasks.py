@@ -46,17 +46,17 @@ def main() -> int:
     ap.add_argument("--text_len", type=int, default=32)
     ap.add_argument("--action_len", type=int, default=32)
     ap.add_argument("--random_init", action="store_true")
+    ap.add_argument("--scope", default="gen_only", help="trainable scope, see TRAINABLE_SCOPES")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16
 
     mot = MoTConfig.from_phi_dir(args.phi_dir)
-    cfg = WorldModelConfig(mot=mot, qwen3vl_dir=args.qwen3vl_dir)
+    cfg = WorldModelConfig(mot=mot, qwen3vl_dir=args.qwen3vl_dir, trainable_scope=args.scope)
     model = MoTWorldModel(cfg)
-    if args.random_init:
-        model.mot.freeze_und()
-    else:
+    # __init__ already applied the trainable scope; loading Phi weights re-applies it.
+    if not args.random_init:
         model.load_pretrained()
     model = model.to(device=device, dtype=dtype)
     model.mot.gradient_checkpointing = True

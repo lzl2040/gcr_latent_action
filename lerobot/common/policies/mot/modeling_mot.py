@@ -478,13 +478,45 @@ class MoTModel(nn.Module):
 
     def freeze_und(self) -> None:
         """Freeze every understanding-expert parameter, leaving the gen expert trainable."""
-        self.embed_tokens.requires_grad_(False)
-        self.norm.requires_grad_(False)
+        self.set_und_trainable(False)
+
+    def set_und_trainable(self, flag: bool) -> None:
+        """Toggle the understanding expert (Phi-4-mini) plus the shared token embedding.
+
+        ``k_norm_und_for_gen`` is deliberately excluded: it normalises und's keys for the gen
+        stream's benefit and exists only because gen does, so it follows gen. Grouping it with
+        und would leave the interface between a frozen tower and a from-scratch expert pinned
+        at its initial scale.
+        """
+        self.embed_tokens.requires_grad_(flag)
+        self.norm.requires_grad_(flag)
         for layer in self.layers:
-            layer.input_layernorm.requires_grad_(False)
-            layer.post_attention_layernorm.requires_grad_(False)
-            layer.self_attn.requires_grad_(False)
-            layer.mlp.requires_grad_(False)
+            layer.input_layernorm.requires_grad_(flag)
+            layer.post_attention_layernorm.requires_grad_(flag)
+            layer.self_attn.requires_grad_(flag)
+            layer.mlp.requires_grad_(flag)
+
+    def set_gen_trainable(self, flag: bool) -> None:
+        """Toggle the generation expert, its in/out heads and the und->gen key norm."""
+        for layer in self.layers:
+            layer.input_layernorm_moe_gen.requires_grad_(flag)
+            layer.post_attention_layernorm_moe_gen.requires_grad_(flag)
+            layer.add_q_proj.requires_grad_(flag)
+            layer.add_k_proj.requires_grad_(flag)
+            layer.add_v_proj.requires_grad_(flag)
+            layer.to_add_out.requires_grad_(flag)
+            layer.norm_added_q.requires_grad_(flag)
+            layer.norm_added_k.requires_grad_(flag)
+            layer.k_norm_und_for_gen.requires_grad_(flag)
+            layer.mlp_moe_gen.requires_grad_(flag)
+        self.norm_moe_gen.requires_grad_(flag)
+        self.proj_in.requires_grad_(flag)
+        self.proj_out.requires_grad_(flag)
+        self.time_embedder.requires_grad_(flag)
+        if self.config.enable_action_gen:
+            self.action_proj_in.requires_grad_(flag)
+            self.action_proj_out.requires_grad_(flag)
+            self.action_modality_embed.requires_grad_(flag)
 
     def param_report(self) -> dict[str, int]:
         und, gen = 0, 0
