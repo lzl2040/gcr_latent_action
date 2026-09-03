@@ -392,13 +392,95 @@ loss = loss_video + w · MSE(action_proj_out(h_a, domain_id), target)
 
 #### 采样比例可配
 
-`TASK_MIXES` 里放了几个预设，也可以直接写权重（会自动归一化）：
+##### `MIX` 到底控制什么
+
+`MIX` 控制的是：**每个 optimizer step 整个 batch 采用哪个任务的采样概率**。
+当前实现不是在一个 batch 内按比例拆样本，而是先从离散分布中采一个任务，再让该 batch
+里的所有样本都执行这个任务：
+
+```text
+p(task=t) = weight[t] / Σ weight[j]
+task ~ Categorical(p)
+loss_step = loss_task(batch)
+```
+
+因此，长时间训练时的期望目标是：
+
+```text
+E[loss] = Σ p(task=t) · E[loss_t]
+```
+
+假设 global batch 不随任务变化，`policy=0.20` 的含义就是：
+
+- 平均每 100 个 step 约有 20 个 `policy` step；
+- 平均每 10,000 个 step 约有 2,000 个 `policy` step；
+- 这些 step 的**整个 batch**都只计算 `policy` 任务。
+
+实际短窗口计数会有随机波动，不保证每 100 步刚好命中 20 次。任务采样使用
+`cfg.seed` 初始化的独立 `torch.Generator`，相同 seed 和相同步数会得到相同的任务序列。
+
+`MIX` 容易和另外两个概念混淆：
+
+| 参数 | 控制什么 | 不控制什么 |
+|---|---|---|
+| `MIX` | 各任务被选为一个训练 step 的频率 | 单个任务内部各 loss 项的数值权重 |
+| `action_loss_weight` | 一个带动作目标的 step 内，`loss_action` 相对 `loss_video` 的权重；当前为 1.0 | 该任务被采多少次 |
+| `data_mix` | batch 从哪些数据集读取、各数据集的比例 | 这个 batch 执行哪种 MoT 任务 |
+
+尤其是 `joint_action`：
+
+```text
+loss_joint_action = loss_video + action_loss_weight · loss_action
+```
+
+提高 `MIX` 中的 `joint_action` 会让这种 loss **出现得更频繁**；提高
+`action_loss_weight` 才会放大每次出现时的 action 梯度。二者都会改变 action 的有效训练
+强度，但作用位置不同，调参时不能把它们当成同一个旋钮。
+
+##### 怎么设置
+
+`MIX` 支持两种写法：
+
+1. 预设名：`stage2`、`stage3`、`stage3_joint_only`、`action_only`；
+2. 逗号分隔的 `任务名=权重`。权重只表示**相对大小**，代码会自动除以总和归一化。
 
 ```bash
-MIX=stage3        bash scripts/bench_mot_scope.sh   # 预设
-MIX=action_only   bash scripts/bench_mot_scope.sh
-MIX="policy=3,fwd_dyn=1,i2v=1"  bash scripts/bench_mot_scope.sh   # → 0.6/0.2/0.2
+# 真正按 MIX 随机采样时必须设 PER_TASK=0
+PER_TASK=0 MIX=stage3 bash scripts/bench_mot_scope.sh
+PER_TASK=0 MIX=action_only bash scripts/bench_mot_scope.sh
+
+# 3:1:1 会归一化为 policy=.60 / fwd_dyn=.20 / i2v=.20
+PER_TASK=0 MIX="policy=3,fwd_dyn=1,i2v=1" bash scripts/bench_mot_scope.sh
+
+# 百分数、概率和整数权重等价
+MIX="policy=60,fwd_dyn=20,i2v=20"       # 同上
+MIX="policy=.6,fwd_dyn=.2,i2v=.2"      # 同上
 ```
+
+没有写进显式 `MIX` 的任务概率为 0，不会被采到。任务名必须来自 `TASK_SPECS`；权重应当
+非负，且至少一个任务为正。启动时程序会打印归一化后的最终结果，例如：
+
+```text
+task mix: fwd_dyn=0.05  i2v=0.20  inv_dyn=0.10  joint_action=0.15
+          policy=0.20  t2i=0.05  t2v=0.10  v2v=0.15
+```
+
+如果未设置 `MIX`，`STAGE=3` 默认取 `stage3`，其他 `STAGE` 值默认取 `stage2`。
+显式设置 `MIX=...` 会覆盖这个默认选择。
+
+**注意 `PER_TASK`：**
+
+- `PER_TASK=0`：正常训练模式，按 `MIX` 逐 step 随机采样；
+- `PER_TASK=1`：性能测试模式，固定按 `TASK_SPECS` 顺序轮询 8 个任务，**完全忽略 `MIX`**。
+
+`scripts/bench_mot_scope.sh` 和 `scripts/train_mot_world.py` 当前都默认 `PER_TASK=1`，这是为了
+让每个任务都拿到稳定的 profile 数据。因此真正训练时必须显式传 `PER_TASK=0`；否则即使
+写了 `MIX=stage3`，实际仍然是 8 个任务各占 1/8。
+
+##### 默认比例为什么这样分
+
+这些比例是当前的**工程起点和消融基线，不是 Cosmos 官方比例，也还不是经过大规模实验
+搜索后的最优值**。
 
 | 预设 | 内容 |
 |---|---|
@@ -406,6 +488,40 @@ MIX="policy=3,fwd_dyn=1,i2v=1"  bash scripts/bench_mot_scope.sh   # → 0.6/0.2/
 | `stage3` | policy .20 / i2v .20 / v2v .15 / joint_action .15 / inv_dyn .10 / t2v .10 / fwd_dyn .05 / t2i .05 |
 | `stage3_joint_only` | 解耦之前的老配方，留作对照 |
 | `action_only` | policy .50 / joint_action .20 / inv_dyn .20 / fwd_dyn .10 |
+
+`stage3` 先按大类做 **50% action + 50% generation**：
+
+| 大类 | 任务 | 全部 step 占比 | 类内占比 | 设置原因 |
+|---|---|---:|---:|---|
+| action | `policy` | 20% | 40% | 唯一与部署完全一致的任务，因此在 action 子集中最高 |
+| action | `joint_action` | 15% | 30% | 联合学习动作与未来画面，但不再让它独占全部 action 预算 |
+| action | `inv_dyn` | 10% | 20% | 单独学习“观察变化 → 动作”，避免这条捷径污染 `policy` |
+| action | `fwd_dyn` | 5% | 10% | 用干净动作预测后果，作为较低频的动力学辅助约束 |
+| generation | `i2v` | 20% | 40% | 最接近机器人条件生成：当前图像 → 未来视频 |
+| generation | `v2v` | 15% | 30% | 保留多帧条件下的视频续写能力 |
+| generation | `t2v` | 10% | 20% | 保留纯文本视频生成能力 |
+| generation | `t2i` | 5% | 10% | 最基础但离机器人 action 场景最远，因此比例最低 |
+
+保留 50% stage-2 生成任务，是为了在加入 action 数据后避免 GEN 分支只追逐动作目标而发生
+生成能力漂移。generation 子集内部又把 70% 给了 `i2v`/`v2v`，因为机器人训练主要是
+图像/视频条件，而不是纯文本生成。
+
+`stage3_joint_only` 保留旧设计的 50% `joint_action`，主要用于回答“σ 解耦和任务拆分到底
+有没有帮助”；它不是当前推荐的正式配方。`action_only` 则用于快速检查 action 路径或短期
+action 微调，因为没有任何 t2i/t2v/i2v/v2v step，长训时更容易让生成能力漂移。
+
+调比例时先看失败类型，而不是盲目增加所有 action 任务：
+
+| 现象 | 优先增加 | 不应首先增加 |
+|---|---|---|
+| 部署时只给当前帧，动作质量差 | `policy` | `inv_dyn` |
+| 动作与观察到的未来变化对不上 | `inv_dyn`、`joint_action` | `t2i` |
+| 给定动作后，预测的未来不合理 | `fwd_dyn`、`i2v`/`v2v` | 只增加 `policy` |
+| 加 action 后视频生成明显退化 | generation 四项的总占比 | `action_only` |
+
+最后，`MIX` 是**采样频率**，并不保证各任务贡献相同的梯度。不同任务的 loss 标度、
+token 数和梯度大小仍然不同；正式长训前应记录每个任务的采样次数、`loss_video`、
+`loss_action` 和梯度范数，再决定是否同时调整 `MIX` 与 `action_loss_weight`。
 
 #### 实测（batch 4，A6000，`PER_TASK=1`，真实数据）
 
@@ -731,7 +847,7 @@ A100 / A6000 = 312 / 77.4 = 4.03×，乘效率 0.75–0.90 → **3.0–3.6×**�
   一个 N 步去噪循环：UND 侧 KV 算一次，之后每步只重跑 GEN 的 96 个 token。这是下一步
   最自然的工作。
 - `action_loss_weight` 目前恒为 1.0 且对所有任务一视同仁。stage-3 混合里现在有四个带
-  动作 loss 的任务（合计 0.55 的采样权重），动作项的**有效**权重已经变了，需要重调。
+  动作 loss 的任务（合计 **0.50** 的采样权重），动作项的**有效**权重已经变了，需要重调。
 - latent 离线缓存（上面 1.66 TB 那条）还没实现，目前是在线编码。
 - 多卡：只在单卡验证过，ZeRO/DeepSpeed 接入未做——`freeze_vision` 档下这是必需项而非
   优化项（fp32 优化器状态放不下，且全归约体积 10.56 GB 需要和反向重叠）。
