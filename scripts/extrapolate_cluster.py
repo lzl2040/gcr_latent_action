@@ -1,385 +1,327 @@
-"""Project cluster wall-clock for the MoT world model from the measured RTX A6000 numbers.
+"""Project 16-GPU wall-clock from the measured Phi-4-Multimodal A6000 anchors.
 
-Extrapolating across GPU generations is the part of a plan most often quoted as one confident
-number and most often wrong. Two things are done here to avoid that:
+The primary convention is the one requested for robot video: one optimizer sample represents
+one source-video frame. Therefore ``hours * 3600 * fps`` samples are divided by
+``16 * batch_per_gpu``. Raw-video rows include mounted-storage latency, decode and the online
+Wan VAE; latent rows remove the VAE and use one small sequential read per sample.
 
-* **Achievable throughput, not marketing peak.** The A6000 anchor matters because it is
-  GA102, whose bf16 tensor cores run at *half* rate with FP32 accumulate -- usable peak ~77
-  TFLOP/s, not the 155 on the datasheet. The earlier stage profile measured the und expert at
-  81 TFLOP/s, i.e. essentially hardware peak, which is what makes the anchor trustworthy.
-  Efficiency on the other devices is a *band*, not a point, because it is an assumption.
-* **Communication is modelled, not fudged.** A 1.44B-parameter bf16 all-reduce is 2.88 GB per
-  step. That is negligible against a 2.1 s A6000 step and decidedly not negligible against a
-  ~70 ms B200 step, which is exactly the regime change a single "scaling efficiency" constant
-  would hide. The script reports the exposed comms so the reader can see when the job stops
-  being compute-bound.
-
-The anchor is a real measurement: scripts/train_mot_world.py at batch 32 on one RTX A6000.
-
-Run:  python scripts/extrapolate_cluster.py [--hours 10000]
+Run:
+    python scripts/extrapolate_cluster.py --hours 30000 --batch-per-gpu 32
 """
 
+from __future__ import annotations
+
 import argparse
+from dataclasses import dataclass
 
-# --- measured: scripts/train_mot_world.py, batch 32, 1x RTX A6000, 15 steps/task ------------
-# Both scopes were measured through the same code path (fused AdamW, expandable_segments), so
-# the ratio between them is like-for-like.
-BATCH_REF = 32
-SCOPES = {
-    # scope -> (per-task model ms at BATCH_REF, trainable params, {batch: measured peak GiB})
-    # The memory column is a *measurement*, including the OOM boundary: the largest batch that
-    # ran and the smallest that did not. Extrapolating it linearly was wrong -- gen_only's peak
-    # tracks activations while freeze_vision's is pinned by optimizer state, so they have
-    # different slopes and only the measured points are trustworthy.
-    #
-    # fwd_dyn/inv_dyn/policy were added after the uncontended runs and could only be measured on
-    # a shared card. Rather than mix contended and uncontended numbers, they are *derived*: the
-    # same run also re-measured the five original tasks, giving a contention factor of
-    # 2914/2338 = 1.246 on joint_action (t2v/i2v/v2v agree at 1.17-1.25), and the new tasks are
-    # divided by it. joint_action, fwd_dyn and inv_dyn have identical 224-token GEN sequences,
-    # and indeed land within 3% of each other; policy's 96 tokens buy 32%, not 57%, because the
-    # UND expert -- not the GEN sequence -- is what dominates a training step.
-    "gen_only": (
-        {
-            "t2i": 614.0, "t2v": 1345.0, "i2v": 2147.0, "v2v": 2324.0,
-            "joint_action": 2338.0,
-            "fwd_dyn": 2339.0, "inv_dyn": 2402.0, "policy": 1587.0,  # derived, see above
-        },
-        1.445e9,
-        {8: 20.4, 32: 26.1, 64: 35.0, 128: None},  # None = OOM on a 47.65 GiB A6000
-    ),
-    # The three new tasks were never measured under freeze_vision; they carry gen_only's ratio to
-    # joint_action. That is mildly optimistic for policy: with the vision tower training, the UND
-    # side is an even larger share of the step, so shortening the GEN sequence saves relatively
-    # less than the 32% seen here.
-    "freeze_vision": (
-        {
-            "t2i": 1173.0, "t2v": 2069.0, "i2v": 2613.0, "v2v": 2613.0,
-            "joint_action": 3018.0,
-            "fwd_dyn": 3019.0, "inv_dyn": 3101.0, "policy": 2049.0,  # scaled, see above
-        },
-        5.281e9,
-        {8: 40.8, 32: 40.9, 64: None},
-    ),
-}
-# Second anchor at batch 64 (gen_only only; freeze_vision OOMs there). Used to fit the
-# marginal per-clip cost instead of assuming the step time is proportional to the batch --
-# it is not, there is a ~281 ms batch-independent floor of launch and optimizer overhead.
-MODEL_MS_B64 = {
-    "t2i": 1066.0, "t2v": 2479.0, "i2v": 4033.0, "v2v": 4170.0,
-    "joint_action": 4420.0,
-    "fwd_dyn": 4420.0, "inv_dyn": 4541.0, "policy": 3000.0,  # same ratios as batch 32
-}
-
-VAE_MS = 1274.0  # task- and scope-independent: the same clip is encoded either way
-NUM_WORKERS = 12
-
-# --- I/O, measured by scripts/measure_io.py ---------------------------------------------------
-# LOADER_MS_WARM is a *single* worker hitting the page cache on a local disk. It was the number
-# used in earlier revisions of this script and it is wildly optimistic for a cluster: /Data here
-# is /dev/sdc1, a Seagate ST16000NM000J with ROTA=1 -- a spinning disk. Reading cold, one worker
-# at a time, the same clip costs 780.8 ms, i.e. 21x more. A blobfuse/NFS mount sits in between:
-# no seek penalty, but a network round trip per read, and there are 6 read syscalls per clip.
-LOADER_MS_WARM = 37.2
-LOADER_MS_COLD_HDD = 780.8
-LOADER_MS_MOUNT = 200.0  # assumption for a blobfuse/NFS mount; the two above are measured
-BYTES_PER_CLIP = 677 * 1024
-READS_PER_CLIP = 6
-
-MIX = {  # world_model.TASK_MIXES["stage3"]
-    "policy": 0.20, "i2v": 0.20, "v2v": 0.15, "joint_action": 0.15,
-    "inv_dyn": 0.10, "t2v": 0.10, "fwd_dyn": 0.05, "t2i": 0.05,
-}
-
-# bf16 bytes per trainable parameter that must live on the card, by parallelism strategy.
-# ddp: params(all) + grads + 2 Adam moments.  zero2: grads and moments sharded over GPUS.
-BYTES_PARAM = 2
-
-# --- dataset --------------------------------------------------------------------------------
-HOURS = 10_000  # overridden by --hours
 FPS = 20
-CHUNK_SECONDS = 1.6
-PIXEL_FRAMES_PER_CLIP = 9
-LATENT_BYTES_PER_CLIP = 48 * 3 * 16 * 16 * 2  # C x T x H x W, bf16
-
-# --- hardware ---------------------------------------------------------------------------------
-# (usable dense bf16 TFLOP/s, (efficiency_low, efficiency_high), usable GiB)
-# Efficiency is relative to the A6000's measured behaviour, which is 1.0 by construction.
-# B200's band is wide and starts low on purpose: its headline peak is ~29x the A6000's, but
-# our gen expert reaches only 67% of usable peak even on the A6000 (52.1 vs the und expert's
-# 78.5 TFLOP/s), because its matrices are smaller -- and that gap widens as tensor cores grow.
-# A100-40GB and A100-80GB have identical compute; only capacity differs, and that is exactly
-# what decides which scope and batch are reachable.
-A6000_GIB = 47.6  # the card every measurement in SCOPES was taken on
-DEVICES = {
-    "RTX A6000": (77.4, (1.00, 1.00), A6000_GIB),
-    "A100-40GB": (312.0, (0.75, 0.90), 39.5),
-    "A100-80GB": (312.0, (0.75, 0.90), 79.2),
-    "B200": (2250.0, (0.30, 0.55), 180.0),
-}
 GPUS = 16
-
-# --- interconnect -----------------------------------------------------------------------------
-# 16 GPUs is 2 nodes of 8, and that makes the *node's* NIC the bottleneck rather than the
-# per-GPU bandwidth a flat model would use. NCCL runs a hierarchical all-reduce: reduce-scatter
-# over NVLink inside the node, all-reduce the 1/8 shards across nodes, all-gather back over
-# NVLink. So the traffic crossing one node's NIC is 2*(nodes-1)/nodes * G -- for 2 nodes, the
-# whole gradient -- shared by all 8 local GPUs. A flat "20 GB/s per GPU" both overstates a
-# commodity VM and understates a properly wired ND-series node, by an order of magnitude each
-# way, which is why this is now a scenario rather than a constant.
 GPUS_PER_NODE = 8
-NVLINK_GBPS = 250.0  # per GPU, bidirectional; A100 NVLink3, conservative for B200
-LATENCY_US = 8.0     # per ring hop; 2*(GPUS-1) hops. Included for completeness -- at 30 hops
-                     # it is 0.24 ms, i.e. never the issue at these message sizes.
-FABRICS = {
-    "8x200G IB": 200.0,  # ND A100 v4 / ND H100 v5 class: one HDR NIC per GPU, 200 GB/s/node
-    "1x200G IB": 25.0,   # a single HDR NIC serving all 8 GPUs
-    "100G Eth": 12.5,    # commodity cloud VM
-}
-# How much of the all-reduce can hide behind the backward pass. A flat "70% is hidden" is wrong
-# in both directions: it under-hides a fast fabric and, worse, it silently claims to hide 919 ms
-# of 100 GbE traffic inside a 1.4 s step. The honest bound is that overlap can only use the
-# *backward* window, and the final bucket can never overlap at all.
-# measure_forward.py: fwd 840 ms of a 3052 ms fwd+bwd, so backward is ~72% of the step.
-BWD_FRACTION = 0.72
-MIN_EXPOSED = 0.05  # the last gradient bucket, which starts only after backward ends
+BATCH_REF = 32
 
-# --- data loading -----------------------------------------------------------------------------
-# The loader runs in parallel with compute, so it only matters when it cannot keep up:
-# step = max(compute + exposed comms, batch / loader throughput). Throughput is capped by the
-# number of worker processes a node can afford -- an 8-GPU node with 96 vCPU gives 12 per GPU,
-# and that ceiling is what turns a fast GPU into an I/O-bound one.
+# Measured on one RTX A6000 with scripts/train_mot_world.py. Times are the model column, so
+# they exclude data loading and Wan VAE. gen_only includes fused AdamW. freeze_vision uses
+# NO_OPT=1 because the unsharded optimizer cannot fit; 30 ms is added below for the estimated
+# per-rank ZeRO-2 optimizer shard.
+TASK_MIX = {
+    "policy": 0.20,
+    "i2v": 0.20,
+    "v2v": 0.15,
+    "joint_action": 0.15,
+    "inv_dyn": 0.10,
+    "t2v": 0.10,
+    "fwd_dyn": 0.05,
+    "t2i": 0.05,
+}
+
+
+@dataclass(frozen=True)
+class Scope:
+    task_ms_b32: dict[str, float]
+    trainable_params: float
+    fixed_ms: float
+    per_clip_ms: float
+    backward_fraction: float
+    optimizer_ms_b32: float
+    activation_gib_per_clip: float
+    strategy: str
+    measured_memory: str
+
+    def model_ms(self, batch: int) -> float:
+        scale = batch / BATCH_REF
+        return self.fixed_ms + self.per_clip_ms * batch + self.optimizer_ms_b32 * scale
+
+
+GEN_B32 = {
+    "t2i": 616.0,
+    "t2v": 1351.0,
+    "i2v": 3804.0,
+    "v2v": 3607.0,
+    "joint_action": 3810.0,
+    "fwd_dyn": 3809.0,
+    "inv_dyn": 3816.0,
+    "policy": 3052.0,
+}
+GEN_B64 = {
+    "t2i": 1093.0,
+    "t2v": 2532.0,
+    "i2v": 7244.0,
+    "v2v": 7320.0,
+    "joint_action": 7593.0,
+    "fwd_dyn": 7596.0,
+    "inv_dyn": 7589.0,
+    "policy": 6138.0,
+}
+FREEZE_B32 = {
+    "t2i": 767.0,
+    "t2v": 1513.0,
+    "i2v": 8883.0,
+    "v2v": 8900.0,
+    "joint_action": 9173.0,
+    "fwd_dyn": 9092.0,
+    "inv_dyn": 9080.0,
+    "policy": 8351.0,
+}
+
+
+def weighted(values: dict[str, float]) -> float:
+    return sum(TASK_MIX[name] * values[name] for name in TASK_MIX)
+
+
+GEN_WEIGHTED_B32 = weighted(GEN_B32)
+GEN_WEIGHTED_B64 = weighted(GEN_B64)
+GEN_PER_CLIP = (GEN_WEIGHTED_B64 - GEN_WEIGHTED_B32) / (64 - BATCH_REF)
+GEN_FIXED = GEN_WEIGHTED_B32 - GEN_PER_CLIP * BATCH_REF
+FREEZE_WEIGHTED_B32 = weighted(FREEZE_B32)
+
+SCOPES = {
+    "gen_only": Scope(
+        task_ms_b32=GEN_B32,
+        trainable_params=1_420_254_656,
+        fixed_ms=GEN_FIXED,
+        per_clip_ms=GEN_PER_CLIP,
+        backward_fraction=0.31,
+        optimizer_ms_b32=0.0,
+        activation_gib_per_clip=0.26,
+        strategy="DDP",
+        measured_memory="b32 26.9 GiB; b64 35.8 GiB; b128 36.5 GiB model-only",
+    ),
+    "freeze_vision": Scope(
+        task_ms_b32=FREEZE_B32,
+        trainable_params=5_543_981_760,
+        fixed_ms=GEN_FIXED,
+        per_clip_ms=(FREEZE_WEIGHTED_B32 - GEN_FIXED) / BATCH_REF,
+        backward_fraction=0.72,
+        optimizer_ms_b32=30.0,
+        activation_gib_per_clip=0.12,
+        strategy="ZeRO-2",
+        measured_memory="b32 25.6 GiB; b64 34.3 GiB (NO_OPT=1)",
+    ),
+}
+
+# A6000 anchors: online Wan VAE at batch 32 and mounted-storage assumptions.
+VAE_MS_B32 = 1306.0
+RAW_VIDEO_LATENCY_MS = 200.0
+LATENT_LATENCY_MS = 60.0
 WORKERS_PER_GPU = 12
-# (per-clip loader latency ms, whether the VAE has to run online).
-# Reading raw video is not just slower I/O -- it also puts the Wan VAE encoder on the critical
-# path, and that cost is NOT in SCOPES: train_mot_world.py times data / vae / model separately
-# and SCOPES holds the model column only. VAE_MS is measured at BATCH_REF clips, forward-only
-# (the VAE is frozen), and it is serial in front of the MoT forward, so it adds to compute.
-IO_SCENARIOS = {
-    "local warm": (LOADER_MS_WARM, True),
-    "blob video": (LOADER_MS_MOUNT, True),    # 6 reads/clip, one network round trip each
-    "blob slow": (500.0, True),               # throttled or cold container
-    "blob latents": (60.0, False),            # 1 sequential 72 KiB read, no decode, no VAE
+
+# Total model excludes the frozen 705M Wan VAE. action_dim=40 is the real-loader model.
+TOTAL_PARAMS = 6_066_925_184
+BF16_BYTES = 2
+
+
+@dataclass(frozen=True)
+class Device:
+    usable_bf16_tflops: float
+    efficiency_low: float
+    efficiency_high: float
+    memory_gib: float
+
+
+# Efficiency is relative to the measured A6000 kernel mix, not marketing peak. The B200 band
+# is intentionally broad because the 2048-wide GEN matrices cannot use its tensor cores as
+# efficiently as Phi's larger matrices.
+DEVICES = {
+    "RTX A6000": Device(77.4, 1.00, 1.00, 47.6),
+    "A100-40GB": Device(312.0, 0.75, 0.90, 39.5),
+    "A100-80GB": Device(312.0, 0.75, 0.90, 79.2),
+    "B200": Device(2250.0, 0.30, 0.55, 180.0),
 }
 
-TOTAL_PARAMS = 5.588e9
-# Fitted on gen_only's three measured peaks (20.4 / 26.1 / 35.0 GiB at batch 8 / 32 / 64),
-# which are self-consistent to 0.24-0.28 GiB per clip. freeze_vision's measured peak is far
-# below what this predicts, so for that scope the number below is a conservative bound and
-# the measured boundary (batch 32 fits, batch 64 OOMs on 47.6 GiB) is the real answer.
-ACT_GIB_PER_CLIP = 0.26
+NVLINK_GBPS = 250.0
+LATENCY_US = 8.0
+FABRICS = {
+    "8x200G IB": 200.0,
+    "1x200G IB": 25.0,
+    "100G Eth": 12.5,
+}
+MIN_EXPOSED = 0.05
 
 
-def comms_ms(trainable: float, node_gbps: float) -> tuple[float, float]:
-    """Return ``(intra_node_ms, inter_node_ms)`` for one hierarchical all-reduce.
-
-    ``trainable`` is a parameter count; gradients are bf16. NCCL reduce-scatters over NVLink
-    inside the node, all-reduces the 1/GPUS_PER_NODE shards across nodes, then all-gathers back.
-    The inter-node term is the volume crossing *one node's* NIC -- all local GPUs share it,
-    which is the step a flat per-GPU bandwidth model skips and the reason a 100G VM is 16x
-    worse than an ND-series node.
-    """
-    grad_gb = trainable * BYTES_PARAM / 1e9
-    nodes = max(1, GPUS // GPUS_PER_NODE)
-    intra = 2 * (GPUS_PER_NODE - 1) / GPUS_PER_NODE * grad_gb / NVLINK_GBPS * 1000.0
-    nic_gb = 2 * (nodes - 1) / nodes * grad_gb
-    inter = nic_gb / node_gbps * 1000.0 + LATENCY_US * 2 * (GPUS - 1) / 1000.0
-    return intra, inter
+def device_ratios(device: Device) -> tuple[float, float]:
+    """Return slow/fast compute ratios relative to the A6000."""
+    base = DEVICES["RTX A6000"].usable_bf16_tflops
+    return (
+        device.usable_bf16_tflops * device.efficiency_low / base,
+        device.usable_bf16_tflops * device.efficiency_high / base,
+    )
 
 
-def exposed_comms(total_comms: float, compute: float) -> float:
-    """Comms that cannot hide behind the backward pass, so it lands on the critical path."""
-    return max(total_comms - BWD_FRACTION * compute, MIN_EXPOSED * total_comms)
+def communication_ms(trainable: float, node_gbps: float) -> float:
+    """Hierarchical bf16 gradient all-reduce for two nodes of eight GPUs."""
+    gradient_gb = trainable * BF16_BYTES / 1e9
+    intra = (
+        2
+        * (GPUS_PER_NODE - 1)
+        / GPUS_PER_NODE
+        * gradient_gb
+        / NVLINK_GBPS
+        * 1000.0
+    )
+    nodes = GPUS // GPUS_PER_NODE
+    inter_gb = 2 * (nodes - 1) / nodes * gradient_gb
+    inter = inter_gb / node_gbps * 1000.0 + LATENCY_US * 2 * (GPUS - 1) / 1000.0
+    return intra + inter
+
+
+def exposed_communication_ms(total: float, compute: float, backward_fraction: float) -> float:
+    return max(total - backward_fraction * compute, MIN_EXPOSED * total)
 
 
 def loader_ms(batch: int, latency_ms: float) -> float:
-    """Wall-clock the loader needs per step, given a hard ceiling of WORKERS_PER_GPU."""
-    return batch / (WORKERS_PER_GPU / (latency_ms / 1000.0)) * 1000.0
-# Fitted on gen_only's three measured peaks (20.4 / 26.1 / 35.0 GiB at batch 8 / 32 / 64),
-# which are self-consistent to 0.24-0.28 GiB per clip. freeze_vision's measured peak is far
-# below what this predicts, so for that scope the number below is a conservative bound and
-# the measured boundary (batch 32 fits, batch 64 OOMs on 47.6 GiB) is the real answer.
-ACT_GIB_PER_CLIP = 0.26
+    clips_per_second = WORKERS_PER_GPU / (latency_ms / 1000.0)
+    return batch / clips_per_second * 1000.0
 
 
-def state_gib(trainable: float, shard: int) -> float:
-    """Params + grads + two bf16 Adam moments. ``shard`` = 1 for DDP, GPUS for ZeRO-2."""
-    return (TOTAL_PARAMS * BYTES_PARAM + trainable * BYTES_PARAM * 3 / shard) / 2**30
+def state_gib(scope: Scope) -> float:
+    """Resident state for the strategy used in the projection.
 
-
-def fmt_time(seconds: float) -> str:
-    d = seconds / 86400
-    return f"{d:.1f} d" if d >= 1 else f"{seconds / 3600:.1f} h"
-
-
-def marginal_fit(scope: str) -> tuple[float, float]:
-    """Return ``(fixed_ms, ms_per_clip)`` on the A6000 for the stage-3 mix.
-
-    Step time is *not* proportional to the batch: there is a batch-independent floor of kernel
-    launch and optimizer overhead. gen_only measured 2112 ms at batch 32 and 3943 ms at batch
-    64 -- doubling the batch cost 1.87x, not 2x. Assuming proportionality would overstate a
-    batch-128 step by ~13%. Only gen_only has a second anchor, so freeze_vision reuses
-    gen_only's fixed floor, which is the conservative choice (it attributes more of the step
-    to the batch-dependent part).
+    DDP matches the measured native BF16 AdamW run: replicated BF16 params, gradients and two
+    BF16 moments. ZeRO-2 conservatively assumes sharded BF16 gradients plus FP32 master params
+    and two FP32 moments.
     """
-    model_ms = SCOPES[scope][0]
-    w32 = sum(MIX[t] * model_ms[t] for t in MIX)
-    if scope == "gen_only":
-        w64 = sum(MIX[t] * MODEL_MS_B64[t] for t in MIX)
-        per_clip = (w64 - w32) / (64 - BATCH_REF)
-        return w32 - per_clip * BATCH_REF, per_clip
-    fixed = marginal_fit("gen_only")[0]
-    return fixed, (w32 - fixed) / BATCH_REF
+    if scope.strategy == "DDP":
+        byte_count = TOTAL_PARAMS * 2 + scope.trainable_params * 6
+    else:
+        byte_count = TOTAL_PARAMS * 2 + scope.trainable_params * 14 / GPUS
+    return byte_count / 2**30
 
 
-def samples_by_convention() -> dict[str, tuple[float, str]]:
-    """How many training samples is "10,000 hours"? Three defensible answers, 32x apart.
-
-    Our sample is a 1.6 s window that READS 9 pixel frames and SPANS 32 of them, so the
-    conversion from "hours of video" to "optimizer steps" is a modelling choice, not a fact.
-    """
-    frames = HOURS * 3600 * FPS
-    clips = HOURS * 3600 / CHUNK_SECONDS
-    return {
-        "frames": (frames, f"1 sample = 1 frame ({frames:.3g} / global batch)"),
-        "windows": (clips, f"1 sample = one non-overlapping {CHUNK_SECONDS}s window"),
-        "coverage": (clips * frames / (clips * PIXEL_FRAMES_PER_CLIP) ,
-                     "enough windows that every frame is read at least once"),
-    }
+def memory_gib(scope: Scope, batch: int) -> float:
+    return state_gib(scope) + scope.activation_gib_per_clip * batch
 
 
-def best_batch(
-    trainable: float, mem: float, peaks: dict[int, float | None]
-) -> tuple[int, float, str] | None:
-    """Largest batch that fits, preferring DDP and falling back to ZeRO-2.
+def compute_ms(scope: Scope, device: Device, batch: int, raw_video: bool) -> tuple[float, float]:
+    """Return fast/slow compute endpoints, including online VAE for raw video."""
+    slow_ratio, fast_ratio = device_ratios(device)
+    a6000 = scope.model_ms(batch)
+    if raw_video:
+        a6000 += VAE_MS_B32 * batch / BATCH_REF
+    fast = a6000 / fast_ratio
+    slow = a6000 / slow_ratio
+    return fast, slow
 
-    Where a measurement exists it wins over the model. ``peaks`` was taken under DDP on a
-    47.6 GiB A6000, so a measured OOM rules that batch out on any card of that capacity --
-    the estimate must not quietly promote a batch that was observed to fail. OOM is treated as
-    monotonic: freeze_vision was measured to OOM at 64, so 128 is out too even though nobody
-    ran it.
-    """
-    smallest_oom = min((b for b, g in peaks.items() if g is None), default=None)
-    for batch in (128, 64, 32):
-        ruled_out = (
-            smallest_oom is not None and batch >= smallest_oom and mem <= A6000_GIB
+
+def step_range_ms(
+    scope: Scope,
+    device: Device,
+    node_gbps: float,
+    batch: int,
+    raw_video: bool,
+) -> tuple[float, float, str]:
+    fast_compute, slow_compute = compute_ms(scope, device, batch, raw_video)
+    total_comm = communication_ms(scope.trainable_params, node_gbps)
+    latency = RAW_VIDEO_LATENCY_MS if raw_video else LATENT_LATENCY_MS
+    io = loader_ms(batch, latency)
+
+    endpoints = []
+    bounds = set()
+    for compute in (fast_compute, slow_compute):
+        exposed = exposed_communication_ms(total_comm, compute, scope.backward_fraction)
+        compute_path = compute + exposed
+        step = max(compute_path, io)
+        endpoints.append(step)
+        if io >= compute_path:
+            bounds.add("I/O")
+        elif exposed > compute:
+            bounds.add("comms")
+        else:
+            bounds.add("compute")
+    return min(endpoints), max(endpoints), "/".join(sorted(bounds))
+
+
+def fmt_ms_range(fast: float, slow: float) -> str:
+    if abs(fast - slow) < 0.5:
+        return f"{fast:.0f}"
+    return f"{fast:.0f}-{slow:.0f}"
+
+
+def fmt_days_range(fast: float, slow: float) -> str:
+    if abs(fast - slow) < 0.05:
+        return f"{fast:.1f} d"
+    return f"{fast:.1f}-{slow:.1f} d"
+
+
+def main(hours: int, batch: int) -> None:
+    frames = hours * 3600 * FPS
+    global_batch = GPUS * batch
+    steps = frames / global_batch
+
+    print(
+        f"{hours:,} h x 3600 x {FPS} fps = {frames:.3g} frame-samples; "
+        f"16 x {batch} = {global_batch} global batch; {steps:.3g} optimizer steps"
+    )
+    print(
+        f"A6000 measured stage-3 model @ b32: gen_only={GEN_WEIGHTED_B32:.0f} ms, "
+        f"freeze_vision={FREEZE_WEIGHTED_B32:.0f} ms (+30 ms estimated ZeRO optimizer)"
+    )
+    print(f"online Wan VAE @ b32: {VAE_MS_B32:.0f} ms\n")
+
+    for data_name, raw_video in (("raw video", True), ("cached latent", False)):
+        print(f"### {data_name}")
+        print(
+            f"{'scope':>14s} {'device':>11s} {'strategy':>9s} {'memory':>10s} "
+            f"{'fabric':>11s} {'step ms':>11s} {'bound':>11s} {'wall time':>14s}"
         )
-        if ruled_out:
-            continue
-        # A measured peak beats the model in both directions. ACT_GIB_PER_CLIP is fitted on
-        # gen_only and over-predicts freeze_vision, which would otherwise demote a
-        # configuration that was observed to run under plain DDP.
-        measured = peaks.get(batch)
-        if measured is not None and measured <= mem:
-            return batch, measured, "DDP"
-        need_ddp = state_gib(trainable, 1) + ACT_GIB_PER_CLIP * batch
-        need_z2 = state_gib(trainable, GPUS) + ACT_GIB_PER_CLIP * batch
-        if need_ddp <= mem:
-            return batch, need_ddp, "DDP"
-        if need_z2 <= mem:
-            return batch, need_z2, "ZeRO-2*"
-    return None
-
-
-def main(hours: int) -> None:
-    global HOURS
-    HOURS = hours
-    clips = HOURS * 3600 / CHUNK_SECONDS
-    frames = HOURS * 3600 * FPS
-    frames_seen = clips * PIXEL_FRAMES_PER_CLIP
-    conventions = samples_by_convention()
-
-    print(f"{HOURS:,} h @ {FPS} fps        : {frames:.3g} pixel frames on disk\n")
-    print(f"One sample is a {CHUNK_SECONDS} s window that READS {PIXEL_FRAMES_PER_CLIP} "
-          f"frames and SPANS {int(CHUNK_SECONDS * FPS)}, so 'how many steps")
-    print(f"is {HOURS:,} hours' has three defensible answers and they differ by 32x:")
-    for name, (n, why) in conventions.items():
-        print(f"  {name:>9s} : {n:9.3g} samples   {why}")
-    print(f"            'coverage' exists because one pass over the windows touches only "
-          f"{frames_seen / frames * 100:.0f}%")
-    print(f"            of the frames on disk ({frames_seen:.3g} of {frames:.3g}); full coverage "
-          f"needs {frames / frames_seen:.1f}x.")
-    print(f"\ncached-latent footprint     : {clips * LATENT_BYTES_PER_CLIP / 1e12:.2f} TB")
-    print(f"per-clip I/O                : {BYTES_PER_CLIP / 1024:.0f} KiB in "
-          f"{READS_PER_CLIP} reads; {LOADER_MS_WARM:.0f} ms warm-local / "
-          f"{LOADER_MS_MOUNT:.0f} ms mount / {LOADER_MS_COLD_HDD:.0f} ms cold-HDD (1 worker)")
-    print(f"loader ceiling              : {WORKERS_PER_GPU} workers/GPU -> "
-          + ", ".join(f"{k} {WORKERS_PER_GPU / (v[0] / 1000):.0f} clips/s"
-                      for k, v in IO_SCENARIOS.items()))
-    print(f"topology                    : {GPUS} GPUs = {GPUS // GPUS_PER_NODE} nodes x "
-          f"{GPUS_PER_NODE}; NVLink {NVLINK_GBPS:.0f} GB/s/GPU, NIC per scenario\n")
-
-    for scope, (model_ms, trainable, peaks) in SCOPES.items():
-        w32 = sum(MIX[t] * model_ms[t] for t in MIX)
-        fixed_ms, per_clip_ms = marginal_fit(scope)
-        grad_gb = trainable * BYTES_PARAM / 1e9
-        meas = "  ".join(
-            f"b{b}={'OOM' if g is None else f'{g:.1f}G'}" for b, g in sorted(peaks.items())
-        )
-
-        print(f"##### scope = {scope}  ({trainable / 1e9:.2f}B trainable) #####")
-        print(f"A6000 step (batch {BATCH_REF})     : {w32:.0f} ms "
-              f"= {fixed_ms:.0f} ms fixed + {per_clip_ms:.1f} ms/clip")
-        print(f"measured peak memory        : {meas}   (47.6 GiB card)")
-        print(f"resident state (no acts)    : DDP {state_gib(trainable, 1):.1f} GiB   "
-              f"ZeRO-2 x{GPUS} {state_gib(trainable, GPUS):.1f} GiB")
-        print(f"gradient all-reduce         : {grad_gb:.2f} GB/GPU; NVLink phase "
-              f"{comms_ms(trainable, 1e9)[0]:.0f} ms, NIC phase per fabric below\n")
-
-        print(f"{'device':>11s} {'b/GPU':>6s} {'mem':>15s} {'fabric':>11s} {'io':>13s} "
-              f"{'compute':>8s} {'comms':>7s} {'io':>7s} {'step':>7s} {'bound':>8s} "
-              f"{'frames':>9s}")
-        for dev, (peak, (eff_lo, eff_hi), mem) in DEVICES.items():
-            fit = best_batch(trainable, mem, peaks)
-            if fit is None:
-                print(f"{dev:>11s} {'-':>6s} {'>' + f'{mem:.0f}G even ZeRO-2':>15s}")
-                continue
-            batch, need, tag = fit
-            ratio = (peak * eff_hi) / DEVICES["RTX A6000"][0]
-            model_c = (fixed_ms + per_clip_ms * batch) / ratio
-            vae_c = VAE_MS / BATCH_REF * batch / ratio
-            for fabric, node_gbps in FABRICS.items():
-                for io_name in ("blob video", "blob latents"):
-                    io_lat, needs_vae = IO_SCENARIOS[io_name]
-                    compute = model_c + (vae_c if needs_vae else 0.0)
-                    intra, inter = comms_ms(trainable, node_gbps)
-                    exposed = exposed_comms(intra + inter, compute)
-                    io = loader_ms(batch, io_lat)
-                    step = max(compute + exposed, io)
-                    bound = ("io" if io > compute + exposed
-                             else "comms" if exposed > compute else "compute")
-                    thru = batch / (step / 1000.0) * GPUS
-                    t = fmt_time(conventions["frames"][0] / thru)
-                    print(f"{dev:>11s} {batch:6d} {f'{need:.0f}G {tag}':>15s} {fabric:>11s} "
-                          f"{io_name:>13s} {compute:7.0f}ms {exposed:6.0f}ms {io:6.0f}ms "
-                          f"{step:6.0f}ms {bound:>8s} {t:>9s}")
+        for scope_name, scope in SCOPES.items():
+            for device_name, device in DEVICES.items():
+                need = memory_gib(scope, batch)
+                if need > device.memory_gib:
+                    print(
+                        f"{scope_name:>14s} {device_name:>11s} {scope.strategy:>9s} "
+                        f"{need:9.1f}G {'-':>11s} {'OOM':>11s} {'memory':>11s} {'-':>14s}"
+                    )
+                    continue
+                for fabric_name, node_gbps in FABRICS.items():
+                    fast_step, slow_step, bound = step_range_ms(
+                        scope,
+                        device,
+                        node_gbps,
+                        batch,
+                        raw_video,
+                    )
+                    fast_days = steps * fast_step / 1000.0 / 86400.0
+                    slow_days = steps * slow_step / 1000.0 / 86400.0
+                    print(
+                        f"{scope_name:>14s} {device_name:>11s} {scope.strategy:>9s} "
+                        f"{need:9.1f}G {fabric_name:>11s} "
+                        f"{fmt_ms_range(fast_step, slow_step):>11s} "
+                        f"{bound:>11s} {fmt_days_range(fast_days, slow_days):>14s}"
+                    )
         print()
 
-    print("##### where the time actually goes #####")
-    print("Three things can bind, and which one does changes with the GPU:")
-    print("  compute  -- the A6000 and, on a good fabric, the A100")
-    print("  comms    -- the gradient all-reduce stops hiding behind the backward pass once")
-    print("              the step gets short, and on a 100G VM it dominates outright")
-    print(f"  io       -- {WORKERS_PER_GPU} workers/GPU at 200 ms/clip is "
-          f"{WORKERS_PER_GPU / 0.2:.0f} clips/s/GPU; a B200 wants more")
-    print(f"\nRaw video also charges the online Wan VAE: {VAE_MS:.0f} ms per {BATCH_REF} clips "
-          f"on the A6000\n({VAE_MS / BATCH_REF:.1f} ms/clip, forward-only), which is on the "
-          "critical path and is scaled with the\nsame device ratio as the model -- optimistic "
-          "for a conv net, whose small spatial dims\nleave tensor cores emptier than the "
-          "transformer's matmuls do.")
-    print()
-    fv = SCOPES["freeze_vision"][1]
-    for fabric, node_gbps in FABRICS.items():
-        intra, inter = comms_ms(fv, node_gbps)
-        print(f"  freeze_vision all-reduce on {fabric:>11s}: NVLink {intra:5.0f} ms + "
-              f"NIC {inter:6.0f} ms = {intra + inter:6.0f} ms "
-              f"(raw)")
-    print()
-    print("Times use the optimistic end of each efficiency band; A100/B200 efficiency and the")
-    print("blob latencies are assumptions, the A6000 step and the 677 KiB/clip are measurements.")
+    print("Measured memory anchors:")
+    for name, scope in SCOPES.items():
+        print(f"  {name:>14s}: {scope.measured_memory}")
+    print(
+        "\nA100/B200 values are projections. Ranges come from achievable-efficiency bands; "
+        "raw-video I/O assumes 12 workers/GPU and 200 ms/clip on mounted storage."
+    )
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--hours", type=int, default=HOURS)
-    main(ap.parse_args().hours)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hours", type=int, default=30_000)
+    parser.add_argument("--batch-per-gpu", type=int, default=32)
+    args = parser.parse_args()
+    main(args.hours, args.batch_per_gpu)
