@@ -1,4 +1,4 @@
-"""Smoke-test the Phi-4-mini MoT world model: shapes, gradients, memory and throughput.
+"""Smoke-test the Phi-4-Multimodal MoT world model.
 
 Checks that matter here:
   * every trainable parameter actually receives a gradient (a silently disconnected gen
@@ -8,7 +8,7 @@ Checks that matter here:
     loss but destroys spatial structure;
   * peak memory and step time at the batch size we intend to train at.
 
-Run:  python -u scripts/smoke_mot_world.py --batch 8
+Run:  CUDA_VISIBLE_DEVICES=2 python -u scripts/smoke_mot_world.py --batch 1
 """
 
 from __future__ import annotations
@@ -37,13 +37,12 @@ def build(args) -> MoTWorldModel:
         if v is not None
     }
     mot = MoTConfig.from_phi_dir(args.phi_dir, **overrides)
-    cfg = WorldModelConfig(mot=mot, qwen3vl_dir=args.qwen3vl_dir,
-                           freeze_vision_projector=args.freeze_projector)
-    model = MoTWorldModel(cfg)
-    # __init__ already applied the trainable scope; loading Phi weights re-applies it.
-    if not args.random_init:
-        model.load_pretrained()
-    return model
+    cfg = WorldModelConfig(
+        mot=mot,
+        trainable_scope=args.scope,
+        freeze_vision_projector=args.freeze_projector,
+    )
+    return MoTWorldModel(cfg)
 
 
 def check_patchify(model: MoTWorldModel, device, dtype) -> bool:
@@ -59,21 +58,21 @@ def check_patchify(model: MoTWorldModel, device, dtype) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--phi_dir", default="/Data/lzl/huggingface/Phi-4-mini-instruct")
-    ap.add_argument("--qwen3vl_dir", default="/Data/lzl/huggingface/Qwen3-VL-4B-Instruct")
+    ap.add_argument("--phi_dir", default="/Data/lzl/huggingface/Phi-4-multimodal-instruct")
     # Default to whatever MoTConfig says, so this script cannot silently keep testing an
     # old gen size after the config moves.
     ap.add_argument("--gen_hidden", type=int, default=None)
     ap.add_argument("--gen_heads", type=int, default=None)
     ap.add_argument("--gen_intermediate", type=int, default=None)
-    ap.add_argument("--batch", type=int, default=8)
+    ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--latent_frames", type=int, default=2)
     ap.add_argument("--text_len", type=int, default=32)
     ap.add_argument("--action_len", type=int, default=32)
-    ap.add_argument("--steps", type=int, default=6)
+    ap.add_argument("--steps", type=int, default=2)
     ap.add_argument("--random_init", action="store_true")
     ap.add_argument("--gen_checkpointing", action="store_true")
     ap.add_argument("--freeze_projector", action="store_true")
+    ap.add_argument("--scope", default="gen_only")
     args = ap.parse_args()
 
     device = "cuda"
@@ -82,12 +81,15 @@ def main() -> int:
 
     print("[build] loading ...")
     model = build(args).to(device=device, dtype=dtype)
+    if not args.random_init:
+        model.load_pretrained()
     model.mot.gradient_checkpointing = args.gen_checkpointing
     model.train()
 
     rep = model.param_report()
     print(
-        f"[params] vision(frozen) {rep['vision_frozen'] / 1e6:.1f}M | merger {rep['vision_merger'] / 1e6:.1f}M | "
+        f"[params] vision {rep['vision_frozen'] / 1e6:.1f}M | "
+        f"projector {rep['vision_projector'] / 1e6:.1f}M | "
         f"und(frozen) {rep['und_frozen'] / 1e9:.3f}B | gen {rep['gen_trainable'] / 1e6:.1f}M"
     )
     print(

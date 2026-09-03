@@ -1,4 +1,4 @@
-"""Mixture-of-Transformers world model with a frozen Phi-4-mini understanding expert.
+"""Mixture-of-Transformers world model with a Phi-4-Multimodal understanding expert.
 
 Architecture follows NVIDIA Cosmos3's ``Cosmos3PackedMoTAttention`` layout: every layer
 carries two parameter sets ("experts") that share a single attention *stage* but run two
@@ -8,29 +8,49 @@ separate attention *calls*:
     gen tokens : full attention over cat([k_und, k_gen])    (conditioned on und)
 
 Because the understanding stream is causal-self-only it is completely independent of the
-generation stream.  With Phi frozen, the whole und stack can therefore run once under
+generation stream. With Phi frozen, the whole und stack can therefore run once under
 ``no_grad`` and export only its per-layer key/value tensors, instead of being interleaved
-layer-by-layer with the gen stack.  That is what :meth:`MoTModel.forward_und` does.
+layer-by-layer with the gen stack. That is what :meth:`MoTModel.forward_und` does.
 
-The und expert reuses Phi-4-mini's parameter names verbatim (``qkv_proj``, ``gate_up_proj``
-...) so a Phi checkpoint loads into it directly.
+Phi-4-Multimodal adds a rank-256 vision LoRA to every attention/MLP projection. The und
+expert keeps those adapters: image-conditioned tasks enable them, while text-only tasks
+disable them exactly like the official ``InputMode.LANGUAGE`` path.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
+from safetensors import safe_open
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 
-# Phi-4-mini: head_dim 128, partial_rotary_factor 0.75 -> 96 rotary dims -> 48 frequencies.
+# Phi-4-MM: head_dim 128, partial_rotary_factor 0.75 -> 96 rotary dims -> 48 frequencies.
 # An mrope section therefore has to sum to 48 rather than head_dim // 2.
 DEFAULT_MROPE_SECTION = (16, 16, 16)
+
+
+def copy_safetensor_tensors(root: str | Path, targets: dict[str, torch.Tensor]) -> None:
+    """Copy selected checkpoint tensors without materialising unrelated audio weights."""
+    root = Path(root)
+    index = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
+    missing = sorted(set(targets) - set(index))
+    if missing:
+        raise RuntimeError(f"checkpoint is missing required tensors: {missing[:8]}")
+
+    by_shard: dict[str, list[str]] = {}
+    for name in targets:
+        by_shard.setdefault(index[name], []).append(name)
+    with torch.no_grad():
+        for shard, names in sorted(by_shard.items()):
+            with safe_open(root / shard, framework="pt", device="cpu") as handle:
+                for name in names:
+                    targets[name].copy_(handle.get_tensor(name))
 
 
 @dataclass
@@ -43,7 +63,7 @@ class MoTConfig:
     from-scratch half affordable.
     """
 
-    phi_dir: str = "/Data/lzl/huggingface/Phi-4-mini-instruct"
+    phi_dir: str = "/Data/lzl/huggingface/Phi-4-multimodal-instruct"
 
     # --- und expert (read from the Phi config, kept here for reference/validation) ---
     und_hidden_size: int = 3072
@@ -59,6 +79,11 @@ class MoTConfig:
     partial_rotary_factor: float = 0.75
     mrope_section: tuple[int, int, int] = DEFAULT_MROPE_SECTION
     rms_norm_eps: float = 1e-5
+    attention_scaling: float = 1.0
+
+    # --- Phi-4-Multimodal vision adapter --------------------------------------------------
+    vision_lora_rank: int = 256
+    vision_lora_alpha: float = 512.0
 
     # --- gen expert (from scratch) ---
     # gen_hidden_size is independent of gen_num_attention_heads * head_dim: add_q_proj and
@@ -97,6 +122,8 @@ class MoTConfig:
             )
         if self.und_hidden_size != self.und_num_attention_heads * self.head_dim:
             raise ValueError("und_hidden_size must equal und_num_attention_heads * head_dim")
+        if self.vision_lora_rank <= 0:
+            raise ValueError("vision_lora_rank must be positive")
         for name, heads in (
             ("und", self.und_num_attention_heads),
             ("gen", self.gen_num_attention_heads),
@@ -108,6 +135,11 @@ class MoTConfig:
     def from_phi_dir(cls, phi_dir: str, **overrides) -> "MoTConfig":
         cfg = json.loads((Path(phi_dir) / "config.json").read_text())
         head_dim = cfg["hidden_size"] // cfg["num_attention_heads"]
+        rope_scale = cfg["max_position_embeddings"] / cfg["original_max_position_embeddings"]
+        attention_scaling = math.sqrt(
+            1.0 + math.log(rope_scale) / math.log(cfg["original_max_position_embeddings"])
+        )
+        vision_lora = cfg["vision_lora"]
         out = cls(
             phi_dir=phi_dir,
             und_hidden_size=cfg["hidden_size"],
@@ -120,6 +152,9 @@ class MoTConfig:
             rope_theta=cfg["rope_theta"],
             partial_rotary_factor=cfg.get("partial_rotary_factor", 1.0),
             rms_norm_eps=cfg["rms_norm_eps"],
+            attention_scaling=attention_scaling,
+            vision_lora_rank=vision_lora["r"],
+            vision_lora_alpha=vision_lora["lora_alpha"],
             **overrides,
         )
         out.validate()
@@ -140,6 +175,25 @@ class RMSNorm(nn.Module):
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
+
+
+class VisionLoRALinear(nn.Module):
+    """Phi-4-MM linear layer with only the vision adapter retained."""
+
+    def __init__(self, in_features: int, out_features: int, rank: int, alpha: float):
+        super().__init__()
+        self.base_layer = nn.Linear(in_features, out_features, bias=False)
+        self.lora_A = nn.Linear(in_features, rank, bias=False)
+        self.lora_B = nn.Linear(rank, out_features, bias=False)
+        self.scaling = alpha / rank
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+
+    def forward(self, x: torch.Tensor, use_vision_lora: bool) -> torch.Tensor:
+        out = self.base_layer(x)
+        if use_vision_lora:
+            out = out + self.lora_B(self.lora_A(x)) * self.scaling
+        return out
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -170,15 +224,15 @@ class MRotaryEmbedding(nn.Module):
     is what lets a text-only pretrained LLM sit in this stack without losing its positional
     behaviour.
 
-    ``attention_scaling`` is taken from the checkpoint's rope config.  Phi-4-mini uses LongRoPE
-    with ``short_factor`` all-ones, so below ``original_max_position_embeddings`` the scaling
-    is an identity and no interpolation is applied.
+    ``attention_scaling`` is taken from the checkpoint's LongRoPE config. Phi-4-MM uses
+    all-one short factors below ``original_max_position_embeddings`` but still applies the
+    checkpoint's global amplitude scale.
     """
 
-    def __init__(self, config: MoTConfig, attention_scaling: float = 1.0):
+    def __init__(self, config: MoTConfig):
         super().__init__()
         self.mrope_section = tuple(config.mrope_section)
-        self.attention_scaling = attention_scaling
+        self.attention_scaling = config.attention_scaling
         half = config.rotary_dim // 2
         inv_freq = 1.0 / (
             config.rope_theta ** (torch.arange(0, half, dtype=torch.float32) / half)
@@ -205,7 +259,7 @@ class MRotaryEmbedding(nn.Module):
 class MoTLayer(nn.Module):
     """One layer holding both experts.
 
-    Und-side parameter names mirror Phi-4-mini so its checkpoint loads unchanged.  Gen-side
+    Und-side parameter names mirror Phi-4-MM. Gen-side
     names mirror Cosmos3 (``add_q_proj``/``mlp_moe_gen``/...) so the layout stays recognisable.
     """
 
@@ -217,15 +271,20 @@ class MoTLayer(nn.Module):
         self.n_gen = config.gen_num_attention_heads
         self.n_kv = config.num_key_value_heads
 
-        # --- understanding expert (Phi-4-mini) ---
+        # --- understanding expert (Phi-4-Multimodal base + vision LoRA) ---
+        lora = (config.vision_lora_rank, config.vision_lora_alpha)
         self.input_layernorm = RMSNorm(h_und, config.rms_norm_eps)
         self.self_attn = nn.Module()
-        self.self_attn.qkv_proj = nn.Linear(h_und, (self.n_und + 2 * self.n_kv) * hd, bias=False)
-        self.self_attn.o_proj = nn.Linear(self.n_und * hd, h_und, bias=False)
+        self.self_attn.qkv_proj = VisionLoRALinear(
+            h_und, (self.n_und + 2 * self.n_kv) * hd, *lora
+        )
+        self.self_attn.o_proj = VisionLoRALinear(self.n_und * hd, h_und, *lora)
         self.post_attention_layernorm = RMSNorm(h_und, config.rms_norm_eps)
         self.mlp = nn.Module()
-        self.mlp.gate_up_proj = nn.Linear(h_und, 2 * config.und_intermediate_size, bias=False)
-        self.mlp.down_proj = nn.Linear(config.und_intermediate_size, h_und, bias=False)
+        self.mlp.gate_up_proj = VisionLoRALinear(
+            h_und, 2 * config.und_intermediate_size, *lora
+        )
+        self.mlp.down_proj = VisionLoRALinear(config.und_intermediate_size, h_und, *lora)
 
         # --- generation expert (from scratch) ---
         self.input_layernorm_moe_gen = RMSNorm(h_gen, config.rms_norm_eps)
@@ -241,10 +300,12 @@ class MoTLayer(nn.Module):
         self.mlp_moe_gen.up_proj = nn.Linear(h_gen, config.gen_intermediate_size, bias=False)
         self.mlp_moe_gen.down_proj = nn.Linear(config.gen_intermediate_size, h_gen, bias=False)
 
-    def _split_qkv(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _split_qkv(
+        self, hidden: torch.Tensor, use_vision_lora: bool
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         b, length, _ = hidden.shape
         hd = self.config.head_dim
-        qkv = self.self_attn.qkv_proj(hidden)
+        qkv = self.self_attn.qkv_proj(hidden, use_vision_lora)
         q_end = self.n_und * hd
         k_end = q_end + self.n_kv * hd
         q = qkv[..., :q_end].view(b, length, self.n_und, hd).transpose(1, 2)
@@ -253,12 +314,15 @@ class MoTLayer(nn.Module):
         return q, k, v
 
     def und_forward(
-        self, hidden: torch.Tensor, rope: tuple[torch.Tensor, torch.Tensor]
+        self,
+        hidden: torch.Tensor,
+        rope: tuple[torch.Tensor, torch.Tensor],
+        use_vision_lora: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Causal self-attention. Returns the new hidden state plus *pre-RoPE* k/v for the gen stack."""
         residual = hidden
         x = self.input_layernorm(hidden)
-        q, k, v = self._split_qkv(x)
+        q, k, v = self._split_qkv(x, use_vision_lora)
         cos, sin = rope
         attn = F.scaled_dot_product_attention(
             apply_partial_rope(q, cos, sin),
@@ -268,13 +332,25 @@ class MoTLayer(nn.Module):
             enable_gqa=True,
         )
         b, _, length, _ = attn.shape
-        hidden = residual + self.self_attn.o_proj(attn.transpose(1, 2).reshape(b, length, -1))
+        hidden = residual + self.self_attn.o_proj(
+            attn.transpose(1, 2).reshape(b, length, -1), use_vision_lora
+        )
 
         residual = hidden
         x = self.post_attention_layernorm(hidden)
-        gate, up = self.mlp.gate_up_proj(x).chunk(2, dim=-1)
-        hidden = residual + self.mlp.down_proj(up * F.silu(gate))
+        gate, up = self.mlp.gate_up_proj(x, use_vision_lora).chunk(2, dim=-1)
+        hidden = residual + self.mlp.down_proj(up * F.silu(gate), use_vision_lora)
         return hidden, k, v
+
+    def und_kv(
+        self,
+        hidden: torch.Tensor,
+        use_vision_lora: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Export this layer's K/V without computing an unused final attention/MLP output."""
+        x = self.input_layernorm(hidden)
+        _, k, v = self._split_qkv(x, use_vision_lora)
+        return k, v
 
     def gen_forward(
         self,
@@ -342,9 +418,9 @@ def timestep_embedding(t: torch.Tensor, dim: int, max_period: float = 10000.0) -
 
 
 class MoTModel(nn.Module):
-    """Phi-4-mini understanding expert + a from-scratch generation expert."""
+    """Phi-4-Multimodal understanding expert + a from-scratch generation expert."""
 
-    def __init__(self, config: MoTConfig, attention_scaling: float = 1.0):
+    def __init__(self, config: MoTConfig):
         super().__init__()
         config.validate()
         self.config = config
@@ -352,7 +428,7 @@ class MoTModel(nn.Module):
         self.layers = nn.ModuleList([MoTLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.und_hidden_size, config.rms_norm_eps)
         self.norm_moe_gen = RMSNorm(config.gen_hidden_size, config.rms_norm_eps)
-        self.rotary_emb = MRotaryEmbedding(config, attention_scaling)
+        self.rotary_emb = MRotaryEmbedding(config)
         # Set by the training wrapper; trades gen-expert recompute for activation memory.
         self.gradient_checkpointing = False
 
@@ -372,7 +448,10 @@ class MoTModel(nn.Module):
     # ------------------------------------------------------------------ und
 
     def forward_und(
-        self, inputs_embeds: torch.Tensor, position_ids: torch.Tensor
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.Tensor,
+        use_vision_lora: bool = False,
     ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]], tuple[torch.Tensor, torch.Tensor]]:
         """Run the whole understanding stack, exporting per-layer pre-RoPE k/v.
 
@@ -384,9 +463,26 @@ class MoTModel(nn.Module):
         hidden = inputs_embeds
         kv: list[tuple[torch.Tensor, torch.Tensor]] = []
         for layer in self.layers:
-            hidden, k, v = layer.und_forward(hidden, rope)
+            hidden, k, v = layer.und_forward(hidden, rope, use_vision_lora)
             kv.append((k, v))
         return self.norm(hidden), kv, rope
+
+    def forward_und_kv(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.Tensor,
+        use_vision_lora: bool = False,
+    ):
+        """Run only the UND computation required by the GEN expert."""
+        rope = tuple(r.to(inputs_embeds.dtype) for r in self.rotary_emb(position_ids))
+        hidden = inputs_embeds
+        kv = []
+        for layer in self.layers[:-1]:
+            hidden, k, v = layer.und_forward(hidden, rope, use_vision_lora)
+            kv.append((k, v))
+        k, v = self.layers[-1].und_kv(hidden, use_vision_lora)
+        kv.append((k, v))
+        return kv, rope
 
     # ------------------------------------------------------------------ gen
 
@@ -428,65 +524,36 @@ class MoTModel(nn.Module):
     # ------------------------------------------------------------------ loading
 
     def load_phi_weights(self, phi_dir: str | None = None) -> None:
-        """Load Phi-4-mini into the und expert.
-
-        Every und parameter must be covered and every Phi tensor consumed; anything left over
-        on either side is raised rather than warned about, so a checkpoint whose layout drifts
-        cannot silently initialise half the tower randomly.
-        """
-        from safetensors.torch import load_file
-
+        """Load the Phi-4-MM language backbone and vision LoRA into the und expert."""
         phi_dir = Path(phi_dir or self.config.phi_dir)
-        index = json.loads((phi_dir / "model.safetensors.index.json").read_text())["weight_map"]
-        shards: dict[str, dict] = {}
-        for shard in sorted(set(index.values())):
-            shards[shard] = load_file(str(phi_dir / shard))
-
-        def take(name: str) -> torch.Tensor:
-            return shards[index[name]][name]
-
-        with torch.no_grad():
-            self.embed_tokens.weight.copy_(take("model.embed_tokens.weight"))
-            self.norm.weight.copy_(take("model.norm.weight"))
-            for i, layer in enumerate(self.layers):
-                p = f"model.layers.{i}."
-                layer.input_layernorm.weight.copy_(take(p + "input_layernorm.weight"))
-                layer.post_attention_layernorm.weight.copy_(take(p + "post_attention_layernorm.weight"))
-                layer.self_attn.qkv_proj.weight.copy_(take(p + "self_attn.qkv_proj.weight"))
-                layer.self_attn.o_proj.weight.copy_(take(p + "self_attn.o_proj.weight"))
-                layer.mlp.gate_up_proj.weight.copy_(take(p + "mlp.gate_up_proj.weight"))
-                layer.mlp.down_proj.weight.copy_(take(p + "mlp.down_proj.weight"))
-
-        expected = {"model.embed_tokens.weight", "model.norm.weight"}
-        for i in range(len(self.layers)):
+        targets = {
+            "model.embed_tokens.weight": self.embed_tokens.weight,
+            "model.norm.weight": self.norm.weight,
+        }
+        for i, layer in enumerate(self.layers):
             p = f"model.layers.{i}."
-            expected |= {
-                p + s
-                for s in (
-                    "input_layernorm.weight",
-                    "post_attention_layernorm.weight",
-                    "self_attn.qkv_proj.weight",
-                    "self_attn.o_proj.weight",
-                    "mlp.gate_up_proj.weight",
-                    "mlp.down_proj.weight",
-                )
-            }
-        # lm_head is tied to embed_tokens in this checkpoint and unused here (no text decoding).
-        unused = set(index) - expected - {"lm_head.weight"}
-        if unused:
-            raise RuntimeError(f"unconsumed Phi tensors: {sorted(unused)[:8]} ({len(unused)} total)")
+            targets[p + "input_layernorm.weight"] = layer.input_layernorm.weight
+            targets[p + "post_attention_layernorm.weight"] = (
+                layer.post_attention_layernorm.weight
+            )
+            for name, module in (
+                ("self_attn.qkv_proj", layer.self_attn.qkv_proj),
+                ("self_attn.o_proj", layer.self_attn.o_proj),
+                ("mlp.gate_up_proj", layer.mlp.gate_up_proj),
+                ("mlp.down_proj", layer.mlp.down_proj),
+            ):
+                targets[p + name + ".base_layer.weight"] = module.base_layer.weight
+                targets[p + name + ".lora_A.vision.weight"] = module.lora_A.weight
+                targets[p + name + ".lora_B.vision.weight"] = module.lora_B.weight
+        copy_safetensor_tensors(phi_dir, targets)
 
-    def freeze_und(self) -> None:
-        """Freeze every understanding-expert parameter, leaving the gen expert trainable."""
-        self.set_und_trainable(False)
+    def set_und_trainable(self, flag: bool, kv_only: bool = False) -> None:
+        """Toggle the Phi-4-MM base, vision LoRA, norms and token embedding.
 
-    def set_und_trainable(self, flag: bool) -> None:
-        """Toggle the understanding expert (Phi-4-mini) plus the shared token embedding.
-
-        ``k_norm_und_for_gen`` is deliberately excluded: it normalises und's keys for the gen
-        stream's benefit and exists only because gen does, so it follows gen. Grouping it with
-        und would leave the interface between a frozen tower and a from-scratch expert pinned
-        at its initial scale.
+        In the world model only each layer's pre-RoPE K/V is consumed. The final UND norm and
+        the last layer's post-K/V attention/MLP path therefore cannot influence the loss and
+        are frozen under ``kv_only`` rather than being sent to an optimizer with permanent
+        ``grad=None``.
         """
         self.embed_tokens.requires_grad_(flag)
         self.norm.requires_grad_(flag)
@@ -495,6 +562,16 @@ class MoTModel(nn.Module):
             layer.post_attention_layernorm.requires_grad_(flag)
             layer.self_attn.requires_grad_(flag)
             layer.mlp.requires_grad_(flag)
+        if flag and kv_only:
+            self.norm.requires_grad_(False)
+            last = self.layers[-1]
+            last.self_attn.o_proj.requires_grad_(False)
+            last.post_attention_layernorm.requires_grad_(False)
+            last.mlp.requires_grad_(False)
+
+    def freeze_und(self) -> None:
+        """Freeze every understanding-expert parameter, leaving the gen expert trainable."""
+        self.set_und_trainable(False)
 
     def set_gen_trainable(self, flag: bool) -> None:
         """Toggle the generation expert, its in/out heads and the und->gen key norm."""

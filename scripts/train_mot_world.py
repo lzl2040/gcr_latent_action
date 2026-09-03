@@ -1,4 +1,4 @@
-"""Train / benchmark the Phi-4-mini MoT world model on the real loader.
+"""Train / benchmark the Phi-4-Multimodal MoT world model on the real loader.
 
 Does two jobs deliberately kept in one file, because the second is only trustworthy if it runs
 the first: a real training step (dataset -> Wan VAE -> MoT -> AdamW), and a per-task timing
@@ -72,8 +72,7 @@ def main(cfg: TrainPipelineConfig):
     warmup = env("WARMUP", 5)
     latent_frames = env("LATENT_FRAMES", 3)
     stage = os.environ.get("STAGE", "3")
-    phi_dir = os.environ.get("PHI_DIR", "/Data/lzl/huggingface/Phi-4-mini-instruct")
-    qwen_dir = os.environ.get("QWEN_DIR", "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct")
+    phi_dir = os.environ.get("PHI_DIR", "/Data/lzl/huggingface/Phi-4-multimodal-instruct")
     vae_dir = os.environ.get("VAE_DIR", "/Data/lzl/huggingface/Cosmos3-Edge/vae")
     per_task = os.environ.get("PER_TASK", "1") == "1"
     scope = os.environ.get("SCOPE", "gen_only")
@@ -118,7 +117,7 @@ def main(cfg: TrainPipelineConfig):
         f"MoT expects {mot.latent_channels} latent channels, VAE produces {vae.latent_channels}"
     )
     model = MoTWorldModel(
-        WorldModelConfig(mot=mot, qwen3vl_dir=qwen_dir, trainable_scope=scope)
+        WorldModelConfig(mot=mot, trainable_scope=scope)
     ).to(device=device, dtype=dtype)
     model.load_pretrained()
     model.mot.gradient_checkpointing = True
@@ -131,8 +130,8 @@ def main(cfg: TrainPipelineConfig):
         f"(vae {sum(p.numel() for p in vae.vae.parameters()) / 1e6:.0f}M frozen, not counted)"
     )
 
-    # A 5.28B-trainable scope needs ~43 GB of params+grads+Adam state, which does not fit on
-    # one 48 GiB card. NO_OPT=1 drops the optimizer so the forward/backward compute -- the part
+    # A 5.54B-trainable scope does not fit on one 48 GiB card with gradients and Adam state.
+    # NO_OPT=1 drops the optimizer so the forward/backward compute -- the part
     # that a faster GPU or more GPUs actually changes -- can still be measured and compared
     # across scopes; the optimizer state is ZeRO-sharded in any real run of this size anyway.
     no_opt = os.environ.get("NO_OPT", "0") == "1"

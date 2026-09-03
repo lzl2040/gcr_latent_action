@@ -78,14 +78,14 @@ intelrealsense = ["pyrealsense2>=2.55.1.6486 ; sys_platform != 'darwin'"]
 # 感知<->物理对比预训练（robo_contrast，train_ace.sh / train_ace_local.sh）需要的额外依赖。
 # 为了让现有的 `pip install -e ".[pi0]"` 一条命令仍然够用，pi0 里也带上了同样的约束。
 contrast = [
-    # DINOv3 (`dinov3_vit`) 从 4.56.0 才进 transformers，更早的版本会直接不认识这个 model type
-    "transformers>=4.56.0",
+    # Phi-4-Multimodal's native vision classes are available from Transformers 4.57.
+    "transformers>=4.57.0",
     # 训练脚本 dps_train_contrast.py 直接 import deepspeed，两个启动脚本也都走 deepspeed/ZeRO-2
     "deepspeed>=0.14.0",
     # tactile_backbone="ftp1" 时用它读 hpt_tokenizer/*.safetensors
     "safetensors>=0.4.0",
 ]
-pi0 = ["transformers>=4.56.0", "deepspeed>=0.14.0", "safetensors>=0.4.0"]
+pi0 = ["transformers>=4.57.0", "deepspeed>=0.14.0", "safetensors>=0.4.0"]
 pusht = ["gym-pusht>=0.1.5 ; python_version < '4.0'"]
 stretch = [
     "hello-robot-stretch-body>=0.7.27 ; python_version < '4.0' and sys_platform == 'linux'",

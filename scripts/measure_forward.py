@@ -47,9 +47,8 @@ def timed(fn, reps: int, warmup: int = 2) -> float:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--phi_dir", default="/Data/lzl/huggingface/Phi-4-mini-instruct")
-    ap.add_argument("--qwen3vl_dir", default="/Data/lzl/huggingface/Qwen3-VL-4B-Instruct")
-    ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--phi_dir", default="/Data/lzl/huggingface/Phi-4-multimodal-instruct")
+    ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--latent_frames", type=int, default=3)
     ap.add_argument("--text_len", type=int, default=32)
     ap.add_argument("--action_len", type=int, default=32)
@@ -73,7 +72,7 @@ def main() -> None:
             raise SystemExit(f"unknown scope {scope!r}")
         torch.cuda.reset_peak_memory_stats()
         mot = MoTConfig.from_phi_dir(args.phi_dir, action_dim=CANON_DIM)
-        cfg = WorldModelConfig(mot=mot, qwen3vl_dir=args.qwen3vl_dir, trainable_scope=scope)
+        cfg = WorldModelConfig(mot=mot, trainable_scope=scope)
         model = MoTWorldModel(cfg).to(device=device, dtype=dtype)
         model.mot.gradient_checkpointing = True
         model.train()

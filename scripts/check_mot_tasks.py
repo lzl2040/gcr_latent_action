@@ -1,7 +1,7 @@
-"""Check the Cosmos stage-2/stage-3 task family: T2I, T2V, I2V, V2V and action.
+"""Check all stage-2/stage-3 generation, action and dynamics tasks.
 
-All five tasks share one rectified-flow code path and differ only in how many latent frames
-start clean and whether the understanding stream gets an image. Two things about that are
+All tasks share one rectified-flow code path and differ only in stream roles, clean context
+length and whether the understanding stream gets an image. Two things about that are
 worth testing rather than assuming.
 
 **Context frames must be excluded from the loss.** They are handed to the model unchanged, so
@@ -13,7 +13,7 @@ context latents by 1000: the masked loss stays O(1), while a broken mask lands a
 blank one would spend a full ViT pass teaching the model what "no image" looks like. A counting
 hook proves the tower is skipped instead of fed zeros.
 
-Run:  python -u scripts/check_mot_tasks.py --batch 4
+Run:  CUDA_VISIBLE_DEVICES=2 python -u scripts/check_mot_tasks.py --batch 1
 """
 
 from __future__ import annotations
@@ -39,9 +39,8 @@ CONTEXT_SCALE = 1000.0
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--phi_dir", default="/Data/lzl/huggingface/Phi-4-mini-instruct")
-    ap.add_argument("--qwen3vl_dir", default="/Data/lzl/huggingface/Qwen3-VL-4B-Instruct")
-    ap.add_argument("--batch", type=int, default=4)
+    ap.add_argument("--phi_dir", default="/Data/lzl/huggingface/Phi-4-multimodal-instruct")
+    ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--latent_frames", type=int, default=3)
     ap.add_argument("--text_len", type=int, default=32)
     ap.add_argument("--action_len", type=int, default=32)
@@ -53,12 +52,11 @@ def main() -> int:
     dtype = torch.bfloat16
 
     mot = MoTConfig.from_phi_dir(args.phi_dir)
-    cfg = WorldModelConfig(mot=mot, qwen3vl_dir=args.qwen3vl_dir, trainable_scope=args.scope)
-    model = MoTWorldModel(cfg)
+    cfg = WorldModelConfig(mot=mot, trainable_scope=args.scope)
+    model = MoTWorldModel(cfg).to(device=device, dtype=dtype)
     # __init__ already applied the trainable scope; loading Phi weights re-applies it.
     if not args.random_init:
         model.load_pretrained()
-    model = model.to(device=device, dtype=dtype)
     model.mot.gradient_checkpointing = True
     model.train()
 

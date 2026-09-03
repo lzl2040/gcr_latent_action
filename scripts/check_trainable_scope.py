@@ -27,10 +27,10 @@ CANON_DIM = 40
 
 
 def groups(model: MoTWorldModel) -> dict[str, list[tuple[str, torch.nn.Parameter]]]:
-    """Bucket every parameter into vision / merger / und / gen."""
+    """Bucket every parameter into vision / projector / und / gen."""
     out: dict[str, list[tuple[str, torch.nn.Parameter]]] = {
         "vision": [],
-        "merger": [],
+        "projector": [],
         "und": [],
         "gen": [],
     }
@@ -48,10 +48,10 @@ def groups(model: MoTWorldModel) -> dict[str, list[tuple[str, torch.nn.Parameter
         "action_",
     )
     for name, p in model.named_parameters():
-        if name.startswith("vision_merger."):
-            out["merger"].append((name, p))
-        elif name.startswith("vision."):
+        if name.startswith("vision.img_processor."):
             out["vision"].append((name, p))
+        elif name.startswith("vision."):
+            out["projector"].append((name, p))
         elif any(m in name for m in gen_marks):
             out["gen"].append((name, p))
         else:
@@ -78,6 +78,7 @@ def main() -> None:
         )
         cfg = WorldModelConfig(mot=mot_cfg, trainable_scope=scope_name)
         model = MoTWorldModel(cfg).to(device, dtype=torch.bfloat16)
+        model.mot.gradient_checkpointing = True
         model.train()
 
         expected = cfg.scope()
@@ -90,8 +91,8 @@ def main() -> None:
             want = getattr(expected, g)
             n_train = sum(1 for _, p in params if p.requires_grad)
             counts[g] = (n_train, len(params))
-            if want and n_train != len(params):
-                print(f"  [FAIL] {g}: expected all {len(params)} trainable, got {n_train}")
+            if want and n_train == 0:
+                print(f"  [FAIL] {g}: expected active trainable parameters, got 0")
                 static_ok = False
             if not want and n_train != 0:
                 print(f"  [FAIL] {g}: expected 0 trainable, got {n_train}")
@@ -123,8 +124,11 @@ def main() -> None:
             want = getattr(expected, g)
             n_grad = sum(1 for _, p in params if p.grad is not None)
             got[g] = n_grad
-            if want and n_grad == 0:
-                print(f"  [FAIL] {g}: trainable but received NO gradient (detached graph?)")
+            if want and n_grad != counts[g][0]:
+                print(
+                    f"  [FAIL] {g}: {counts[g][0]} tensors are trainable but only "
+                    f"{n_grad} received gradients"
+                )
                 dyn_ok = False
             if not want and n_grad != 0:
                 print(f"  [FAIL] {g}: frozen but {n_grad} tensors received gradient")
@@ -132,7 +136,10 @@ def main() -> None:
 
         n_train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
         n_all_p = sum(p.numel() for p in model.parameters())
-        flags = " ".join(f"{g}={int(getattr(expected, g))}" for g in ("vision", "merger", "und", "gen"))
+        flags = " ".join(
+            f"{g}={int(getattr(expected, g))}"
+            for g in ("vision", "projector", "und", "gen")
+        )
         detail = " ".join(f"{g}:{counts[g][0]}/{counts[g][1]}->grad{got[g]}" for g in buckets)
         status = "PASS" if (static_ok and dyn_ok) else "FAIL"
         print(

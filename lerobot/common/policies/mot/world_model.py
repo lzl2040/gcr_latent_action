@@ -1,40 +1,41 @@
-"""World model built on the Phi-4-mini MoT: video-latent flow matching conditioned on a VLM.
+"""World model built on the Phi-4-Multimodal MoT.
 
 Data flow::
 
-    frame_0 --[Qwen3-VL ViT, frozen]--> 256 tok --[2x2 merge, trained]--> 64 tok --.
-    instruction --[Phi embed]--> text tok --------------------------------------.  |
-                                                                                v  v
-                                                       und stream (Phi-4-mini, frozen)
+    frame_0 --[Phi-4-MM SigLIP + projector]--> 545 image tok --.
+    instruction --[Phi-4-MM embed]-----------> text tok --------.  |
+                                                               v  v
+                                       und stream (Phi-4-MM + vision LoRA)
                                                                     | per-layer k/v
                                                                     v
     clip --[Wan VAE, frozen]--> latents --> noise --> patches --> gen stream --> velocity
 
-The und stream is a frozen feature extractor; only the vision merge/projector and the whole
-generation expert are trained.  Because gradients still have to reach the projector *through*
-Phi, the und stack is gradient-checkpointed when the projector is trainable, and switches to a
-no_grad fast path when it is not.
+The official multimodal checkpoint contributes the SigLIP NaViT, image projector, language
+backbone and rank-256 vision LoRA. Audio and speech-LoRA weights are deliberately not loaded.
+For square robot frames, the global and sub crops are identical; the ViT is evaluated once and
+its feature grid is reused to construct the checkpoint's exact 545-token ``sub_glb`` layout.
 """
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
+from transformers import Phi4MultimodalVisionConfig
+from transformers.models.phi4_multimodal.modeling_phi4_multimodal import (
+    Phi4MultimodalVisionModel,
+)
 
-from lerobot.common.policies.ace.qwen3vl_encoder import build_qwen3vl_vision
-from lerobot.common.policies.mot.modeling_mot import MoTConfig, MoTModel
-
-# Qwen3-VL preprocessing, taken from the checkpoint config (rescale 1/255, mean/std 0.5).
-QWEN3VL_MEAN = 0.5
-QWEN3VL_STD = 0.5
+from lerobot.common.policies.mot.modeling_mot import (
+    MoTConfig,
+    MoTModel,
+    copy_safetensor_tensors,
+)
 
 
 Role = Literal["noisy", "clean", "absent"]
@@ -179,32 +180,32 @@ class TrainableScope:
     modelling one.
     """
 
-    vision: bool  # Qwen3-VL ViT
-    merger: bool  # 2x2 vision merger into Phi's width
-    und: bool  # Phi-4-mini
+    vision: bool  # Phi-4-MM SigLIP NaViT
+    projector: bool  # official image projection + learned row/global separators
+    und: bool  # Phi-4-MM language base + vision LoRA
     gen: bool  # generation expert
 
 
 TRAINABLE_SCOPES: dict[str, TrainableScope] = {
     # Cosmos3-style: only the generation side moves. Cheapest and the safest for a
     # from-scratch gen expert.
-    "gen_only": TrainableScope(vision=False, merger=True, und=False, gen=True),
+    "gen_only": TrainableScope(vision=False, projector=False, und=False, gen=True),
     # pi-0.5-style: freeze the vision encoder, train the rest.
-    "freeze_vision": TrainableScope(vision=False, merger=True, und=True, gen=True),
-    "all": TrainableScope(vision=True, merger=True, und=True, gen=True),
+    "freeze_vision": TrainableScope(vision=False, projector=True, und=True, gen=True),
+    "all": TrainableScope(vision=True, projector=True, und=True, gen=True),
 }
 
 
 @dataclass
 class WorldModelConfig:
     mot: MoTConfig
-    qwen3vl_dir: str = "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct"
-    vision_merge_size: int = 2
     trainable_scope: str = "gen_only"
-    # Applied on top of the scope. Freezing the merger lets the und stack run under no_grad
-    # in the gen_only scope, which measured 1.58x faster; it does nothing once und is trained.
+    # Applied on top of the scope; useful for isolating the pretrained projector cost.
     freeze_vision_projector: bool = False
     und_grad_checkpointing: bool = True
+    # Image-conditioned UND sequences are 545 image tokens plus text. Processing the batch in
+    # slices bounds the large Phi MLP temporaries while preserving the external/global batch.
+    und_microbatch_size: int | None = 32
     latent_grid: int = 16
     action_loss_weight: float = 1.0
 
@@ -216,7 +217,9 @@ class WorldModelConfig:
             )
         s = TRAINABLE_SCOPES[self.trainable_scope]
         if self.freeze_vision_projector:
-            s = replace(s, merger=False)
+            s = replace(s, projector=False)
+        if self.und_microbatch_size is not None and self.und_microbatch_size <= 0:
+            raise ValueError("und_microbatch_size must be positive or None")
         return s
 
 
@@ -245,33 +248,107 @@ def build_mrope_positions(
     return torch.stack([torch.cat(t_ids), torch.cat(h_ids), torch.cat(w_ids)])
 
 
-class VisionMerger(nn.Module):
-    """Learned 2x2 spatial merge, mirroring Qwen3-VL's own merger.
+class Phi4MMVisionEmbedding(nn.Module):
+    """Official Phi-4-MM vision tower/projector with a square-frame fast path."""
 
-    The ViT trunk keeps all 256 tokens (its merger is stripped upstream); pooling here cuts the
-    und sequence 4x, which is what makes gradient-checkpointed backprop through the frozen LLM
-    affordable.
-    """
+    image_size = 448
+    patch_size = 14
+    feature_grid = 16
+    hidden_size = 1152
+    num_tokens = 545
 
-    def __init__(self, in_dim: int, out_dim: int, merge_size: int = 2):
+    def __init__(self, out_dim: int):
         super().__init__()
-        self.merge_size = merge_size
-        self.norm = nn.LayerNorm(in_dim * merge_size**2)
-        self.proj = nn.Sequential(
-            nn.Linear(in_dim * merge_size**2, out_dim),
+        vision_config = Phi4MultimodalVisionConfig(
+            hidden_size=self.hidden_size,
+            intermediate_size=4304,
+            num_hidden_layers=27,
+            num_attention_heads=16,
+            image_size=self.image_size,
+            patch_size=self.patch_size,
+            feature_layer=-2,
+            _attn_implementation="sdpa",
+        )
+        self.img_processor = Phi4MultimodalVisionModel(vision_config)
+        # Transformers 4.57 marks this bidirectional SigLIP attention as causal when routing
+        # through the generic SDPA backend. The checkpoint's original implementation is
+        # non-causal; correct the backend hint while retaining fused SDPA performance.
+        for layer in self.img_processor.encoder.layers:
+            layer.self_attn.is_causal = False
+        self.image_token_compression = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.glb_GN = nn.Parameter(torch.zeros(1, 1, self.hidden_size))
+        self.sub_GN = nn.Parameter(torch.zeros(1, 1, 1, self.hidden_size))
+        self.img_projection = nn.Sequential(
+            nn.Linear(self.hidden_size, out_dim),
             nn.GELU(),
             nn.Linear(out_dim, out_dim),
         )
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        b, n, d = tokens.shape
-        side = int(math.isqrt(n))
-        if side * side != n:
-            raise ValueError(f"expected a square token grid, got {n}")
-        m = self.merge_size
-        x = tokens.view(b, side // m, m, side // m, m, d).permute(0, 1, 3, 2, 4, 5)
-        x = x.reshape(b, (side // m) ** 2, d * m * m)
-        return self.proj(self.norm(x))
+    def set_trainable(self, encoder: bool, projector: bool) -> None:
+        self.img_processor.requires_grad_(encoder)
+        if encoder:
+            self.img_processor.gradient_checkpointing_enable()
+        else:
+            self.img_processor.gradient_checkpointing_disable()
+        # Phi-4-MM takes the second-to-last encoder output. The final layer, post norm and
+        # pooling head are checkpoint residents but not part of the image-embedding path.
+        self.img_processor.encoder.layers[-1].requires_grad_(False)
+        self.img_processor.post_layernorm.requires_grad_(False)
+        self.img_processor.head.requires_grad_(False)
+        self.glb_GN.requires_grad_(projector)
+        self.sub_GN.requires_grad_(projector)
+        self.img_projection.requires_grad_(projector)
+
+    def load_pretrained(self, phi_dir) -> None:
+        prefix = "model.embed_tokens_extend.image_embed."
+        targets = {prefix + name: tensor for name, tensor in self.state_dict().items()}
+        copy_safetensor_tensors(phi_dir, targets)
+
+    def forward(self, images: torch.Tensor, encoder_grad: bool) -> torch.Tensor:
+        if images.ndim != 4 or images.shape[1] != 3:
+            raise ValueError(f"expected images shaped (B,3,H,W), got {tuple(images.shape)}")
+
+        # The official processor uses (x/255 - .5)/.5. Inputs to this module are already [0,1].
+        x = F.interpolate(
+            images.float(),
+            size=(self.image_size, self.image_size),
+            mode="bicubic",
+            align_corners=False,
+        )
+        x = (x - 0.5) / 0.5
+        x = x.to(self.img_processor.embeddings.patch_embedding.weight.dtype)
+
+        with torch.set_grad_enabled(encoder_grad and torch.is_grad_enabled()):
+            patch_mask = torch.ones(
+                x.shape[0],
+                32,
+                32,
+                dtype=torch.bool,
+                device=x.device,
+            )
+            features = self.img_processor.embeddings(
+                pixel_values=x,
+                patch_attention_mask=patch_mask,
+            )
+            # feature_layer=-2 is the output after layer 25. Stop there instead of running
+            # the unused 27th layer, post-layernorm and pooling head.
+            for layer in self.img_processor.encoder.layers[:-1]:
+                features = layer(features, attention_mask=None)
+            b = features.shape[0]
+            features = features.view(b, 32, 32, self.hidden_size).permute(0, 3, 1, 2)
+            features = self.image_token_compression(features).permute(0, 2, 3, 1)
+        if not encoder_grad:
+            features = features.detach()
+
+        # Official order is sub-grid, one global separator, global-grid. For a square
+        # single-crop robot frame the sub/global pixels are identical, so reusing this grid is
+        # exactly equivalent to evaluating the same 448x448 crop twice.
+        row_sep = self.sub_GN.expand(b, self.feature_grid, 1, self.hidden_size)
+        block = torch.cat([features, row_sep], dim=2).reshape(b, -1, self.hidden_size)
+        image_tokens = torch.cat([block, self.glb_GN.expand(b, -1, -1), block], dim=1)
+        if image_tokens.shape[1] != self.num_tokens:
+            raise RuntimeError(f"expected {self.num_tokens} image tokens, got {image_tokens.shape[1]}")
+        return self.img_projection(image_tokens)
 
 
 class MoTWorldModel(nn.Module):
@@ -279,18 +356,9 @@ class MoTWorldModel(nn.Module):
         super().__init__()
         self.config = config
         self.mot = MoTModel(config.mot)
-
-        vision, vision_dim, vision_image_size = build_qwen3vl_vision(config.qwen3vl_dir)
-        self.vision = vision
-        self.vision_image_size = vision_image_size
-        self.vision_merger = VisionMerger(
-            vision_dim, config.mot.und_hidden_size, config.vision_merge_size
-        )
-
-        patch_size = json.loads((Path(config.qwen3vl_dir) / "config.json").read_text())["vision_config"][
-            "patch_size"
-        ]
-        self.vision_grid = vision_image_size // int(patch_size) // config.vision_merge_size
+        self.vision = Phi4MMVisionEmbedding(config.mot.und_hidden_size)
+        self.vision_image_size = self.vision.image_size
+        self.vision_grid = self.vision.feature_grid
         self.latent_side = config.latent_grid // config.mot.latent_patch_size
         self.apply_trainable_scope()
 
@@ -299,26 +367,26 @@ class MoTWorldModel(nn.Module):
     def apply_trainable_scope(self) -> None:
         """Set ``requires_grad`` across the four weight groups from the configured scope."""
         s = self.config.scope()
-        self.vision.requires_grad_(s.vision)
-        self.vision_merger.requires_grad_(s.merger)
-        self.mot.set_und_trainable(s.und)
+        self.vision.set_trainable(s.vision, s.projector)
+        self.mot.set_und_trainable(s.und, kv_only=True)
         self.mot.set_gen_trainable(s.gen)
 
     def load_pretrained(self) -> None:
         self.mot.load_phi_weights()
+        self.vision.load_pretrained(self.config.mot.phi_dir)
         self.apply_trainable_scope()
 
     @property
     def und_needs_grad(self) -> bool:
         """Whether the und stack must build a graph.
 
-        True if und itself trains, or if anything feeding it does -- a trainable merger or
+        True if und itself trains, or if anything feeding it does -- a trainable projector or
         vision tower sits upstream, so their gradients only exist if und is differentiated
         through. Getting this wrong is silent: no_grad here would leave those weights with
         ``grad = None`` while the loss still fell on the gen expert alone.
         """
         s = self.config.scope()
-        return s.und or s.merger or s.vision
+        return s.und or s.projector or s.vision
 
     # ------------------------------------------------------------------ und
 
@@ -329,50 +397,90 @@ class MoTWorldModel(nn.Module):
         frame, and feeding a blank one would spend a full vision-tower pass teaching the model
         that "no image" looks like a particular grey rectangle.
         """
+        batch = text_ids.shape[0]
+        micro = self.config.und_microbatch_size
+        if pixel_values is not None and micro is not None and batch > micro:
+            if pixel_values.shape[0] != batch:
+                raise ValueError(
+                    f"pixel/text batch mismatch: {pixel_values.shape[0]} vs {batch}"
+                )
+            pieces = [
+                self._encode_und_batch(
+                    pixel_values[start : start + micro],
+                    text_ids[start : start + micro],
+                )
+                for start in range(0, batch, micro)
+            ]
+            kv = []
+            for layer in range(self.config.mot.num_hidden_layers):
+                kv.append(
+                    (
+                        torch.cat([piece_kv[layer][0] for piece_kv, _ in pieces], dim=0),
+                        torch.cat([piece_kv[layer][1] for piece_kv, _ in pieces], dim=0),
+                    )
+                )
+                # Release each slice as soon as its merged layer exists. Otherwise torch.cat
+                # temporarily keeps two complete copies of all 32 layers' K/V.
+                for piece_kv, _ in pieces:
+                    piece_kv[layer] = None
+            rope = tuple(
+                torch.cat([piece_rope[i] for _, piece_rope in pieces], dim=0)
+                for i in range(2)
+            )
+            return kv, rope
+        return self._encode_und_batch(pixel_values, text_ids)
+
+    def _encode_und_batch(self, pixel_values: torch.Tensor | None, text_ids: torch.Tensor):
         device = text_ids.device
         text_embeds = self.mot.embed_tokens(text_ids)
-        n_text = text_ids.shape[1]
 
         if pixel_values is None:
             inputs_embeds = text_embeds
-            segments = [(1, 1, 1)] * n_text
+            use_vision_lora = False
         else:
-            # no_grad only when the tower is actually frozen; wrapping a trainable tower would
-            # silently starve it of gradients.
             vision_trains = self.config.scope().vision
-            with torch.set_grad_enabled(vision_trains and torch.is_grad_enabled()):
-                vision_tokens = self.vision(self._to_pixel_values(pixel_values)).last_hidden_state
-            image_embeds = self.vision_merger(vision_tokens.to(self.vision_merger.norm.weight.dtype))
+            image_embeds = self.vision(pixel_values, encoder_grad=vision_trains)
             inputs_embeds = torch.cat([image_embeds, text_embeds], dim=1)
-            segments = [(1, self.vision_grid, self.vision_grid)] + [(1, 1, 1)] * n_text
+            use_vision_lora = True
 
-        pos = build_mrope_positions(segments, device)
-        pos = pos.unsqueeze(1).expand(3, text_ids.shape[0], -1)
+        # Phi-4-MM was pretrained with ordinary 1-D LongRoPE over the flattened image/text
+        # sequence. Repeating the same index on all three mRoPE axes is exactly that 1-D RoPE.
+        seq = torch.arange(inputs_embeds.shape[1], device=device)
+        pos = seq.view(1, 1, -1).expand(3, text_ids.shape[0], -1)
 
         run = self._forward_und_checkpointed if self.und_needs_grad else self._forward_und_nograd
-        _, kv, rope = run(inputs_embeds, pos)
+        _, kv, rope = run(inputs_embeds, pos, use_vision_lora)
         return kv, rope
 
-    def _forward_und_nograd(self, inputs_embeds, pos):
+    def _forward_und_nograd(self, inputs_embeds, pos, use_vision_lora):
         with torch.no_grad():
-            return self.mot.forward_und(inputs_embeds, pos)
+            kv, rope = self.mot.forward_und_kv(inputs_embeds, pos, use_vision_lora)
+        return None, kv, rope
 
-    def _forward_und_checkpointed(self, inputs_embeds, pos):
+    def _forward_und_checkpointed(self, inputs_embeds, pos, use_vision_lora):
         if not (self.config.und_grad_checkpointing and self.training):
-            return self.mot.forward_und(inputs_embeds, pos)
+            kv, rope = self.mot.forward_und_kv(inputs_embeds, pos, use_vision_lora)
+            return None, kv, rope
         rope = tuple(r.to(inputs_embeds.dtype) for r in self.mot.rotary_emb(pos))
         hidden = inputs_embeds
         kv = []
-        for layer in self.mot.layers:
-            hidden, k, v = checkpoint(layer.und_forward, hidden, rope, use_reentrant=False)
+        for layer in self.mot.layers[:-1]:
+            hidden, k, v = checkpoint(
+                layer.und_forward,
+                hidden,
+                rope,
+                use_vision_lora,
+                use_reentrant=False,
+            )
             kv.append((k, v))
-        return self.mot.norm(hidden), kv, rope
-
-    def _to_pixel_values(self, images: torch.Tensor) -> torch.Tensor:
-        size = self.vision_image_size
-        if images.shape[-1] != size or images.shape[-2] != size:
-            images = F.interpolate(images, size=(size, size), mode="bilinear", align_corners=False)
-        return (images - QWEN3VL_MEAN) / QWEN3VL_STD
+        k, v = checkpoint(
+            self.mot.layers[-1].und_kv,
+            hidden,
+            use_vision_lora,
+            use_reentrant=False,
+        )
+        kv.append((k, v))
+        return None, kv, rope
 
     # ------------------------------------------------------------------ gen
 
@@ -531,14 +639,14 @@ class MoTWorldModel(nn.Module):
             return sum(p.numel() for p in module.parameters())
 
         mot = self.mot.param_report()
-        vision = count(self.vision)
-        merger = count(self.vision_merger)
+        vision = count(self.vision.img_processor)
+        projector = count(self.vision) - vision
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return {
             "vision_frozen": vision,
-            "vision_merger": merger,
+            "vision_projector": projector,
             "und_frozen": mot["und"],
             "gen_trainable": mot["gen"],
-            "total": vision + merger + mot["total"],
+            "total": vision + projector + mot["total"],
             "trainable": trainable,
         }
