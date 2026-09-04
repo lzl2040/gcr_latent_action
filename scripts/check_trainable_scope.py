@@ -63,6 +63,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--layers", type=int, default=2, help="small model: the switch is per-group")
     ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--microbatch", type=int, default=32)
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,7 +77,11 @@ def main() -> None:
             gen_intermediate_size=512,
             action_dim=CANON_DIM,
         )
-        cfg = WorldModelConfig(mot=mot_cfg, trainable_scope=scope_name)
+        cfg = WorldModelConfig(
+            mot=mot_cfg,
+            trainable_scope=scope_name,
+            und_microbatch_size=args.microbatch,
+        )
         model = MoTWorldModel(cfg).to(device, dtype=torch.bfloat16)
         model.mot.gradient_checkpointing = True
         model.train()

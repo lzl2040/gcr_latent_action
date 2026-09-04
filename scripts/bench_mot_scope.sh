@@ -5,7 +5,7 @@
 # only the trainer differs (no deepspeed, no wandb). Knobs come from the environment because
 # draccus rejects unknown CLI flags.
 #
-#   SCOPE=freeze_vision BATCH=8 bash scripts/bench_mot_scope.sh
+#   SCOPE=freeze_vision BATCH=8 EXECUTION=interleaved bash scripts/bench_mot_scope.sh
 set -euo pipefail
 
 export SCOPE=${SCOPE:-gen_only}
@@ -14,6 +14,9 @@ export STEPS=${STEPS:-10}
 export WARMUP=${WARMUP:-3}
 export PER_TASK=${PER_TASK:-1}
 export STAGE=${STAGE:-3}
+export EXECUTION=${EXECUTION:-interleaved}
+export CKPT_SEGMENT=${CKPT_SEGMENT:-8}
+export MOT_MICROBATCH=${MOT_MICROBATCH:-32}
 
 python -u ${BENCH_SCRIPT:-scripts/train_mot_world.py} \
     --policy.type="robo_contrast" \

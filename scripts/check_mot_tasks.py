@@ -46,13 +46,18 @@ def main() -> int:
     ap.add_argument("--action_len", type=int, default=32)
     ap.add_argument("--random_init", action="store_true")
     ap.add_argument("--scope", default="gen_only", help="trainable scope, see TRAINABLE_SCOPES")
+    ap.add_argument("--execution", choices=("interleaved", "cached"), default="interleaved")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16
 
     mot = MoTConfig.from_phi_dir(args.phi_dir)
-    cfg = WorldModelConfig(mot=mot, trainable_scope=args.scope)
+    cfg = WorldModelConfig(
+        mot=mot,
+        trainable_scope=args.scope,
+        training_execution=args.execution,
+    )
     model = MoTWorldModel(cfg).to(device=device, dtype=dtype)
     # __init__ already applied the trainable scope; loading Phi weights re-applies it.
     if not args.random_init:
@@ -63,7 +68,7 @@ def main() -> int:
     rep = model.param_report()
     print(
         f"params: total {rep['total'] / 1e9:.3f}B  trainable {rep['trainable'] / 1e9:.3f}B  "
-        f"gen {rep['gen_trainable'] / 1e9:.3f}B"
+        f"gen {rep['gen_trainable'] / 1e9:.3f}B  execution={args.execution}"
     )
 
     # Count vision-tower invocations so "no image" is proved, not assumed.

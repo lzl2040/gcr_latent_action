@@ -8,9 +8,9 @@ separate attention *calls*:
     gen tokens : full attention over cat([k_und, k_gen])    (conditioned on und)
 
 Because the understanding stream is causal-self-only it is completely independent of the
-generation stream. With Phi frozen, the whole und stack can therefore run once under
-``no_grad`` and export only its per-layer key/value tensors, instead of being interleaved
-layer-by-layer with the gen stack. That is what :meth:`MoTModel.forward_und` does.
+generation stream. Training follows Cosmos3 and advances both streams layer-by-layer so each
+layer's und K/V can be consumed and released immediately. Inference may instead run the whole
+und stack once under ``no_grad`` and reuse its per-layer K/V across denoising steps.
 
 Phi-4-Multimodal adds a rank-256 vision LoRA to every attention/MLP projection. The und
 expert keeps those adapters: image-conditioned tasks enable them, while text-only tasks
@@ -386,6 +386,55 @@ class MoTLayer(nn.Module):
         hidden = residual + self.mlp_moe_gen.down_proj(F.relu(self.mlp_moe_gen.up_proj(x)) ** 2)
         return hidden
 
+    def interleaved_forward(
+        self,
+        und_hidden: torch.Tensor,
+        gen_hidden: torch.Tensor,
+        rope_und: tuple[torch.Tensor, torch.Tensor],
+        rope_gen: tuple[torch.Tensor, torch.Tensor],
+        use_vision_lora: bool,
+        und_requires_grad: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Advance both Cosmos3 pathways through one layer.
+
+        UND never consumes GEN. Its same-layer pre-RoPE K/V are therefore the only temporary
+        tensors crossing from the causal pathway to the full-attention pathway.
+        """
+        with torch.set_grad_enabled(torch.is_grad_enabled() and und_requires_grad):
+            und_hidden, k_und, v_und = self.und_forward(
+                und_hidden,
+                rope_und,
+                use_vision_lora,
+            )
+        gen_hidden = self.gen_forward(
+            gen_hidden,
+            rope_gen,
+            rope_und,
+            k_und,
+            v_und,
+        )
+        return und_hidden, gen_hidden
+
+    def interleaved_last_forward(
+        self,
+        und_hidden: torch.Tensor,
+        gen_hidden: torch.Tensor,
+        rope_und: tuple[torch.Tensor, torch.Tensor],
+        rope_gen: tuple[torch.Tensor, torch.Tensor],
+        use_vision_lora: bool,
+        und_requires_grad: bool,
+    ) -> torch.Tensor:
+        """Run the final MoT layer without computing an unused final UND state."""
+        with torch.set_grad_enabled(torch.is_grad_enabled() and und_requires_grad):
+            k_und, v_und = self.und_kv(und_hidden, use_vision_lora)
+        return self.gen_forward(
+            gen_hidden,
+            rope_gen,
+            rope_und,
+            k_und,
+            v_und,
+        )
+
 
 class PerDomainLinear(nn.Module):
     """A separate ``Linear(in, out)`` per embodiment domain, stored as one stacked tensor.
@@ -486,16 +535,8 @@ class MoTModel(nn.Module):
 
     # ------------------------------------------------------------------ gen
 
-    def forward_gen(
-        self,
-        gen_hidden: torch.Tensor,
-        gen_position_ids: torch.Tensor,
-        kv: list[tuple[torch.Tensor, torch.Tensor]],
-        rope_und: tuple[torch.Tensor, torch.Tensor],
-        timestep: torch.Tensor,
-    ) -> torch.Tensor:
-        rope_gen = self.rotary_emb(gen_position_ids)
-        rope_gen = tuple(r.to(gen_hidden.dtype) for r in rope_gen)
+    def _add_timestep(self, gen_hidden: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+        """Add a per-sample or per-token diffusion timestep embedding."""
         # ``timestep`` is (B,) when every token shares a noise level, or (B, L) when it does
         # not -- which is what the task family needs, since context frames stay clean at
         # sigma=0 while the frames being predicted carry real noise.
@@ -510,7 +551,119 @@ class MoTModel(nn.Module):
                     gen_hidden.dtype
                 )
             ).view(bsz, seq, -1)
-        hidden = gen_hidden + t_emb
+        return gen_hidden + t_emb
+
+    def forward_interleaved(
+        self,
+        und_hidden: torch.Tensor,
+        und_position_ids: torch.Tensor,
+        gen_hidden: torch.Tensor,
+        gen_position_ids: torch.Tensor,
+        timestep: torch.Tensor,
+        use_vision_lora: bool = False,
+        und_requires_grad: bool = True,
+        checkpoint_layers: bool | None = None,
+        checkpoint_segment_size: int = 8,
+    ) -> torch.Tensor:
+        """Cosmos3-style training path with layer-local UND K/V.
+
+        Checkpointing wraps short runs of complete dual-pathway layers. Backward recomputes
+        each run's UND K/V instead of retaining every layer's cache or every layer's UND
+        hidden state for the lifetime of the forward.
+        """
+        if checkpoint_segment_size <= 0:
+            raise ValueError("checkpoint_segment_size must be positive")
+        rope_und = tuple(r.to(und_hidden.dtype) for r in self.rotary_emb(und_position_ids))
+        rope_gen = tuple(r.to(gen_hidden.dtype) for r in self.rotary_emb(gen_position_ids))
+        gen_hidden = self._add_timestep(gen_hidden, timestep)
+        if checkpoint_layers is None:
+            checkpoint_layers = self.gradient_checkpointing and self.training
+        use_ckpt = checkpoint_layers and torch.is_grad_enabled()
+
+        normal_layers = len(self.layers) - 1
+        if use_ckpt:
+            for start in range(0, normal_layers, checkpoint_segment_size):
+                end = min(start + checkpoint_segment_size, normal_layers)
+                und_hidden, gen_hidden = torch.utils.checkpoint.checkpoint(
+                    self._forward_interleaved_segment,
+                    und_hidden,
+                    gen_hidden,
+                    rope_und,
+                    rope_gen,
+                    use_vision_lora,
+                    und_requires_grad,
+                    start,
+                    end,
+                    use_reentrant=False,
+                )
+        else:
+            for layer in self.layers[:-1]:
+                und_hidden, gen_hidden = layer.interleaved_forward(
+                    und_hidden,
+                    gen_hidden,
+                    rope_und,
+                    rope_gen,
+                    use_vision_lora,
+                    und_requires_grad,
+                )
+
+        last = self.layers[-1]
+        if use_ckpt:
+            gen_hidden = torch.utils.checkpoint.checkpoint(
+                last.interleaved_last_forward,
+                und_hidden,
+                gen_hidden,
+                rope_und,
+                rope_gen,
+                use_vision_lora,
+                und_requires_grad,
+                use_reentrant=False,
+            )
+        else:
+            gen_hidden = last.interleaved_last_forward(
+                und_hidden,
+                gen_hidden,
+                rope_und,
+                rope_gen,
+                use_vision_lora,
+                und_requires_grad,
+            )
+        return self.norm_moe_gen(gen_hidden)
+
+    def _forward_interleaved_segment(
+        self,
+        und_hidden: torch.Tensor,
+        gen_hidden: torch.Tensor,
+        rope_und: tuple[torch.Tensor, torch.Tensor],
+        rope_gen: tuple[torch.Tensor, torch.Tensor],
+        use_vision_lora: bool,
+        und_requires_grad: bool,
+        start: int,
+        end: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run a checkpoint segment while keeping every layer Cosmos3-interleaved."""
+        for layer in self.layers[start:end]:
+            und_hidden, gen_hidden = layer.interleaved_forward(
+                und_hidden,
+                gen_hidden,
+                rope_und,
+                rope_gen,
+                use_vision_lora,
+                und_requires_grad,
+            )
+        return und_hidden, gen_hidden
+
+    def forward_gen(
+        self,
+        gen_hidden: torch.Tensor,
+        gen_position_ids: torch.Tensor,
+        kv: list[tuple[torch.Tensor, torch.Tensor]],
+        rope_und: tuple[torch.Tensor, torch.Tensor],
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        rope_gen = self.rotary_emb(gen_position_ids)
+        rope_gen = tuple(r.to(gen_hidden.dtype) for r in rope_gen)
+        hidden = self._add_timestep(gen_hidden, timestep)
         use_ckpt = self.gradient_checkpointing and self.training
         for layer, (k_und, v_und) in zip(self.layers, kv, strict=True):
             if use_ckpt:

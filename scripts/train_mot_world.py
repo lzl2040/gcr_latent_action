@@ -76,6 +76,9 @@ def main(cfg: TrainPipelineConfig):
     vae_dir = os.environ.get("VAE_DIR", "/Data/lzl/huggingface/Cosmos3-Edge/vae")
     per_task = os.environ.get("PER_TASK", "1") == "1"
     scope = os.environ.get("SCOPE", "gen_only")
+    execution = os.environ.get("EXECUTION", "interleaved")
+    checkpoint_segment = env("CKPT_SEGMENT", 8)
+    mot_microbatch = env("MOT_MICROBATCH", 32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16
@@ -117,7 +120,13 @@ def main(cfg: TrainPipelineConfig):
         f"MoT expects {mot.latent_channels} latent channels, VAE produces {vae.latent_channels}"
     )
     model = MoTWorldModel(
-        WorldModelConfig(mot=mot, trainable_scope=scope)
+        WorldModelConfig(
+            mot=mot,
+            trainable_scope=scope,
+            training_execution=execution,
+            mot_checkpoint_segment_size=checkpoint_segment,
+            und_microbatch_size=mot_microbatch,
+        )
     ).to(device=device, dtype=dtype)
     model.load_pretrained()
     model.mot.gradient_checkpointing = True
@@ -128,6 +137,11 @@ def main(cfg: TrainPipelineConfig):
         f"params: total {rep['total'] / 1e9:.3f}B  trainable {rep['trainable'] / 1e9:.3f}B  "
         f"scope={scope}  "
         f"(vae {sum(p.numel() for p in vae.vae.parameters()) / 1e6:.0f}M frozen, not counted)"
+    )
+    print(
+        f"execution: train={execution}  checkpoint_segment={checkpoint_segment}  "
+        f"microbatch={mot_microbatch}  "
+        "eval=per-layer UND KV cache"
     )
 
     # A 5.54B-trainable scope does not fit on one 48 GiB card with gradients and Adam state.

@@ -1,9 +1,12 @@
-"""Project 16-GPU wall-clock from the measured Phi-4-Multimodal A6000 anchors.
+"""Project 16-GPU wall-clock from the cached-training Phi-4-MM A6000 anchors.
 
 The primary convention is the one requested for robot video: one optimizer sample represents
 one source-video frame. Therefore ``hours * 3600 * fps`` samples are divided by
 ``16 * batch_per_gpu``. Raw-video rows include mounted-storage latency, decode and the online
 Wan VAE; latent rows remove the VAE and use one small sequential read per sample.
+
+These measurements predate the interleaved training default. Keep them as a reproducible
+baseline, but do not present them as interleaved-training throughput.
 
 Run:
     python scripts/extrapolate_cluster.py --hours 30000 --batch-per-gpu 32
@@ -270,6 +273,10 @@ def main(hours: int, batch: int) -> None:
     print(
         f"{hours:,} h x 3600 x {FPS} fps = {frames:.3g} frame-samples; "
         f"16 x {batch} = {global_batch} global batch; {steps:.3g} optimizer steps"
+    )
+    print(
+        "WARNING: anchors use training_execution=cached; "
+        "the current training default is interleaved and needs a clean-GPU rebenchmark"
     )
     print(
         f"A6000 measured stage-3 model @ b32: gen_only={GEN_WEIGHTED_B32:.0f} ms, "

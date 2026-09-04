@@ -5,10 +5,13 @@ Data flow::
     frame_0 --[Phi-4-MM SigLIP + projector]--> 545 image tok --.
     instruction --[Phi-4-MM embed]-----------> text tok --------.  |
                                                                v  v
-                                       und stream (Phi-4-MM + vision LoRA)
-                                                                    | per-layer k/v
-                                                                    v
+                             und stream (Phi-4-MM + vision LoRA) ----.
+                                      | same-layer K/V               |
+                                      v                              v
     clip --[Wan VAE, frozen]--> latents --> noise --> patches --> gen stream --> velocity
+
+Training advances UND and GEN together layer-by-layer, matching Cosmos3. Inference keeps the
+separable UND-cache path so fixed image/text conditioning can be encoded once and reused.
 
 The official multimodal checkpoint contributes the SigLIP NaViT, image projector, language
 backbone and rank-256 vision LoRA. Audio and speech-LoRA weights are deliberately not loaded.
@@ -39,6 +42,7 @@ from lerobot.common.policies.mot.modeling_mot import (
 
 
 Role = Literal["noisy", "clean", "absent"]
+TrainingExecution = Literal["interleaved", "cached"]
 
 
 @dataclass
@@ -203,8 +207,15 @@ class WorldModelConfig:
     # Applied on top of the scope; useful for isolating the pretrained projector cost.
     freeze_vision_projector: bool = False
     und_grad_checkpointing: bool = True
-    # Image-conditioned UND sequences are 545 image tokens plus text. Processing the batch in
-    # slices bounds the large Phi MLP temporaries while preserving the external/global batch.
+    # Cosmos3-style layer-interleaved execution is the default during training. ``cached`` is
+    # retained as an A/B and compatibility path; eval always uses the reusable cache path.
+    training_execution: TrainingExecution = "interleaved"
+    # Checkpoint several complete dual-pathway layers as one segment. Per-layer checkpointing
+    # retains one long UND hidden state at every layer; segments retain only their boundaries.
+    mot_checkpoint_segment_size: int = 8
+    # Image-conditioned UND sequences are 545 image tokens plus text. During interleaved
+    # training the complete UND+GEN model is sliced along the batch dimension; during cached
+    # execution only UND is sliced. Both preserve the external/global batch semantics.
     und_microbatch_size: int | None = 32
     latent_grid: int = 16
     action_loss_weight: float = 1.0
@@ -218,6 +229,13 @@ class WorldModelConfig:
         s = TRAINABLE_SCOPES[self.trainable_scope]
         if self.freeze_vision_projector:
             s = replace(s, projector=False)
+        if self.training_execution not in ("interleaved", "cached"):
+            raise ValueError(
+                f"unknown training_execution {self.training_execution!r}; "
+                "expected 'interleaved' or 'cached'"
+            )
+        if self.mot_checkpoint_segment_size <= 0:
+            raise ValueError("mot_checkpoint_segment_size must be positive")
         if self.und_microbatch_size is not None and self.und_microbatch_size <= 0:
             raise ValueError("und_microbatch_size must be positive or None")
         return s
@@ -390,8 +408,31 @@ class MoTWorldModel(nn.Module):
 
     # ------------------------------------------------------------------ und
 
+    def _prepare_und_batch(
+        self,
+        pixel_values: torch.Tensor | None,
+        text_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, bool]:
+        device = text_ids.device
+        text_embeds = self.mot.embed_tokens(text_ids)
+
+        if pixel_values is None:
+            inputs_embeds = text_embeds
+            use_vision_lora = False
+        else:
+            vision_trains = self.config.scope().vision
+            image_embeds = self.vision(pixel_values, encoder_grad=vision_trains)
+            inputs_embeds = torch.cat([image_embeds, text_embeds], dim=1)
+            use_vision_lora = True
+
+        # Phi-4-MM was pretrained with ordinary 1-D LongRoPE over the flattened image/text
+        # sequence. Repeating the same index on all three mRoPE axes is exactly that 1-D RoPE.
+        seq = torch.arange(inputs_embeds.shape[1], device=device)
+        pos = seq.view(1, 1, -1).expand(3, text_ids.shape[0], -1)
+        return inputs_embeds, pos, use_vision_lora
+
     def encode_und(self, pixel_values: torch.Tensor | None, text_ids: torch.Tensor):
-        """Build and run the understanding stream. Returns ``(kv, rope_und)``.
+        """Build the reusable inference cache. Returns ``(per_layer_kv, rope_und)``.
 
         ``pixel_values`` is optional: the text-to-image and text-to-video tasks have no input
         frame, and feeding a blank one would spend a full vision-tower pass teaching the model
@@ -431,23 +472,10 @@ class MoTWorldModel(nn.Module):
         return self._encode_und_batch(pixel_values, text_ids)
 
     def _encode_und_batch(self, pixel_values: torch.Tensor | None, text_ids: torch.Tensor):
-        device = text_ids.device
-        text_embeds = self.mot.embed_tokens(text_ids)
-
-        if pixel_values is None:
-            inputs_embeds = text_embeds
-            use_vision_lora = False
-        else:
-            vision_trains = self.config.scope().vision
-            image_embeds = self.vision(pixel_values, encoder_grad=vision_trains)
-            inputs_embeds = torch.cat([image_embeds, text_embeds], dim=1)
-            use_vision_lora = True
-
-        # Phi-4-MM was pretrained with ordinary 1-D LongRoPE over the flattened image/text
-        # sequence. Repeating the same index on all three mRoPE axes is exactly that 1-D RoPE.
-        seq = torch.arange(inputs_embeds.shape[1], device=device)
-        pos = seq.view(1, 1, -1).expand(3, text_ids.shape[0], -1)
-
+        inputs_embeds, pos, use_vision_lora = self._prepare_und_batch(
+            pixel_values,
+            text_ids,
+        )
         run = self._forward_und_checkpointed if self.und_needs_grad else self._forward_und_nograd
         _, kv, rope = run(inputs_embeds, pos, use_vision_lora)
         return kv, rope
@@ -481,6 +509,75 @@ class MoTWorldModel(nn.Module):
         )
         kv.append((k, v))
         return None, kv, rope
+
+    def _forward_interleaved_batch(
+        self,
+        pixel_values: torch.Tensor | None,
+        text_ids: torch.Tensor,
+        gen_tokens: torch.Tensor,
+        gen_position_ids: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        und_hidden, und_position_ids, use_vision_lora = self._prepare_und_batch(
+            pixel_values,
+            text_ids,
+        )
+        checkpoint_layers = self.training and (
+            self.mot.gradient_checkpointing
+            or (self.und_needs_grad and self.config.und_grad_checkpointing)
+        )
+        return self.mot.forward_interleaved(
+            und_hidden=und_hidden,
+            und_position_ids=und_position_ids,
+            gen_hidden=gen_tokens,
+            gen_position_ids=gen_position_ids,
+            timestep=timestep,
+            use_vision_lora=use_vision_lora,
+            und_requires_grad=self.und_needs_grad,
+            checkpoint_layers=checkpoint_layers,
+            checkpoint_segment_size=self.config.mot_checkpoint_segment_size,
+        )
+
+    def forward_interleaved(
+        self,
+        pixel_values: torch.Tensor | None,
+        text_ids: torch.Tensor,
+        gen_tokens: torch.Tensor,
+        gen_position_ids: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run Cosmos3-style training without retaining an all-layer UND cache."""
+        batch = text_ids.shape[0]
+        if gen_tokens.shape[0] != batch or gen_position_ids.shape[1] != batch:
+            raise ValueError("UND and GEN batch dimensions must match")
+        if pixel_values is not None and pixel_values.shape[0] != batch:
+            raise ValueError(
+                f"pixel/text batch mismatch: {pixel_values.shape[0]} vs {batch}"
+            )
+
+        micro = self.config.und_microbatch_size
+        if pixel_values is not None and micro is not None and batch > micro:
+            outputs = []
+            for start in range(0, batch, micro):
+                end = min(start + micro, batch)
+                outputs.append(
+                    self._forward_interleaved_batch(
+                        pixel_values[start:end],
+                        text_ids[start:end],
+                        gen_tokens[start:end],
+                        gen_position_ids[:, start:end],
+                        timestep[start:end],
+                    )
+                )
+            return torch.cat(outputs, dim=0)
+
+        return self._forward_interleaved_batch(
+            pixel_values,
+            text_ids,
+            gen_tokens,
+            gen_position_ids,
+            timestep,
+        )
 
     # ------------------------------------------------------------------ gen
 
@@ -600,9 +697,19 @@ class MoTWorldModel(nn.Module):
                 [token_sigma, sigma_action.unsqueeze(1).expand(b, n_action)], dim=1
             )
 
-        kv, rope_und = self.encode_und(pixel_values, text_ids)
         pos = self.gen_positions(t_lat, n_action, device).unsqueeze(1).expand(3, b, -1)
-        hidden = self.mot.forward_gen(gen_tokens, pos, kv, rope_und, token_sigma * 1000.0)
+        timestep = token_sigma * 1000.0
+        if self.training and self.config.training_execution == "interleaved":
+            hidden = self.forward_interleaved(
+                pixel_values,
+                text_ids,
+                gen_tokens,
+                pos,
+                timestep,
+            )
+        else:
+            kv, rope_und = self.encode_und(pixel_values, text_ids)
+            hidden = self.mot.forward_gen(gen_tokens, pos, kv, rope_und, timestep)
 
         out: dict[str, torch.Tensor] = {}
         total = None

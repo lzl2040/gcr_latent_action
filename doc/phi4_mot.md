@@ -25,10 +25,30 @@ GEN: full attention(query=GEN, key/value=[UND, GEN])
 
 因此：
 
-1. UND 不读取 GEN，可以先独立跑完整个理解栈；
+1. UND 不读取 GEN，但训练时默认仍按 Cosmos3 的顺序逐层交错执行；
 2. GEN 每层必须接收对应 UND 层导出的 pre-RoPE K/V；
 3. 两侧只必须共享 `head_dim=128` 和 `num_key_value_heads=8`；
 4. GEN 的 hidden size、query heads 和 MLP size可以独立设置。
+
+训练和推理保留两种数学等价的执行顺序：
+
+```text
+# training_execution=interleaved（训练默认）
+for layer in layers:
+    und, k_und, v_und = layer.und_forward(und)
+    gen = layer.gen_forward(gen, k_und, v_und)
+
+# cached（推理默认，也可用于 A/B）
+for layer in layers:
+    und, k_und, v_und = layer.und_forward(und)
+    kv_cache.append((k_und, v_und))
+for layer, (k_und, v_und) in zip(layers, kv_cache):
+    gen = layer.gen_forward(gen, k_und, v_und)
+```
+
+训练默认的 interleaved 路径与 Diffusers `Cosmos3VLTextMoTDecoderLayer.forward()` 一致：
+同层 UND K/V 立即供同层 GEN 使用，用完即可释放。cached 路径仍完整保留，适合固定
+image/text 条件下跨多个 denoising step 复用。
 
 当前 GEN 取：
 
@@ -141,18 +161,25 @@ GEN 侧继续使用视频 latent 的三维位置：
 ### 1.6 为大 batch 做的内存优化
 
 一张图会把 UND 长度从 32 个文本 token 提高到约 577。Phi 的 fused MLP 在 batch 128 时会
-产生很大的临时张量。`WorldModelConfig.und_microbatch_size=32` 会把 **UND batch** 分块，
-再按层拼回 K/V：
+产生很大的临时张量。训练时 `WorldModelConfig.und_microbatch_size=32` 会沿 batch 维同时
+切分 **UND 和 GEN**：
 
 - 外部/global batch 不变；
-- GEN 仍一次处理完整 batch；
+- 每个 microbatch 完整经过同一组 UND/GEN 层；
 - loss、负样本和 optimizer step 语义不变；
-- 只限制理解侧临时激活峰值。
+- batch 内样本没有相互 attention，因此切分在数学上等价；
+- BF16 因 GEMM kernel 形状不同可能有舍入差异，回归测试 cosine 为 `0.99999`。
 
-拼接时会逐层释放各 microbatch 的旧 K/V，避免同时保留两份完整 32 层缓存。
+训练默认把连续 8 个双路径层作为一个 checkpoint segment。层内仍保持 Cosmos3 的
+UND→同层 GEN 顺序；反向只保留 segment 边界并重算段内层，而不是让全部 32 层 K/V 或全部
+32 个 UND hidden 存活到 backward。以 batch 32、577 个 UND token 计算，单是原始 BF16
+K/V cache 就约 2.25 GiB，还不含 autograd graph。
+
+推理或显式设置 `training_execution="cached"` 时仍走旧路径：只对 UND 做 microbatch，再按层
+合并 K/V，供一次或多次 `forward_gen()` 使用。
 
 最后一个 UND 层只需要导出 K/V；它的 attention output、MLP 和最终 norm 不会被 GEN 或 loss
-读取。当前 KV-only 路径跳过这些死计算，并冻结 94.378M 永远不可能收到梯度的参数。
+读取。两种执行路径都跳过这些死计算，并冻结 94.378M 永远不可能收到梯度的参数。
 
 ---
 
@@ -373,7 +400,26 @@ vision cosine   0.99802
 
 FP32 结果证明结构等价；BF16 差异来自 kernel 数值路径，而不是漏权重或错 token 布局。
 
-### 6.2 8 个任务
+### 6.2 两种执行顺序等价
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -u scripts/check_mot_execution.py
+```
+
+小型三层 MoT 对照结果：
+
+```text
+cached vs interleaved output max diff = 0
+cached vs interleaved gradient max diff = 0
+checkpointed interleaved output max diff = 0
+batch slicing cosine = 0.999987
+frozen UND 没有梯度，GEN 梯度正常
+```
+
+这证明执行顺序的改变没有改变 MoT 数学关系。batch slicing 的非零差异来自 BF16 GEMM 在
+不同 batch shape 下选择不同 kernel；FP32 或不切 batch 时 cached/interleaved 逐元素一致。
+
+### 6.3 8 个任务
 
 ```bash
 CUDA_VISIBLE_DEVICES=2 python -u scripts/check_mot_tasks.py \
@@ -387,7 +433,7 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/check_mot_tasks.py \
 - t2i/t2v 完全不调用 vision；
 - action/video 需要的 projection 均收到梯度。
 
-### 6.3 trainable scope
+### 6.4 trainable scope
 
 ```bash
 CUDA_VISIBLE_DEVICES=2 python -u scripts/check_trainable_scope.py --layers 1
@@ -396,23 +442,32 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/check_trainable_scope.py --layers 1
 三个 scope 的静态 `requires_grad` 和动态梯度覆盖均通过。检查要求每一个被标记为 trainable
 的有效 tensor 都必须实际收到梯度，而不只是“这个组里至少有一个梯度”。
 
-### 6.4 完整模型与 batch 128
+### 6.5 完整模型与 batch 128
 
-`gen_only`、GEN checkpointing、单张 RTX A6000：
+新的 interleaved 路径已在 `gen_only`、完整 6.070B 模型上通过 batch 128：
 
 ```text
 batch 128
-14.338 s/step
-36.4 GiB peak
+training_execution = interleaved
+checkpoint segment = 8 layers
+完整 AdamW optimizer step 通过
+当前进程 peak = 22.1 GiB
 所有 366 个可训练 tensor 有梯度
 ```
 
-这是模型本体的合成 latent 测量，证明单卡模型路径支持 batch 128。原视频端到端还要同时
-运行 705M Wan VAE，batch 128 的总流水线未宣称已经通过；正式原视频基准使用 batch 32/64。
+测试时该卡还被另一个进程占用约 19 GiB，因此使用 microbatch 1 才能在共享卡上完成，测得的
+42.1 s 不能作为吞吐基准；它只证明包含 AdamW 的 batch 128 完整路径可以运行。旧 cached
+路径在独占 A6000、microbatch 32 下为 14.338 s/step、36.4 GiB，二者不是同条件速度对比。
+原视频端到端还要运行 705M Wan VAE，正式基准仍使用 batch 32/64。
 
 ---
 
-## 7. RTX A6000 实测
+## 7. RTX A6000 cached 基线
+
+> 本节数值是在切换到 interleaved 训练前测得的 `training_execution=cached` 基线。当前四张
+> A6000 均被其他进程占用，不能可靠刷新绝对吞吐；这些数值不能直接当作新的默认训练速度。
+> 同卡受干扰 A/B 显示：冻结 UND 的 `gen_only` interleaved checkpoint 会因反向重算 UND 而
+> 更慢；`freeze_vision` 两种路径接近。需在独占 GPU 上重新测量后再刷新集群外推。
 
 ### 7.1 forward-only 阶段拆解
 
@@ -475,7 +530,9 @@ UND 有约 577 token，GEN 联合任务只有 224 token，所以即使两侧参�
 
 ---
 
-## 8. 16 卡 A100 / B200 时间
+## 8. 16 卡 A100 / B200 cached 基线
+
+以下时间仍由第 7 节 cached A6000 锚点推得，不代表新的 interleaved 默认训练路径。
 
 ### 8.1 口径
 
@@ -572,12 +629,21 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/check_mot_und.py --fp32 --seq 2
 CUDA_VISIBLE_DEVICES=2 python -u scripts/check_mot_tasks.py \
   --batch 1 --text_len 4 --action_len 4 --random_init
 
+# cached / interleaved 输出与梯度等价
+CUDA_VISIBLE_DEVICES=2 python -u scripts/check_mot_execution.py
+
 # scope 梯度
-CUDA_VISIBLE_DEVICES=2 python -u scripts/check_trainable_scope.py --layers 1
+CUDA_VISIBLE_DEVICES=2 python -u scripts/check_trainable_scope.py \
+  --layers 3 --batch 2 --microbatch 1
 
 # 完整 pretrained smoke
 CUDA_VISIBLE_DEVICES=2 python -u scripts/smoke_mot_world.py \
-  --batch 1 --latent_frames 3 --gen_checkpointing
+  --batch 1 --latent_frames 3 --gen_checkpointing \
+  --execution interleaved --checkpoint_segment 8
+
+# 明确保留的 cached 训练 A/B 路径
+CUDA_VISIBLE_DEVICES=2 python -u scripts/smoke_mot_world.py \
+  --batch 1 --latent_frames 3 --gen_checkpointing --execution cached
 
 # 真实数据 benchmark
 CUDA_VISIBLE_DEVICES=2 BATCH=32 STEPS=24 WARMUP=8 \
@@ -588,7 +654,8 @@ CUDA_VISIBLE_DEVICES=2 BATCH=32 STEPS=16 WARMUP=8 \
 
 # 正式按 stage3 MIX 采样
 CUDA_VISIBLE_DEVICES=2 BATCH=32 SCOPE=gen_only \
-  PER_TASK=0 MIX=stage3 bash scripts/bench_mot_scope.sh
+  PER_TASK=0 MIX=stage3 EXECUTION=interleaved CKPT_SEGMENT=8 \
+  bash scripts/bench_mot_scope.sh
 ```
 
 ---
@@ -596,7 +663,9 @@ CUDA_VISIBLE_DEVICES=2 BATCH=32 SCOPE=gen_only \
 ## 10. 尚未完成或仍需实机确认
 
 - 当前只有训练 forward，没有机器人部署用的多步 action denoising sampler；
+- cached UND K/V 的底层接口已保留，但部署 sampler 还需负责在 denoising steps 间持有并复用；
 - A100/B200 数字来自 A6000 实测外推，尚未在对应集群实测；
+- 第 7、8 节仍是 cached 基线；interleaved 的独占 GPU benchmark 尚未刷新；
 - `freeze_vision` 的单卡 optimizer 放不下，当前只实测前反向；正式 ZeRO-2 optimizer 时间是估计；
 - 原视频 blob 延迟 200 ms/clip 是场景假设，必须在目标集群重新跑 I/O probe；
 - 方形图像快速路径不等价于任意长宽比的官方 dynamic-HD；

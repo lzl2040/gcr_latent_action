@@ -41,6 +41,9 @@ def build(args) -> MoTWorldModel:
         mot=mot,
         trainable_scope=args.scope,
         freeze_vision_projector=args.freeze_projector,
+        training_execution=args.execution,
+        und_microbatch_size=args.microbatch,
+        mot_checkpoint_segment_size=args.checkpoint_segment,
     )
     return MoTWorldModel(cfg)
 
@@ -73,6 +76,10 @@ def main() -> int:
     ap.add_argument("--gen_checkpointing", action="store_true")
     ap.add_argument("--freeze_projector", action="store_true")
     ap.add_argument("--scope", default="gen_only")
+    ap.add_argument("--execution", choices=("interleaved", "cached"), default="interleaved")
+    ap.add_argument("--microbatch", type=int, default=32)
+    ap.add_argument("--checkpoint_segment", type=int, default=8)
+    ap.add_argument("--skip_opt", action="store_true")
     args = ap.parse_args()
 
     device = "cuda"
@@ -130,19 +137,28 @@ def main() -> int:
     print(f"[grad] gen-expert tensors receiving grad: {len(gen_named)}")
 
     model.zero_grad(set_to_none=True)
-    opt = torch.optim.AdamW([p for _, p in trainable], lr=1e-4)
+    opt = (
+        None
+        if args.skip_opt
+        else torch.optim.AdamW([p for _, p in trainable], lr=1e-4)
+    )
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
     for _ in range(args.steps):
-        opt.zero_grad(set_to_none=True)
+        if opt is None:
+            model.zero_grad(set_to_none=True)
+        else:
+            opt.zero_grad(set_to_none=True)
         loss = model(latents, images, text_ids, actions, domain, task="joint_action")["loss"]
         loss.backward()
-        opt.step()
+        if opt is not None:
+            opt.step()
     torch.cuda.synchronize()
     dt = (time.perf_counter() - t0) / args.steps
     peak = torch.cuda.max_memory_allocated() / 2**30
-    print(f"[perf] batch {b}: {dt:.3f}s/step, peak {peak:.1f} GiB "
+    mode = "fwd+bwd" if opt is None else "optimizer step"
+    print(f"[perf] batch {b}: {dt:.3f}s/{mode}, peak {peak:.1f} GiB "
           f"({b / dt:.1f} samples/s)")
 
     print("\nALL CHECKS PASSED" if ok else "\nFAILURES PRESENT")
