@@ -668,6 +668,23 @@ CUDA_VISIBLE_DEVICES=2 BATCH=32 SCOPE=gen_only \
   bash scripts/bench_mot_scope.sh
 ```
 
+正式训练使用 DeepSpeed ZeRO-2 入口，而不是上面的单卡 benchmark：
+
+```bash
+# 单机 8 卡，Cosmos3 风格只训练 GEN
+bash train_mot.sh --job_name phi4_mot_stage3 --nproc_per_node 8
+
+# π0.5 风格：冻结 vision encoder，训练 projector、UND 和 GEN
+bash train_mot.sh --job_name phi4_mot_freeze_vision \
+  --nproc_per_node 8 --scope freeze_vision
+```
+
+`train_mot.sh` 默认使用原视频在线计算 Wan latent、`debug_research_data`、stage3 MIX、
+每卡 batch 32、interleaved execution 和 4 层 checkpoint segment。它会生成任务独立的
+临时 ZeRO-2 配置，并支持 `--nnodes/--node_rank/--master_addr` 多机启动、DeepSpeed
+checkpoint 自动续训以及 `--` 后的 draccus 参数透传。可先用
+`bash train_mot.sh --job_name check --dry_run` 检查最终命令。
+
 ---
 
 ## 10. 尚未完成或仍需实机确认
