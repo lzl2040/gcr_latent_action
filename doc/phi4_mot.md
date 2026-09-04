@@ -685,6 +685,22 @@ bash train_mot.sh --job_name phi4_mot_freeze_vision \
 checkpoint 自动续训以及 `--` 后的 draccus 参数透传。可先用
 `bash train_mot.sh --job_name check --dry_run` 检查最终命令。
 
+本地共享 A6000 机器使用：
+
+```bash
+conda activate lerobot_v2
+
+# 自动选择显存占用低于 5 GiB 的 GPU
+bash train_mot_local.sh
+
+# 推荐显式固定设备；后续参数会覆盖本地默认值
+CUDA_VISIBLE_DEVICES=0,3 JOB_NAME=mot_local \
+  bash train_mot_local.sh --scope freeze_vision --batch_size 16
+```
+
+`train_mot_local.sh` 复用正式 DeepSpeed 入口，但将权重和数据覆盖到 `/Data/...` 本地路径，
+自动按可见 GPU 数设置进程数并选择空闲 rendezvous 端口；W&B 和 checkpoint 续训默认关闭。
+
 ---
 
 ## 10. 尚未完成或仍需实机确认
