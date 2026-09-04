@@ -49,11 +49,14 @@ CHUNK_SIZE=32
 GROUP_SIZE=4
 CHUNK_SECONDS=1.6
 
-# 触觉塔："resnet18"（从头学）或 "ftp1"（加载 FTP-1 预训练的 per-sensor tokenizer，冻结）。
+# 触觉塔："resnet18"、"ftp1" 或 "anytouch"。后两者加载预训练权重并冻结。
 # 选 ftp1 时 FTP1_TACTILE_DIR 必须指向集群上 hpt_tokenizer/*.safetensors 所在目录，
-# 且 __post_init__ 会把触觉图像尺寸强制成 224。
+# 选 anytouch 时 ANYTOUCH_CHECKPOINT 必须指向官方 stage-2 checkpoint。
+# 两者都会把触觉图像尺寸强制成 224。
 TACTILE_BACKBONE="resnet18"
 FTP1_TACTILE_DIR="/mnt/wangxiaofa/pt_weights/ftp1_v0426_50kstep/"
+ANYTOUCH_CHECKPOINT="/mnt/wangxiaofa/pt_weights/anytouch_encoder.pth"
+ANYTOUCH_FORWARD_BATCH_SIZE=128
 # `--` 之后收集到这里，原样透传给训练脚本
 EXTRA_ARGS=()
 
@@ -112,6 +115,8 @@ while [[ $# -gt 0 ]]; do
         --chunk_seconds) CHUNK_SECONDS="$2"; shift 2 ;;
         --tactile_backbone) TACTILE_BACKBONE="$2"; shift 2 ;;
         --ftp1_tactile_dir) FTP1_TACTILE_DIR="$2"; shift 2 ;;
+        --anytouch_checkpoint) ANYTOUCH_CHECKPOINT="$2"; shift 2 ;;
+        --anytouch_forward_batch_size) ANYTOUCH_FORWARD_BATCH_SIZE="$2"; shift 2 ;;
         --parent_dir_v21) PARENT_DIR_V21="$2"; shift 2 ;;
         --parent_dir_v30) PARENT_DIR_V30="$2"; shift 2 ;;
         --parent_dir_extra) PARENT_DIR_EXTRA="$2"; shift 2 ;;
@@ -166,6 +171,15 @@ if [[ "$TACTILE_BACKBONE" == "ftp1" ]]; then
         exit 1
     fi
     TACTILE_ARGS+=(--policy.ftp1_tactile_dir="$FTP1_TACTILE_DIR")
+elif [[ "$TACTILE_BACKBONE" == "anytouch" ]]; then
+    if [[ -z "$ANYTOUCH_CHECKPOINT" || ! -f "$ANYTOUCH_CHECKPOINT" ]]; then
+        echo "错误：--tactile_backbone anytouch 需要有效的 --anytouch_checkpoint: ${ANYTOUCH_CHECKPOINT}"
+        exit 1
+    fi
+    TACTILE_ARGS+=(
+        --policy.anytouch_checkpoint="$ANYTOUCH_CHECKPOINT"
+        --policy.anytouch_forward_batch_size="$ANYTOUCH_FORWARD_BATCH_SIZE"
+    )
 elif [[ -n "$FTP1_TACTILE_DIR" ]]; then
     echo "警告：--ftp1_tactile_dir 已忽略，因为 --tactile_backbone 是 ${TACTILE_BACKBONE}（只有 ftp1 会读它）"
 fi
@@ -188,13 +202,13 @@ fi
 echo "nodes=${NNODES} rank=${NODE_RANK} gpus/node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 
 # ---------------------------------------------------------------- 执行训练命令
-# torchrun \
-#     --nnodes=$NNODES \
-#     --nproc_per_node=$NPROC_PER_NODE \
-#     --node_rank=$NODE_RANK \
-#     --master_addr=$MASTER_ADDR \
-#     --master_port=$MASTER_PORT \
-python lerobot/scripts/dps_train_contrast.py \
+torchrun \
+    --nnodes=$NNODES \
+    --nproc_per_node=$NPROC_PER_NODE \
+    --node_rank=$NODE_RANK \
+    --master_addr=$MASTER_ADDR \
+    --master_port=$MASTER_PORT \
+    lerobot/scripts/dps_train_contrast.py \
     --deepspeed="$DS_CONFIG" \
     --policy.type="robo_contrast" \
     --policy.vision_model_name="$VISION_MODEL" \

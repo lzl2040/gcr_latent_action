@@ -71,16 +71,28 @@ def main():
     ap.add_argument("--backbone", nargs="*", default=["dinov3", "cosmos3", "qwen3vl"])
     ap.add_argument("--target", nargs="*", default=["vision", "vae"])
     ap.add_argument("--k", nargs="*", type=int, default=[1, 4])
+    ap.add_argument(
+        "--tactile_backbone",
+        default="resnet18",
+        choices=("resnet18", "ftp1", "anytouch"),
+    )
+    ap.add_argument(
+        "--anytouch_checkpoint",
+        default="/Data/lzl/huggingface/anytouch_encoder.pth",
+    )
+    ap.add_argument("--anytouch_forward_batch_size", type=int, default=128)
     args = ap.parse_args()
 
     combos = list(itertools.product(args.backbone, args.target, args.k))
     for backbone, target, k in combos:
-        cfg = RoboContrastConfig()
-        cfg.vision_backbone = backbone
-        cfg.perception_recon_target = target
-        cfg.num_cls_tokens = k
-        cfg.validate_features() if hasattr(cfg, "validate_features") else None
-        cfg.__post_init__()
+        cfg = RoboContrastConfig(
+            vision_backbone=backbone,
+            perception_recon_target=target,
+            num_cls_tokens=k,
+            tactile_backbone=args.tactile_backbone,
+            anytouch_checkpoint=args.anytouch_checkpoint,
+            anytouch_forward_batch_size=args.anytouch_forward_batch_size,
+        )
 
         model = RoboContrast(cfg).to(args.device)
         model.train()

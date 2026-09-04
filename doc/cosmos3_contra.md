@@ -3,18 +3,21 @@
 What this branch adds to the perception ↔ physical contrastive model, what each module
 costs, and which parts are actually trained.
 
-Three knobs were added, each defaulting to the previous behaviour, so an existing config
-run on this branch produces the same model it did before:
+The perception-side knobs still default to the previous behaviour, and the tactile switch
+also defaults to the existing ResNet path, so an existing config produces the same model:
 
 | config | values | default |
 |---|---|---|
 | `vision_backbone` | `dinov3`, `cosmos3`, `qwen3vl` | `dinov3` |
 | `perception_recon_target` | `vision`, `vae` | `vision` |
 | `num_cls_tokens` | `1`, or any `K ≤ num_change_queries` | `1` |
+| `tactile_backbone` | `resnet18`, `ftp1`, `anytouch` | `resnet18` |
 
 Supporting knobs: `cosmos3_dir` (weights, default `/Data/lzl/huggingface/Cosmos3-Edge`),
 `qwen3vl_dir` (default `/Data/lzl/huggingface/Qwen3-VL-4B-Instruct`) and
-`vae_repeat_frames` (default `1`; see "Repeating frames is a no-op" below).
+`vae_repeat_frames` (default `1`; see "Repeating frames is a no-op" below). AnyTouch adds
+`anytouch_checkpoint` (default `/Data/lzl/huggingface/anytouch_encoder.pth`) and
+`anytouch_forward_batch_size` (default `128` dynamic windows).
 
 Regenerate every table here with `python scripts/dump_module_params.py`. Do not hand-edit
 them — a stale parameter table is worse than no table.
@@ -77,6 +80,45 @@ visual space, which is what makes "the instruction selects which change matters"
 Cosmos3's own text tower is a 2.2B LLM in `transformer/`; it was measured to add ~0.3s to
 a 1.04s step, against the 0.013s the SigLIP2 tower currently costs, so it is not used and
 its weights are not downloaded.
+
+### Optional `tactile_backbone=anytouch`
+
+Generated with:
+
+```bash
+python scripts/dump_module_params.py \
+  --vision_backbone dinov3 \
+  --perception_recon_target vision \
+  --tactile_backbone anytouch
+```
+
+| module | params | trainable |
+|---|---:|---:|
+| **perception_encoder** | **573.5M** | **205.6M** |
+| &nbsp;&nbsp;`vision_backbone` | 85.7M | 0.0M |
+| &nbsp;&nbsp;`text_backbone` | 282.3M | 0.0M |
+| &nbsp;&nbsp;`visual_proj` | 0.8M | 0.8M |
+| &nbsp;&nbsp;`text_proj` | 0.8M | 0.8M |
+| &nbsp;&nbsp;`evidence_blocks` | 63.0M | 63.0M |
+| &nbsp;&nbsp;`blocks` | 84.0M | 84.0M |
+| &nbsp;&nbsp;`out_proj` | 1.6M | 1.6M |
+| &nbsp;&nbsp;`predictor` | 55.4M | 55.4M |
+| **physical_encoder** | **485.1M** | **179.9M** |
+| &nbsp;&nbsp;`state_proj` | 0.3M | 0.3M |
+| &nbsp;&nbsp;`action_proj` | 0.3M | 0.3M |
+| &nbsp;&nbsp;`signal_proj` | 0.3M | 0.3M |
+| &nbsp;&nbsp;`tactile_cnn` (AnyTouch ViT-L/14) | 305.2M | 0.0M |
+| &nbsp;&nbsp;`tactile_adapter` | 0.4M | 0.4M |
+| &nbsp;&nbsp;`tactile_img_proj` | 0.5M | 0.5M |
+| &nbsp;&nbsp;`sample_rate_embed` | 0.1M | 0.1M |
+| &nbsp;&nbsp;`blocks` | 176.4M | 176.4M |
+| &nbsp;&nbsp;`out_proj` | 1.6M | 1.6M |
+| **total** | **1058.6M** | **385.4M** |
+
+The optional tower therefore exceeds the original 500–800M total-parameter envelope, but
+all 305.2M AnyTouch parameters are frozen. It removes the trainable ResNet, temporal
+attention and tactile reconstruction head, then adds a trainable `768 -> 512` adapter.
+Consequently trainable capacity falls from 406.5M to 385.4M rather than increasing.
 
 ---
 
@@ -295,7 +337,124 @@ the sense that metric exists to catch.
 
 ---
 
-## 5. Verification
+## 5. AnyTouch tactile encoder
+
+`lerobot/common/policies/ace/anytouch_tactile.py` reconstructs only the touch encoder from
+the MIT-licensed [GeWu-Lab/AnyTouch](https://github.com/GeWu-Lab/AnyTouch) release, pinned
+to commit `9c43a1a6eb38d904fd767712eb9dcb2d98b8d56b`. The local stage-2 checkpoint is a 2.9 GiB
+full multimodal checkpoint; the loader deliberately maps only:
+
+- the 24-layer CLIP ViT-L/14 touch transformer;
+- the shared 3-D patch convolution;
+- the five-token sensor embedding;
+- the `1024 -> 768` touch projection.
+
+Text, vision and MAE-decoder weights are never registered in this model. Loading is strict
+for the retained CLIP subtree, so a missing or shape-incompatible encoder key raises instead
+of silently leaving random weights. The checkpoint also contains
+`video_position_embedding`, but the pinned AnyTouch dynamic forward does not read it; it
+uses the CLIP touch position embedding for both static and dynamic inputs, and this
+implementation preserves that behaviour.
+
+### Input and temporal layout
+
+Each frame is RGB, resized directly to 224 × 224, converted to `[0, 1]`, and normalized by
+ImageNet mean/std. There is no center crop. The dynamic path preserves AnyTouch's unusual
+released layout:
+
+```text
+(B, T=3, C=3, H, W) -> Conv3d(in_channels=3, kernel=(3,14,14))
+```
+
+This means the three frames occupy the convolution's input-channel axis and RGB occupies
+its depth axis. Swapping to the conventional `(B,C,T,H,W)` interpretation looks cleaner but
+would apply the pretrained weights to different dimensions.
+
+The dataset supplies four samples per tactile pad. With the default
+`tactile_tokens_per_pad=2`, they become two contiguous windows:
+
+```text
+token 0 <- frames [0,1,2]
+token 1 <- frames [1,2,3]
+```
+
+Each window produces the post-LayerNorm CLS feature projected to 768 dimensions, exactly
+the representation supervised by AnyTouch stage 2. A trainable linear + LayerNorm adapter
+maps it to the existing 512-dimensional tactile interface; the physical transformer still
+receives only two tokens per pad, not 256 patch tokens. Setting
+`tactile_tokens_per_pad=1` uses only frames `[0,1,2]` and approximately halves AnyTouch
+compute.
+
+All current image-tactile datasets in `debug_research_data` use sensors outside AnyTouch's
+five named training sensors, so the encoder uses sensor id `-1`, the learned universal
+sensor token. AnyTouch explicitly trained that token by replacing known sensor identities
+during pre-training; inventing a GelSight/DIGIT identity for Sharpa or OpenLoong would be
+less defensible. Pad identity remains represented by this model's separate
+`tactile_view_embed`.
+
+The ViT, sensor token and pretrained projection are frozen and forced to eval mode. Only
+the `768 -> 512` adapter, `tactile_img_proj`, modality gate and physical transformer learn.
+`tactile_recon_weight` is forced to zero because the AnyTouch MAE decoder is not loaded and
+a decoder attached after a frozen feature cannot shape the backbone. Frozen windows are
+processed in chunks of `anytouch_forward_batch_size` (128 by default), bounding transient
+attention memory for tactile-heavy batches without changing outputs.
+
+There is still a temporal-domain mismatch to measure rather than hide: AnyTouch learned
+from short clips of nearby historical frames, whereas this dataset samples four tactile
+observations uniformly across the same ~1.6 s window as state/action/vision. The pretrained
+spatial and sensor invariances remain useful, but its temporal filters are seeing larger
+gaps than in much of the original corpus. Keep the ResNet baseline in every experiment and
+judge AnyTouch by downstream contrastive/action metrics, not by its pre-training pedigree.
+The repository code is MIT licensed; the checkpoint page does not state a separate weight
+license, so commercial use should confirm the weight terms with the authors.
+
+Enable it on the cluster launcher with:
+
+```bash
+bash train_ace.sh \
+  --job_name anytouch_contrast \
+  --tactile_backbone anytouch \
+  --anytouch_checkpoint /mnt/wangxiaofa/pt_weights/anytouch_encoder.pth
+```
+
+The local launcher already forwards arbitrary policy overrides:
+
+```bash
+bash train_ace_local.sh \
+  --policy.tactile_backbone=anytouch \
+  --policy.anytouch_checkpoint=/Data/lzl/huggingface/anytouch_encoder.pth
+```
+
+### Measured cost
+
+RTX A6000, bf16, real `debug_research_data`, batch 128, four tactile frames, two dynamic
+windows per live pad:
+
+| backbone | model params | trainable | representative step | tactile tower | CUDA peak |
+|---|---:|---:|---:|---:|---:|
+| ResNet-18 | 774.4M | 406.5M | 1.01 s | 0.074 s | 10.83 GiB |
+| AnyTouch | 1058.6M | 385.4M | 1.62 s | 0.728 s | 9.66 GiB |
+
+The matching uncontended runs spent ~0.33 s in the unchanged perception encoder. AnyTouch
+processed about 176 live pads per timed step, or 352 three-frame windows. It is roughly
+60% slower end to end at this tactile density, but the frozen/chunked implementation keeps
+memory below the ResNet run and satisfies the single-GPU batch-128 requirement. These are
+shared-machine measurements; unrelated GPU load can inflate absolute time, so use the
+provided profiler for cluster-specific capacity planning:
+
+```bash
+python scripts/profile_contrastive_step.py \
+  --mix debug_research_data --batch_size 128 --steps 6 \
+  --tactile_backbone anytouch
+```
+
+This is a useful high-capacity reference encoder, not the default. If its online cost is too
+high, first test `tactile_tokens_per_pad=1`; for large-scale pre-training, offline caching
+or distillation into the existing smaller tower is more economical than unfreezing ViT-L.
+
+---
+
+## 6. Verification
 
 | check | result |
 |---|---|
@@ -322,10 +481,17 @@ raising:
 | `pos_embed` still receives gradient when unfrozen | pass |
 | All 4 `target × K` combinations build, forward, backward | pass |
 | End-to-end `train_ace_local.sh`, `qwen3vl` | 407.0M / 995.5M, batch **256**, clean exit |
+| AnyTouch full checkpoint -> retained encoder strict load | all 391 CLIP keys matched |
+| AnyTouch four frames -> two dynamic features | `(N,4,3,224,224) -> (N,2,768)`, pass |
+| Window ordering | changing frame 3 leaves token 0 unchanged and changes token 1 |
+| Frozen/trainable gradient split, with and without tactile rows | backbone none; adapter/projection present |
+| Full DINOv3 RoboContrast forward/backward with AnyTouch | pass |
+| Real-video `debug_research_data`, single-GPU batch 128 | pass, 9.66 GiB allocated peak |
+| `train_ace.sh`, one-device ZeRO-2, real video, batch 128 | pass; 110 live pads, 3.54 s update |
 
 ---
 
-## 6. Known pre-existing issues (not introduced here, not fixed here)
+## 7. Known pre-existing issues (not introduced here, not fixed here)
 
 - **`MultiHeadAttention.norm_kv` is dead in self-attention.** The self-attention path uses
   `norm_q` for both query and key/value, so `norm_kv` never receives a gradient: 2

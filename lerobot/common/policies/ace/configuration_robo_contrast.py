@@ -168,8 +168,8 @@ class RoboContrastConfig(PreTrainedConfig):
     # are dead, so a larger share is not obviously better.
     tactile_tokens_per_pad: int = 2
     # ResNet-18 downsamples by 32, so 112 gives a 4x4 map (64 would give a useless 2x2).
-    # Forced to 224 by ``__post_init__`` when ``tactile_backbone="ftp1"``, which is the
-    # resolution its positional embedding was trained at.
+    # Forced to 224 by ``__post_init__`` for FTP-1 and AnyTouch, matching their pretrained
+    # positional embeddings.
     tactile_img_size: int = 112
     tactile_feat_dim: int = 512
     # A tactile pad whose per-channel *spatial* std stays below this (on a [0, 1] scale, so one
@@ -231,6 +231,12 @@ class RoboContrastConfig(PreTrainedConfig):
     # including our own sharpa / VisuoTactile / RDP datasets. Which of the two is better is an
     # empirical question: judge it on the *windowed contrastive loss*, not retrieval accuracy,
     # which cannot resolve tactile changes at all (doc/results.md S9).
+    #
+    # "anytouch" loads the frozen AnyTouch ViT-L/14 touch encoder. Its universal sensor
+    # token was explicitly trained by replacing known sensor ids with -1, so it is a better
+    # conceptual match for unseen Sharpa/OpenLoong sensors than pretending they are one of
+    # AnyTouch's five known GelSight/DIGIT-family sensors. Four frames are encoded as the two
+    # overlapping dynamic windows [0,1,2] and [1,2,3], yielding two tokens per pad directly.
     tactile_backbone: str = "resnet18"
     tactile_pretrained: bool = True
     # Where the FTP-1 `hpt_tokenizer/*.safetensors` files live. Only read for backbone="ftp1".
@@ -241,9 +247,15 @@ class RoboContrastConfig(PreTrainedConfig):
     # parameters of GPU memory and some start-up time; a sensor that is needed but not listed
     # falls back to zero features, so only narrow it deliberately.
     ftp1_tactile_sensors: tuple[str, ...] = ()
-    # The reconstruction head only exists to shape the tactile features. A frozen FTP-1 tower
-    # has no features to shape, so `__post_init__` switches this off for backbone="ftp1" --
-    # otherwise we would pay for a decoder whose gradient reaches nothing.
+    # Official AnyTouch stage-2 checkpoint. The file contains the full multimodal model; the
+    # loader maps only its 305M encoder parameters and does not allocate the text/vision
+    # towers or MAE decoder.
+    anytouch_checkpoint: str = "/Data/lzl/huggingface/anytouch_encoder.pth"
+    # Maximum dynamic windows evaluated at once inside the frozen AnyTouch ViT. This keeps a
+    # tactile-heavy batch from making attention memory scale with batch * pads * two windows.
+    anytouch_forward_batch_size: int = 128
+    # The reconstruction head only exists to shape the tactile features. Frozen FTP-1 and
+    # AnyTouch towers have no features to shape, so `__post_init__` switches it off.
     # The target is z-scored per dataset (see `_tactile_recon_loss`), so this weight applies to
     # a loss of order 1. Against a raw-[0, 1] target it would have applied to a loss that
     # bottoms out near 0.01, i.e. it would have been ~0.001 in effect.
@@ -337,9 +349,10 @@ class RoboContrastConfig(PreTrainedConfig):
                 f"`hidden_dim` ({self.hidden_dim}) must be divisible by "
                 f"`num_attention_heads` ({self.num_attention_heads})."
             )
-        if self.tactile_backbone not in ("resnet18", "ftp1"):
+        if self.tactile_backbone not in ("resnet18", "ftp1", "anytouch"):
             raise ValueError(
-                f"`tactile_backbone` must be 'resnet18' or 'ftp1', got {self.tactile_backbone!r}."
+                "`tactile_backbone` must be 'resnet18', 'ftp1' or 'anytouch', got "
+                f"{self.tactile_backbone!r}."
             )
         if self.vision_backbone not in ("dinov3", "cosmos3", "qwen3vl"):
             raise ValueError(
@@ -395,6 +408,23 @@ class RoboContrastConfig(PreTrainedConfig):
             # off-distribution for weights we are not training.
             self.tactile_img_size = FTP1_IMAGE_SIZE
             # A frozen tower cannot be shaped by a reconstruction loss.
+            self.tactile_recon_weight = 0.0
+        elif self.tactile_backbone == "anytouch":
+            if self.tactile_frames < 3:
+                raise ValueError(
+                    "AnyTouch needs at least 3 tactile frames for its dynamic encoder."
+                )
+            if self.tactile_tokens_per_pad == 2 and self.tactile_frames < 4:
+                raise ValueError(
+                    "AnyTouch needs at least 4 tactile frames to emit two distinct windows."
+                )
+            if self.anytouch_forward_batch_size < 1:
+                raise ValueError(
+                    "`anytouch_forward_batch_size` must be positive, got "
+                    f"{self.anytouch_forward_batch_size}."
+                )
+            self.tactile_img_size = 224
+            # The encoder is frozen and the AnyTouch MAE decoder is intentionally not loaded.
             self.tactile_recon_weight = 0.0
 
     def validate_features(self) -> None:

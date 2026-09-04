@@ -40,20 +40,50 @@ def dump(model: RoboContrast, title: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cpu")
+    ap.add_argument(
+        "--tactile_backbone",
+        default="resnet18",
+        choices=("resnet18", "ftp1", "anytouch"),
+    )
+    ap.add_argument(
+        "--anytouch_checkpoint",
+        default="/Data/lzl/huggingface/anytouch_encoder.pth",
+    )
+    ap.add_argument(
+        "--vision_backbone",
+        choices=("dinov3", "cosmos3", "qwen3vl"),
+        help="dump only this vision backbone instead of the standard comparison matrix",
+    )
+    ap.add_argument(
+        "--perception_recon_target",
+        default="vision",
+        choices=("vision", "vae"),
+    )
     args = ap.parse_args()
 
-    for backbone, target in (
-        ("dinov3", "vision"),
-        ("cosmos3", "vision"),
-        ("cosmos3", "vae"),
-        ("qwen3vl", "vision"),
-    ):
-        cfg = RoboContrastConfig()
-        cfg.vision_backbone = backbone
-        cfg.perception_recon_target = target
-        cfg.__post_init__()
+    combinations = (
+        [(args.vision_backbone, args.perception_recon_target)]
+        if args.vision_backbone
+        else [
+            ("dinov3", "vision"),
+            ("cosmos3", "vision"),
+            ("cosmos3", "vae"),
+            ("qwen3vl", "vision"),
+        ]
+    )
+    for backbone, target in combinations:
+        cfg = RoboContrastConfig(
+            vision_backbone=backbone,
+            perception_recon_target=target,
+            tactile_backbone=args.tactile_backbone,
+            anytouch_checkpoint=args.anytouch_checkpoint,
+        )
         model = RoboContrast(cfg).to(args.device)
-        dump(model, f"vision_backbone={backbone}, perception_recon_target={target}")
+        dump(
+            model,
+            f"vision_backbone={backbone}, perception_recon_target={target}, "
+            f"tactile_backbone={args.tactile_backbone}",
+        )
         del model
         torch.cuda.empty_cache()
 

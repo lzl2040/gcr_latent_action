@@ -117,6 +117,8 @@ def build_config(args) -> _Cfg:
         chunk_seconds=args.chunk_seconds,
         tactile_backbone=args.tactile_backbone,
         ftp1_tactile_dir=args.ftp1_tactile_dir,
+        anytouch_checkpoint=args.anytouch_checkpoint,
+        anytouch_forward_batch_size=args.anytouch_forward_batch_size,
         tactile_frames=args.tactile_frames,
         tactile_tokens_per_pad=args.tactile_tokens_per_pad,
         vision_backbone=args.vision_backbone,
@@ -157,12 +159,18 @@ def main() -> int:
     p.add_argument("--chunk_size", type=int, default=32)
     p.add_argument("--group_size", type=int, default=4)
     p.add_argument("--chunk_seconds", type=float, default=1.6)
-    p.add_argument("--tactile_backbone", default="resnet18", choices=["resnet18", "ftp1"])
+    p.add_argument(
+        "--tactile_backbone",
+        default="resnet18",
+        choices=["resnet18", "ftp1", "anytouch"],
+    )
     p.add_argument("--tactile_frames", type=int, default=4,
-                   help="frames read per pad; the loader decodes them and the CNN runs once per frame")
+                   help="frames read per pad; AnyTouch turns four frames into two 3-frame windows")
     p.add_argument("--tactile_tokens_per_pad", type=int, default=2,
                    help="tokens each pad contributes after the temporal fusion")
     p.add_argument("--ftp1_tactile_dir", default="/Data/lzl/huggingface/ftp1_v0426_50kstep")
+    p.add_argument("--anytouch_checkpoint", default="/Data/lzl/huggingface/anytouch_encoder.pth")
+    p.add_argument("--anytouch_forward_batch_size", type=int, default=128)
     p.add_argument("--vision_model", default="/Data/lzl/huggingface/dinov3-vitb16-pretrain-lvd1689m")
     p.add_argument("--vision_backbone", default="dinov3", choices=["dinov3", "cosmos3", "qwen3vl"])
     p.add_argument("--perception_recon_target", default="vision", choices=["vision", "vae"])
@@ -255,6 +263,7 @@ def main() -> int:
     policy = policy.to(device=device, dtype=torch.bfloat16)
     policy.train()
     optim = torch.optim.AdamW(policy.parameters(), lr=1e-5)
+    torch.cuda.reset_peak_memory_stats(device)
 
     timer = Timer()
     phys = policy.physical_encoder
@@ -294,6 +303,7 @@ def main() -> int:
             pads["rows"] = 0.0
             pads["batches"] = 0
             wall["dataloading"] = 0.0
+            torch.cuda.reset_peak_memory_stats(device)
 
         gpu_batch = {}
         with timer("H2D 拷贝"):
@@ -337,10 +347,20 @@ def main() -> int:
             continue
         print(f"{label:<28s} {secs:7.3f} s  ({100 * secs / max(total_step, 1e-9):5.1f}%)")
     print(f"{'-' * 62}\n{'每步合计':<26s} {total_step:7.3f} s")
+    print(
+        f"CUDA 峰值：allocated={torch.cuda.max_memory_allocated(device) / 2**30:.2f} GiB, "
+        f"reserved={torch.cuda.max_memory_reserved(device) / 2**30:.2f} GiB"
+    )
     if pads["batches"]:
-        print(f"\n触觉 pad：每步送进 backbone {pads['selected'] / n:.0f} 个 pad "
-              f"（每 pad {args.tactile_frames} 帧 = {args.tactile_frames * pads['selected'] / n:.0f} 张图），"
-              f"mask 存活 {pads['rows'] / n:.0f}")
+        unit = (
+            f"{args.tactile_tokens_per_pad} 个三帧窗口"
+            if args.tactile_backbone == "anytouch"
+            else f"{args.tactile_frames} 帧"
+        )
+        print(
+            f"\n触觉 pad：每步送进 backbone {pads['selected'] / n:.0f} 个 pad "
+            f"（每 pad {unit}），mask 存活 {pads['rows'] / n:.0f}"
+        )
     return 0
 
 

@@ -17,10 +17,10 @@ computed over the union of all ranks.
 
 Guarding against tactile domination
     Tactile images are 4 x 3 x 64 x 64 = 49k raw dimensions versus 40 for the state, so if they
-    were encoded with the same capacity as the rest they would trivially dominate. Three
-    mechanisms prevent that:
-      * a deliberately shallow CNN pooled into a *single* token, so tactile never outnumbers
-        the action tokens;
+    were allowed an unbounded token stream they would trivially dominate. Three mechanisms
+    prevent that:
+      * each pad is compressed into one or two tokens, independent of image resolution or
+        backbone size;
       * a learnable gate initialised at zero, so training starts from a tactile-free model and
         only opens the channel if it helps;
       * per-sample modality dropout, so no modality is ever guaranteed present.
@@ -875,14 +875,13 @@ class PhysicalEncoder(nn.Module):
     state               chunk         G
     action              chunk         G
     tactile signal      chunk         G
-    tactile image       t, t+H        ``max_tactile_views``
+    tactile image       4             ``max_tactile_views * tactile_tokens_per_pad``
     ==================  ============  ==========================
 
     The token budget is the main defence against tactile dominance. A tactile camera carries
-    far more raw capacity per token than a 40-dim state vector, so it is folded into one token
-    per pad -- ``[feat_t, feat_t1 - feat_t]`` -- rather than the 64-per-pad that a naive
-    patchwise encoding would produce. The zero-initialised gates, the tactile dropout and the
-    reduced tactile learning rate handle the rest.
+    far more raw capacity per token than a 40-dim state vector, so it is folded into one or
+    two tokens per pad rather than the hundreds per pad emitted by a patchwise encoder. The
+    zero-initialised gates and tactile dropout handle the rest.
     """
 
     MOD_CLS, MOD_STATE, MOD_ACTION, MOD_TAC_SIG, MOD_TAC_IMG = range(5)
@@ -907,12 +906,12 @@ class PhysicalEncoder(nn.Module):
         # "commanded" against "achieved" at matching times.
         self.state_proj = nn.Linear(self.group_size * self.state_dim * 2, dim)
         self.action_proj = nn.Linear(self.group_size * self.action_dim * 2, dim)
-        # Tactile images are read at the two ends of the window, so their projection sees a
-        # pair of frames and keeps its original token count: the useful thing about tactile is
-        # the *change* in contact, but spending more tokens on it would let it crowd out the
-        # action chunk. The tactile signal is chunked like state and action.
+        # Tactile images are read at four points across the window. ResNet/FTP-1 encode each
+        # frame and fuse them below; AnyTouch uses its pretrained three-frame dynamic path.
+        # The tactile signal is chunked like state and action.
         self.signal_proj = nn.Linear(self.group_size * self.signal_dim * 2, dim)
         self.use_ftp1_tactile = config.tactile_backbone == "ftp1"
+        self.use_anytouch_tactile = config.tactile_backbone == "anytouch"
         if self.use_ftp1_tactile:
             self.tactile_cnn = FTP1TactileTower(
                 config.ftp1_tactile_dir,
@@ -920,16 +919,44 @@ class PhysicalEncoder(nn.Module):
                 out_dim=config.tactile_feat_dim,
                 img_size=config.tactile_img_size,
             )
+        elif self.use_anytouch_tactile:
+            # Keep the optional 305M Transformers tower out of imports and normal model
+            # construction unless the switch is actually selected.
+            from lerobot.common.policies.ace.anytouch_tactile import AnyTouchTactileTower
+
+            self.tactile_cnn = AnyTouchTactileTower(
+                config.anytouch_checkpoint,
+                num_tokens=config.tactile_tokens_per_pad,
+                forward_batch_size=config.anytouch_forward_batch_size,
+            )
         else:
             self.tactile_cnn = TactileImageEncoder(config.tactile_feat_dim, config.tactile_pretrained)
         self.tactile_frames = config.tactile_frames
         self.tactile_tokens_per_pad = config.tactile_tokens_per_pad
-        self.tactile_temporal = TactilePadTemporal(
-            config.tactile_feat_dim,
-            config.tactile_frames,
-            config.tactile_tokens_per_pad,
-            num_heads=8,
-            dropout=config.dropout,
+        self.tactile_feat_dim = config.tactile_feat_dim
+        tactile_backbone_dim = (
+            self.tactile_cnn.output_dim
+            if self.use_anytouch_tactile
+            else config.tactile_feat_dim
+        )
+        self.tactile_adapter = (
+            nn.Sequential(
+                nn.Linear(tactile_backbone_dim, config.tactile_feat_dim),
+                nn.LayerNorm(config.tactile_feat_dim),
+            )
+            if self.use_anytouch_tactile
+            else nn.Identity()
+        )
+        self.tactile_temporal = (
+            None
+            if self.use_anytouch_tactile
+            else TactilePadTemporal(
+                config.tactile_feat_dim,
+                config.tactile_frames,
+                config.tactile_tokens_per_pad,
+                num_heads=8,
+                dropout=config.dropout,
+            )
         )
         self.tactile_img_proj = nn.Linear(config.tactile_feat_dim, dim)
         self.tactile_recon = (
@@ -1047,13 +1074,14 @@ class PhysicalEncoder(nn.Module):
         signal_tokens = signal_tokens + group_pos + mod[self.MOD_TAC_SIG] + rate_embed
 
         # -- tactile images ------------------------------------------------
-        # One token per pad rather than a single pooled token: pads touch different parts of
-        # the object and averaging them destroys exactly the contact pattern we want. The zero
-        # initialised gate, the modality dropout and the reduced tactile learning rate are what
-        # stop these extra tokens from taking over.
+        # A bounded number of tokens per pad rather than patch tokens: pads touch different
+        # parts of the object and averaging pads destroys exactly the contact pattern we want.
+        # The zero-initialised gate and modality dropout stop these extra tokens from taking
+        # over.
         #
-        # Each pad arrives as ``tactile_frames`` samples spread across the window, fused inside
-        # the pad by ``TactilePadTemporal`` into ``tactile_tokens_per_pad`` tokens. The window
+        # Each pad arrives as ``tactile_frames`` samples spread across the window. ResNet and
+        # FTP-1 features are fused by ``TactilePadTemporal``; AnyTouch directly encodes two
+        # overlapping three-frame windows. The window
         # interior is the point: a grasp that closes and settles mid-window is invisible at both
         # endpoints, and doc/results.md §21 measured that what the endpoints miss is structured
         # deformation rather than noise. Two tokens per pad give the transformer separate access
@@ -1081,7 +1109,26 @@ class PhysicalEncoder(nn.Module):
             selected = torch.zeros(1, dtype=torch.long, device=device)
         sel_images = flat_images[selected]
         # ``sel_images`` is (N, F, 3, H, W); the encoder treats the frame axis as its view axis.
-        if self.use_ftp1_tactile:
+        if self.use_anytouch_tactile:
+            if has_tactile:
+                # AnyTouch is frozen: the 24-layer ViT does not need an autograd graph. Its
+                # universal sensor token (-1) was trained specifically for unseen sensors.
+                with torch.no_grad():
+                    raw_tokens = self.tactile_cnn(sel_images).to(dtype)
+            else:
+                # Unlike the trainable ResNet path, a dummy AnyTouch forward is unnecessary.
+                # The downstream projection remains in the graph and therefore keeps the
+                # ZeRO gradient schedule data-independent.
+                raw_tokens = torch.zeros(
+                    1,
+                    self.tactile_tokens_per_pad,
+                    self.tactile_cnn.output_dim,
+                    device=device,
+                    dtype=dtype,
+                )
+            sel_tokens = self.tactile_adapter(raw_tokens)
+            sel_pair = sel_tokens
+        elif self.use_ftp1_tactile:
             # The FTP-1 tower has one tokenizer per physical sensor, so it additionally needs
             # to know which sensor each selected pad came from and the per-dataset z-score
             # that sensor's weights were calibrated against.
@@ -1101,10 +1148,10 @@ class PhysicalEncoder(nn.Module):
         if not has_tactile:
             sel_pair = sel_pair * 0.0
             sel_feats = sel_feats * 0.0
-        # ``(N, F, D) -> (N, T, D)``: the window's frames are fused inside the pad, so a pad
-        # stays one maskable unit and the tokens that leave describe the contact rather than
-        # individual frames.
-        sel_tokens = self.tactile_temporal(sel_pair)
+        if not self.use_anytouch_tactile:
+            # ``(N, F, D) -> (N, T, D)``: the window's frames are fused inside the pad, so a
+            # pad stays one maskable unit and the tokens describe contact, not raw frames.
+            sel_tokens = self.tactile_temporal(sel_pair)
 
         tok_per_pad, feat_dim = self.tactile_tokens_per_pad, sel_tokens.shape[-1]
         view_feats = torch.zeros(
@@ -1218,9 +1265,9 @@ class RoboContrast(PreTrainedPolicy):
         it converges first and the contrastive loss learns to read tactile and ignore the
         action chunk.
 
-        With ``tactile_backbone="ftp1"`` the tower is frozen, so the ``requires_grad`` filter
-        below leaves only its output LayerNorm in this group -- the reduced learning rate then
-        just makes the model cautious about rescaling pretrained features.
+        With ``tactile_backbone="ftp1"`` or ``"anytouch"`` the pretrained tower is frozen,
+        so it is absent from the optimizer. AnyTouch's new 768->``tactile_feat_dim`` adapter
+        and the physical projection remain in the main parameter group.
         """
         tactile_params, other_params = [], []
         tactile_prefix = ("physical_encoder.tactile_cnn.", "physical_encoder.tactile_recon.")
