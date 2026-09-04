@@ -37,12 +37,15 @@ def build(args) -> MoTWorldModel:
         if v is not None
     }
     mot = MoTConfig.from_phi_dir(args.phi_dir, **overrides)
+    microbatch = args.microbatch if args.microbatch is not None else (
+        32 if args.scope == "gen_only" else 16
+    )
     cfg = WorldModelConfig(
         mot=mot,
         trainable_scope=args.scope,
         freeze_vision_projector=args.freeze_projector,
         training_execution=args.execution,
-        und_microbatch_size=args.microbatch,
+        und_microbatch_size=microbatch,
         mot_checkpoint_segment_size=args.checkpoint_segment,
     )
     return MoTWorldModel(cfg)
@@ -77,8 +80,8 @@ def main() -> int:
     ap.add_argument("--freeze_projector", action="store_true")
     ap.add_argument("--scope", default="gen_only")
     ap.add_argument("--execution", choices=("interleaved", "cached"), default="interleaved")
-    ap.add_argument("--microbatch", type=int, default=32)
-    ap.add_argument("--checkpoint_segment", type=int, default=8)
+    ap.add_argument("--microbatch", type=int, default=None)
+    ap.add_argument("--checkpoint_segment", type=int, default=4)
     ap.add_argument("--skip_opt", action="store_true")
     args = ap.parse_args()
 

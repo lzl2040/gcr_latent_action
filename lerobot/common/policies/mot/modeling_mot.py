@@ -563,7 +563,7 @@ class MoTModel(nn.Module):
         use_vision_lora: bool = False,
         und_requires_grad: bool = True,
         checkpoint_layers: bool | None = None,
-        checkpoint_segment_size: int = 8,
+        checkpoint_segment_size: int = 4,
     ) -> torch.Tensor:
         """Cosmos3-style training path with layer-local UND K/V.
 

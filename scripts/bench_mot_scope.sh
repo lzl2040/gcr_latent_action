@@ -15,8 +15,15 @@ export WARMUP=${WARMUP:-3}
 export PER_TASK=${PER_TASK:-1}
 export STAGE=${STAGE:-3}
 export EXECUTION=${EXECUTION:-interleaved}
-export CKPT_SEGMENT=${CKPT_SEGMENT:-8}
-export MOT_MICROBATCH=${MOT_MICROBATCH:-32}
+export CKPT_SEGMENT=${CKPT_SEGMENT:-4}
+if [[ -z "${MOT_MICROBATCH:-}" ]]; then
+    if [[ "${SCOPE}" == "gen_only" ]]; then
+        export MOT_MICROBATCH=32
+    else
+        export MOT_MICROBATCH=16
+    fi
+fi
+export GRAD_CHECKPOINTING=${GRAD_CHECKPOINTING:-1}
 
 python -u ${BENCH_SCRIPT:-scripts/train_mot_world.py} \
     --policy.type="robo_contrast" \

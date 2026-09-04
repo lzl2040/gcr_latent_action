@@ -1,12 +1,9 @@
-"""Project 16-GPU wall-clock from the cached-training Phi-4-MM A6000 anchors.
+"""Project 16-GPU wall-clock from the interleaved-training Phi-4-MM A6000 anchors.
 
 The primary convention is the one requested for robot video: one optimizer sample represents
 one source-video frame. Therefore ``hours * 3600 * fps`` samples are divided by
 ``16 * batch_per_gpu``. Raw-video rows include mounted-storage latency, decode and the online
 Wan VAE; latent rows remove the VAE and use one small sequential read per sample.
-
-These measurements predate the interleaved training default. Keep them as a reproducible
-baseline, but do not present them as interleaved-training throughput.
 
 Run:
     python scripts/extrapolate_cluster.py --hours 30000 --batch-per-gpu 32
@@ -56,34 +53,34 @@ class Scope:
 
 
 GEN_B32 = {
-    "t2i": 616.0,
-    "t2v": 1351.0,
-    "i2v": 3804.0,
-    "v2v": 3607.0,
-    "joint_action": 3810.0,
-    "fwd_dyn": 3809.0,
-    "inv_dyn": 3816.0,
-    "policy": 3052.0,
+    "t2i": 710.0,
+    "t2v": 1469.0,
+    "i2v": 5347.0,
+    "v2v": 5346.0,
+    "joint_action": 5550.0,
+    "fwd_dyn": 5552.0,
+    "inv_dyn": 5560.0,
+    "policy": 4882.0,
 }
 GEN_B64 = {
-    "t2i": 1093.0,
-    "t2v": 2532.0,
-    "i2v": 7244.0,
-    "v2v": 7320.0,
-    "joint_action": 7593.0,
-    "fwd_dyn": 7596.0,
-    "inv_dyn": 7589.0,
-    "policy": 6138.0,
+    "t2i": 1261.0,
+    "t2v": 2725.0,
+    "i2v": 10533.0,
+    "v2v": 10535.0,
+    "joint_action": 10928.0,
+    "fwd_dyn": 10930.0,
+    "inv_dyn": 10927.0,
+    "policy": 9374.0,
 }
 FREEZE_B32 = {
-    "t2i": 767.0,
-    "t2v": 1513.0,
-    "i2v": 8883.0,
-    "v2v": 8900.0,
-    "joint_action": 9173.0,
-    "fwd_dyn": 9092.0,
-    "inv_dyn": 9080.0,
-    "policy": 8351.0,
+    "t2i": 784.0,
+    "t2v": 1542.0,
+    "i2v": 8839.0,
+    "v2v": 8851.0,
+    "joint_action": 9052.0,
+    "fwd_dyn": 9062.0,
+    "inv_dyn": 9065.0,
+    "policy": 8315.0,
 }
 
 
@@ -103,11 +100,11 @@ SCOPES = {
         trainable_params=1_420_254_656,
         fixed_ms=GEN_FIXED,
         per_clip_ms=GEN_PER_CLIP,
-        backward_fraction=0.31,
+        backward_fraction=0.54,
         optimizer_ms_b32=0.0,
-        activation_gib_per_clip=0.26,
+        activation_gib_per_clip=0.24,
         strategy="DDP",
-        measured_memory="b32 26.9 GiB; b64 35.8 GiB; b128 36.5 GiB model-only",
+        measured_memory="b32 26.9 GiB raw video; b64 26.5 GiB latent; b128 28.1 GiB",
     ),
     "freeze_vision": Scope(
         task_ms_b32=FREEZE_B32,
@@ -116,14 +113,16 @@ SCOPES = {
         per_clip_ms=(FREEZE_WEIGHTED_B32 - GEN_FIXED) / BATCH_REF,
         backward_fraction=0.72,
         optimizer_ms_b32=30.0,
-        activation_gib_per_clip=0.12,
+        # Calibrated to the measured 30.8 GiB raw-video peak at batch 32. This is
+        # deliberately conservative for cached latents, which omit the resident Wan VAE.
+        activation_gib_per_clip=0.468,
         strategy="ZeRO-2",
-        measured_memory="b32 25.6 GiB; b64 34.3 GiB (NO_OPT=1)",
+        measured_memory="b32 30.8 GiB raw video; b64 28.2 GiB latent (NO_OPT=1)",
     ),
 }
 
 # A6000 anchors: online Wan VAE at batch 32 and mounted-storage assumptions.
-VAE_MS_B32 = 1306.0
+VAE_MS_B32 = 1289.0
 RAW_VIDEO_LATENCY_MS = 200.0
 LATENT_LATENCY_MS = 60.0
 WORKERS_PER_GPU = 12
@@ -275,11 +274,7 @@ def main(hours: int, batch: int) -> None:
         f"16 x {batch} = {global_batch} global batch; {steps:.3g} optimizer steps"
     )
     print(
-        "WARNING: anchors use training_execution=cached; "
-        "the current training default is interleaved and needs a clean-GPU rebenchmark"
-    )
-    print(
-        f"A6000 measured stage-3 model @ b32: gen_only={GEN_WEIGHTED_B32:.0f} ms, "
+        f"A6000 interleaved stage-3 model @ b32: gen_only={GEN_WEIGHTED_B32:.0f} ms, "
         f"freeze_vision={FREEZE_WEIGHTED_B32:.0f} ms (+30 ms estimated ZeRO optimizer)"
     )
     print(f"online Wan VAE @ b32: {VAE_MS_B32:.0f} ms\n")

@@ -170,7 +170,7 @@ GEN 侧继续使用视频 latent 的三维位置：
 - batch 内样本没有相互 attention，因此切分在数学上等价；
 - BF16 因 GEMM kernel 形状不同可能有舍入差异，回归测试 cosine 为 `0.99999`。
 
-训练默认把连续 8 个双路径层作为一个 checkpoint segment。层内仍保持 Cosmos3 的
+训练默认把连续 4 个双路径层作为一个 checkpoint segment。层内仍保持 Cosmos3 的
 UND→同层 GEN 顺序；反向只保留 segment 边界并重算段内层，而不是让全部 32 层 K/V 或全部
 32 个 UND hidden 存活到 backward。以 batch 32、577 个 UND token 计算，单是原始 BF16
 K/V cache 就约 2.25 GiB，还不含 autograd graph。
@@ -449,25 +449,21 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/check_trainable_scope.py --layers 1
 ```text
 batch 128
 training_execution = interleaved
-checkpoint segment = 8 layers
+checkpoint segment = 4 layers
+UND/GEN microbatch = 32
 完整 AdamW optimizer step 通过
-当前进程 peak = 22.1 GiB
+21.728 s/step
+28.1 GiB peak
 所有 366 个可训练 tensor 有梯度
 ```
 
-测试时该卡还被另一个进程占用约 19 GiB，因此使用 microbatch 1 才能在共享卡上完成，测得的
-42.1 s 不能作为吞吐基准；它只证明包含 AdamW 的 batch 128 完整路径可以运行。旧 cached
-路径在独占 A6000、microbatch 32 下为 14.338 s/step、36.4 GiB，二者不是同条件速度对比。
-原视频端到端还要运行 705M Wan VAE，正式基准仍使用 batch 32/64。
+这是独占 RTX A6000 上的合成 latent 测量，包含完整 AdamW。batch 64 为
+10.826 s/step、25.3 GiB，两者都是约 5.9 samples/s。原视频端到端还要运行 705M Wan VAE；
+batch 64 的在线 VAE 在显存压力下出现严重退化，因此集群时间仍按每卡 batch 32 估算。
 
 ---
 
-## 7. RTX A6000 cached 基线
-
-> 本节数值是在切换到 interleaved 训练前测得的 `training_execution=cached` 基线。当前四张
-> A6000 均被其他进程占用，不能可靠刷新绝对吞吐；这些数值不能直接当作新的默认训练速度。
-> 同卡受干扰 A/B 显示：冻结 UND 的 `gen_only` interleaved checkpoint 会因反向重算 UND 而
-> 更慢；`freeze_vision` 两种路径接近。需在独占 GPU 上重新测量后再刷新集群外推。
+## 7. RTX A6000 实测
 
 ### 7.1 forward-only 阶段拆解
 
@@ -482,57 +478,71 @@ checkpoint segment = 8 layers
 UND 有约 577 token，GEN 联合任务只有 224 token，所以即使两侧参数量接近，image-conditioned
 任务仍明显由 UND 主导。
 
-### 7.2 batch 32 前向/反向分解
+### 7.2 cached 与 interleaved 对照
 
 `joint_action`、合成 tensor：
 
-| scope | forward no-grad | forward grad | forward+backward | + optimizer |
-|---|---:|---:|---:|---:|
-| `gen_only` | 2445 ms | 2446 ms | 3595 ms | 3699 ms |
-| `freeze_vision` | 2417 ms | 2416 ms | 8699 ms | 单卡放不下完整 optimizer |
+| scope / execution | microbatch | forward no-grad | forward grad | forward+backward | + optimizer | model peak |
+|---|---:|---:|---:|---:|---:|---:|
+| `gen_only` / cached | 32 | 2447 ms | 2445 ms | 3599 ms | — | 19.1 GiB |
+| `gen_only` / interleaved | 32 | 2447 ms | 2443 ms | 5309 ms | 5416 ms | 23.8 GiB |
+| `freeze_vision` / cached | 32 | 2418 ms | 2426 ms | 8745 ms | — | 24.3 GiB |
+| `freeze_vision` / interleaved | 16 | 2438 ms | 2465 ms | 8916 ms | — | 29.4 GiB |
 
-两种 scope 的 forward 基本相同，因为都必须跑完整 Phi-4-MM；`freeze_vision` 的额外成本主要
-在 language base、vision LoRA 和 projector 的反向。
+forward 基本相同，说明两种执行顺序没有改变计算图本身。差异发生在 backward：
+
+- `gen_only` 的 UND 已冻结。interleaved checkpoint 为避免保存每层 K/V，会在 backward
+  重算 UND，因此比 cached 慢约 48%；
+- `freeze_vision` 本来就必须对 UND 做 checkpoint/recompute，interleaved 只慢约 2%；
+- `gen_only` 关闭 checkpoint 时 joint-action 可降到 3.402 s，但模型峰值达到 42.1 GiB，
+  再加在线 VAE 会 OOM，所以原视频默认仍启用 checkpoint；
+- segment 扫描后选择 4 层/段；segment 8 在 `freeze_vision`、microbatch 32 下 OOM，
+  而 segment 4 配合 microbatch 16 能稳定运行真实 VAE 路径。
 
 ### 7.3 真实数据、batch 32
 
 `debug_research_data`，9 原视频帧 → 3 latent，`PER_TASK=1`：
 
-| 任务 | `gen_only` model | `freeze_vision` model |
-|---|---:|---:|
-| `t2i` | 616 ms | 767 ms |
-| `t2v` | 1351 ms | 1513 ms |
-| `i2v` | 3804 ms | 8883 ms |
-| `v2v` | 3607 ms | 8900 ms |
-| `joint_action` | 3810 ms | 9173 ms |
-| `fwd_dyn` | 3809 ms | 9092 ms |
-| `inv_dyn` | 3816 ms | 9080 ms |
-| `policy` | 3052 ms | 8351 ms |
-| **按 stage3 MIX 加权** | **3222 ms** | **7710 ms** |
+| 任务 | gen cached | gen interleaved | freeze cached | freeze interleaved |
+|---|---:|---:|---:|---:|
+| `t2i` | 610 ms | 710 ms | 757 ms | 784 ms |
+| `t2v` | 1343 ms | 1469 ms | 1494 ms | 1542 ms |
+| `i2v` | 3569 ms | 5347 ms | 8693 ms | 8839 ms |
+| `v2v` | 3677 ms | 5346 ms | 8701 ms | 8851 ms |
+| `joint_action` | 3762 ms | 5550 ms | 8941 ms | 9052 ms |
+| `fwd_dyn` | 3764 ms | 5552 ms | 8890 ms | 9062 ms |
+| `inv_dyn` | 3767 ms | 5560 ms | 8895 ms | 9065 ms |
+| `policy` | 3013 ms | 4882 ms | 8138 ms | 8315 ms |
+| **stage3 MIX 加权** | **3162 ms** | **4696 ms** | **7534 ms** | **7669 ms** |
 
 说明：
 
-- `gen_only` 包含 fused AdamW step；
-- `freeze_vision` 使用 `NO_OPT=1`，表中是 forward+backward；集群外推额外加每卡约 30 ms
-  的 ZeRO-2 optimizer shard 估计；
-- 在线 Wan VAE 在 batch 32 为 **1306 ms**；
-- peak memory：`gen_only` 26.9 GiB；`freeze_vision` 25.6 GiB（无 optimizer）；
+- `gen_only` 两列都包含 fused AdamW step；
+- `freeze_vision` 两列使用 `NO_OPT=1`，是 forward+backward；集群外推额外加每卡约
+  30 ms 的 ZeRO-2 optimizer shard 估计；
+- interleaved 默认：`gen_only` microbatch 32，`freeze_vision` microbatch 16；
+- 在线 Wan VAE 在 batch 32 为 **1289 ms**；
+- 原视频 peak：interleaved `gen_only` 26.9 GiB；interleaved `freeze_vision`
+  30.8 GiB（无 optimizer）；
 - `freeze_vision` 有 5.544B 有效可训练参数，单卡完整 Adam state 不适合 48 GiB，正式训练
   应使用 ZeRO-2。
 
-补充锚点：
+### 7.4 batch 扩展
 
-| 配置 | 时间/显存 |
-|---|---|
-| `gen_only`, batch 64, 真实原视频 | 35.8 GiB peak |
-| `freeze_vision`, batch 64, synthetic, no optimizer | 17.48 s fwd+bwd，34.3 GiB |
-| `gen_only`, batch 128, synthetic latent | 14.338 s/step，36.4 GiB |
+| 配置 | 模型时间 | peak |
+|---|---:|---:|
+| `gen_only`, batch 32, stage3 MIX, 原视频 | 4.696 s | 26.9 GiB |
+| `gen_only`, batch 64, stage3 MIX, synthetic latent | 9.176 s | 26.5 GiB |
+| `gen_only`, batch 64, joint-action, synthetic latent | 10.826 s | 25.3 GiB |
+| `gen_only`, batch 128, joint-action, synthetic latent | 21.728 s | 28.1 GiB |
+| `freeze_vision`, batch 64, joint-action, no optimizer | 18.783 s | 28.2 GiB |
+
+MoT 本体从 batch 32 到 128 基本线性扩展。batch 64 原视频不是推荐设置：在线 Wan VAE 的
+单步时间在显存高压下从约 2.6 秒恶化到 53–80 秒，因此外推固定采用每卡 batch 32。
 
 ---
 
-## 8. 16 卡 A100 / B200 cached 基线
-
-以下时间仍由第 7 节 cached A6000 锚点推得，不代表新的 interleaved 默认训练路径。
+## 8. 16 卡 A100 / B200 时间
 
 ### 8.1 口径
 
@@ -562,7 +572,7 @@ steps = frames / 512
 - 挂载存储单 clip 延迟假设 200 ms；
 - 每卡 12 loader workers → 60 clips/s；
 - batch 32 的 loader floor = `32/60 = 533 ms/step`；
-- 在线 Wan VAE 使用 A6000 实测 1306 ms/batch 32，并按设备效率外推；
+- 在线 Wan VAE 使用 A6000 实测 1289 ms/batch 32，并按设备效率外推；
 - A100/B200 使用可达到效率区间，不直接套宣传峰值；
 - `freeze_vision` 用 ZeRO-2，`gen_only` 用 DDP；
 - 通信模型包含节点内 NVLink、节点间 NIC、反向 overlap 和最后不可隐藏 bucket。
@@ -571,25 +581,25 @@ steps = frames / 512
 
 | scope | 设备 | 1 万小时 | 3 万小时 | 主要瓶颈 |
 |---|---|---:|---:|---|
-| `gen_only` | 16× RTX A6000 | 73.7 d | 221.2 d | compute |
-| `gen_only` | 16× A100-40GB | 20.3–24.4 d | 61.0–73.2 d | compute |
-| `gen_only` | 16× A100-80GB | 20.3–24.4 d | 61.0–73.2 d | compute |
-| `gen_only` | 16× B200 | **8.7 d** | **26.0 d** | raw-video I/O |
-| `freeze_vision` | 16× RTX A6000 | 147.3 d | 442.0 d | compute |
-| `freeze_vision` | 16× A100-40GB | 40.7–48.8 d | 122.1–146.4 d | compute |
-| `freeze_vision` | 16× A100-80GB | 40.7–48.8 d | 122.1–146.4 d | compute |
-| `freeze_vision` | 16× B200 | **9.3–17.0 d** | **28.0–51.0 d** | compute / I/O |
+| `gen_only` | 16× RTX A6000 | 97.4 d | 292.3 d | compute |
+| `gen_only` | 16× A100-40GB | 26.9–32.2 d | 80.6–96.7 d | compute |
+| `gen_only` | 16× A100-80GB | 26.9–32.2 d | 80.6–96.7 d | compute |
+| `gen_only` | 16× B200 | **8.7–11.2 d** | **26.0–33.6 d** | I/O / compute |
+| `freeze_vision` | 16× RTX A6000 | 146.4 d | 439.2 d | compute |
+| `freeze_vision` | 16× A100-40GB | 40.4–48.5 d | 121.3–145.5 d | compute |
+| `freeze_vision` | 16× A100-80GB | 40.4–48.5 d | 121.3–145.5 d | compute |
+| `freeze_vision` | 16× B200 | **9.3–16.9 d** | **27.8–50.7 d** | compute / I/O |
 
 A100-40GB 与 80GB 在固定 batch 32 下算力相同，因此时间相同；80GB 的价值是允许更大的
 per-GPU batch 或减少 checkpoint/offload，而不是让同一个 batch 的 kernel 自动变快。
 
-B200 `gen_only` 精确撞上原视频 loader floor：
+B200 `gen_only` 的乐观端撞上原视频 loader floor：
 
 ```text
 2.16e9 frames / (16 GPU * 60 clips/s) = 26.0 days
 ```
 
-所以继续增加 B200 算力不会低于 26 天，除非减少每 clip 延迟、提高 worker 吞吐或预提 latent。
+所以 3 万小时的乐观下限仍是 26 天；较低 kernel 利用率时会达到约 33.6 天。
 
 ### 8.4 网络敏感性
 
@@ -597,8 +607,8 @@ B200 `gen_only` 精确撞上原视频 loader floor：
 
 | scope | A100-40/80GB | B200 |
 |---|---:|---:|
-| `gen_only` | 61.5–73.7 d | 26.0–29.6 d |
-| `freeze_vision` | 124.1–148.5 d | **54.8–61.3 d** |
+| `gen_only` | 81.2–97.3 d | 26.0–34.1 d |
+| `freeze_vision` | 123.3–147.5 d | **54.8–61.2 d** |
 
 `freeze_vision` 每步需要归约约 11.1 GB bf16 gradient。A100 的长计算能隐藏大部分通信；
 B200 的 backward 很短，100G 网络无法隐藏，因此比 8×200G IB 明显变慢。
@@ -639,7 +649,7 @@ CUDA_VISIBLE_DEVICES=2 python -u scripts/check_trainable_scope.py \
 # 完整 pretrained smoke
 CUDA_VISIBLE_DEVICES=2 python -u scripts/smoke_mot_world.py \
   --batch 1 --latent_frames 3 --gen_checkpointing \
-  --execution interleaved --checkpoint_segment 8
+  --execution interleaved --checkpoint_segment 4
 
 # 明确保留的 cached 训练 A/B 路径
 CUDA_VISIBLE_DEVICES=2 python -u scripts/smoke_mot_world.py \
@@ -654,7 +664,7 @@ CUDA_VISIBLE_DEVICES=2 BATCH=32 STEPS=16 WARMUP=8 \
 
 # 正式按 stage3 MIX 采样
 CUDA_VISIBLE_DEVICES=2 BATCH=32 SCOPE=gen_only \
-  PER_TASK=0 MIX=stage3 EXECUTION=interleaved CKPT_SEGMENT=8 \
+  PER_TASK=0 MIX=stage3 EXECUTION=interleaved CKPT_SEGMENT=4 \
   bash scripts/bench_mot_scope.sh
 ```
 
@@ -665,7 +675,6 @@ CUDA_VISIBLE_DEVICES=2 BATCH=32 SCOPE=gen_only \
 - 当前只有训练 forward，没有机器人部署用的多步 action denoising sampler；
 - cached UND K/V 的底层接口已保留，但部署 sampler 还需负责在 denoising steps 间持有并复用；
 - A100/B200 数字来自 A6000 实测外推，尚未在对应集群实测；
-- 第 7、8 节仍是 cached 基线；interleaved 的独占 GPU benchmark 尚未刷新；
 - `freeze_vision` 的单卡 optimizer 放不下，当前只实测前反向；正式 ZeRO-2 optimizer 时间是估计；
 - 原视频 blob 延迟 200 ms/clip 是场景假设，必须在目标集群重新跑 I/O probe；
 - 方形图像快速路径不等价于任意长宽比的官方 dynamic-HD；

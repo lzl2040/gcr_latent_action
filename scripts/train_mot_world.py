@@ -77,8 +77,10 @@ def main(cfg: TrainPipelineConfig):
     per_task = os.environ.get("PER_TASK", "1") == "1"
     scope = os.environ.get("SCOPE", "gen_only")
     execution = os.environ.get("EXECUTION", "interleaved")
-    checkpoint_segment = env("CKPT_SEGMENT", 8)
-    mot_microbatch = env("MOT_MICROBATCH", 32)
+    checkpoint_segment = env("CKPT_SEGMENT", 4)
+    mot_microbatch = env("MOT_MICROBATCH", 32 if scope == "gen_only" else 16)
+    grad_checkpointing = os.environ.get("GRAD_CHECKPOINTING", "1") == "1"
+    skip_vae = os.environ.get("SKIP_VAE", "0") == "1"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16
@@ -129,7 +131,7 @@ def main(cfg: TrainPipelineConfig):
         )
     ).to(device=device, dtype=dtype)
     model.load_pretrained()
-    model.mot.gradient_checkpointing = True
+    model.mot.gradient_checkpointing = grad_checkpointing
     model.train()
 
     rep = model.param_report()
@@ -140,9 +142,11 @@ def main(cfg: TrainPipelineConfig):
     )
     print(
         f"execution: train={execution}  checkpoint_segment={checkpoint_segment}  "
-        f"microbatch={mot_microbatch}  "
+        f"microbatch={mot_microbatch}  checkpointing={int(grad_checkpointing)}  "
         "eval=per-layer UND KV cache"
     )
+    if skip_vae:
+        print("SKIP_VAE=1: benchmarking MoT with synthetic latent tensors")
 
     # A 5.54B-trainable scope does not fit on one 48 GiB card with gradients and Adam state.
     # NO_OPT=1 drops the optimizer so the forward/backward compute -- the part
@@ -188,8 +192,19 @@ def main(cfg: TrainPipelineConfig):
         spec = TASK_SPECS[task]
 
         t0 = time.perf_counter()
-        clip = batch["image_clip"].to(device, non_blocking=True)
-        latents = vae(clip).to(dtype)
+        if skip_vae:
+            latents = torch.randn(
+                batch_size,
+                mot.latent_channels,
+                latent_frames,
+                model.config.latent_grid,
+                model.config.latent_grid,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            clip = batch["image_clip"].to(device, non_blocking=True)
+            latents = vae(clip).to(dtype)
         timer.sync()
         t_vae = time.perf_counter() - t0
 

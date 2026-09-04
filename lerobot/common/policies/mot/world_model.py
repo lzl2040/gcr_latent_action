@@ -212,7 +212,7 @@ class WorldModelConfig:
     training_execution: TrainingExecution = "interleaved"
     # Checkpoint several complete dual-pathway layers as one segment. Per-layer checkpointing
     # retains one long UND hidden state at every layer; segments retain only their boundaries.
-    mot_checkpoint_segment_size: int = 8
+    mot_checkpoint_segment_size: int = 4
     # Image-conditioned UND sequences are 545 image tokens plus text. During interleaved
     # training the complete UND+GEN model is sliced along the batch dimension; during cached
     # execution only UND is sliced. Both preserve the external/global batch semantics.

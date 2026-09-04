@@ -56,8 +56,13 @@ def main() -> None:
     ap.add_argument("--scopes", default="gen_only,freeze_vision")
     ap.add_argument("--task", default="joint_action")
     ap.add_argument("--execution", choices=("interleaved", "cached"), default="interleaved")
-    ap.add_argument("--microbatch", type=int, default=32)
-    ap.add_argument("--checkpoint_segment", type=int, default=8)
+    ap.add_argument("--microbatch", type=int, default=None)
+    ap.add_argument("--checkpoint_segment", type=int, default=4)
+    ap.add_argument(
+        "--checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     ap.add_argument("--skip_opt", action="store_true",
                     help="skip the optimizer stage; its state does not fit when the card is shared")
     args = ap.parse_args()
@@ -75,15 +80,18 @@ def main() -> None:
             raise SystemExit(f"unknown scope {scope!r}")
         torch.cuda.reset_peak_memory_stats()
         mot = MoTConfig.from_phi_dir(args.phi_dir, action_dim=CANON_DIM)
+        microbatch = args.microbatch if args.microbatch is not None else (
+            32 if scope == "gen_only" else 16
+        )
         cfg = WorldModelConfig(
             mot=mot,
             trainable_scope=scope,
             training_execution=args.execution,
-            und_microbatch_size=args.microbatch,
+            und_microbatch_size=microbatch,
             mot_checkpoint_segment_size=args.checkpoint_segment,
         )
         model = MoTWorldModel(cfg).to(device=device, dtype=dtype)
-        model.mot.gradient_checkpointing = True
+        model.mot.gradient_checkpointing = args.checkpoint
         model.train()
 
         c, g = mot.latent_channels, cfg.latent_grid
