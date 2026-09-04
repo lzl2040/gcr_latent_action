@@ -200,6 +200,32 @@ PHYSICAL_SPECS: dict[str, dict] = {
         "action": [_seg("action", 0, 10, 0)],
         "state": [_seg("observation.state", 0, 10, 0)],
     },
+    # EgoDex
+    "ego_dex_split1": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 20, 0)],
+        "state": [_seg("observation.state", 0, 20, 0)],
+    },
+    "ego_dex_split2": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 20, 0)],
+        "state": [_seg("observation.state", 0, 20, 0)],
+    },
+    "ego_dex_split3": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 20, 0)],
+        "state": [_seg("observation.state", 0, 20, 0)],
+    },
+    "ego_dex_split4": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 20, 0)],
+        "state": [_seg("observation.state", 0, 20, 0)],
+    },
+    "ego_dex_split5": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 20, 0)],
+        "state": [_seg("observation.state", 0, 20, 0)],
+    },
     # Micro Data
     ## --- YAM / xdof bimanual stations: eef ort6d (20) + joints (14 = 7 + 7) ---
     ## XMI_MERGED do not have joint positions, so we only use the eef ort6d (20) part.
@@ -552,6 +578,7 @@ PHYSICAL_SPECS: dict[str, dict] = {
     "open_neo_arx5": {
         "action": [
             _seg("action.eef_pose", 0, 20, 0),
+            # joint positions: 6 joints + a gripper per arm, not 7 joints: dim 6 and dim 13 measure [0, 1.0]
             _seg("action", 0, 6, 20),
             _seg("action", 6, 7, 27),
             _seg("action", 7, 13, 28),
@@ -559,6 +586,7 @@ PHYSICAL_SPECS: dict[str, dict] = {
         ],
         "state": [
             _seg("observation.eef_pose", 0, 20, 0),
+            # joint positions: 6 joints + a gripper per arm, not 7 joints: dim 6 and dim 13 measure [0, 1.0]
             _seg("observation.state", 0, 6, 20),
             _seg("observation.state", 6, 7, 27),
             _seg("observation.state", 7, 13, 28),
@@ -599,6 +627,34 @@ PHYSICAL_SPECS: dict[str, dict] = {
             _seg("observation.eef_pose", 0, 10, 0),
             _seg("observation.state", 0, 6, 20),
             _seg("observation.state", 6, 7, 27),
+        ],
+        "tactile_image": [
+            "observation.images.left_wrist_left_tactile",
+            "observation.images.left_wrist_right_tactile"
+        ],
+    },
+    # 200 million
+    "open_neo_umi": {
+        "action": [
+            _seg("action", 0, 20, 0),
+        ],
+        "state": [
+            _seg("observation.state", 0, 20, 0),
+        ],
+        "tactile_image": [
+            "observation.images.left_wrist_left_tactile",
+            "observation.images.left_wrist_right_tactile",
+            "observation.images.right_wrist_left_tactile",
+            "observation.images.right_wrist_right_tactile"
+        ],
+    },
+    # 100 million
+    "open_neo_umi_single": {
+        "action": [
+            _seg("action", 0, 10, 0),
+        ],
+        "state": [
+            _seg("observation.state", 0, 10, 0),
         ],
         "tactile_image": [
             "observation.images.left_wrist_left_tactile",

@@ -757,13 +757,13 @@ fi
 
 # ---------------------------------------------------------------- 执行训练命令
 CMD=(
-    torchrun
-    --nnodes="$NNODES"
-    --nproc_per_node="$NPROC_PER_NODE"
-    --node_rank="$NODE_RANK"
-    --master_addr="$MASTER_ADDR"
-    --master_port="$MASTER_PORT"
-    lerobot/scripts/dps_train_contrast.py
+    # torchrun
+    # --nnodes="$NNODES"
+    # --nproc_per_node="$NPROC_PER_NODE"
+    # --node_rank="$NODE_RANK"
+    # --master_addr="$MASTER_ADDR"
+    # --master_port="$MASTER_PORT"
+    python lerobot/scripts/dps_train_contrast.py
     --deepspeed="$DS_CONFIG"
     --policy.type="robo_contrast"
     "${PERCEPTION_ARGS[@]}"

@@ -76,6 +76,8 @@ class StateEncoding(IntEnum):
     # fmt: on
     EEF_R6 = 5 # EEF Delta XYZ (3) + R6 (6) + Gripper Open/Close (1)
     EEF_R6_AND_JOINT = 6          # EEF_R6 + JOINT (xyz+joint+gripper)
+    EEF_R6_DUAL = 7
+    EEF_R6_AND_JOINT_DUAL = 8  # EEF_R6_DUAL + JOINT_BIMANUAL (xyz+joint+gripper)
 
 
 # Defines Action Encoding Schemes
@@ -87,7 +89,8 @@ class ActionEncoding(IntEnum):
     EEF_R6 = 4              # EEF Delta XYZ (3) + R6 (6) + Gripper Open/Close (1)
     # fmt: on
     EEF_R6_AND_JOINT = 6          # EEF_R6 + JOINT (xyz+joint+gripper)
-
+    EEF_R6_DUAL = 7
+    EEF_R6_AND_JOINT_DUAL = 8  # EEF_R6_DUAL + JOINT_BIMANUAL (xyz+joint+gripper)
 
 # === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
@@ -1236,8 +1239,8 @@ OXE_DATASET_CONFIGS = {
         "image_obs_keys": {"primary": "third_view", "secondary": "left_wrist_view", "wrist": "right_wrist_view"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
-        "state_encoding": StateEncoding.EEF_R6_AND_JOINT,
-        "action_encoding": ActionEncoding.EEF_R6_AND_JOINT,
+        "state_encoding": StateEncoding.EEF_R6_AND_JOINT_DUAL,
+        "action_encoding": ActionEncoding.EEF_R6_AND_JOINT_DUAL,
     },
     "open_neo_arx5_single": {
         "image_obs_keys": {"primary": "third_view", "secondary": None, "wrist": "left_wrist_view"},
@@ -1250,8 +1253,8 @@ OXE_DATASET_CONFIGS = {
         "image_obs_keys": {"primary": "third_view", "secondary": "left_wrist_view", "wrist": "right_wrist_view"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
-        "state_encoding": StateEncoding.EEF_R6_AND_JOINT,
-        "action_encoding": ActionEncoding.EEF_R6_AND_JOINT,
+        "state_encoding": StateEncoding.EEF_R6_AND_JOINT_DUAL,
+        "action_encoding": ActionEncoding.EEF_R6_AND_JOINT_DUAL,
     },
     "open_neo_flexiv": {
         "image_obs_keys": {"primary": "third_view", "secondary": None, "wrist": "left_wrist_view"},
@@ -1266,5 +1269,19 @@ OXE_DATASET_CONFIGS = {
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.EEF_R6_AND_JOINT,
         "action_encoding": ActionEncoding.EEF_R6_AND_JOINT,
+    },
+    "open_neo_umi_single": {
+        "image_obs_keys": {"primary": "third_view", "secondary": None, "wrist": "left_wrist_view"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
+    },
+    "open_neo_umi": {
+        "image_obs_keys": {"primary": "third_view", "secondary": "left_wrist_view", "wrist": "right_wrist_view"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6_DUAL,
+        "action_encoding": ActionEncoding.EEF_R6_DUAL,
     },
 }
