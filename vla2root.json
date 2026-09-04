@@ -54,11 +54,6 @@
     "pizza_task_16_sep2": "pizza_v9_task_16_sep2",
     "pizza_task_3": "pizza_v9_task_3_sep1",
     "pizza_task_19": "pizza_v9_task_19_sep1",
-    "ego_dex_split2": "EgoDex",
-    "ego_dex_split1": "EgoDex_split1",
-    "ego_dex_split3": "EgoDex_split3",
-    "ego_dex_split4": "EgoDex_split4",
-    "ego_dex_split5": "EgoDex_split5",
     "cup_4hz": "cup_hz_4_plus_1103",
     "pizza_sub1": "pizza_sub_1_hz_15",
     "pizza_sub2": "pizza_sub_2_hz_15",
@@ -69,6 +64,11 @@
     "game_stardew": "game_data/Stardew_Valley",
     "local_game_csgo": "GameData/D2E/Counter-Strike_2",
     "game_csgo": "game_data/Counter-Strike_2",
+    "ego_dex_split1": "EgoDex/EgoDex_part1",
+    "ego_dex_split2": "EgoDex/EgoDex_part2",
+    "ego_dex_split3": "EgoDex/EgoDex_part3",
+    "ego_dex_split4": "EgoDex/EgoDex_part4",
+    "ego_dex_split5": "EgoDex/EgoDex_part5",
     "robomind_franka_3rgb": "RoboMind_full/franka_3rgb",
     "robomind_franka_1rgb": "RoboMind_full/franka_1rgb",
     "robomind_agilex_3rgb": "RoboMind_full/agilex_3rgb",
@@ -106,5 +106,7 @@
     "open_neo_aloha": "OpenNeoData/aloha",
     "open_neo_arx5": "OpenNeoData/arx5",
     "open_neo_flexiv": "OpenNeoData/flexiv",
-    "open_neo_ur": "OpenNeoData/ur"
+    "open_neo_ur": "OpenNeoData/ur",
+    "open_neo_umi": "OpenNeoData/umi",
+    "open_neo_umi_single": "OpenNeoData/umi_single"
 }
