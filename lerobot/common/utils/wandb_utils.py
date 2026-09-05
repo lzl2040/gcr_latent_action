@@ -79,7 +79,7 @@ class WandBLogger:
         else:
             wandb_run_id = None
         # wandb_run_id = get_wandb_run_id_from_filesystem(self.log_dir) if cfg.resume else None
-        wandb.init(
+        run = wandb.init(
             id=wandb_run_id,
             project=self.cfg.project,
             entity=self.cfg.entity,
@@ -95,7 +95,7 @@ class WandBLogger:
             resume="never" if cfg.resume else None,
         )
         print(colored("Logs will be synced with wandb.", "blue", attrs=["bold"]))
-        logging.info(f"Track this run --> {colored(wandb.run.get_url(), 'yellow', attrs=['bold'])}")
+        logging.info(f"Track this run --> {colored(run.url, 'yellow', attrs=['bold'])}")
         self._wandb = wandb
 
     def log_policy(self, checkpoint_dir: Path):
