@@ -448,7 +448,7 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("fmb_dataset", 0.3),
         ("dobbe", 0.3),
         # ("droid", 0.01),
-        ("agibot_alpha", 0.1),
+        # ("agibot_alpha", 0.1),
         # robomind
         ("robomind_franka_dual_arm", 1.0),
         ("robomind_franka_3rgb", 1.0),
