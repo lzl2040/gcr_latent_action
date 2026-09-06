@@ -31,7 +31,35 @@ echo "devices=${CUDA_VISIBLE_DEVICES}"
 MASTER_PORT=${MASTER_PORT:-$(python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")}
 echo "master_port=${MASTER_PORT}"
 
-deepspeed --master_port=${MASTER_PORT} lerobot/scripts/dps_train_contrast.py \
+TASK_TYPE="train_contrastive"
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+        --task_type=*) TASK_TYPE="${args[$i]#*=}" ;;
+        --task_type)
+            if ((i + 1 < ${#args[@]})); then
+                TASK_TYPE="${args[$((i + 1))]}"
+            fi
+            ;;
+    esac
+done
+
+MODE_ARGS=()
+case "$TASK_TYPE" in
+    train_perception)
+        TRAIN_ENTRYPOINT="lerobot/scripts/dps_train_perception.py"
+        MODE_ARGS+=(--policy.perception_only=true)
+        ;;
+    train_contrastive)
+        TRAIN_ENTRYPOINT="lerobot/scripts/dps_train_contrast.py"
+        ;;
+    *)
+        echo "Unsupported task_type: ${TASK_TYPE}" >&2
+        exit 2
+        ;;
+esac
+
+deepspeed --master_port=${MASTER_PORT} "$TRAIN_ENTRYPOINT" \
     --deepspeed="./ds_zero2_contrast.json" \
     --policy.type="robo_contrast" \
     --is_ft=false \
@@ -63,6 +91,7 @@ deepspeed --master_port=${MASTER_PORT} lerobot/scripts/dps_train_contrast.py \
     --wandb.project="robo_contrast" \
     --job_name="perception_physical_contrast" \
     --weight_resume=false \
-    --task_type="train_contrastive" \
+    --task_type="$TASK_TYPE" \
+    "${MODE_ARGS[@]}" \
     "$@"
     # --wandb.enable=true \

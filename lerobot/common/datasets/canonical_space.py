@@ -77,6 +77,7 @@ def _seg(src_key: str, src_from: int, src_to: int, dst_from: int) -> tuple[str, 
 #   "state"           : list of copy instructions for the proprioceptive state
 #   "tactile_signal"  : list of low-dimensional tactile keys (concatenated)
 #   "tactile_image"   : list of tactile camera keys (at most MAX_TACTILE_VIEWS used)
+#   "perception_only" : whether the dataset has no physical-side supervision
 # Datasets absent from this table fall back to :func:`default_spec`.
 PHYSICAL_SPECS: dict[str, dict] = {
     # --- Open-X style datasets already converted to xyz + ort6d + gripper -----
@@ -225,6 +226,14 @@ PHYSICAL_SPECS: dict[str, dict] = {
         # TO DO: 20-50 is 10 finger xyz
         "action": [_seg("action", 0, 20, 0)],
         "state": [_seg("observation.state", 0, 20, 0)],
+    },
+    # Human egocentric video without robot action, proprioception, or tactile data.
+    # It is valid for `train_perception`, whose loader bypasses this table entirely, but
+    # cannot provide a physical-side positive for contrastive training.
+    "ego10k_part1": {
+        "action": [],
+        "state": [],
+        "perception_only": True,
     },
     # Micro Data
     ## --- YAM / xdof bimanual stations: eef ort6d (20) + joints (14 = 7 + 7) ---

@@ -202,6 +202,13 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 action_dim=self._feature_dim(info, "action"),
                 state_dim=self._feature_dim(info, "observation.state"),
             )
+            if spec.get("perception_only", False):
+                logger.info(
+                    "%s has no physical-side supervision; skipping it in contrastive training. "
+                    "Use task_type=train_perception to train on this video source.",
+                    dataset_name,
+                )
+                continue
 
             dataset, ds_meta, img_keys, horizon_ds, true_fps_ds = self._build_dataset(
                 cfg, dataset_name, data_root, version, spec

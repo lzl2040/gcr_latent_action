@@ -459,8 +459,11 @@ fi
 
 if [[ "$TASK_TYPE" == "train_perception" ]]; then
     PERCEPTION_ONLY=true
+    TRAIN_ENTRYPOINT="lerobot/scripts/dps_train_perception.py"
 elif [[ "$PERCEPTION_ONLY" == "true" ]]; then
     die "perception_only=true 时 task_type 必须是 train_perception"
+else
+    TRAIN_ENTRYPOINT="lerobot/scripts/dps_train_contrast.py"
 fi
 
 PREDICTOR_ENABLED="$(
@@ -763,7 +766,7 @@ CMD=(
     # --node_rank="$NODE_RANK"
     # --master_addr="$MASTER_ADDR"
     # --master_port="$MASTER_PORT"
-    python lerobot/scripts/dps_train_contrast.py
+    python "$TRAIN_ENTRYPOINT"
     --deepspeed="$DS_CONFIG"
     --policy.type="robo_contrast"
     "${PERCEPTION_ARGS[@]}"
