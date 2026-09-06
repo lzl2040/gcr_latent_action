@@ -43,7 +43,12 @@ QWEN3VL_IMAGE_SIZE = 256
 
 
 class _NormOnlyMerger(nn.Module):
-    """The pretrained merger's LayerNorm, without the 2x2 pooling MLP that follows it."""
+    """Keep the pretrained output norm while removing spatial pooling and width projection.
+
+    Transformers still exposes this module's result as ``pooler_output`` because that is the
+    fixed Qwen3-VL output field. In this wrapper the name is historical: the tensor remains
+    full-resolution ``(B * num_patches, hidden_size)`` and is not pooled.
+    """
 
     def __init__(self, norm: nn.Module):
         super().__init__()
@@ -216,8 +221,11 @@ class Qwen3VLPatchTrunk(nn.Module):
         grid_thw = torch.tensor([[1, gh, gw]] * b, device=grid_device, dtype=torch.long)
         out = self.vision_model(flat, grid_thw)
         if getattr(out, "pooler_output", None) is not None:
-            # Transformers 5 exposes pre-merger tokens as `last_hidden_state`; our
-            # norm-only merger output is the counterpart of Transformers 4's tuple[0].
+            # Transformers 5 keeps the historical `pooler_output` field even though our
+            # replacement merger only applies LayerNorm. Stock Qwen3-VL would return
+            # (B*64, out_hidden_size) here; we retain all patches as
+            # (B*gh*gw, hidden_size), which is (B*256, 1024) for the 4B checkpoint.
+            # `last_hidden_state` has the same shape but is before this pretrained norm.
             tokens = out.pooler_output
         elif hasattr(out, "last_hidden_state"):
             tokens = out.last_hidden_state

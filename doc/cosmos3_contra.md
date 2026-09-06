@@ -195,6 +195,37 @@ resolution. The DeepStack heads (81.8M) are dropped — they exist to inject int
 layers into the first three LLM layers, and there is no LLM here. That does mean the
 features are not quite everything Qwen's pretraining optimised the tower to emit.
 
+#### Why the code reads `pooler_output` even though no pooling remains
+
+`pooler_output` is the fixed Hugging Face output-field name for the result of Qwen3-VL's
+`merger`; the name describes the **original module**, not necessarily the replacement
+installed at runtime. With the stock Qwen3-VL-4B merger, a 256×256 image follows:
+
+```text
+last_hidden_state: (N·256, 1024)
+    -> LayerNorm
+    -> group each 2×2 patch block: (N·64, 4096)
+    -> merger MLP
+pooler_output:     (N·64, 2560)
+```
+
+This repository replaces that merger with `_NormOnlyMerger(model.merger.norm)`. The forward
+API still writes its result into `pooler_output`, but the replacement performs no reshape,
+pooling, or 1024→2560 projection:
+
+```text
+last_hidden_state: (N·256, 1024)  # final ViT block, before output norm
+pooler_output:     (N·256, 1024)  # after pretrained LayerNorm; not actually pooled here
+wrapper output:    (N, 256, 1024) # restored batch and row-major spatial order
+```
+
+The perception encoder concatenates the current and future frames before this call, so for
+a training batch of size `B`, `N=2B`; it then splits the wrapper output back into
+`p0, p1: (B, 256, 1024)`. Reading `last_hidden_state` would preserve the token count but
+silently omit the pretrained output LayerNorm. Transformers 4.57 returned the normalized
+merger result as `tuple[0]`, so selecting `pooler_output` on Transformers 5 also keeps both
+versions semantically aligned.
+
 The patch-ordering trap is written up in full — why we cannot call Qwen's own processor in
 the training loop, how the merge-block layout was derived, and how it is verified — in
 [`doc/problem_and_solution.md` §1](problem_and_solution.md).
