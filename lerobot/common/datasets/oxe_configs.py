@@ -820,6 +820,13 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
+    "ego10k_part1":{
+        "image_obs_keys": {"primary": "ego", "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": None,
+        "state_encoding": None,
+        "action_encoding": None,
+    },
     "ms_data_scale":{
         # "image_obs_keys": {"primary": "cam_high", "secondary": "cam_low", "wrist": "cam_right_wrist"},
         "image_obs_keys": {"primary": "cam_high", "secondary": None, "wrist": None},

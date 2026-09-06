@@ -497,6 +497,74 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("open_neo_flexiv", 0.1),
     ],
     
+    "hq_research_data":[
+        ("fractal20220817_data", 1.0),
+        ("kuka", 0.5),
+        ("bridge_orig", 0.5),                                   # Original Version of Bridge V2 from Project Website
+        # ("language_table", 0.1),
+        ("taco_play", 1.0),
+        ("jaco_play", 1.0),
+        ("bc_z", 0.3),                                          # Note: use v0.1.0 --> later versions broken
+        ("fmb_dataset", 0.3),
+        ("dobbe", 0.3),
+        # ("droid", 0.01),
+        # ("agibot_alpha", 0.1),
+        ("robomind_franka_dual_arm", 1.0),
+        ("robomind_franka_3rgb", 1.0),
+        ("robomind_franka_1rgb", 1.5),
+        ("robomind_agilex_3rgb", 0.5),
+        ("robomind_ur_1rgb", 0.5),
+        # interna1
+        # ("interna1_dual_arm_0", 0.05),
+        # ("interna1_dual_arm_1", 0.05),
+        ("interna1_dual_arm_2", 0.1),
+        ("interna1_dual_arm_3", 0.1),
+        ("interna1_dual_arm_4", 0.1),
+        ("interna1_single_arm", 0.1),
+        # egodex
+        ("ego_dex_split1", 0.05),
+        ("ego_dex_split2", 0.05),
+        # ("ego_dex_split3", 0.05),
+        # ("ego_dex_split4", 0.05),
+        # ("ego_dex_split5", 0.05),
+        # ms_buy_data
+        ("ms_data_scale", 0.2),
+        ("ms_data_xdof_1", 0.12),
+        ("ms_data_xdof_2", 0.15),
+        ("ms_data_xdof_3", 0.15),
+        ("ms_data_xdof_4", 0.12),
+        # FTP-1
+        ("ftp_1_RH20TCfg5Franka", 1.0),
+        ("ftp_1_RH20TCfg6ATIAxia", 1.0),
+        ("ftp_1_RH20TCfg7Tactile", 1.0),
+        ("ftp_1_VLA_touch", 1.0),
+        ("ftp_1_ViTaMIn", 1.0),
+        ("ftp_1_VisuoTactile_QINGLOONG", 1.0),
+        ("ftp_1_exUMI", 1.0),
+        ("ftp_1_Unit", 2.0),
+        ("ftp_1_RDP_Bimanual", 2.0),
+        ("ftp_1_RDP", 2.0),
+        ("ftp_1_FreeTacMan", 1.0),
+        ("ftp_1_MotionTrans", 1.0),
+        ("ftp_1_sharpa", 0.2),
+        ("ftp_1_VisuoTactile_D-WHEEL", 0.5),
+        # open neo data
+        ("open_neo_arx5_single", 0.1),
+        ("open_neo_aloha", 0.1),
+        ("open_neo_arx5", 0.1),
+        ("open_neo_ur", 0.1),
+        ("open_neo_flexiv", 0.1),
+    ],
+    
+    "ego_data":[
+        ("ego_dex_split1", 1.0),
+        ("ego_dex_split2", 1.0),
+        ("ego_dex_split3", 1.0),
+        ("ego_dex_split4", 1.0),
+        ("ego_dex_split5", 1.0),
+        ("ego10k_part1", 0.2), # 0.5 billion frames
+    ],
+    
     "debug_research_data":[
         # ("agibot_alpha", 0.1),
         ("fractal20220817_data", 1.0),
@@ -512,8 +580,8 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         # ("ftp_1_sharpa_split_0", 1.0),
         # ("ftp_1_VisuoTactile_D-WHEEL_split_0", 1.0),
         ("ftp_1_RDP_Bimanual", 1.0),
-        # ("open_neo_arx5_single", 0.5),
-        # ("open_neo_aloha", 0.5)
+        ("open_neo_arx5_single", 0.5),
+        ("open_neo_aloha", 0.5)
     ],
     
     "debug":[

@@ -69,6 +69,7 @@
     "ego_dex_split3": "EgoDex/EgoDex_part3",
     "ego_dex_split4": "EgoDex/EgoDex_part4",
     "ego_dex_split5": "EgoDex/EgoDex_part5",
+    "ego10k_part1": "ego10k_part1",
     "robomind_franka_3rgb": "RoboMind_full/franka_3rgb",
     "robomind_franka_1rgb": "RoboMind_full/franka_1rgb",
     "robomind_agilex_3rgb": "RoboMind_full/agilex_3rgb",
