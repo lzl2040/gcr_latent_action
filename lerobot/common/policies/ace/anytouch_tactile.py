@@ -76,7 +76,10 @@ class AnyTouchTactileTower(nn.Module):
             layer_norm_eps=1e-5,
             attention_dropout=0.0,
         )
-        self.touch_model = CLIPVisionModel(config).vision_model
+        clip_vision = CLIPVisionModel(config)
+        # Transformers 4 wraps the encoder under ``vision_model``; Transformers 5 exposes
+        # the same embeddings/encoder/layernorm modules directly on CLIPVisionModel.
+        self.touch_model = getattr(clip_vision, "vision_model", clip_vision)
         self.touch_model.embeddings.patch_embedding = nn.Conv3d(
             in_channels=3,
             out_channels=ANYTOUCH_HIDDEN_DIM,
