@@ -45,6 +45,11 @@ QWEN3VL_IMAGE_SIZE = 256
 class _NormOnlyMerger(nn.Module):
     """Keep the pretrained output norm while removing spatial pooling and width projection.
 
+    The stock merger is an adapter for the Qwen language model: it groups each 2x2 patch
+    block and projects the concatenated feature to the LLM width. This repository instead
+    compares frame pairs token by token and reconstructs a 16x16 target grid, so collapsing
+    that grid to 8x8 would discard the spatial correspondence the change queries supervise.
+
     Transformers still exposes this module's result as ``pooler_output`` because that is the
     fixed Qwen3-VL output field. In this wrapper the name is historical: the tensor remains
     full-resolution ``(B * num_patches, hidden_size)`` and is not pooled.
@@ -293,7 +298,10 @@ def build_qwen3vl_vision(model_dir: str | Path, optimized: bool = True):
         )
 
     full = sum(p.numel() for p in model.parameters()) / 1e6
-    # Keep the trained output LayerNorm, drop the 2x2 pooling MLP and the DeepStack heads.
+    # The stock merger is an LLM adapter: it pools the 16x16 grid to 8x8 and maps four
+    # concatenated 1024-d patches to the text model's 2560-d width. Our change representation
+    # and reconstruction target both require one token per original 16x16 cell, so retain the
+    # trained per-token output norm but remove the spatial pooling/projection.
     model.merger = _NormOnlyMerger(model.merger.norm)
     model.deepstack_merger_list = nn.ModuleList()
     model.deepstack_visual_indexes = []

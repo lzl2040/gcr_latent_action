@@ -195,6 +195,29 @@ resolution. The DeepStack heads (81.8M) are dropped — they exist to inject int
 layers into the first three LLM layers, and there is no LLM here. That does mean the
 features are not quite everything Qwen's pretraining optimised the tower to emit.
 
+#### Why the original merger is removed
+
+The merger is not an intrinsic part of spatial feature extraction; it is the adapter between
+the ViT and Qwen's language model. For the 4B checkpoint it groups every 2×2 block of
+1024-dimensional patches, concatenates the four vectors, and projects `4096→2560` so the
+result matches the text model's hidden width. That is useful when visual tokens are inserted
+into the LLM, but conflicts with this model in three ways:
+
+1. The perception branch forms token-wise evidence such as `v1[i] - v0[i]`. Keeping the
+   original merger would reduce the 16×16 grid to 8×8 and mix four spatial locations before
+   the change-query transformer sees them.
+2. The vision reconstruction target has a 16×16 patch grid (and the Wan VAE target is also
+   16×16). Preserving 256 tokens gives an exact location-to-location target instead of asking
+   the predictor to recover four cells from one already-pooled token.
+3. The merger's 2560-dimensional output width exists only to match Qwen3-VL-4B's text
+   decoder. This repository has no Qwen decoder; its own `visual_proj` maps the retained
+   1024-dimensional vision features into the shared 512-dimensional perception space.
+
+The whole merger is therefore not discarded blindly: its trained per-token LayerNorm is
+kept, while only the task-specific 2×2 pooling and LLM-width MLP are removed. The trade-off is
+that these are full-resolution ViT features rather than the exact 64 visual tokens consumed
+by Qwen's LLM, which is intentional for spatial change reconstruction.
+
 #### Why the code reads `pooler_output` even though no pooling remains
 
 `pooler_output` is the fixed Hugging Face output-field name for the result of Qwen3-VL's
