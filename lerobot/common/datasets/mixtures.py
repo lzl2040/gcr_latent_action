@@ -463,8 +463,8 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("interna1_dual_arm_4", 0.1),
         ("interna1_single_arm", 0.1),
         # egodex
-        ("ego_dex_split1", 0.05),
-        ("ego_dex_split2", 0.05),
+        # ("ego_dex_split1", 0.05),
+        # ("ego_dex_split2", 0.05),
         # ("ego_dex_split3", 0.05),
         # ("ego_dex_split4", 0.05),
         # ("ego_dex_split5", 0.05),
