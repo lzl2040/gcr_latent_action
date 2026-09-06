@@ -139,6 +139,10 @@ def _install_grid_caches(vision_model: nn.Module) -> None:
     frozen in this repo, but the guard means unfreezing it stays correct rather than
     silently freezing the position embedding.
     """
+    if not hasattr(vision_model, "rot_pos_emb") or not hasattr(vision_model, "fast_pos_embed_interpolate"):
+        # Newer Transformers computes these through shared vision utilities in forward.
+        return
+
     stock_rot = vision_model.rot_pos_emb
     stock_pos = vision_model.fast_pos_embed_interpolate
     rot_cache: dict = {}
@@ -204,16 +208,23 @@ class Qwen3VLPatchTrunk(nn.Module):
         x = x.unsqueeze(6).expand(-1, -1, -1, -1, -1, -1, self.temporal_patch_size, -1, -1)
         flat = x.reshape(b * gh * gw, c * self.temporal_patch_size * p * p)
 
-        grid_thw = torch.tensor([[1, gh, gw]] * b, device="cpu", dtype=torch.long)
-        # `grid_thw` is deliberately kept on the CPU. `Qwen3VLVisionModel.rot_pos_emb` runs
-        # `torch.prod(grid_thw, dim=1)`, and an int64 `prod` on CUDA goes through torch's
-        # jiterator, which needs `libnvrtc-builtins` at runtime and dies on hosts that lack
-        # it. The tensor is (B, 3), so computing it on the host is free. Correctness is
-        # covered by the batch-independence check in `scripts/check_qwen3vl_vision.py`:
-        # if the CPU `cu_seqlens` derived from it ever stopped masking across images, that
-        # test would fail rather than silently degrade the features.
+        # Transformers 4.57 computes rotary positions with an int64 `torch.prod`; keeping
+        # that legacy path on CPU avoids an NVRTC dependency. Transformers 5 instead builds
+        # embedding indices directly on `grid_thw.device`, so the grid must follow the
+        # CUDA-resident position embedding or `nn.Embedding` receives CPU indices.
+        grid_device = flat.device if hasattr(self.vision_model, "interpolation_mode") else "cpu"
+        grid_thw = torch.tensor([[1, gh, gw]] * b, device=grid_device, dtype=torch.long)
         out = self.vision_model(flat, grid_thw)
-        tokens = out[0] if isinstance(out, tuple) else out
+        if getattr(out, "pooler_output", None) is not None:
+            # Transformers 5 exposes pre-merger tokens as `last_hidden_state`; our
+            # norm-only merger output is the counterpart of Transformers 4's tuple[0].
+            tokens = out.pooler_output
+        elif hasattr(out, "last_hidden_state"):
+            tokens = out.last_hidden_state
+        elif isinstance(out, tuple):
+            tokens = out[0]
+        else:
+            tokens = out
 
         # Undo the merge-block ordering: (B, bh, bw, m, m, D) -> (B, gh, gw, D).
         d = tokens.shape[-1]
