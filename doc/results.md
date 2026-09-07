@@ -1301,6 +1301,37 @@ Verified on this dataset:
 Backups came to 283 MB. The re-encoded files are larger than the originals (1.39 MB vs
 0.92 MB for a 299-frame episode) since they now carry 2.25x the pixels.
 
+### 16.2 The current v3 copy regressed, so the loader now has a narrow fallback
+
+On 2026-09-07 the current
+`/Data/lerobot_data_ort6d/v30/RoboMind_full/franka_3rgb` was checked again after the cluster
+reported:
+
+```text
+Failed to read robomind_franka_3rgb[231613]:
+    Expected pre-allocated tensor of shape 720x1280x3, got [480, 640, 3]
+```
+
+Frame 231613 is episode 1432, local frame 20, in
+`camera_top/chunk-000/file-006.mp4`. Four merged files (`file-003.mp4` through
+`file-006.mp4`) again contain both 480×640 and 720×1280 frames. The existing detector found
+all four, but the re-encoder originally selected files only from their stream-header
+resolution; that chose `004` and `006` and missed `003` and `005`, whose headers happen to
+match the declared 720×1280. The re-encoder now also runs the same torchcodec batch decode as
+training, so its dry-run selects all four dynamic-resolution files.
+
+The standard v3 loader now catches only torchcodec's specific pre-allocation mismatch and
+decodes the requested indices through its single-frame API. It verifies that all requested
+frames have one shape before stacking; a request that genuinely crosses a resolution
+boundary still raises a clear error rather than resizing or padding silently. This is
+correct for the contrastive loader because both timestamps are constrained to one episode,
+and the source episodes themselves have a fixed resolution. The exact failing sample now
+returns two 720×1280 uint8 frames and the full canonical path resizes/collates them as
+`(B,3,224,224)`.
+
+This fallback prevents sample substitution and keeps training correct, but it is slower than
+torchcodec's batch API. Re-encoding the four files remains the preferred permanent repair.
+
 ## 17. A resume path that only breaks on the second checkpoint
 
 Saving on the cluster died with:

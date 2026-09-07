@@ -91,6 +91,9 @@ def probe(path: str) -> dict | None:
             "fps": s.get("r_frame_rate"),
             "pix_fmt": s.get("pix_fmt"),
             "codec": s.get("codec_name"),
+            # A stream header can match the target while later concatenated episodes switch
+            # resolution. The same batch call used in training is the authoritative check.
+            "decode_error": decode_check(path),
         }
     except Exception:
         return None
@@ -311,12 +314,18 @@ def main() -> int:
             unreadable.append(path)
             continue
         tgt = targets[k]
-        if not args.force and (info_p["height"], info_p["width"]) == tgt:
+        dynamic_resolution = "Expected pre-allocated tensor" in (info_p.get("decode_error") or "")
+        if (
+            not args.force
+            and (info_p["height"], info_p["width"]) == tgt
+            and not dynamic_resolution
+        ):
             continue
         jobs.append({
             "path": path,
             "rel": str(Path(path).relative_to(root)),
             "probe": info_p,
+            "dynamic_resolution": dynamic_resolution,
             "target_h": tgt[0], "target_w": tgt[1],
             "strategy": args.strategy, "vcodec": args.vcodec,
             "pix_fmt": args.pix_fmt, "crf": args.crf, "g": args.g,
@@ -341,8 +350,9 @@ def main() -> int:
     print("\n示例:")
     for j in jobs[:5]:
         b = j["probe"]
+        reason = "dynamic resolution" if j["dynamic_resolution"] else "stream resolution"
         print(f"   {j['rel']}  {b['height']}x{b['width']} -> {j['target_h']}x{j['target_w']}"
-              f"  ({b['nb_frames']} 帧)")
+              f"  ({b['nb_frames']} 帧, {reason})")
 
     if args.dry_run:
         print("\n--dry-run: 不做任何修改。")

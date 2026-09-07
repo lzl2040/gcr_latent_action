@@ -649,6 +649,21 @@ class FrameTimestampError(ValueError):
 
 
 _default_decoder_cache = VideoDecoderCache()
+_dynamic_resolution_warned: set[str] = set()
+_dynamic_resolution_warning_lock = Lock()
+
+
+def _warn_dynamic_resolution_fallback(video_path: str) -> None:
+    """Log this expensive compatibility path once per video and worker process."""
+    with _dynamic_resolution_warning_lock:
+        if video_path in _dynamic_resolution_warned:
+            return
+        _dynamic_resolution_warned.add(video_path)
+    logger.warning(
+        "Dynamic-resolution video detected at %s; falling back to torchcodec single-frame "
+        "decoding. Re-encode the file to one resolution for full throughput.",
+        video_path,
+    )
 
 
 def decode_video_frames_torchcodec(
@@ -697,11 +712,35 @@ def decode_video_frames_torchcodec(
     frame_indices = [round(ts * average_fps) for ts in timestamps]
     # retrieve frames based on indices
 
-    frames_batch = decoder.get_frames_at(indices=frame_indices)
+    try:
+        frames_batch = decoder.get_frames_at(indices=frame_indices)
+        decoded = zip(frames_batch.data, frames_batch.pts_seconds, strict=True)
+    except RuntimeError as exc:
+        if "Expected pre-allocated tensor" not in str(exc):
+            raise
 
-    for frame, pts in zip(frames_batch.data, frames_batch.pts_seconds, strict=True):
+        # torchcodec's batch API allocates one tensor from the stream-header resolution.
+        # RoboMind v3 files may contain concatenated episodes with different resolutions, so
+        # that allocation fails even when every requested frame belongs to one resolution.
+        # The single-frame API allocates from each decoded frame and remains correct.
+        single_data = []
+        single_pts = []
+        for index in frame_indices:
+            frame = decoder.get_frame_at(index) if hasattr(decoder, "get_frame_at") else decoder[index]
+            single_data.append(getattr(frame, "data", frame))
+            single_pts.append(float(getattr(frame, "pts_seconds", index / average_fps)))
+        shapes = {tuple(frame.shape) for frame in single_data}
+        if len(shapes) != 1:
+            raise RuntimeError(
+                f"Requested frames from {video_path} span multiple resolutions {sorted(shapes)}; "
+                "the video must be re-encoded before these frames can be returned as one tensor."
+            ) from exc
+        _warn_dynamic_resolution_fallback(str(video_path))
+        decoded = zip(single_data, single_pts, strict=True)
+
+    for frame, pts in decoded:
         loaded_frames.append(frame)
-        loaded_ts.append(pts.item())
+        loaded_ts.append(float(pts))
         if log_loaded_timestamps:
             logger.info(f"Frame loaded at timestamp={pts:.4f}")
 
