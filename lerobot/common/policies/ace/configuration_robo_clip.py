@@ -86,7 +86,9 @@ class RobotCLIPConfig(PreTrainedConfig):
     max_state_dim: int = 32
     max_action_dim: int = 32
     # other setting
-    frozen_ace: bool = False # true = train decoder
+    frozen_ace: bool = False  # True keeps only the reconstruction decoder trainable.
+    # Train the ACE encoder and reconstruction decoder, but no vision-side modules.
+    train_latent_action_only: bool = False
     ace_pretrained_path: str = ""
     
     

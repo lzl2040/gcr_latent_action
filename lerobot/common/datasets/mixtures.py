@@ -564,6 +564,9 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("ego_dex_split5", 1.0),
         ("ego10k_part1", 0.2), # 0.5 billion frames
     ],
+    "ego_dex_split1":[
+        ("ego_dex_split1", 1.0),
+    ],
     "egodex":[
         ("ego_dex_split1", 1.0),
         ("ego_dex_split2", 1.0),

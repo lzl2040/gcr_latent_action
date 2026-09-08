@@ -1444,6 +1444,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         self.episodes = None
         self.cfg = cfg
         self.seed = seed
+        self.action_only = cfg.task_type == "train_action_decoder"
         # set seed
         set_seed(seed)
         # specific process
@@ -1521,6 +1522,8 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                         dataset_name=dataset_name,
                         video_return_type="uint8"
                     )
+                if self.action_only:
+                    dataset.video_keys_to_decode = []
                 self.datasets.append(dataset)
                 self.dataset_sizes.append(len(dataset))
                 self.dataset_names.append(dataset_name)
@@ -1640,7 +1643,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         for dataset_idx, (dataset, num_samples, dataset_name) in enumerate(
             zip(self.datasets, self.dataset_sample_counts, self.dataset_names)
         ):
-            indices = list(range(len(dataset)))
+            indices = range(len(dataset))
         
             if num_samples <= len(indices):
                 # 不放回
@@ -1649,9 +1652,12 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 # 放回
                 sampled_indices = random.choices(indices, k=num_samples)
         
-            episode_this_dataset = int(
-                dataset.num_episodes * (len(sampled_indices) / len(dataset))
-            )
+            episode_this_dataset = 0
+            if sampled_indices:
+                episode_this_dataset = max(
+                    1,
+                    int(dataset.num_episodes * (len(sampled_indices) / len(dataset))),
+                )
             episode_count += episode_this_dataset
         
             # self.selected_indices.append(sampled_indices)
@@ -1668,10 +1674,10 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         """Can be (batch_size x sequence_length x features_dimension)
         or (batch_size x features_dimension)
         """
-        if vector.shape[-1] == new_dim:
-            return vector
+        current_dim = vector.shape[-1]
+        if current_dim >= new_dim:
+            return vector[..., :new_dim]
         shape = list(vector.shape)
-        current_dim = shape[-1]
         shape[-1] = new_dim
         new_vector = torch.zeros(*shape, dtype=vector.dtype, device=vector.device)
         new_vector[..., :current_dim] = vector
@@ -1710,7 +1716,21 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
         return data_dict
     
     def _fetch_data_dict(self, item, image_obs_keys):
-        
+        raw_action_dim = item["action"].shape[-1]
+        item["action"] = self.pad_vector(item["action"], self.max_action_dim)
+        xyz_idx = [0, 1, 2, 10, 11, 12] if raw_action_dim > 10 else [0, 1, 2]
+        mean = self.stats["action"]["mean"].to(item["action"].dtype).to(item["action"].device)
+        std = self.stats["action"]["std"].to(item["action"].dtype).to(item["action"].device)
+        item["action"][..., xyz_idx] = (
+            item["action"][..., xyz_idx] - mean[xyz_idx]
+        ) / (std[xyz_idx] + 1e-8)
+
+        if self.action_only:
+            return {
+                "sample_rate": item["fps"],
+                "action": item["action"],
+            }
+
         exist_image = None
         key_to_pad = []
         new_keys = []
@@ -1721,11 +1741,10 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             if old_img_key not in item:
                 old_img_key = f"observations.images.{old_key}" # for ms buy data
             if old_key != None:
-                
                 if isinstance(item[old_img_key], list):
                     if not len(item[old_img_key]):
                         key_to_pad.append(new_key)
-                
+
                 item[f"observation.images.{new_key}"] = copy.deepcopy(item[old_img_key])
                 exist_image = item[old_img_key]
                 if new_key != old_key:
@@ -1733,7 +1752,7 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             else:
                 # if missing, use zero image
                 key_to_pad.append(new_key)
-        
+
         exist_image_valide = False
         if exist_image is not None:
             if isinstance(exist_image, list):
@@ -1748,24 +1767,31 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
                 sample_image = Image.fromarray(np.ones((height, width, channel), dtype=np.uint8))
                 exist_image_valide = True
             # tensor
-        
-        
+
         if not exist_image_valide:
             # print(exist_image_valide)
-            sample_image = Image.fromarray(np.ones((self.cfg.dataset.default_image_size, self.cfg.dataset.default_image_size, self.cfg.dataset.default_channel_size), dtype=np.uint8))  
-        
-        
+            sample_image = Image.fromarray(
+                np.ones(
+                    (
+                        self.cfg.dataset.default_image_size,
+                        self.cfg.dataset.default_image_size,
+                        self.cfg.dataset.default_channel_size,
+                    ),
+                    dtype=np.uint8,
+                )
+            )
+
         for new_key in key_to_pad:
             item[f"observation.images.{new_key}"] = copy.deepcopy(sample_image)
             if new_key == "primary":
                 item[f"observation.images.{new_key}"] = [item[f"observation.images.{new_key}"]]
-        
+
         # remove other image keys
         keys = list(item.keys())
         for key in keys:
             if "images" in key and key not in new_keys:
                 del item[key]
-                
+
         # add the dataset source
         if "episode_index" in item:
             item["source"] = f"{item['dataset_name']}_episode_id_{item['episode_index']}"
@@ -1773,26 +1799,9 @@ class MultiDatasetforDistTraining(torch.utils.data.Dataset):
             item["source"] = f"{item['dataset_name']}_episode_id_{item['ep_idx']}"
         else:
             item["source"] = f"{item['dataset_name']}_with_unknown_episode_id"
-        
-        raw_action_dim = item["action"].shape[-1]
-        # print(raw_action_dim)
-        
-        # Pad the action and observation vectors
-        item["action"] = self.pad_vector(item["action"], self.max_action_dim)
-        item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
-        
-        # Normlize the action and observation vectors
-        # if "agi" in item["dataset_name"] or "dual" in item["dataset_name"] or "agilex" in item["dataset_name"]:
-        if raw_action_dim > 10:
-            xyz_idx = [0, 1, 2, 10, 11, 12]   # 双臂 xyz
-        else:
-            xyz_idx = [0, 1, 2]               # 单臂 xyz
 
-        # print(torch.max(item["action"]), torch.min(item["action"]))
-        # action
-        mean = self.stats["action"]["mean"].to(item["action"].dtype).to(item["action"].device)
-        std = self.stats["action"]["std"].to(item["action"].dtype).to(item["action"].device)
-        item["action"][..., xyz_idx] = (item["action"][..., xyz_idx] - mean[xyz_idx]) / (std[xyz_idx] + 1e-8)
+        # Pad the observation vector
+        item["observation.state"] = self.pad_vector(item["observation.state"], self.max_state_dim)
 
         # state
         mean = self.stats["observation.state"]["mean"].to(item["observation.state"].dtype).to(item["observation.state"].device)

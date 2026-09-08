@@ -226,7 +226,7 @@ def train(cfg: TrainPipelineConfig):
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
 
     logger.info("Setting model parameters to BF16...")
-    if cfg.policy.frozen_ace == False:
+    if cfg.policy.frozen_ace == False and not getattr(cfg.policy, "train_latent_action_only", False):
         for name, params in policy.named_parameters():
             if "text_model" not in name:
                 params.requires_grad = True
@@ -272,7 +272,7 @@ def train(cfg: TrainPipelineConfig):
     dataloader = DataLoader(dataset=dataset,
                             batch_size=batch_size,
                             sampler=sampler,
-                            num_workers=4,
+                            num_workers=cfg.num_workers,
                             pin_memory=True,
                             drop_last=True,
                             # multiprocessing_context="spawn"
@@ -437,6 +437,4 @@ def train(cfg: TrainPipelineConfig):
 
 
 if __name__ == "__main__":
-    # os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    os.environ['WANDB_API_KEY'] = '9e1c3ac77856b8ebb5573c4e1e250c84aabfb904'
     train()

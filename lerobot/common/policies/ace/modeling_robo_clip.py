@@ -457,7 +457,7 @@ class RobotCLIP(PreTrainedPolicy):
             num_hidden_layers=config.num_hidden_layers,
             output_dim=config.output_dim,
             max_action_dim=config.max_action_dim,
-            frozen_ace=config.frozen_ace
+            frozen_ace=config.frozen_ace or config.train_latent_action_only,
         )
         self.action_encoder = ActionChunkEncoder(action_config)
         
@@ -481,8 +481,12 @@ class RobotCLIP(PreTrainedPolicy):
         # Layer norm for stability
         self.tanh = nn.Tanh()
         
-        # frozen weights
-        if config.frozen_ace:
+        # Latent-action-only training keeps the current ACE encoder and its
+        # reconstruction decoder trainable while excluding every vision-side module.
+        if config.train_latent_action_only:
+            for name, param in self.named_parameters():
+                param.requires_grad = name.startswith("action_encoder.")
+        elif config.frozen_ace:
             for name, param in self.named_parameters():
                 if "action_decoder" in name:
                     # print(f"Frozen parameter: {name}")
