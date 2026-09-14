@@ -3,8 +3,9 @@
 What this branch adds to the perception ↔ physical contrastive model, what each module
 costs, and which parts are actually trained.
 
-The perception-side knobs still default to the previous behaviour, and the tactile switch
-also defaults to the existing ResNet path, so an existing config produces the same model:
+The perception-side knobs still default to the previous behaviour. The default tactile
+backbone is now a trainable ResNet spatial codec: it exposes patch latents for a later world
+model while retaining the same one/two-token contrastive interface:
 
 | config | values | default |
 |---|---|---|
@@ -17,7 +18,8 @@ Supporting knobs: `cosmos3_dir` (weights, default `/Data/lzl/huggingface/Cosmos3
 `qwen3vl_dir` (default `/Data/lzl/huggingface/Qwen3-VL-4B-Instruct`) and
 `vae_repeat_frames` (default `1`; see "Repeating frames is a no-op" below). AnyTouch adds
 `anytouch_checkpoint` (default `/Data/lzl/huggingface/anytouch_encoder.pth`) and
-`anytouch_forward_batch_size` (default `128` dynamic windows).
+`anytouch_forward_batch_size` (default `128` dynamic windows). For ResNet,
+`tactile_recon_size=None` follows the 112×112 encoder input.
 
 Regenerate every table here with `python scripts/dump_module_params.py`. Do not hand-edit
 them — a stale parameter table is worse than no table.
@@ -39,16 +41,16 @@ them — a stale parameter table is worse than no table.
 | &nbsp;&nbsp;`blocks` (5 × change-query cross-attn) | 84.0M | 84.0M |
 | &nbsp;&nbsp;`out_proj` | 1.6M | 1.6M |
 | &nbsp;&nbsp;`predictor` (reconstruction head) | 55.4M | 55.4M |
-| **physical_encoder** | **200.9M** | **200.9M** |
+| **physical_encoder** | **191.2M** | **191.2M** |
 | &nbsp;&nbsp;`state_proj` / `action_proj` / `signal_proj` | 0.3M each | 0.3M each |
 | &nbsp;&nbsp;`tactile_cnn` | 11.2M | 11.2M |
-| &nbsp;&nbsp;`tactile_temporal` | 3.2M | 3.2M |
+| &nbsp;&nbsp;`tactile_temporal` (per-patch, 128-d bottleneck) | 0.4M | 0.4M |
 | &nbsp;&nbsp;`tactile_img_proj` | 0.5M | 0.5M |
-| &nbsp;&nbsp;`tactile_recon` | 7.1M | 7.1M |
+| &nbsp;&nbsp;`tactile_recon` (7×7 → 112×112) | 0.1M | 0.1M |
 | &nbsp;&nbsp;`sample_rate_embed` | 0.1M | 0.1M |
 | &nbsp;&nbsp;`blocks` (14 × self-attn over ~40 tokens) | 176.4M | 176.4M |
 | &nbsp;&nbsp;`out_proj` | 1.6M | 1.6M |
-| **total** | **774.4M** | **406.5M** |
+| **total** | **764.7M** | **396.7M** |
 
 Switching `vision_backbone` changes only the `vision_backbone` row (and `predictor` by
 ±0.2M, since the reconstruction head's width follows the tower); every other row is
@@ -61,16 +63,16 @@ Only the perception branch changes; the physical branch is identical in every ro
 
 | configuration | perception | physical | total | trainable | step @ bs128 |
 |---|---:|---:|---:|---:|---:|
-| `dinov3` + `vision` | 573.5M | 200.9M | **774.4M** | **406.5M** | 1.02 s |
-| `cosmos3` + `vision` | 901.3M | 200.9M | **1102.2M** | **407.3M** | 1.71 s |
-| `cosmos3` + `vae` | 1049.8M | 200.9M | **1250.7M** | **406.1M** | — |
-| `qwen3vl` + `vision` | 794.6M | 200.9M | **995.5M** | **407.0M** | 1.70 s |
-| `qwen3vl` + `vae` | 943.3M | 200.9M | **1144.2M** | **406.0M** | — |
+| `dinov3` + `vision` | 573.5M | 191.2M | **764.7M** | **396.7M** | 1.32 s |
+| `cosmos3` + `vision` | 901.3M | 191.2M | **1092.5M** | **397.6M** | — |
+| `cosmos3` + `vae` | 1049.8M | 191.2M | **1241.0M** | **396.4M** | — |
+| `qwen3vl` + `vision` | 794.6M | 191.2M | **985.8M** | **397.3M** | — |
+| `qwen3vl` + `vae` | 943.3M | 191.2M | **1134.5M** | **396.3M** | — |
 
 The deltas are entirely frozen: `vision_backbone` 85.7M → 412.6M (cosmos3) or 306.2M
 (qwen3vl), plus a 149.6M VAE encoder for the `vae` target. Trainable capacity stays at
-~406M in every combination and is split almost exactly in half between the two branches
-(205M / 201M), which is the budget the design targets. Total parameters exceed the original
+~397M in every combination and remains close between the two branches
+(205–206M / 191M). Total parameters exceed the original
 500–800M envelope, but those are frozen feature extractors, not capacity the model is free
 to use.
 
@@ -118,7 +120,7 @@ python scripts/dump_module_params.py \
 The optional tower therefore exceeds the original 500–800M total-parameter envelope, but
 all 305.2M AnyTouch parameters are frozen. It removes the trainable ResNet, temporal
 attention and tactile reconstruction head, then adds a trainable `768 -> 512` adapter.
-Consequently trainable capacity falls from 406.5M to 385.4M rather than increasing.
+Consequently trainable capacity falls from 396.7M to 385.4M rather than increasing.
 
 ---
 
@@ -486,10 +488,12 @@ windows per live pad:
 
 | backbone | model params | trainable | representative step | tactile tower | CUDA peak |
 |---|---:|---:|---:|---:|---:|
-| ResNet-18 | 774.4M | 406.5M | 1.01 s | 0.074 s | 10.83 GiB |
+| ResNet-18 spatial codec | 764.7M | 396.7M | 1.32 s | 0.055 s | 16.14 GiB |
 | AnyTouch | 1058.6M | 385.4M | 1.62 s | 0.728 s | 9.66 GiB |
 
-The matching uncontended runs spent ~0.33 s in the unchanged perception encoder. AnyTouch
+The ResNet row also spends 0.098 s in its full-resolution endpoint decoder; the table's
+"tactile tower" column is encoder-only. The matching runs spent ~0.32–0.33 s in the
+unchanged perception encoder. AnyTouch
 processed about 176 live pads per timed step, or 352 three-frame windows. It is roughly
 60% slower end to end at this tactile density, but the frozen/chunked implementation keeps
 memory below the ResNet run and satisfies the single-GPU batch-128 requirement. These are
@@ -513,11 +517,14 @@ or distillation into the existing smaller tower is more economical than unfreezi
 | check | result |
 |---|---|
 | All 12 `backbone × target × K` combinations build, forward, backward | pass (`scripts/smoke_cosmos3_contrast.py`) |
-| `dinov3/vision/K=1` reproduces the pre-change parameter split | 774.4M / 406.5M, exact |
+| ResNet spatial codec shape | `(N,4,3,112,112) → (N,4,512,7,7)` |
+| Patch temporal head / Physical input | `(N,4,512,7,7) → (N,2,512,7,7) → (N,2,512)` |
+| Spatial decoder | `(N,512,7,7) → (N,3,112,112)`, no skip connections |
+| Full DINOv3 model parameter split | 764.7M / 396.7M |
 | `K=1` similarity is bit-identical to the old formula | max abs diff 0.0 |
 | Degenerate `K=4` reduces to `K=1` | max abs diff 5.6e-08 |
 | End-to-end `train_ace_local.sh`, `cosmos3` + `vae` + `K=4` | 12 steps + eval + checkpoint, clean exit |
-| Single-GPU batch size at the heaviest configuration | **256** (requirement: ≥128) |
+| Single-GPU ResNet codec batch size | **256**, 30.03 GiB allocated (requirement: ≥128) |
 
 Qwen3-VL adds its own suite (`scripts/check_qwen3vl_vision.py`), since that tower is driven
 through a hand-written interface where a mistake would degrade features without ever
@@ -549,8 +556,8 @@ raising:
 
 - **`MultiHeadAttention.norm_kv` is dead in self-attention.** The self-attention path uses
   `norm_q` for both query and key/value, so `norm_kv` never receives a gradient: 2
-  parameters × 28 self-attention modules = 56 parameters, ~57k values. Harmless, but it is
-  why the smoke test reports `grads 633/689`. Deleting it would change checkpoint keys and
+  tensors × 27 self-attention modules = 54 tensors. Harmless, but it is why the DINOv3
+  smoke test reports `grads 667/721`. Deleting it would change checkpoint keys and
   break loading of every existing checkpoint, so it is left alone deliberately.
 - **`contrastive_eval` draws its batches i.i.d.** from `dataset.sample_weights`, while
   training uses `ContrastiveBatchSampler` with `same_dataset_frac=0.75`. The eval's

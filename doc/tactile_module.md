@@ -1,7 +1,7 @@
-# 触觉模块设计与 AnyTouch 图像编码流程
+# 触觉模块设计与图像编码流程
 
-本文档说明当前 `robo_contrast` 模型如何统一处理异构触觉数据，重点介绍
-`tactile_backbone="anytouch"` 时触觉图像从数据读取到进入物理 Transformer 的完整路径。
+本文档说明当前 `robo_contrast` 模型如何统一处理异构触觉数据，包括默认 ResNet spatial codec
+如何为第二阶段提供 patch latent，以及 `tactile_backbone="anytouch"` 的可选预训练路径。
 
 相关实现：
 
@@ -109,11 +109,73 @@ policy.tactile_backbone
 
 | backbone | 单帧/时序编码 | 输出 | 是否训练 | 触觉重建 |
 |---|---|---:|---|---|
-| `resnet18` | 4 帧分别经过 ResNet，再用 `TactilePadTemporal` 融合 | 2 × 512/pad | 训练 | 开启 |
+| `resnet18` | 每帧输出 7×7 patch grid，逐 patch 做时间融合 | codec: 4×49×512；Physical: 2×512/pad | 训练 | 112×112 spatial decoder |
 | `ftp1` | 4 帧分别经过 sensor-specific tokenizer，再做时序融合 | 2 × 512/pad | 主干冻结 | 关闭 |
 | `anytouch` | 两组三帧直接经过动态 ViT | 2 × 768/pad，再适配到 512 | 主干冻结 | 关闭 |
 
 AnyTouch 不再经过 `TactilePadTemporal`，因为它的 3D patch embedding 和 ViT 已经直接处理三帧时序。
+
+### 3.1 默认 ResNet spatial codec
+
+ResNet 路径现在把空间 feature map 作为正式、可复用的 encoder 输出。默认 112×112 输入在
+layer4 不再做最后一次 stride-2 下采样，因此：
+
+```text
+(N, F=4, 3, 112, 112)
+→ shared ResNet-18
+→ per-patch Linear/LayerNorm
+→ (N, F=4, 512, 7, 7)
+```
+
+改变 layer4 stride 不改变任何预训练参数形状。`7×7=49` 个 patch 比原来的 4×4 更适合保留
+接触位置、marker 位移和局部形变。
+
+同一个 patch grid 有两个独立消费者。
+
+**对比分支**在每个空间位置分别处理四帧：
+
+```text
+(N,4,512,7,7)
+→ reshape (N×49,4,512)
+→ [patch state, patch state - frame0 state]
+→ 128-d temporal cross-attention
+→ (N,2,512,7,7)
+→ spatial mean
+→ (N,2,512)
+```
+
+所以送给 Physical Transformer 的 token budget 不变：每个 tactile view/pad 仍只有
+`tactile_tokens_per_pad` 个 token，默认最多 `6×2=12` 个。空间池化只属于 contrastive head，
+不会改变可复用 codec 的输出。
+
+**重建分支**直接读取完整空间 latent，不读取时间 token或 Physical Transformer 输出：
+
+```text
+(N,512,7,7)
+→ four lightweight 2× upsampling blocks
+→ (N,3,112,112)
+```
+
+训练时同时重建窗口起点 `t` 和终点 `t+H`。这很重要：episode 最后一个 horizon 的帧不会成为
+另一个窗口的起点，但正是第二阶段需要预测和解码的 future tactile state。Decoder 没有 encoder
+skip connection，因此第二阶段只预测 patch grid 就足以解码。
+
+第二阶段可直接调用：
+
+```python
+z_t = physical_encoder.encode_tactile_patches(tactile_t)
+x_t = physical_encoder.decode_tactile_patches(z_t)
+```
+
+形状为：
+
+```text
+encode: (B,V,3,112,112) → (B,V,512,7,7)
+decode: (B,V,512,7,7)   → (B,V,3,112,112)
+```
+
+Decoder 当前预测按数据集 mean/std 标准化后的 RGB；恢复 `[0,1]` 图像时使用对应 view 的统计量
+反标准化。第二阶段应冻结 ResNet encoder 和 spatial decoder，以固定 future latent 的目标空间。
 
 ---
 
@@ -519,15 +581,15 @@ policy.anytouch_forward_batch_size=128
 
 | 触觉 backbone | 总参数 | 可训练参数 | batch 128 代表性 step | CUDA allocated 峰值 |
 |---|---:|---:|---:|---:|
-| ResNet-18 | 774.4M | 406.5M | 1.01 s | 10.83 GiB |
+| ResNet-18 spatial codec | 764.7M | 396.7M | 1.32 s | 16.14 GiB |
 | AnyTouch | 1058.6M | 385.4M | 1.62 s | 9.66 GiB |
 
-AnyTouch 增加了约 305.2M 冻结参数，但移除了可训练 ResNet、`TactilePadTemporal` 和触觉重建头，所以
-可训练参数反而从 406.5M 降到 385.4M。
+ResNet 数字包括 7×7 patch latent、逐 patch 时间头，以及对 `t`/`t+H` 两端的 112×112 重建。
+AnyTouch 增加约 305.2M 冻结参数，但不提供与当前第二阶段目标匹配的可训练 spatial codec。
 
-上述结果来自 RTX A6000、bf16、真实 `debug_research_data`、batch 128。代表性 AnyTouch step
-处理约 176 个有效 pad，即 352 个三帧窗口。共享机器上的绝对时间会受其他任务影响，应主要参考
-ResNet/AnyTouch 相对差异。
+上述结果来自 RTX A6000、bf16、真实 `debug_research_data`、batch 128。ResNet 测量每步平均处理
+297 个有效 tactile view，其中 encoder 为 0.055 s、decoder 为 0.098 s。batch 256 也已通过：
+2.58 s/step、30.03 GiB allocated，平均约 604 个有效 view。共享机器上的绝对时间会受其他任务影响。
 
 正式 `train_ace.sh` 的单卡 ZeRO-2 batch 128 实测也已跑通：
 
@@ -623,6 +685,17 @@ bash train_ace.sh \
 ```
 
 ### 独立检查 checkpoint 和窗口顺序
+
+默认 ResNet spatial codec：
+
+```bash
+python scripts/check_resnet_tactile_codec.py --device cuda
+```
+
+该脚本检查 7×7 patch shape、逐 patch 时间融合的空间独立性、Physical token shape、完整
+112×112 decode，以及 encoder/temporal/decoder 的梯度。
+
+AnyTouch checkpoint：
 
 ```bash
 python scripts/check_anytouch_tactile.py \

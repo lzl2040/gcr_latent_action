@@ -220,7 +220,10 @@ class RoboContrastConfig(PreTrainedConfig):
     # aggressively because a 4-view image stream would otherwise dominate the physical token
     # budget and let the model ignore state/action entirely.
     # Tactile image encoder, following UniVTAC (`UniVTAC/encoder/network.py`): a plain
-    # ImageNet-pretrained ResNet-18 with a 512-d output, plus a reconstruction head. UniVTAC
+    # ImageNet-pretrained ResNet-18. The reusable output is a 7x7 grid of 512-d patch latents
+    # at the default 112 input. A patch-temporal contrastive head produces only one or two
+    # tokens per pad for the physical transformer, while a spatial decoder reconstructs the
+    # tactile image directly from the same grid. UniVTAC
     # supervises marker positions / depth / contact pose from simulation, which we do not
     # have for real sensors, so we keep only the RGB reconstruction head. Giving tactile its
     # own objective stops its features from being shaped purely by the contrastive loss.
@@ -260,7 +263,9 @@ class RoboContrastConfig(PreTrainedConfig):
     # a loss of order 1. Against a raw-[0, 1] target it would have applied to a loss that
     # bottoms out near 0.01, i.e. it would have been ~0.001 in effect.
     tactile_recon_weight: float = 0.1
-    tactile_recon_size: int = 28
+    # Spatial decoder output. None follows tactile_img_size, which keeps the stage-two latent
+    # and decoder paired at the actual encoder input resolution.
+    tactile_recon_size: int | None = None
     # UniVTAC trains its tactile backbone with a dedicated (much lower) learning rate; the
     # same trick keeps a 11.7M-parameter CNN from racing ahead of the rest of the model.
     tactile_lr_scale: float = 0.1
@@ -426,6 +431,12 @@ class RoboContrastConfig(PreTrainedConfig):
             self.tactile_img_size = 224
             # The encoder is frozen and the AnyTouch MAE decoder is intentionally not loaded.
             self.tactile_recon_weight = 0.0
+        if self.tactile_recon_size is None:
+            self.tactile_recon_size = self.tactile_img_size
+        if self.tactile_recon_size < 1:
+            raise ValueError(
+                f"`tactile_recon_size` must be positive, got {self.tactile_recon_size}."
+            )
 
     def validate_features(self) -> None:
         for i in range(self.empty_cameras):

@@ -728,15 +728,13 @@ def _freeze_batchnorm(module: nn.Module) -> nn.Module:
 
 
 class TactileImageEncoder(nn.Module):
-    """ResNet-18 tactile encoder, after UniVTAC (``UniVTAC/encoder/network.py::Tactile``).
+    """ResNet-18 spatial tactile encoder, after UniVTAC.
 
     UniVTAC unifies heterogeneous *optical* tactile sensors (GelSight Mini, ViTAI GF225,
     XenseWS) by pushing all of them through one ImageNet-initialised ResNet-18 with
-    ``num_classes=512``, i.e. the final FC is reused as an embedding head. It relies on the
-    backbone alone to abstract over gel colour, marker pattern and resolution; there is no
-    per-sensor adapter. We keep that choice — our sensors are equally heterogeneous and we
-    have no calibration data — but add an explicit view embedding downstream, because unlike
-    UniVTAC we must also cope with a *varying number* of sensors per dataset.
+    ``num_classes=512``. Here the reusable boundary is earlier: the encoder returns the
+    spatial layer-4 grid, projected and normalised per patch. The contrastive branch may pool
+    it, but a later world model can predict the future grid and decode it back to an image.
 
     Note UniVTAC feeds raw ``[0, 1]`` images (no ImageNet normalisation) because its backbone
     was re-trained from scratch on tactile data; we start from ImageNet weights, so we apply
@@ -750,6 +748,8 @@ class TactileImageEncoder(nn.Module):
         super().__init__()
         import torchvision
 
+        self.output_dim = out_dim
+        self.output_stride = 16
         weights = None
         if pretrained:
             try:
@@ -760,6 +760,11 @@ class TactileImageEncoder(nn.Module):
             net = torchvision.models.resnet18(weights=weights)
         except Exception:
             net = torchvision.models.resnet18(weights=None)
+        # Keep a 7x7 latent grid for the default 112x112 tactile input. ResNet-18 normally
+        # downsamples once more in layer4 and would leave only 4x4 patches. Changing stride
+        # does not change any pretrained parameter shape.
+        net.layer4[0].conv1.stride = (1, 1)
+        net.layer4[0].downsample[0].stride = (1, 1)
         # Frozen BatchNorm, as UniVTAC does when it plugs the encoder into the policy
         # (`policy/ACT/detr/models/backbone.py`). Here it is not optional: the number of
         # tactile pads varies per sample, so the effective BN batch size is data dependent
@@ -775,53 +780,94 @@ class TactileImageEncoder(nn.Module):
         self.register_buffer("std", torch.tensor(self.IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(B, V, 3, H, W)`` uint8 -> per-view embedding ``(B, V, out_dim)`` and feature map."""
+        """Return pooled embeddings and reusable spatial patch latents.
+
+        ``(B,V,3,H,W)`` uint8 becomes ``(B,V,D,H/16,W/16)`` patches. The first
+        return value is only a convenience mean over those same patches.
+        """
         b, v = images.shape[:2]
         conv_dtype = _module_dtype(self.stem)
         x = images.reshape(b * v, *images.shape[2:]).to(dtype=torch.float32) / 255.0
         x = ((x - self.mean) / self.std).to(conv_dtype)
         feat_map = self.layers(self.stem(x))
-        pooled = F.adaptive_avg_pool2d(feat_map, 1).flatten(1)
-        # The head may sit in a different dtype than the convolutions (see `_module_dtype`).
+        height, width = feat_map.shape[-2:]
+        patch_tokens = feat_map.flatten(2).transpose(1, 2)
+        # The patch head may sit in a different dtype than the convolutions.
         head_dtype = self.proj.weight.dtype if isinstance(self.proj, nn.Linear) else self.norm.weight.dtype
-        emb = self.norm(self.proj(pooled.to(head_dtype)))
-        return emb.view(b, v, -1), feat_map
+        patch_tokens = self.norm(self.proj(patch_tokens.to(head_dtype)))
+        pooled = patch_tokens.mean(dim=1)
+        patch_map = patch_tokens.transpose(1, 2).reshape(
+            b, v, self.output_dim, height, width
+        )
+        return pooled.view(b, v, -1), patch_map
 
 
-class TactileReconHead(nn.Module):
-    """Reconstructs the tactile image from its embedding.
+class _TactileUpsampleBlock(nn.Module):
+    """Cheap 2x spatial upsampling for the tactile patch decoder."""
 
-    UniVTAC pretrains its encoder with MSE reconstruction of the gel image plus marker
-    positions, depth and contact pose. Those three extra targets only exist in simulation, so
-    for real sensors we keep the one head whose supervision is always available. The point is
-    not the reconstruction itself but that the tactile features are shaped by an objective of
-    their own instead of being dragged around by the contrastive gradient.
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.depthwise = nn.Conv2d(in_dim, in_dim, 3, padding=1, groups=in_dim)
+        self.depth_norm = nn.GroupNorm(8, in_dim)
+        self.pointwise = nn.Conv2d(in_dim, out_dim, 1)
+        self.point_norm = nn.GroupNorm(8, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.interpolate(x, scale_factor=2.0, mode="bilinear", align_corners=False)
+        x = F.silu(self.depth_norm(self.depthwise(x)))
+        return F.silu(self.point_norm(self.pointwise(x)))
+
+
+class TactilePatchDecoder(nn.Module):
+    """Decode the reusable spatial tactile latent back to an RGB tactile image.
+
+    There are deliberately no encoder skip connections: stage two will only predict this
+    patch grid, so the decoder must be able to reconstruct from that grid alone.
 
     The target is z-scored per dataset before the MSE; see ``_tactile_recon_loss``. That is
     what makes this head do anything at all, so the output is deliberately unbounded -- no
     sigmoid, unlike UniVTAC's ``RGBDecoder``, which predicts into [0, 1].
     """
 
-    def __init__(self, in_dim: int, out_size: int = 28):
+    def __init__(self, in_dim: int, out_size: int = 112):
         super().__init__()
+        self.in_dim = in_dim
         self.out_size = out_size
-        self.fc = nn.Linear(in_dim, 256 * 7 * 7)
-        self.net = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, 4, 2, 1),
+        self.input_projection = nn.Sequential(
+            nn.Conv2d(in_dim, 128, 1),
             nn.GroupNorm(8, 128),
             nn.SiLU(),
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),
-            nn.GroupNorm(8, 64),
-            nn.SiLU(),
-            nn.Conv2d(64, 3, 3, 1, 1),
         )
+        self.upsample_blocks = nn.ModuleList(
+            [
+                _TactileUpsampleBlock(128, 128),
+                _TactileUpsampleBlock(128, 64),
+                _TactileUpsampleBlock(64, 32),
+                _TactileUpsampleBlock(32, 16),
+            ]
+        )
+        self.output_projection = nn.Conv2d(16, 3, 3, padding=1)
 
-    def forward(self, emb: torch.Tensor) -> torch.Tensor:
-        x = self.fc(emb).view(-1, 256, 7, 7)
-        x = self.net(x)
-        if x.shape[-1] != self.out_size:
-            x = F.interpolate(x, size=(self.out_size, self.out_size), mode="bilinear", align_corners=False)
-        return x
+    def forward(self, patches: torch.Tensor) -> torch.Tensor:
+        if patches.ndim < 4 or patches.shape[-3] != self.in_dim:
+            raise ValueError(
+                f"Expected tactile patches shaped (...,{self.in_dim},H,W), "
+                f"got {tuple(patches.shape)}."
+            )
+        leading_shape = patches.shape[:-3]
+        x = patches.reshape(-1, *patches.shape[-3:])
+        x = self.input_projection(x)
+        for block in self.upsample_blocks:
+            x = block(x)
+        x = self.output_projection(x)
+        if x.shape[-2:] != (self.out_size, self.out_size):
+            x = F.interpolate(
+                x,
+                size=(self.out_size, self.out_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+        return x.reshape(*leading_shape, 3, self.out_size, self.out_size)
 
 
 class TactilePadTemporal(nn.Module):
@@ -839,9 +885,8 @@ class TactilePadTemporal(nn.Module):
     tokens are scratch. ``F`` is 4, so the attention is negligible next to the ResNet passes
     that produced its input.
 
-    The first query is initialised to read the window start and the second the change across
-    it, matching what the previous ``[feat_t, feat_t1 - feat_t]`` concatenation encoded, so
-    ``T = 2`` starts from the old behaviour and is free to depart from it.
+    With two queries they can specialise into contact state and temporal change, but that
+    division is learned rather than hard-coded.
     """
 
     def __init__(self, dim: int, num_frames: int, num_tokens: int, num_heads: int = 8, dropout: float = 0.0):
@@ -859,6 +904,77 @@ class TactilePadTemporal(nn.Module):
         q = self.query.to(feats.dtype).expand(feats.shape[0], -1, -1)
         out = self.block(torch.cat([q, x], dim=1))
         return self.norm(out[:, : self.num_tokens])
+
+
+class TactilePatchTemporal(nn.Module):
+    """Read four-frame dynamics independently at every tactile patch.
+
+    The reusable encoder stays single-frame and spatial. This contrastive-only head sees both
+    each patch's state and its displacement from frame 0, emits one or two temporal grids,
+    and leaves spatial pooling to the caller. A 128-wide bottleneck keeps processing 49
+    patches cheaper than running the 512-wide pad-level transformer 49 times.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_frames: int,
+        num_tokens: int,
+        temporal_dim: int = 128,
+        num_heads: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        if temporal_dim % num_heads != 0:
+            raise ValueError(
+                f"temporal_dim ({temporal_dim}) must be divisible by num_heads ({num_heads})."
+            )
+        self.dim = dim
+        self.num_frames = num_frames
+        self.num_tokens = num_tokens
+        self.input_norm = nn.LayerNorm(dim)
+        self.state_change_projection = nn.Linear(2 * dim, temporal_dim)
+        self.frame_embedding = nn.Parameter(
+            torch.randn(1, num_frames, temporal_dim) * 0.02
+        )
+        self.temporal_query = nn.Parameter(
+            torch.randn(1, num_tokens, temporal_dim) * 0.02
+        )
+        self.temporal_cross_attention = MultiHeadAttention(
+            temporal_dim, num_heads, dropout
+        )
+        self.temporal_ffn = FeedForward(temporal_dim, dropout=dropout)
+        self.output_projection = nn.Linear(temporal_dim, dim)
+        self.output_norm = nn.LayerNorm(dim)
+
+    def forward(self, patches: torch.Tensor) -> torch.Tensor:
+        """``(N,F,D,H,W) -> (N,T,D,H,W)``."""
+        if patches.ndim != 5:
+            raise ValueError(
+                f"Expected temporal tactile patches shaped (N,F,D,H,W), "
+                f"got {tuple(patches.shape)}."
+            )
+        n, frames, dim, height, width = patches.shape
+        if frames != self.num_frames or dim != self.dim:
+            raise ValueError(
+                f"Expected F={self.num_frames}, D={self.dim}; got F={frames}, D={dim}."
+            )
+        sequence = patches.permute(0, 3, 4, 1, 2).reshape(
+            n * height * width, frames, dim
+        )
+        state = self.input_norm(sequence)
+        change = state - state[:, :1]
+        x = self.state_change_projection(torch.cat([state, change], dim=-1))
+        x = x + self.frame_embedding.to(x.dtype)
+        query = self.temporal_query.to(x.dtype).expand(x.shape[0], -1, -1)
+        out = query + self.temporal_cross_attention(query, x)
+        out = out + self.temporal_ffn(out)
+        out = self.output_norm(self.output_projection(out[:, : self.num_tokens]))
+        return (
+            out.view(n, height, width, self.num_tokens, dim)
+            .permute(0, 3, 4, 1, 2)
+            .contiguous()
+        )
 
 
 class PhysicalEncoder(nn.Module):
@@ -947,21 +1063,32 @@ class PhysicalEncoder(nn.Module):
             if self.use_anytouch_tactile
             else nn.Identity()
         )
-        self.tactile_temporal = (
-            None
-            if self.use_anytouch_tactile
-            else TactilePadTemporal(
+        if self.use_anytouch_tactile:
+            self.tactile_temporal = None
+        elif self.use_ftp1_tactile:
+            self.tactile_temporal = TactilePadTemporal(
                 config.tactile_feat_dim,
                 config.tactile_frames,
                 config.tactile_tokens_per_pad,
                 num_heads=8,
                 dropout=config.dropout,
             )
-        )
+        else:
+            self.tactile_temporal = TactilePatchTemporal(
+                config.tactile_feat_dim,
+                config.tactile_frames,
+                config.tactile_tokens_per_pad,
+                dropout=config.dropout,
+            )
         self.tactile_img_proj = nn.Linear(config.tactile_feat_dim, dim)
         self.tactile_recon = (
-            TactileReconHead(config.tactile_feat_dim, config.tactile_recon_size)
+            TactilePatchDecoder(
+                config.tactile_feat_dim,
+                config.tactile_recon_size,
+            )
             if config.tactile_recon_weight > 0
+            and not self.use_ftp1_tactile
+            and not self.use_anytouch_tactile
             else None
         )
 
@@ -1009,6 +1136,26 @@ class PhysicalEncoder(nn.Module):
             return keep
         draw = torch.rand_like(keep)
         return keep * (draw >= p).to(keep.dtype)
+
+    def encode_tactile_patches(self, images: torch.Tensor) -> torch.Tensor:
+        """Encode current tactile views for reuse by a later world model.
+
+        ``(B,V,3,H,W) -> (B,V,D,H/16,W/16)``. Only the trainable ResNet codec has
+        this interface; FTP-1 and AnyTouch currently expose pooled pretrained features.
+        """
+        if self.use_ftp1_tactile or self.use_anytouch_tactile:
+            raise RuntimeError(
+                "Spatial tactile patches are only available with tactile_backbone='resnet18'."
+            )
+        return self.tactile_cnn(images)[1]
+
+    def decode_tactile_patches(self, patches: torch.Tensor) -> torch.Tensor:
+        """Decode ``(...,D,H,W)`` patch latents into z-scored RGB tactile images."""
+        if self.tactile_recon is None:
+            raise RuntimeError(
+                "The tactile patch decoder is unavailable; enable ResNet tactile reconstruction."
+            )
+        return self.tactile_recon(patches)
 
     def forward(self, batch: dict) -> torch.Tensor:
         dtype = self.state_proj.weight.dtype
@@ -1079,9 +1226,10 @@ class PhysicalEncoder(nn.Module):
         # The zero-initialised gate and modality dropout stop these extra tokens from taking
         # over.
         #
-        # Each pad arrives as ``tactile_frames`` samples spread across the window. ResNet and
-        # FTP-1 features are fused by ``TactilePadTemporal``; AnyTouch directly encodes two
-        # overlapping three-frame windows. The window
+        # Each pad arrives as ``tactile_frames`` samples spread across the window. ResNet
+        # fuses time independently at every spatial patch before contrastive-only pooling;
+        # FTP-1 fuses global frame features, and AnyTouch directly encodes two overlapping
+        # three-frame windows. The window
         # interior is the point: a grasp that closes and settles mid-window is invisible at both
         # endpoints, and doc/results.md §21 measured that what the endpoints miss is structured
         # deformation rather than noise. Two tokens per pad give the transformer separate access
@@ -1108,7 +1256,9 @@ class PhysicalEncoder(nn.Module):
         if not has_tactile:
             selected = torch.zeros(1, dtype=torch.long, device=device)
         sel_images = flat_images[selected]
-        # ``sel_images`` is (N, F, 3, H, W); the encoder treats the frame axis as its view axis.
+        # ``sel_images`` is (N,F,3,H,W); frame is the encoder's per-image batch axis.
+        recon_patches = None
+        recon_images = None
         if self.use_anytouch_tactile:
             if has_tactile:
                 # AnyTouch is frozen: the 24-layer ViT does not need an autograd graph. Its
@@ -1127,7 +1277,8 @@ class PhysicalEncoder(nn.Module):
                     dtype=dtype,
                 )
             sel_tokens = self.tactile_adapter(raw_tokens)
-            sel_pair = sel_tokens
+            if not has_tactile:
+                sel_tokens = sel_tokens * 0.0
         elif self.use_ftp1_tactile:
             # The FTP-1 tower has one tokenizer per physical sensor, so it additionally needs
             # to know which sensor each selected pad came from and the per-dataset z-score
@@ -1140,18 +1291,20 @@ class PhysicalEncoder(nn.Module):
             with torch.no_grad():
                 sel_pair = self.tactile_cnn(sel_images, sensor_ids, sel_mean, sel_std)
             sel_pair = sel_pair.to(dtype)
-        else:
-            # Same `.to(dtype)` as the FTP-1 branch above: the encoder's output dtype follows
-            # its own head, which need not match the trunk that consumes it.
-            sel_pair = self.tactile_cnn(sel_images)[0].to(dtype)
-        sel_feats = sel_pair[:, 0]
-        if not has_tactile:
-            sel_pair = sel_pair * 0.0
-            sel_feats = sel_feats * 0.0
-        if not self.use_anytouch_tactile:
-            # ``(N, F, D) -> (N, T, D)``: the window's frames are fused inside the pad, so a
-            # pad stays one maskable unit and the tokens describe contact, not raw frames.
+            if not has_tactile:
+                sel_pair = sel_pair * 0.0
             sel_tokens = self.tactile_temporal(sel_pair)
+        else:
+            # Contrastive supervision reads temporal changes before spatial pooling, while the
+            # decoder and stage two retain the full per-frame 7x7 patch latent.
+            _, patch_frames = self.tactile_cnn(sel_images)
+            patch_frames = patch_frames.to(dtype)
+            if not has_tactile:
+                patch_frames = patch_frames * 0.0
+            temporal_patches = self.tactile_temporal(patch_frames)
+            sel_tokens = temporal_patches.mean(dim=(-1, -2))
+            recon_patches = torch.cat([patch_frames[:, 0], patch_frames[:, -1]], dim=0)
+            recon_images = torch.cat([sel_images[:, 0], sel_images[:, -1]], dim=0)
 
         tok_per_pad, feat_dim = self.tactile_tokens_per_pad, sel_tokens.shape[-1]
         view_feats = torch.zeros(
@@ -1160,10 +1313,10 @@ class PhysicalEncoder(nn.Module):
         view_feats = view_feats.index_put((selected,), sel_tokens)
         img_tokens = self.tactile_img_proj(view_feats.view(b, num_views * tok_per_pad, feat_dim))
         if self.tactile_recon is not None and self.training:
-            # Reconstruct the frame at ``t`` only -- the head exists to shape the features, and
-            # running it over all ``tactile_frames`` would multiply its cost by that factor for
-            # supervision of the same kind. ``sel_feats`` is frame 0's feature, taken before the
-            # temporal fusion, so the pixel target ``sel_images[:, 0]`` is the matching frame.
+            # Reconstruct both endpoints directly from their spatial latents. In particular,
+            # the last horizon of an episode never appears as frame t, so training only on
+            # the first frame would leave exactly the future states needed by stage two out
+            # of the decoder's training distribution.
             # The dataset ships FTP-1's statistics in its [-1, 1] convention
             # (``x/255*2-1``); the target here is in [0, 1], so shift them across. A dataset
             # with no registry entry gets the identity default (mean 0, std 1 in [-1, 1]),
@@ -1172,10 +1325,10 @@ class PhysicalEncoder(nn.Module):
             sel_mean = batch["tactile_img_mean"].to(device).reshape(-1, 3)[selected]
             sel_std = batch["tactile_img_std"].to(device).reshape(-1, 3)[selected]
             recon_loss = self._tactile_recon_loss(
-                sel_feats,
-                sel_images[:, 0],
-                (sel_mean.float() + 1.0) * 0.5,
-                (sel_std.float() * 0.5).clamp_min(1e-3),
+                recon_patches,
+                recon_images,
+                ((sel_mean.float() + 1.0) * 0.5).repeat(2, 1),
+                ((sel_std.float() * 0.5).clamp_min(1e-3)).repeat(2, 1),
             )
             if not has_tactile:
                 recon_loss = recon_loss * 0.0
@@ -1208,8 +1361,8 @@ class PhysicalEncoder(nn.Module):
             summary = summary.squeeze(1)
         return summary, recon_loss
 
-    def _tactile_recon_loss(self, valid_feats, valid_images, mean, std) -> torch.Tensor:
-        """MSE between the decoded and the true tactile image (UniVTAC's `rgb` head).
+    def _tactile_recon_loss(self, valid_patches, valid_images, mean, std) -> torch.Tensor:
+        """MSE between a decoded spatial latent and its tactile image.
 
         ``mean``/``std`` are the per-dataset per-channel pixel statistics, in [0, 1] space,
         for each selected pad. Z-scoring the target is not cosmetic: gel images occupy a very
@@ -1226,7 +1379,7 @@ class PhysicalEncoder(nn.Module):
         *between* datasets, so it would leave sharpa's target at 0.23 variance and
         neo_aloha's at 0.55 instead of 1.
         """
-        pred = self.tactile_recon(valid_feats).float()
+        pred = self.tactile_recon(valid_patches).float()
         size = self.config.tactile_recon_size
         target = valid_images.float() / 255.0
         target = F.interpolate(target, size=(size, size), mode="bilinear", align_corners=False)

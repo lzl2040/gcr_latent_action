@@ -16,8 +16,8 @@ image. Whether that teaches anything depends on two quantities this script measu
    itself. If that residual were small, the objective would mostly be teaching the encoder to
    recognise episodes, and raising its weight would make things worse rather than better.
 
-Both are reported at the size the loss actually uses (``tactile_recon_size``, default 28),
-after the same 112 -> 28 bilinear path as the model.
+Both are reported at the size the loss actually uses (``tactile_recon_size``, default 112),
+matching the spatial tactile codec's input resolution.
 
 Usage
 -----
@@ -157,7 +157,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", action="append", required=True, type=Path, help="dataset root (repeatable)")
     p.add_argument("--name", action="append", default=[], help="registry name for the matching --root")
-    p.add_argument("--recon-size", type=int, default=28, help="config.tactile_recon_size")
+    p.add_argument("--recon-size", type=int, default=112, help="config.tactile_recon_size")
     p.add_argument("--episodes", type=int, default=8)
     p.add_argument("--frames", type=int, default=24, help="frames per episode, spread over the whole episode")
     args = p.parse_args()

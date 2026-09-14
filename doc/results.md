@@ -1818,3 +1818,57 @@ set the gate to 1 first or it measures 0.0 everywhere and looks like a bug.
 tactile image share of the physical sequence from 19% to 32%, while §8 deliberately held tactile
 level and roughly half of pad-frames are dead. That needs an A/B against `=1` read through the
 §20 `gap`/`erank` metrics, not through the loss.
+
+## 23. ResNet tactile spatial codec for future-patch prediction
+
+The global frame embedding in §22 is sufficient for coarse temporal changes, but it is the wrong
+reusable boundary for a Cosmos-style second stage whose tactile objective is:
+
+```text
+current tactile patch grid -> predict future patch grid -> decode future tactile image
+```
+
+The default ResNet path now keeps layer4 at output stride 16. A 112×112 frame produces a
+trainable `(512,7,7)` latent instead of pooling a `(512,4,4)` map immediately. Projection and
+LayerNorm are applied independently to each of the 49 patches. This same grid feeds two branches:
+
+```text
+codec:       (N,F,512,7,7) ----------------------------> stage-two latent
+contrastive: (N,F,512,7,7) -> patch temporal -> mean -> (N,T,512)
+reconstruct: (N,  512,7,7) -> spatial decoder --------> (N,3,112,112)
+```
+
+The temporal head works independently at every spatial location. It concatenates each patch's
+state with its displacement from frame 0, projects to a 128-d bottleneck, and lets one or two
+learned queries cross-attend over the four frames. Only then is the 7×7 grid averaged for the
+Physical Transformer. Changing one future patch changes only that output location before pooling;
+`scripts/check_resnet_tactile_codec.py` checks this exactly.
+
+The decoder has no encoder skip connections, so a predicted latent is sufficient by itself.
+Both `t` and `t+H` are reconstruction targets. Training only `t` would omit the last horizon of
+every episode from decoder supervision, exactly where the second-stage future target lives.
+
+Public stage-two interfaces:
+
+```text
+PhysicalEncoder.encode_tactile_patches:
+    (B,V,3,112,112) -> (B,V,512,7,7)
+
+PhysicalEncoder.decode_tactile_patches:
+    (B,V,512,7,7) -> (B,V,3,112,112), in per-dataset z-score space
+```
+
+The contrastive temporal head and spatial pooling are deliberately outside this codec boundary.
+Stage two freezes the ResNet encoder and decoder, predicts the future `(512,7,7)` target, and
+backpropagates through the frozen decoder when applying an image-space loss.
+
+**Measured on RTX A6000, bf16, real `debug_research_data`:**
+
+| batch | live tactile views / step | total step | ResNet encoder | endpoint decoder | CUDA allocated |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 297 | 1.316 s | 0.055 s | 0.098 s | 16.14 GiB |
+| 256 | 604 | 2.580 s | 0.103 s | 0.198 s | 30.03 GiB |
+
+The model is 764.7M parameters / 396.7M trainable. Batch 256 still fits comfortably on a 48 GiB
+A6000, so retaining patch latents and decoding both endpoints does not violate the original
+single-GPU batch-size requirement.
