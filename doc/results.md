@@ -1851,6 +1851,14 @@ plus uniform mean. `scripts/check_resnet_tactile_codec.py` verifies that opening
 single future-patch change propagate to other spatial positions, while both one- and two-token
 configurations retain the same external shape.
 
+The per-patch temporal attention deliberately uses explicit chunked math rather than CUDA SDPA.
+Flattening 772 live pads at 7×7 creates 37,828 independent attention rows, or 151,312
+batch-head launches with four heads. Older cluster SDPA kernels reject that launch geometry with
+`CUDA error: invalid configuration argument`, even though each matrix is only `T≤2 × F=4`.
+Processing at most 8192 rows per explicit-attention chunk removes that backend limit; a 20,000-row
+stress case and a small-batch numerical comparison against SDPA are part of the codec check.
+Perception and Physical Transformer attention remain on fused SDPA.
+
 The decoder has no encoder skip connections, so a predicted latent is sufficient by itself.
 Both `t` and `t+H` are reconstruction targets. Training only `t` would omit the last horizon of
 every episode from decoder supervision, exactly where the second-stage future target lives.

@@ -19,6 +19,12 @@ def main() -> int:
     parser.add_argument("--image_size", type=int, default=112)
     parser.add_argument("--frames", type=int, default=4)
     parser.add_argument("--tokens", type=int, default=2, choices=(1, 2))
+    parser.add_argument(
+        "--stress_rows",
+        type=int,
+        default=20_000,
+        help="flattened patch rows used to exercise the cluster-safe temporal attention",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -30,6 +36,57 @@ def main() -> int:
         num_tokens=args.tokens,
     ).to(device=device, dtype=dtype)
     decoder = TactilePatchDecoder(512, args.image_size).to(device=device, dtype=dtype)
+
+    if temporal.temporal_cross_attention.use_sdpa:
+        raise AssertionError("Patch temporal attention must not use CUDA SDPA")
+    with torch.no_grad():
+        comparison_context = torch.randn(
+            32,
+            args.frames,
+            128,
+            device=device,
+            dtype=dtype,
+        )
+        comparison_query = temporal.temporal_query.expand(32, -1, -1)
+        manual_attention = temporal.temporal_cross_attention(
+            comparison_query,
+            comparison_context,
+        )
+        temporal.temporal_cross_attention.use_sdpa = True
+        try:
+            sdpa_attention = temporal.temporal_cross_attention(
+                comparison_query,
+                comparison_context,
+            )
+        finally:
+            temporal.temporal_cross_attention.use_sdpa = False
+        tolerance = 2e-2 if dtype == torch.bfloat16 else 1e-5
+        torch.testing.assert_close(
+            manual_attention,
+            sdpa_attention,
+            rtol=tolerance,
+            atol=tolerance,
+            msg="Explicit temporal attention does not match SDPA",
+        )
+
+        stress_context = torch.randn(
+            args.stress_rows,
+            args.frames,
+            128,
+            device=device,
+            dtype=dtype,
+        )
+        stress_query = temporal.temporal_query.expand(args.stress_rows, -1, -1)
+        stress_output = temporal.temporal_cross_attention(
+            stress_query,
+            stress_context,
+        )
+        expected_stress = (args.stress_rows, args.tokens, 128)
+        if stress_output.shape != expected_stress:
+            raise AssertionError(
+                f"Expected stress attention {expected_stress}, "
+                f"got {tuple(stress_output.shape)}"
+            )
 
     images = torch.randint(
         0,

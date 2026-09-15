@@ -519,6 +519,7 @@ or distillation into the existing smaller tower is more economical than unfreezi
 | ResNet spatial codec shape | `(N,4,3,112,112) → (N,4,512,7,7)` |
 | Temporal + spatial head / Physical input | `(N,4,512,7,7) → (N,2,512,7,7) → (N,2,512)` |
 | Cross-spatial tactile change | dilation-1/2 depthwise mixing + learned 49-patch pooling |
+| Cluster-safe patch temporal attention | explicit 8192-row chunks; 20,000-row stress pass |
 | Spatial decoder | `(N,512,7,7) → (N,3,112,112)`, no skip connections |
 | Full DINOv3 model parameter split | 764.7M / 396.8M |
 | `K=1` similarity is bit-identical to the old formula | max abs diff 0.0 |

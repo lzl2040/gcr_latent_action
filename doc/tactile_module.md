@@ -148,6 +148,12 @@ layer4 不再做最后一次 stride-2 下采样，因此：
 → (N,2,512)
 ```
 
+这里的 temporal cross-attention 不调用 CUDA SDPA。空间展开会把 `N` 个有效 pad 变成
+`N×49` 个 attention batch；例如 772 个 pad 会产生 37,828 rows，再乘 4 heads 后超过部分
+旧版 CUDA SDPA kernel 的 launch-grid 上限，并报 `invalid configuration argument`。实际矩阵
+只有 `T≤2 × F=4`，因此代码使用数值等价的显式 attention，并按 8192 rows 分块。长序列的
+Perception/Physical Transformer 仍使用 fused SDPA。
+
 两层 dilation `1/2` 给空间分支一个 7×7 感受野，因此局部接触从一个 patch 移动到相邻或更远
 patch 时，不再只能由最后的固定平均间接表达。Learned pooling 可以针对每个 temporal query
 选择不同接触区域。`spatial_mixing_gate` 从 0 开始，pooling score 也从全 0 开始，所以初始化
@@ -712,10 +718,11 @@ python scripts/check_resnet_tactile_codec.py --device cuda
 python scripts/check_physical_tactile_mask.py --device cuda
 ```
 
-第一个脚本检查 7×7 patch shape、跨位置变化传播、learned pooling 的均匀初始化、Physical
-token shape、完整 112×112 decode，以及 encoder/temporal/spatial/decoder 的梯度。第二个
-脚本检查缺失 image/signal placeholder 不影响 CLS、有效触觉仍然影响输出，以及整批无触觉时
-ZeRO 所需的零梯度 tensor 仍然存在。
+第一个脚本检查 7×7 patch shape、跨位置变化传播、learned pooling 的均匀初始化、20,000-row
+显式 attention 压力形状、与 SDPA 的小 batch 数值一致性、Physical token shape、完整 112×112
+decode，以及 encoder/temporal/spatial/decoder 的梯度。第二个脚本检查缺失 image/signal
+placeholder 不影响 CLS、有效触觉仍然影响输出，以及整批无触觉时 ZeRO 所需的零梯度 tensor
+仍然存在。
 
 AnyTouch checkpoint：
 

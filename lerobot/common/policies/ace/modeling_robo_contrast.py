@@ -112,12 +112,20 @@ def paired_similarity(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 class MultiHeadAttention(nn.Module):
     """Pre-norm multi-head attention supporting self- and cross-attention."""
 
-    def __init__(self, dim: int, num_heads: int, dropout: float = 0.0):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        dropout: float = 0.0,
+        use_sdpa: bool = True,
+    ):
         super().__init__()
         assert dim % num_heads == 0
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.dropout = dropout
+        self.use_sdpa = use_sdpa
+        self.explicit_attention_chunk_size = 8192
 
         self.norm_q = nn.LayerNorm(dim)
         self.norm_kv = nn.LayerNorm(dim)
@@ -139,14 +147,50 @@ class MultiHeadAttention(nn.Module):
         k = self.k_proj(kv).view(b, m, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(kv).view(b, m, self.num_heads, self.head_dim).transpose(1, 2)
 
-        attn_mask = None
         if key_padding_mask is not None:
-            # True = keep. Expand to (B, 1, 1, M) for scaled_dot_product_attention.
-            attn_mask = key_padding_mask[:, None, None, :].to(torch.bool)
+            if key_padding_mask.shape != (b, m):
+                raise ValueError(
+                    f"Expected key padding mask {(b, m)}, "
+                    f"got {tuple(key_padding_mask.shape)}."
+                )
+            key_padding_mask = key_padding_mask.to(torch.bool)
 
-        out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0.0
-        )
+        dropout_p = self.dropout if self.training else 0.0
+        if self.use_sdpa:
+            attn_mask = (
+                key_padding_mask[:, None, None, :]
+                if key_padding_mask is not None
+                else None
+            )
+            out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p,
+            )
+        else:
+            # Explicit attention is preferable when each matrix is tiny but the flattened
+            # batch is huge. Older CUDA SDPA kernels launch one block per batch/head and fail
+            # with "invalid configuration argument" once that grid grows too large.
+            output_chunks = []
+            for start in range(0, b, self.explicit_attention_chunk_size):
+                end = min(start + self.explicit_attention_chunk_size, b)
+                scores = torch.matmul(
+                    q[start:end].float(),
+                    k[start:end].float().transpose(-2, -1),
+                ) * (self.head_dim ** -0.5)
+                if key_padding_mask is not None:
+                    scores = scores.masked_fill(
+                        ~key_padding_mask[start:end, None, None, :],
+                        torch.finfo(scores.dtype).min,
+                    )
+                weights = F.softmax(scores, dim=-1)
+                weights = F.dropout(weights, p=dropout_p, training=self.training)
+                output_chunks.append(
+                    torch.matmul(weights, v[start:end].float()).to(q.dtype)
+                )
+            out = torch.cat(output_chunks, dim=0)
         out = out.transpose(1, 2).reshape(b, n, self.num_heads * self.head_dim)
         return self.out_proj(out)
 
@@ -964,8 +1008,15 @@ class TactilePatchTemporal(nn.Module):
         self.temporal_query = nn.Parameter(
             torch.randn(1, num_tokens, temporal_dim) * 0.02
         )
+        # Spatial flattening turns N tactile pads into N*H*W attention batches. On tactile-
+        # dense ranks that exceeds the launch-grid limit of older CUDA SDPA kernels, while
+        # the actual attention matrix is only T<=2 by F=4. Explicit math is both safe and
+        # negligible here; the long perception/physical attentions keep fused SDPA.
         self.temporal_cross_attention = MultiHeadAttention(
-            temporal_dim, num_heads, dropout
+            temporal_dim,
+            num_heads,
+            dropout,
+            use_sdpa=False,
         )
         self.temporal_ffn = FeedForward(temporal_dim, dropout=dropout)
         self.spatial_input_norm = nn.GroupNorm(math.gcd(8, temporal_dim), temporal_dim)
