@@ -266,16 +266,12 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.dataset_size_one_epoch = dataset_size_one_epoch
         self.dataset_sample_counts = (self.sample_weights * dataset_size_one_epoch).astype(int)
 
-        print(
-            tabulate(
-                [
-                    [self.dataset_names[i], self.dataset_sizes[i], f"{self.sample_weights[i]:.4f}", len(self.episode_ranges[i])]
-                    for i in range(len(self.datasets))
-                ],
-                headers=["Dataset", "Frames", "Ratio", "Episodes"],
-                tablefmt="grid",
-            )
-        )
+        self.dataset_statistics = self._build_dataset_statistics()
+        self.dataset_hours = [stat["hours"] for stat in self.dataset_statistics]
+        self.total_source_frames = sum(stat["frames"] for stat in self.dataset_statistics)
+        self.total_source_episodes = sum(stat["episodes"] for stat in self.dataset_statistics)
+        self.total_source_hours = sum(stat["hours"] for stat in self.dataset_statistics)
+        self._print_dataset_statistics()
 
         self.id2dataset, self.num_episodes = self._build_sampling_plan(seed)
         self.dataset_len = len(self.id2dataset)
@@ -285,6 +281,66 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
     # ------------------------------------------------------------------
     # construction helpers
     # ------------------------------------------------------------------
+    def _build_dataset_statistics(self) -> list[dict[str, str | int | float]]:
+        """Source-data size and wall-clock duration for every loaded dataset.
+
+        Duration uses the resolved capture rate rather than the declared index fps. This
+        matters for FTP-1, whose videos are indexed at 30 Hz but were captured at 15 Hz.
+        These are source totals, independent of mixture weights and the sampled epoch size.
+        """
+        statistics = []
+        for name, frames, fps, ratio, episode_ranges in zip(
+            self.dataset_names,
+            self.dataset_sizes,
+            self.true_fps,
+            self.sample_weights,
+            self.episode_ranges,
+            strict=True,
+        ):
+            if fps <= 0:
+                raise ValueError(f"Dataset {name!r} has non-positive true fps {fps}.")
+            statistics.append(
+                {
+                    "dataset": name,
+                    "frames": int(frames),
+                    "fps": float(fps),
+                    "hours": float(frames) / float(fps) / 3600.0,
+                    "sample_ratio": float(ratio),
+                    "episodes": int(len(episode_ranges)),
+                }
+            )
+        return statistics
+
+    def _print_dataset_statistics(self) -> None:
+        rows = [
+            [
+                stat["dataset"],
+                stat["frames"],
+                f"{stat['fps']:g}",
+                f"{stat['hours']:.2f}",
+                f"{stat['sample_ratio']:.4f}",
+                stat["episodes"],
+            ]
+            for stat in self.dataset_statistics
+        ]
+        rows.append(
+            [
+                "TOTAL",
+                self.total_source_frames,
+                "-",
+                f"{self.total_source_hours:.2f}",
+                f"{sum(self.sample_weights):.4f}",
+                self.total_source_episodes,
+            ]
+        )
+        print(
+            tabulate(
+                rows,
+                headers=["Dataset", "Frames", "FPS", "Hours", "Ratio", "Episodes"],
+                tablefmt="grid",
+            )
+        )
+
     @staticmethod
     def _resolve_root(cfg, relative_root: str) -> str | None:
         """First root under which ``relative_root`` is an actual LeRobot dataset.
