@@ -157,10 +157,9 @@ class RoboContrastConfig(PreTrainedConfig):
     # other. Four frames is nearly free on the decode side because cost is dominated by seeking
     # to a keyframe, not by frames returned (0.94-1.12x cold). See doc/results.md §21.
     tactile_frames: int = 4
-    # Tokens emitted per pad after the intra-pad temporal fusion. 1 concatenates the fused
-    # state and dynamics into a single token; 2 gives the physical transformer separate access
-    # to "what is being touched" and "how the contact evolved", which it cannot recover from
-    # the concatenation because the projection mixes them before attention sees them.
+    # Tokens emitted per pad after the intra-pad temporal-spatial fusion. 1 learned query must
+    # jointly summarise state and dynamics; 2 queries can specialise into "what is being
+    # touched" and "how the contact evolved" before the physical transformer sees them.
     #
     # This is the maximum tactile share of the physical sequence: at 6 valid pads the image
     # stream is 6/31 = 19% of the tokens at 1, and 12/37 = 32% at 2. Missing/dropped pads are
@@ -221,9 +220,10 @@ class RoboContrastConfig(PreTrainedConfig):
     # budget and let the model ignore state/action entirely.
     # Tactile image encoder, following UniVTAC (`UniVTAC/encoder/network.py`): a plain
     # ImageNet-pretrained ResNet-18. The reusable output is a 7x7 grid of 512-d patch latents
-    # at the default 112 input. A patch-temporal contrastive head produces only one or two
-    # tokens per pad for the physical transformer, while a spatial decoder reconstructs the
-    # tactile image directly from the same grid. UniVTAC
+    # at the default 112 input. A contrastive-only head performs per-patch temporal attention,
+    # dilated depthwise spatial mixing and learned spatial pooling, then produces only one or
+    # two tokens per pad for the physical transformer. A spatial decoder reconstructs the
+    # tactile image directly from the original grid. UniVTAC
     # supervises marker positions / depth / contact pose from simulation, which we do not
     # have for real sensors, so we keep only the RGB reconstruction head. Giving tactile its
     # own objective stops its features from being shaped purely by the contrastive loss.

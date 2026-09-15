@@ -109,7 +109,7 @@ policy.tactile_backbone
 
 | backbone | 单帧/时序编码 | 输出 | 是否训练 | 触觉重建 |
 |---|---|---:|---|---|
-| `resnet18` | 每帧输出 7×7 patch grid，逐 patch 做时间融合 | codec: 4×49×512；Physical: 2×512/pad | 训练 | 112×112 spatial decoder |
+| `resnet18` | 7×7 patch grid 上先做时间融合，再做跨空间 mixing/pooling | codec: 4×49×512；Physical: 2×512/pad | 训练 | 112×112 spatial decoder |
 | `ftp1` | 4 帧分别经过 sensor-specific tokenizer，再做时序融合 | 2 × 512/pad | 主干冻结 | 关闭 |
 | `anytouch` | 两组三帧直接经过动态 ViT | 2 × 768/pad，再适配到 512 | 主干冻结 | 关闭 |
 
@@ -132,17 +132,26 @@ layer4 不再做最后一次 stride-2 下采样，因此：
 
 同一个 patch grid 有两个独立消费者。
 
-**对比分支**在每个空间位置分别处理四帧：
+**对比分支**先在每个空间位置处理四帧，再显式混合不同位置：
 
 ```text
 (N,4,512,7,7)
 → reshape (N×49,4,512)
 → [patch state, patch state - frame0 state]
 → 128-d temporal cross-attention
-→ (N,2,512,7,7)
-→ spatial mean
+→ (N,2,128,7,7)
+→ coordinate embedding
+→ depthwise 3×3 spatial block, dilation 1
+→ depthwise 3×3 spatial block, dilation 2
+→ Linear(128,512) + LayerNorm
+→ learned attention pooling over 49 positions
 → (N,2,512)
 ```
+
+两层 dilation `1/2` 给空间分支一个 7×7 感受野，因此局部接触从一个 patch 移动到相邻或更远
+patch 时，不再只能由最后的固定平均间接表达。Learned pooling 可以针对每个 temporal query
+选择不同接触区域。`spatial_mixing_gate` 从 0 开始，pooling score 也从全 0 开始，所以初始化
+在数值上退化为旧的逐位置 temporal head + 均匀空间平均；训练后再按需要打开跨空间路径。
 
 所以 Physical Transformer 的最大 token budget 不变：每个有效 tactile view/pad 仍只有
 `tactile_tokens_per_pad` 个 token，默认最多 `6×2=12` 个。缺失或被 modality dropout 丢弃的
@@ -588,15 +597,18 @@ policy.anytouch_forward_batch_size=128
 
 | 触觉 backbone | 总参数 | 可训练参数 | batch 128 代表性 step | CUDA allocated 峰值 |
 |---|---:|---:|---:|---:|
-| ResNet-18 spatial codec | 764.7M | 396.7M | 1.32 s | 16.14 GiB |
-| AnyTouch | 1058.6M | 385.4M | 1.62 s | 9.66 GiB |
+| ResNet-18 spatial codec | 764.7M | 396.8M | 2.41 s | 20.36 GiB |
+| AnyTouch | 1058.6M | 385.4M | 3.07 s | 9.76 GiB |
 
-ResNet 数字包括 7×7 patch latent、逐 patch 时间头，以及对 `t`/`t+H` 两端的 112×112 重建。
+ResNet 数字包括 7×7 patch latent、temporal + cross-spatial head，以及对 `t`/`t+H` 两端的
+112×112 重建。
 AnyTouch 增加约 305.2M 冻结参数，但不提供与当前第二阶段目标匹配的可训练 spatial codec。
 
-上述结果来自 RTX A6000、bf16、真实 `debug_research_data`、batch 128。ResNet 测量每步平均处理
-297 个有效 tactile view，其中 encoder 为 0.055 s、decoder 为 0.098 s。batch 256 也已通过：
-2.58 s/step、30.03 GiB allocated，平均约 604 个有效 view。共享机器上的绝对时间会受其他任务影响。
+上述结果来自 RTX A6000、bf16、真实 `debug_research_data`、batch 128，二者使用相同 sampler
+并平均处理 380 个有效 tactile view。ResNet Physical forward 为 0.225 s，其中 encoder
+0.068 s、endpoint decoder 0.125 s；AnyTouch Physical forward 为 1.533 s，其中冻结 ViT 为
+1.508 s。端到端时间还受视频缓存和共享磁盘影响，应优先比较组件时间。batch 256 的 ResNet
+路径也已通过：6.89 s/step、37.22 GiB allocated、45.90 GiB reserved，平均 772 个有效 view。
 
 正式 `train_ace.sh` 的单卡 ZeRO-2 batch 128 实测也已跑通：
 
@@ -700,10 +712,10 @@ python scripts/check_resnet_tactile_codec.py --device cuda
 python scripts/check_physical_tactile_mask.py --device cuda
 ```
 
-第一个脚本检查 7×7 patch shape、逐 patch 时间融合的空间独立性、Physical token shape、完整
-112×112 decode，以及 encoder/temporal/decoder 的梯度。第二个脚本检查缺失 image/signal
-placeholder 不影响 CLS、有效触觉仍然影响输出，以及整批无触觉时 ZeRO 所需的零梯度 tensor
-仍然存在。
+第一个脚本检查 7×7 patch shape、跨位置变化传播、learned pooling 的均匀初始化、Physical
+token shape、完整 112×112 decode，以及 encoder/temporal/spatial/decoder 的梯度。第二个
+脚本检查缺失 image/signal placeholder 不影响 CLS、有效触觉仍然影响输出，以及整批无触觉时
+ZeRO 所需的零梯度 tensor 仍然存在。
 
 AnyTouch checkpoint：
 

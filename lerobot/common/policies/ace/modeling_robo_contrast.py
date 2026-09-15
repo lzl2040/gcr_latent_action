@@ -906,13 +906,37 @@ class TactilePadTemporal(nn.Module):
         return self.norm(out[:, : self.num_tokens])
 
 
+class _TactileSpatialResidualBlock(nn.Module):
+    """Mix neighbouring tactile patches with a cheap depthwise residual block."""
+
+    def __init__(self, dim: int, dilation: int, dropout: float):
+        super().__init__()
+        self.norm = nn.GroupNorm(math.gcd(8, dim), dim)
+        self.depthwise = nn.Conv2d(
+            dim,
+            dim,
+            3,
+            padding=dilation,
+            dilation=dilation,
+            groups=dim,
+        )
+        self.pointwise = nn.Conv2d(dim, dim, 1)
+        self.dropout = nn.Dropout2d(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = self.depthwise(F.silu(self.norm(x)))
+        residual = self.pointwise(F.silu(residual))
+        return x + self.dropout(residual)
+
+
 class TactilePatchTemporal(nn.Module):
-    """Read four-frame dynamics independently at every tactile patch.
+    """Compress a tactile patch movie into cross-spatial physical tokens.
 
     The reusable encoder stays single-frame and spatial. This contrastive-only head sees both
-    each patch's state and its displacement from frame 0, emits one or two temporal grids,
-    and leaves spatial pooling to the caller. A 128-wide bottleneck keeps processing 49
-    patches cheaper than running the 512-wide pad-level transformer 49 times.
+    each patch's state and its displacement from frame 0. Temporal queries first read each
+    location independently; two dilated depthwise blocks give the spatial branch a 7x7
+    receptive field, and learned attention pooling reads the full grid into one or two tokens
+    for the physical transformer. All spatial processing stays in a 128-wide bottleneck.
     """
 
     def __init__(
@@ -944,11 +968,44 @@ class TactilePatchTemporal(nn.Module):
             temporal_dim, num_heads, dropout
         )
         self.temporal_ffn = FeedForward(temporal_dim, dropout=dropout)
+        self.spatial_input_norm = nn.GroupNorm(math.gcd(8, temporal_dim), temporal_dim)
+        self.spatial_coordinate_projection = nn.Conv2d(2, temporal_dim, 1)
+        self.spatial_blocks = nn.ModuleList(
+            [
+                _TactileSpatialResidualBlock(
+                    temporal_dim,
+                    dilation=dilation,
+                    dropout=dropout,
+                )
+                for dilation in (1, 2)
+            ]
+        )
+        # Start from the previous per-location temporal head. The gate can open once
+        # cross-spatial mixing proves useful, without perturbing an existing checkpoint at
+        # load time.
+        self.spatial_mixing_gate = nn.Parameter(torch.zeros(()))
         self.output_projection = nn.Linear(temporal_dim, dim)
         self.output_norm = nn.LayerNorm(dim)
+        self.spatial_pool_norm = nn.LayerNorm(dim)
+        self.spatial_pool_score = nn.Linear(dim, 1)
+        # Zero logits make the initial learned pool exactly uniform, matching the old mean.
+        nn.init.zeros_(self.spatial_pool_score.weight)
+        nn.init.zeros_(self.spatial_pool_score.bias)
 
-    def forward(self, patches: torch.Tensor) -> torch.Tensor:
-        """``(N,F,D,H,W) -> (N,T,D,H,W)``."""
+    @staticmethod
+    def _coordinate_grid(
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        y = torch.linspace(-1.0, 1.0, height, device=device, dtype=dtype)
+        x = torch.linspace(-1.0, 1.0, width, device=device, dtype=dtype)
+        yy, xx = torch.meshgrid(y, x, indexing="ij")
+        return torch.stack([xx, yy], dim=0).unsqueeze(0)
+
+    def forward_spatial(self, patches: torch.Tensor) -> torch.Tensor:
+        """Return the contrastive spatiotemporal grid as ``(N,T,D,H,W)``."""
         if patches.ndim != 5:
             raise ValueError(
                 f"Expected temporal tactile patches shaped (N,F,D,H,W), "
@@ -969,12 +1026,57 @@ class TactilePatchTemporal(nn.Module):
         query = self.temporal_query.to(x.dtype).expand(x.shape[0], -1, -1)
         out = query + self.temporal_cross_attention(query, x)
         out = out + self.temporal_ffn(out)
-        out = self.output_norm(self.output_projection(out[:, : self.num_tokens]))
-        return (
-            out.view(n, height, width, self.num_tokens, dim)
+        temporal_grid = (
+            out[:, : self.num_tokens]
+            .view(n, height, width, self.num_tokens, -1)
             .permute(0, 3, 4, 1, 2)
             .contiguous()
         )
+        flat_grid = temporal_grid.reshape(
+            n * self.num_tokens,
+            temporal_grid.shape[2],
+            height,
+            width,
+        )
+        coordinates = self._coordinate_grid(
+            height,
+            width,
+            flat_grid.device,
+            flat_grid.dtype,
+        )
+        spatial = self.spatial_input_norm(flat_grid)
+        spatial = spatial + self.spatial_coordinate_projection(coordinates)
+        for block in self.spatial_blocks:
+            spatial = block(spatial)
+        mixed = flat_grid + torch.tanh(self.spatial_mixing_gate).to(
+            flat_grid.dtype
+        ) * spatial
+        mixed = (
+            mixed.view(n, self.num_tokens, -1, height, width)
+            .permute(0, 1, 3, 4, 2)
+            .contiguous()
+        )
+        mixed = self.output_norm(self.output_projection(mixed))
+        return mixed.permute(0, 1, 4, 2, 3).contiguous()
+
+    def pool_spatial(self, spatial: torch.Tensor) -> torch.Tensor:
+        """Pool ``(N,T,D,H,W)`` with learned content-dependent spatial weights."""
+        if spatial.ndim != 5:
+            raise ValueError(
+                f"Expected tactile spatial features shaped (N,T,D,H,W), "
+                f"got {tuple(spatial.shape)}."
+            )
+        sequence = spatial.flatten(3).transpose(2, 3)
+        scores = self.spatial_pool_score(self.spatial_pool_norm(sequence)).squeeze(-1)
+        weights = F.softmax(scores.float(), dim=-1)
+        return torch.sum(
+            sequence.float() * weights.unsqueeze(-1),
+            dim=2,
+        ).to(sequence.dtype)
+
+    def forward(self, patches: torch.Tensor) -> torch.Tensor:
+        """``(N,F,D,H,W) -> (N,T,D)``."""
+        return self.pool_spatial(self.forward_spatial(patches))
 
 
 class PhysicalEncoder(nn.Module):
@@ -1229,9 +1331,9 @@ class PhysicalEncoder(nn.Module):
         # over.
         #
         # Each pad arrives as ``tactile_frames`` samples spread across the window. ResNet
-        # fuses time independently at every spatial patch before contrastive-only pooling;
-        # FTP-1 fuses global frame features, and AnyTouch directly encodes two overlapping
-        # three-frame windows. The window
+        # first fuses time at every patch, then mixes and pools the spatial grid; FTP-1 fuses
+        # global frame features, and AnyTouch directly encodes two overlapping three-frame
+        # windows. The window
         # interior is the point: a grasp that closes and settles mid-window is invisible at both
         # endpoints, and doc/results.md §21 measured that what the endpoints miss is structured
         # deformation rather than noise. Two tokens per pad give the transformer separate access
@@ -1297,14 +1399,14 @@ class PhysicalEncoder(nn.Module):
                 sel_pair = sel_pair * 0.0
             sel_tokens = self.tactile_temporal(sel_pair)
         else:
-            # Contrastive supervision reads temporal changes before spatial pooling, while the
-            # decoder and stage two retain the full per-frame 7x7 patch latent.
+            # Contrastive supervision reads temporal changes, mixes nearby spatial positions
+            # and learns how to pool them, while the decoder and stage two retain the full
+            # per-frame 7x7 patch latent.
             _, patch_frames = self.tactile_cnn(sel_images)
             patch_frames = patch_frames.to(dtype)
             if not has_tactile:
                 patch_frames = patch_frames * 0.0
-            temporal_patches = self.tactile_temporal(patch_frames)
-            sel_tokens = temporal_patches.mean(dim=(-1, -2))
+            sel_tokens = self.tactile_temporal(patch_frames)
             recon_patches = torch.cat([patch_frames[:, 0], patch_frames[:, -1]], dim=0)
             recon_images = torch.cat([sel_images[:, 0], sel_images[:, -1]], dim=0)
 

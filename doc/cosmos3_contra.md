@@ -44,13 +44,13 @@ them — a stale parameter table is worse than no table.
 | **physical_encoder** | **191.2M** | **191.2M** |
 | &nbsp;&nbsp;`state_proj` / `action_proj` / `signal_proj` | 0.3M each | 0.3M each |
 | &nbsp;&nbsp;`tactile_cnn` | 11.2M | 11.2M |
-| &nbsp;&nbsp;`tactile_temporal` (per-patch, 128-d bottleneck) | 0.4M | 0.4M |
+| &nbsp;&nbsp;`tactile_temporal` (temporal + dilated spatial head) | 0.4M | 0.4M |
 | &nbsp;&nbsp;`tactile_img_proj` | 0.5M | 0.5M |
 | &nbsp;&nbsp;`tactile_recon` (7×7 → 112×112) | 0.1M | 0.1M |
 | &nbsp;&nbsp;`sample_rate_embed` | 0.1M | 0.1M |
 | &nbsp;&nbsp;`blocks` (14 × self-attn over ~40 tokens) | 176.4M | 176.4M |
 | &nbsp;&nbsp;`out_proj` | 1.6M | 1.6M |
-| **total** | **764.7M** | **396.7M** |
+| **total** | **764.7M** | **396.8M** |
 
 Switching `vision_backbone` changes only the `vision_backbone` row (and `predictor` by
 ±0.2M, since the reconstruction head's width follows the tower); every other row is
@@ -63,8 +63,8 @@ Only the perception branch changes; the physical branch is identical in every ro
 
 | configuration | perception | physical | total | trainable | step @ bs128 |
 |---|---:|---:|---:|---:|---:|
-| `dinov3` + `vision` | 573.5M | 191.2M | **764.7M** | **396.7M** | 1.32 s |
-| `cosmos3` + `vision` | 901.3M | 191.2M | **1092.5M** | **397.6M** | — |
+| `dinov3` + `vision` | 573.5M | 191.2M | **764.7M** | **396.8M** | 2.41 s |
+| `cosmos3` + `vision` | 901.3M | 191.2M | **1092.5M** | **397.5M** | — |
 | `cosmos3` + `vae` | 1049.8M | 191.2M | **1241.0M** | **396.4M** | — |
 | `qwen3vl` + `vision` | 794.6M | 191.2M | **985.8M** | **397.3M** | — |
 | `qwen3vl` + `vae` | 943.3M | 191.2M | **1134.5M** | **396.3M** | — |
@@ -120,7 +120,7 @@ python scripts/dump_module_params.py \
 The optional tower therefore exceeds the original 500–800M total-parameter envelope, but
 all 305.2M AnyTouch parameters are frozen. It removes the trainable ResNet, temporal
 attention and tactile reconstruction head, then adds a trainable `768 -> 512` adapter.
-Consequently trainable capacity falls from 396.7M to 385.4M rather than increasing.
+Consequently trainable capacity falls from 396.8M to 385.4M rather than increasing.
 
 ---
 
@@ -488,15 +488,14 @@ windows per live pad:
 
 | backbone | model params | trainable | representative step | tactile tower | CUDA peak |
 |---|---:|---:|---:|---:|---:|
-| ResNet-18 spatial codec | 764.7M | 396.7M | 1.32 s | 0.055 s | 16.14 GiB |
-| AnyTouch | 1058.6M | 385.4M | 1.62 s | 0.728 s | 9.66 GiB |
+| ResNet-18 spatial codec | 764.7M | 396.8M | 2.41 s | 0.068 s | 20.36 GiB |
+| AnyTouch | 1058.6M | 385.4M | 3.07 s | 1.508 s | 9.76 GiB |
 
-The ResNet row also spends 0.098 s in its full-resolution endpoint decoder; the table's
-"tactile tower" column is encoder-only. The matching runs spent ~0.32–0.33 s in the
-unchanged perception encoder. AnyTouch
-processed about 176 live pads per timed step, or 352 three-frame windows. It is roughly
-60% slower end to end at this tactile density, but the frozen/chunked implementation keeps
-memory below the ResNet run and satisfies the single-GPU batch-128 requirement. These are
+The ResNet row also spends 0.125 s in its full-resolution endpoint decoder; the table's
+"tactile tower" column is encoder-only. Both rows use the same sampler and average 380 live
+pads per timed step; AnyTouch therefore processes about 760 three-frame windows. Their
+perception encoders both take ~0.32–0.33 s. AnyTouch's Physical forward is 1.533 s versus
+0.225 s for ResNet, while its frozen/chunked implementation keeps memory lower. These are
 shared-machine measurements; unrelated GPU load can inflate absolute time, so use the
 provided profiler for cluster-specific capacity planning:
 
@@ -518,13 +517,14 @@ or distillation into the existing smaller tower is more economical than unfreezi
 |---|---|
 | All 12 `backbone × target × K` combinations build, forward, backward | pass (`scripts/smoke_cosmos3_contrast.py`) |
 | ResNet spatial codec shape | `(N,4,3,112,112) → (N,4,512,7,7)` |
-| Patch temporal head / Physical input | `(N,4,512,7,7) → (N,2,512,7,7) → (N,2,512)` |
+| Temporal + spatial head / Physical input | `(N,4,512,7,7) → (N,2,512,7,7) → (N,2,512)` |
+| Cross-spatial tactile change | dilation-1/2 depthwise mixing + learned 49-patch pooling |
 | Spatial decoder | `(N,512,7,7) → (N,3,112,112)`, no skip connections |
-| Full DINOv3 model parameter split | 764.7M / 396.7M |
+| Full DINOv3 model parameter split | 764.7M / 396.8M |
 | `K=1` similarity is bit-identical to the old formula | max abs diff 0.0 |
 | Degenerate `K=4` reduces to `K=1` | max abs diff 5.6e-08 |
 | End-to-end `train_ace_local.sh`, `cosmos3` + `vae` + `K=4` | 12 steps + eval + checkpoint, clean exit |
-| Single-GPU ResNet codec batch size | **256**, 30.03 GiB allocated (requirement: ≥128) |
+| Single-GPU ResNet codec batch size | **256**, 37.22 GiB allocated at 772 live views (requirement: ≥128) |
 
 Qwen3-VL adds its own suite (`scripts/check_qwen3vl_vision.py`), since that tower is driven
 through a hand-written interface where a mistake would degrade features without ever
@@ -547,7 +547,7 @@ raising:
 | Window ordering | changing frame 3 leaves token 0 unchanged and changes token 1 |
 | Frozen/trainable gradient split, with and without tactile rows | backbone none; adapter/projection present |
 | Full DINOv3 RoboContrast forward/backward with AnyTouch | pass |
-| Real-video `debug_research_data`, single-GPU batch 128 | pass, 9.66 GiB allocated peak |
+| Real-video `debug_research_data`, single-GPU batch 128 | pass, 9.76 GiB allocated peak |
 | `train_ace.sh`, one-device ZeRO-2, real video, batch 128 | pass; 110 live pads, 3.54 s update |
 
 ---
@@ -557,7 +557,7 @@ raising:
 - **`MultiHeadAttention.norm_kv` is dead in self-attention.** The self-attention path uses
   `norm_q` for both query and key/value, so `norm_kv` never receives a gradient: 2
   tensors × 27 self-attention modules = 54 tensors. Harmless, but it is why the DINOv3
-  smoke test reports `grads 667/721`. Deleting it would change checkpoint keys and
+  smoke test reports `grads 688/742`. Deleting it would change checkpoint keys and
   break loading of every existing checkpoint, so it is left alone deliberately.
 - **`contrastive_eval` draws its batches i.i.d.** from `dataset.sample_weights`, while
   training uses `ContrastiveBatchSampler` with `same_dataset_frac=0.75`. The eval's

@@ -1834,15 +1834,22 @@ LayerNorm are applied independently to each of the 49 patches. This same grid fe
 
 ```text
 codec:       (N,F,512,7,7) ----------------------------> stage-two latent
-contrastive: (N,F,512,7,7) -> patch temporal -> mean -> (N,T,512)
+contrastive: (N,F,512,7,7) -> temporal -> spatial mix/pool -> (N,T,512)
 reconstruct: (N,  512,7,7) -> spatial decoder --------> (N,3,112,112)
 ```
 
-The temporal head works independently at every spatial location. It concatenates each patch's
-state with its displacement from frame 0, projects to a 128-d bottleneck, and lets one or two
-learned queries cross-attend over the four frames. Only then is the 7×7 grid averaged for the
-Physical Transformer. Changing one future patch changes only that output location before pooling;
-`scripts/check_resnet_tactile_codec.py` checks this exactly.
+The temporal head first works independently at every spatial location. It concatenates each
+patch's state with its displacement from frame 0, projects to a 128-d bottleneck, and lets one or
+two learned queries cross-attend over the four frames. The resulting grid then receives coordinate
+features and two residual depthwise 3×3 blocks with dilation 1 and 2, giving the spatial branch a
+7×7 receptive field. A learned content-dependent pool reads all 49 positions into each Physical
+token instead of applying a fixed mean.
+
+Both additions are behaviour-safe at initialization: `spatial_mixing_gate=0`, and the pooling
+score layer is zero-initialized, so it starts as exactly the previous independent temporal grid
+plus uniform mean. `scripts/check_resnet_tactile_codec.py` verifies that opening the gate makes a
+single future-patch change propagate to other spatial positions, while both one- and two-token
+configurations retain the same external shape.
 
 The decoder has no encoder skip connections, so a predicted latent is sufficient by itself.
 Both `t` and `t+H` are reconstruction targets. Training only `t` would omit the last horizon of
@@ -1858,7 +1865,7 @@ PhysicalEncoder.decode_tactile_patches:
     (B,V,512,7,7) -> (B,V,3,112,112), in per-dataset z-score space
 ```
 
-The contrastive temporal head and spatial pooling are deliberately outside this codec boundary.
+The contrastive temporal/spatial aggregation head is deliberately outside this codec boundary.
 Stage two freezes the ResNet encoder and decoder, predicts the future `(512,7,7)` target, and
 backpropagates through the frozen decoder when applying an image-space loss.
 
@@ -1866,9 +1873,11 @@ backpropagates through the frozen decoder when applying an image-space loss.
 
 | batch | live tactile views / step | total step | ResNet encoder | endpoint decoder | CUDA allocated |
 |---:|---:|---:|---:|---:|---:|
-| 128 | 297 | 1.316 s | 0.055 s | 0.098 s | 16.14 GiB |
-| 256 | 604 | 2.580 s | 0.103 s | 0.198 s | 30.03 GiB |
+| 128 | 380 | 2.413 s | 0.068 s | 0.125 s | 20.36 GiB |
+| 256 | 772 | 6.885 s | 0.132 s | 0.303 s | 37.22 GiB |
 
-The model is 764.7M parameters / 396.7M trainable. Batch 256 still fits comfortably on a 48 GiB
-A6000, so retaining patch latents and decoding both endpoints does not violate the original
-single-GPU batch-size requirement.
+The model is 764.7M parameters / 396.8M trainable; the entire cross-spatial addition is only
+38,274 parameters. The batch-256 run reserved 45.90 GiB on a 48 GiB A6000 and completed, so the
+larger live-pad sample still satisfies the original single-GPU batch-size requirement. Absolute
+step time is dominated by shared-disk video loading and should be compared at matched live-pad
+density.
