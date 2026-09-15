@@ -996,8 +996,9 @@ class PhysicalEncoder(nn.Module):
 
     The token budget is the main defence against tactile dominance. A tactile camera carries
     far more raw capacity per token than a 40-dim state vector, so it is folded into one or
-    two tokens per pad rather than the hundreds per pad emitted by a patchwise encoder. The
-    zero-initialised gates and tactile dropout handle the rest.
+    two tokens per pad rather than the hundreds per pad emitted by a patchwise encoder.
+    Zero-initialised gates and tactile dropout handle valid tactile features; missing or
+    dropped tactile tokens are additionally excluded from self-attention key/value inputs.
     """
 
     MOD_CLS, MOD_STATE, MOD_ACTION, MOD_TAC_SIG, MOD_TAC_IMG = range(5)
@@ -1219,6 +1220,7 @@ class PhysicalEncoder(nn.Module):
             1 - keep_signal
         ).unsqueeze(1) * missing[self.MOD_TAC_SIG]
         signal_tokens = signal_tokens + group_pos + mod[self.MOD_TAC_SIG] + rate_embed
+        signal_token_keep = keep_signal.to(torch.bool).expand(-1, self.num_groups)
 
         # -- tactile images ------------------------------------------------
         # A bounded number of tokens per pad rather than patch tokens: pads touch different
@@ -1334,11 +1336,13 @@ class PhysicalEncoder(nn.Module):
                 recon_loss = recon_loss * 0.0
 
         img_tokens = torch.tanh(self.tactile_image_gate).to(dtype) * img_tokens
-        # A pad that this dataset does not have is replaced by the learned "missing" token, so
-        # a 4-pad dataset and a 0-pad dataset produce sequences of the same shape. The mask is
-        # per pad, so it repeats across that pad's tokens.
+        # Keep fixed-shape placeholder tokens for checkpoint and distributed-autograd
+        # compatibility. Invalid or dropped pads are also key/value-masked below, so the
+        # repeated placeholders cannot dilute attention or become dataset-identity shortcuts.
+        # The mask is per pad, so it repeats across that pad's tokens.
         view_keep = (keep_tac_img * tac_img_mask).repeat_interleave(tok_per_pad, dim=1).unsqueeze(-1)
         img_tokens = view_keep * img_tokens + (1 - view_keep) * missing[self.MOD_TAC_IMG]
+        image_token_keep = view_keep.squeeze(-1).to(torch.bool)
         view_ids = torch.arange(num_views, device=device).repeat_interleave(tok_per_pad)
         token_ids = torch.arange(tok_per_pad, device=device).repeat(num_views)
         img_tokens = (
@@ -1353,8 +1357,23 @@ class PhysicalEncoder(nn.Module):
         # G = chunk_size / group_size, V = max_tactile_views, T = tactile_tokens_per_pad.
         cls = (self.cls_token.to(dtype).expand(b, -1, -1) + mod[self.MOD_CLS])
         tokens = torch.cat([cls, state_tokens, action_tokens, signal_tokens, img_tokens], dim=1)
+        # State/action retain their learned missing-modality representation. Tactile padding
+        # is different: up to V*T repeated placeholders would otherwise consume attention
+        # mass and expose a strong dataset-specific missing-view pattern. The attention API
+        # uses True=keep and masks keys/values; masked query rows are never read out and stay
+        # masked as keys in every subsequent layer.
+        non_tactile_keep = torch.ones(
+            b,
+            self.num_cls_tokens + 2 * self.num_groups,
+            dtype=torch.bool,
+            device=device,
+        )
+        token_keep = torch.cat(
+            [non_tactile_keep, signal_token_keep, image_token_keep],
+            dim=1,
+        )
         for block in self.blocks:
-            tokens = block(tokens)
+            tokens = block(tokens, token_keep)
 
         summary = self.out_proj(self.out_norm(tokens[:, : self.num_cls_tokens]))
         if self.num_cls_tokens == 1:

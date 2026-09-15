@@ -20,7 +20,7 @@
 |---|---|---|---|
 | 信号型触觉 | 力、力矩、关节扭矩、阵列信号 | `(B, S, 32)` | `signal_proj`，不经过 AnyTouch |
 | 图像型触觉 | GelSight、Sharpa、D-WHEEL、MCTac | `(B, V, F, 3, H, W)` | ResNet、FTP-1 或 AnyTouch |
-| 无触觉 | 普通视觉机器人数据 | 全零占位 + mask | learned missing token |
+| 无触觉 | 普通视觉机器人数据 | 全零占位 + mask | 固定占位 token + attention mask |
 
 其中：
 
@@ -84,7 +84,7 @@ tactile_dead_std = 0.002
 
 - 不进入触觉图像 backbone；
 - 不产生真实 backbone feature；
-- 在物理 Transformer 中由 learned missing token 表示。
+- 保留固定形状的 placeholder token，但在物理 Transformer 中作为 key/value 被 attention mask。
 
 模型 forward 还会根据 `tactile_image_mask` 只挑出 batch 中真实有效的 pad。假设输入是：
 
@@ -144,9 +144,10 @@ layer4 不再做最后一次 stride-2 下采样，因此：
 → (N,2,512)
 ```
 
-所以送给 Physical Transformer 的 token budget 不变：每个 tactile view/pad 仍只有
-`tactile_tokens_per_pad` 个 token，默认最多 `6×2=12` 个。空间池化只属于 contrastive head，
-不会改变可复用 codec 的输出。
+所以 Physical Transformer 的最大 token budget 不变：每个有效 tactile view/pad 仍只有
+`tactile_tokens_per_pad` 个 token，默认最多 `6×2=12` 个。缺失或被 modality dropout 丢弃的
+pad 虽然保留固定 tensor slot，但不会作为 attention key/value。空间池化只属于 contrastive
+head，不会改变可复用 codec 的输出。
 
 **重建分支**直接读取完整空间 latent，不读取时间 token或 Physical Transformer 输出：
 
@@ -515,6 +516,8 @@ modality_dropout_tactile = 0.3
 ```
 
 训练时会随机隐藏整个样本的触觉模态，避免模型把数据集身份或任务结果完全建立在某一种触觉传感器上。
+被隐藏的 tactile signal/image token 会从 Physical Transformer 的 attention key/value 中屏蔽，
+而不只是替换成另一组可见的 missing token。
 
 ### 10.4 为什么关闭 tactile reconstruction
 
@@ -536,17 +539,21 @@ AnyTouch adapter 和物理分支仍然通过感知侧/物理侧的对比损失�
 
 ## 11. 缺失触觉与分布式训练
 
-当某个样本没有触觉图像时，相应 pad 使用 learned missing token。
+当某个样本没有触觉信号或图像时，固定序列位置仍保留 placeholder token，以保持 batch tensor
+shape 和 checkpoint 参数不变；但这些位置会在每层 Physical Transformer self-attention 中作为
+key/value 屏蔽。它们不会稀释 CLS 对有效 state/action/tactile token 的注意力，也不能充当额外
+scratch token 或暴露重复的缺失-view 数据集模式。
 
 当一个 rank 的整个 local batch 都没有有效图像触觉时：
 
 - 不运行冻结的 AnyTouch ViT；
 - 创建一个零的 768 维占位 feature；
 - 仍然经过 trainable adapter 和 `tactile_img_proj`；
-- 最终由 mask 把它替换成 missing token。
+- 最终生成固定占位 token，并由 attention mask 排除其 key/value。
 
 这样既不浪费 305M AnyTouch 主干的前向计算，也保证 adapter/projection 始终出现在 autograd 图中。
-这对 ZeRO-2 很重要：不同 rank 不能因为本地 batch 是否包含触觉而改变参与梯度同步的可训练参数集合。
+mask 后的梯度为零 tensor 而不是跳过参数。这对 ZeRO-2 很重要：不同 rank 不能因为本地 batch
+是否包含触觉而改变参与梯度同步的可训练参数集合。
 
 ---
 
@@ -690,10 +697,13 @@ bash train_ace.sh \
 
 ```bash
 python scripts/check_resnet_tactile_codec.py --device cuda
+python scripts/check_physical_tactile_mask.py --device cuda
 ```
 
-该脚本检查 7×7 patch shape、逐 patch 时间融合的空间独立性、Physical token shape、完整
-112×112 decode，以及 encoder/temporal/decoder 的梯度。
+第一个脚本检查 7×7 patch shape、逐 patch 时间融合的空间独立性、Physical token shape、完整
+112×112 decode，以及 encoder/temporal/decoder 的梯度。第二个脚本检查缺失 image/signal
+placeholder 不影响 CLS、有效触觉仍然影响输出，以及整批无触觉时 ZeRO 所需的零梯度 tensor
+仍然存在。
 
 AnyTouch checkpoint：
 

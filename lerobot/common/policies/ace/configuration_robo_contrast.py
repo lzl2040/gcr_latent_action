@@ -141,8 +141,8 @@ class RoboContrastConfig(PreTrainedConfig):
     max_state_dim: int = 40
     max_tactile_signal_dim: int = 32
     # Must not exceed canonical_space.MAX_TACTILE_VIEWS, which the dataset clamps against.
-    # 6 covers `ftp_1_sharpa`'s three pads per hand; datasets with fewer fill the spare slots
-    # with the learned `missing` token.
+    # 6 covers `ftp_1_sharpa`'s three pads per hand; datasets with fewer retain fixed-shape
+    # placeholder slots, but those slots are key/value-masked in the physical transformer.
     #
     # Note the truncation `tactile_image_keys(spec)[:max_tactile_views]` keeps the first N keys
     # in *sorted* order, which is unrelated to which pads are live. Lowering this drops
@@ -162,12 +162,12 @@ class RoboContrastConfig(PreTrainedConfig):
     # to "what is being touched" and "how the contact evolved", which it cannot recover from
     # the concatenation because the projection mixes them before attention sees them.
     #
-    # This is the tactile share of the physical sequence: at 6 pads the image stream is
-    # 6/31 = 19% of the tokens at 1, and 12/37 = 32% at 2. Keep it a knob -- doc/results.md §8
-    # deliberately held tactile level with the chunked streams, and roughly half our pad-frames
-    # are dead, so a larger share is not obviously better.
+    # This is the maximum tactile share of the physical sequence: at 6 valid pads the image
+    # stream is 6/31 = 19% of the tokens at 1, and 12/37 = 32% at 2. Missing/dropped pads are
+    # attention-masked, so samples with fewer live pads expose fewer tactile keys. Keep it a
+    # knob -- doc/results.md §8 deliberately held tactile level with the chunked streams.
     tactile_tokens_per_pad: int = 2
-    # ResNet-18 downsamples by 32, so 112 gives a 4x4 map (64 would give a useless 2x2).
+    # The tactile ResNet keeps layer4 at output stride 16, so 112 gives a 7x7 patch grid.
     # Forced to 224 by ``__post_init__`` for FTP-1 and AnyTouch, matching their pretrained
     # positional embeddings.
     tactile_img_size: int = 112
