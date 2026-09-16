@@ -519,6 +519,7 @@ or distillation into the existing smaller tower is more economical than unfreezi
 | All 12 `backbone × target × K` combinations build, forward, backward | pass (`scripts/smoke_cosmos3_contrast.py`) |
 | ResNet spatial codec shape | `(N,4,3,112,112) → (N,4,512,4,4)` |
 | Patch temporal head / Physical input | `(N,4,512,4,4) → (N,2,512,4,4) → (N,2,512)` |
+| Temporal SDPA launch bound | 8192 patch rows/chunk = at most 32,768 batch-heads |
 | Spatial decoder | `(N,512,4,4) → (N,3,112,112)`, no skip connections |
 | Full DINOv3 model parameter split | 764.7M / 396.7M |
 | `K=1` similarity is bit-identical to the old formula | max abs diff 0.0 |

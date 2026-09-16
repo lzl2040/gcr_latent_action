@@ -131,6 +131,10 @@ ResNet-18 layer4 原生的 stride-2 下采样，因此：
 pad 49 行降到 16 行。四个 attention head 下，772 个有效 pad 的 batch-head 数从 151,312
 降到 49,408。恢复原生 stride 不改变任何预训练参数或 checkpoint tensor 的形状。
 
+temporal attention 继续使用 fused SDPA，但会沿展开后的 `N×16` 维度按最多 8192 行分块。
+因此每次 CUDA launch 最多处理 `8192×4=32768` 个 batch-head；即使单卡 batch 512 且每个
+样本都有 6 个有效 pad，也不会把全部 `3072×16×4` 个 batch-head 放进同一次 kernel launch。
+
 同一个 patch grid 有两个独立消费者。
 
 **对比分支**在每个空间位置分别处理四帧：
@@ -702,10 +706,10 @@ python scripts/check_resnet_tactile_codec.py --device cuda
 python scripts/check_physical_tactile_mask.py --device cuda
 ```
 
-第一个脚本检查 4×4 patch shape、逐 patch 时间融合的空间独立性、Physical token shape、完整
-112×112 decode，以及 encoder/temporal/decoder 的梯度。第二个脚本检查缺失 image/signal
-placeholder 不影响 CLS、有效触觉仍然影响输出，以及整批无触觉时 ZeRO 所需的零梯度 tensor
-仍然存在。
+第一个脚本检查 4×4 patch shape、分块与非分块 temporal attention 的数值一致性、逐 patch
+时间融合的空间独立性、Physical token shape、完整 112×112 decode，以及
+encoder/temporal/decoder 的梯度。第二个脚本检查缺失 image/signal placeholder 不影响 CLS、
+有效触觉仍然影响输出，以及整批无触觉时 ZeRO 所需的零梯度 tensor 仍然存在。
 
 AnyTouch checkpoint：
 

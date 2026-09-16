@@ -112,12 +112,23 @@ def paired_similarity(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 class MultiHeadAttention(nn.Module):
     """Pre-norm multi-head attention supporting self- and cross-attention."""
 
-    def __init__(self, dim: int, num_heads: int, dropout: float = 0.0):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        dropout: float = 0.0,
+        sdpa_batch_chunk_size: int | None = None,
+    ):
         super().__init__()
         assert dim % num_heads == 0
+        if sdpa_batch_chunk_size is not None and sdpa_batch_chunk_size <= 0:
+            raise ValueError(
+                f"sdpa_batch_chunk_size must be positive, got {sdpa_batch_chunk_size}."
+            )
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.dropout = dropout
+        self.sdpa_batch_chunk_size = sdpa_batch_chunk_size
 
         self.norm_q = nn.LayerNorm(dim)
         self.norm_kv = nn.LayerNorm(dim)
@@ -144,9 +155,27 @@ class MultiHeadAttention(nn.Module):
             # True = keep. Expand to (B, 1, 1, M) for scaled_dot_product_attention.
             attn_mask = key_padding_mask[:, None, None, :].to(torch.bool)
 
-        out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0.0
-        )
+        dropout_p = self.dropout if self.training else 0.0
+        chunk_size = self.sdpa_batch_chunk_size
+        if chunk_size is None or b <= chunk_size:
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask, dropout_p=dropout_p
+            )
+        else:
+            output_chunks = []
+            for start in range(0, b, chunk_size):
+                end = min(start + chunk_size, b)
+                chunk_mask = attn_mask[start:end] if attn_mask is not None else None
+                output_chunks.append(
+                    F.scaled_dot_product_attention(
+                        q[start:end],
+                        k[start:end],
+                        v[start:end],
+                        attn_mask=chunk_mask,
+                        dropout_p=dropout_p,
+                    )
+                )
+            out = torch.cat(output_chunks, dim=0)
         out = out.transpose(1, 2).reshape(b, n, self.num_heads * self.head_dim)
         return self.out_proj(out)
 
@@ -937,8 +966,14 @@ class TactilePatchTemporal(nn.Module):
         self.temporal_query = nn.Parameter(
             torch.randn(1, num_tokens, temporal_dim) * 0.02
         )
+        # Spatial flattening turns N pads into N*H*W attention batches. Bound each fused
+        # SDPA launch to 32,768 batch-heads so older CUDA kernels do not exceed their grid
+        # limit on tactile-dense ranks.
         self.temporal_cross_attention = MultiHeadAttention(
-            temporal_dim, num_heads, dropout
+            temporal_dim,
+            num_heads,
+            dropout,
+            sdpa_batch_chunk_size=max(1, 32_768 // num_heads),
         )
         self.temporal_ffn = FeedForward(temporal_dim, dropout=dropout)
         self.output_projection = nn.Linear(temporal_dim, dim)

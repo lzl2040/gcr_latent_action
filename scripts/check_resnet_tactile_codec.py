@@ -57,7 +57,18 @@ def main() -> int:
     if not torch.equal(pooled, pooled_from_patches):
         raise AssertionError("Pooled tactile embedding is not the mean of the reusable patches")
 
+    with torch.no_grad():
+        temporal.temporal_cross_attention.sdpa_batch_chunk_size = None
+        unchunked_temporal = temporal(patches.detach())
+    temporal.temporal_cross_attention.sdpa_batch_chunk_size = 5
     temporal_patches = temporal(patches)
+    torch.testing.assert_close(
+        temporal_patches,
+        unchunked_temporal,
+        rtol=1e-3,
+        atol=1e-3,
+        msg="Chunked temporal attention differs from the unchunked result",
+    )
     expected_temporal = (
         args.batch_size,
         args.tokens,

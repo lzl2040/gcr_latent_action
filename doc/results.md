@@ -1848,8 +1848,10 @@ The first version used output stride 16 and a 7×7 grid. Restoring native layer4
 the flattened temporal-attention batch from 49 to 16 rows per tactile pad. With four heads, the
 SDPA batch-head multiplier drops from `196N` to `64N`: the profiled 772-pad case falls from
 151,312 to 49,408, below the common 65,535 launch-grid dimension limit. The corresponding
-approximate pad threshold rises from 334 to 1,023; an unusually dense rank above that still needs
-chunked attention. Restoring the native stride preserves all checkpoint tensor shapes.
+approximate unchunked pad threshold rises from 334 to 1,023. To cover batch 512 and the theoretical
+maximum of six valid pads per sample, the temporal head additionally chunks the flattened batch
+at 8,192 rows while retaining fused SDPA. Each launch therefore sees at most 32,768 batch-heads.
+Restoring the native stride and adding launch chunking preserve all checkpoint tensor shapes.
 
 The decoder has no encoder skip connections, so a predicted latent is sufficient by itself.
 Both `t` and `t+H` are reconstruction targets. Training only `t` would omit the last horizon of
