@@ -167,7 +167,7 @@ class RoboContrastConfig(PreTrainedConfig):
     # attention-masked, so samples with fewer live pads expose fewer tactile keys. Keep it a
     # knob -- doc/results.md §8 deliberately held tactile level with the chunked streams.
     tactile_tokens_per_pad: int = 2
-    # The tactile ResNet keeps layer4 at output stride 16, so 112 gives a 7x7 patch grid.
+    # The tactile ResNet uses its native output stride 32, so 112 gives a 4x4 patch grid.
     # Forced to 224 by ``__post_init__`` for FTP-1 and AnyTouch, matching their pretrained
     # positional embeddings.
     tactile_img_size: int = 112
@@ -220,7 +220,7 @@ class RoboContrastConfig(PreTrainedConfig):
     # aggressively because a 4-view image stream would otherwise dominate the physical token
     # budget and let the model ignore state/action entirely.
     # Tactile image encoder, following UniVTAC (`UniVTAC/encoder/network.py`): a plain
-    # ImageNet-pretrained ResNet-18. The reusable output is a 7x7 grid of 512-d patch latents
+    # ImageNet-pretrained ResNet-18. The reusable output is a 4x4 grid of 512-d patch latents
     # at the default 112 input. A patch-temporal contrastive head produces only one or two
     # tokens per pad for the physical transformer, while a spatial decoder reconstructs the
     # tactile image directly from the same grid. UniVTAC

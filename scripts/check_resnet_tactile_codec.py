@@ -39,7 +39,9 @@ def main() -> int:
         device=device,
     )
     pooled, patches = encoder(images)
-    expected_grid = args.image_size // encoder.output_stride
+    if encoder.output_stride != 32:
+        raise AssertionError(f"Expected output stride 32, got {encoder.output_stride}")
+    expected_grid = (args.image_size + encoder.output_stride - 1) // encoder.output_stride
     expected_patches = (
         args.batch_size,
         args.frames,

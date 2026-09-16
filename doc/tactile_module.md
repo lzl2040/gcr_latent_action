@@ -109,7 +109,7 @@ policy.tactile_backbone
 
 | backbone | 单帧/时序编码 | 输出 | 是否训练 | 触觉重建 |
 |---|---|---:|---|---|
-| `resnet18` | 每帧输出 7×7 patch grid，逐 patch 做时间融合 | codec: 4×49×512；Physical: 2×512/pad | 训练 | 112×112 spatial decoder |
+| `resnet18` | 每帧输出 4×4 patch grid，逐 patch 做时间融合 | codec: 4×16×512；Physical: 2×512/pad | 训练 | 112×112 spatial decoder |
 | `ftp1` | 4 帧分别经过 sensor-specific tokenizer，再做时序融合 | 2 × 512/pad | 主干冻结 | 关闭 |
 | `anytouch` | 两组三帧直接经过动态 ViT | 2 × 768/pad，再适配到 512 | 主干冻结 | 关闭 |
 
@@ -117,29 +117,30 @@ AnyTouch 不再经过 `TactilePadTemporal`，因为它的 3D patch embedding 和
 
 ### 3.1 默认 ResNet spatial codec
 
-ResNet 路径现在把空间 feature map 作为正式、可复用的 encoder 输出。默认 112×112 输入在
-layer4 不再做最后一次 stride-2 下采样，因此：
+ResNet 路径现在把空间 feature map 作为正式、可复用的 encoder 输出。默认 112×112 输入保留
+ResNet-18 layer4 原生的 stride-2 下采样，因此：
 
 ```text
 (N, F=4, 3, 112, 112)
 → shared ResNet-18
 → per-patch Linear/LayerNorm
-→ (N, F=4, 512, 7, 7)
+→ (N, F=4, 512, 4, 4)
 ```
 
-改变 layer4 stride 不改变任何预训练参数形状。`7×7=49` 个 patch 比原来的 4×4 更适合保留
-接触位置、marker 位移和局部形变。
+`4×4=16` 个 patch 仍保留空间布局，同时把逐 patch temporal attention 的展开规模从每个
+pad 49 行降到 16 行。四个 attention head 下，772 个有效 pad 的 batch-head 数从 151,312
+降到 49,408。恢复原生 stride 不改变任何预训练参数或 checkpoint tensor 的形状。
 
 同一个 patch grid 有两个独立消费者。
 
 **对比分支**在每个空间位置分别处理四帧：
 
 ```text
-(N,4,512,7,7)
-→ reshape (N×49,4,512)
+(N,4,512,4,4)
+→ reshape (N×16,4,512)
 → [patch state, patch state - frame0 state]
 → 128-d temporal cross-attention
-→ (N,2,512,7,7)
+→ (N,2,512,4,4)
 → spatial mean
 → (N,2,512)
 ```
@@ -152,8 +153,8 @@ head，不会改变可复用 codec 的输出。
 **重建分支**直接读取完整空间 latent，不读取时间 token或 Physical Transformer 输出：
 
 ```text
-(N,512,7,7)
-→ four lightweight 2× upsampling blocks
+(N,512,4,4)
+→ four lightweight 2× upsampling blocks + final resize
 → (N,3,112,112)
 ```
 
@@ -171,8 +172,8 @@ x_t = physical_encoder.decode_tactile_patches(z_t)
 形状为：
 
 ```text
-encode: (B,V,3,112,112) → (B,V,512,7,7)
-decode: (B,V,512,7,7)   → (B,V,3,112,112)
+encode: (B,V,3,112,112) → (B,V,512,4,4)
+decode: (B,V,512,4,4)   → (B,V,3,112,112)
 ```
 
 Decoder 当前预测按数据集 mean/std 标准化后的 RGB；恢复 `[0,1]` 图像时使用对应 view 的统计量
@@ -591,7 +592,8 @@ policy.anytouch_forward_batch_size=128
 | ResNet-18 spatial codec | 764.7M | 396.7M | 1.32 s | 16.14 GiB |
 | AnyTouch | 1058.6M | 385.4M | 1.62 s | 9.66 GiB |
 
-ResNet 数字包括 7×7 patch latent、逐 patch 时间头，以及对 `t`/`t+H` 两端的 112×112 重建。
+ResNet 数字来自此前的 7×7 baseline，包括逐 patch 时间头以及对 `t`/`t+H` 两端的
+112×112 重建；当前 4×4 codec 的计算和激活规模更小。
 AnyTouch 增加约 305.2M 冻结参数，但不提供与当前第二阶段目标匹配的可训练 spatial codec。
 
 上述结果来自 RTX A6000、bf16、真实 `debug_research_data`、batch 128。ResNet 测量每步平均处理
@@ -700,7 +702,7 @@ python scripts/check_resnet_tactile_codec.py --device cuda
 python scripts/check_physical_tactile_mask.py --device cuda
 ```
 
-第一个脚本检查 7×7 patch shape、逐 patch 时间融合的空间独立性、Physical token shape、完整
+第一个脚本检查 4×4 patch shape、逐 patch 时间融合的空间独立性、Physical token shape、完整
 112×112 decode，以及 encoder/temporal/decoder 的梯度。第二个脚本检查缺失 image/signal
 placeholder 不影响 CLS、有效触觉仍然影响输出，以及整批无触觉时 ZeRO 所需的零梯度 tensor
 仍然存在。

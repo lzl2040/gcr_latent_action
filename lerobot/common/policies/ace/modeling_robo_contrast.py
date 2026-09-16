@@ -749,7 +749,7 @@ class TactileImageEncoder(nn.Module):
         import torchvision
 
         self.output_dim = out_dim
-        self.output_stride = 16
+        self.output_stride = 32
         weights = None
         if pretrained:
             try:
@@ -760,11 +760,8 @@ class TactileImageEncoder(nn.Module):
             net = torchvision.models.resnet18(weights=weights)
         except Exception:
             net = torchvision.models.resnet18(weights=None)
-        # Keep a 7x7 latent grid for the default 112x112 tactile input. ResNet-18 normally
-        # downsamples once more in layer4 and would leave only 4x4 patches. Changing stride
-        # does not change any pretrained parameter shape.
-        net.layer4[0].conv1.stride = (1, 1)
-        net.layer4[0].downsample[0].stride = (1, 1)
+        # Keep ResNet-18's native layer4 stride so the default 112x112 input produces a
+        # compact 4x4 latent grid. This also bounds the flattened per-patch temporal batch.
         # Frozen BatchNorm, as UniVTAC does when it plugs the encoder into the policy
         # (`policy/ACT/detr/models/backbone.py`). Here it is not optional: the number of
         # tactile pads varies per sample, so the effective BN batch size is data dependent
@@ -782,8 +779,8 @@ class TactileImageEncoder(nn.Module):
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return pooled embeddings and reusable spatial patch latents.
 
-        ``(B,V,3,H,W)`` uint8 becomes ``(B,V,D,H/16,W/16)`` patches. The first
-        return value is only a convenience mean over those same patches.
+        ``(B,V,3,H,W)`` uint8 becomes ``(B,V,D,ceil(H/32),ceil(W/32))`` patches.
+        The first return value is only a convenience mean over those same patches.
         """
         b, v = images.shape[:2]
         conv_dtype = _module_dtype(self.stem)
@@ -1141,8 +1138,9 @@ class PhysicalEncoder(nn.Module):
     def encode_tactile_patches(self, images: torch.Tensor) -> torch.Tensor:
         """Encode current tactile views for reuse by a later world model.
 
-        ``(B,V,3,H,W) -> (B,V,D,H/16,W/16)``. Only the trainable ResNet codec has
-        this interface; FTP-1 and AnyTouch currently expose pooled pretrained features.
+        ``(B,V,3,H,W) -> (B,V,D,ceil(H/32),ceil(W/32))``. Only the trainable
+        ResNet codec has this interface; FTP-1 and AnyTouch currently expose pooled
+        pretrained features.
         """
         if self.use_ftp1_tactile or self.use_anytouch_tactile:
             raise RuntimeError(
@@ -1298,7 +1296,7 @@ class PhysicalEncoder(nn.Module):
             sel_tokens = self.tactile_temporal(sel_pair)
         else:
             # Contrastive supervision reads temporal changes before spatial pooling, while the
-            # decoder and stage two retain the full per-frame 7x7 patch latent.
+            # decoder and stage two retain the full per-frame 4x4 patch latent.
             _, patch_frames = self.tactile_cnn(sel_images)
             patch_frames = patch_frames.to(dtype)
             if not has_tactile:

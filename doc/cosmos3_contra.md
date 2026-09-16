@@ -46,7 +46,7 @@ them — a stale parameter table is worse than no table.
 | &nbsp;&nbsp;`tactile_cnn` | 11.2M | 11.2M |
 | &nbsp;&nbsp;`tactile_temporal` (per-patch, 128-d bottleneck) | 0.4M | 0.4M |
 | &nbsp;&nbsp;`tactile_img_proj` | 0.5M | 0.5M |
-| &nbsp;&nbsp;`tactile_recon` (7×7 → 112×112) | 0.1M | 0.1M |
+| &nbsp;&nbsp;`tactile_recon` (4×4 → 112×112) | 0.1M | 0.1M |
 | &nbsp;&nbsp;`sample_rate_embed` | 0.1M | 0.1M |
 | &nbsp;&nbsp;`blocks` (14 × self-attn over ~40 tokens) | 176.4M | 176.4M |
 | &nbsp;&nbsp;`out_proj` | 1.6M | 1.6M |
@@ -517,14 +517,14 @@ or distillation into the existing smaller tower is more economical than unfreezi
 | check | result |
 |---|---|
 | All 12 `backbone × target × K` combinations build, forward, backward | pass (`scripts/smoke_cosmos3_contrast.py`) |
-| ResNet spatial codec shape | `(N,4,3,112,112) → (N,4,512,7,7)` |
-| Patch temporal head / Physical input | `(N,4,512,7,7) → (N,2,512,7,7) → (N,2,512)` |
-| Spatial decoder | `(N,512,7,7) → (N,3,112,112)`, no skip connections |
+| ResNet spatial codec shape | `(N,4,3,112,112) → (N,4,512,4,4)` |
+| Patch temporal head / Physical input | `(N,4,512,4,4) → (N,2,512,4,4) → (N,2,512)` |
+| Spatial decoder | `(N,512,4,4) → (N,3,112,112)`, no skip connections |
 | Full DINOv3 model parameter split | 764.7M / 396.7M |
 | `K=1` similarity is bit-identical to the old formula | max abs diff 0.0 |
 | Degenerate `K=4` reduces to `K=1` | max abs diff 5.6e-08 |
 | End-to-end `train_ace_local.sh`, `cosmos3` + `vae` + `K=4` | 12 steps + eval + checkpoint, clean exit |
-| Single-GPU ResNet codec batch size | **256**, 30.03 GiB allocated (requirement: ≥128) |
+| Single-GPU ResNet codec batch size (earlier 7×7 baseline) | **256**, 30.03 GiB allocated (requirement: ≥128) |
 
 Qwen3-VL adds its own suite (`scripts/check_qwen3vl_vision.py`), since that tower is driven
 through a hand-written interface where a mistake would degrade features without ever

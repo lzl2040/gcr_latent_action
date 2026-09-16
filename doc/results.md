@@ -1828,21 +1828,28 @@ reusable boundary for a Cosmos-style second stage whose tactile objective is:
 current tactile patch grid -> predict future patch grid -> decode future tactile image
 ```
 
-The default ResNet path now keeps layer4 at output stride 16. A 112×112 frame produces a
-trainable `(512,7,7)` latent instead of pooling a `(512,4,4)` map immediately. Projection and
-LayerNorm are applied independently to each of the 49 patches. This same grid feeds two branches:
+The default ResNet path uses the native layer4 output stride 32. A 112×112 frame produces a
+trainable `(512,4,4)` latent. Projection and LayerNorm are applied independently to each of the
+16 patches. This same grid feeds two branches:
 
 ```text
-codec:       (N,F,512,7,7) ----------------------------> stage-two latent
-contrastive: (N,F,512,7,7) -> patch temporal -> mean -> (N,T,512)
-reconstruct: (N,  512,7,7) -> spatial decoder --------> (N,3,112,112)
+codec:       (N,F,512,4,4) ----------------------------> stage-two latent
+contrastive: (N,F,512,4,4) -> patch temporal -> mean -> (N,T,512)
+reconstruct: (N,  512,4,4) -> spatial decoder --------> (N,3,112,112)
 ```
 
 The temporal head works independently at every spatial location. It concatenates each patch's
 state with its displacement from frame 0, projects to a 128-d bottleneck, and lets one or two
-learned queries cross-attend over the four frames. Only then is the 7×7 grid averaged for the
+learned queries cross-attend over the four frames. Only then is the 4×4 grid averaged for the
 Physical Transformer. Changing one future patch changes only that output location before pooling;
 `scripts/check_resnet_tactile_codec.py` checks this exactly.
+
+The first version used output stride 16 and a 7×7 grid. Restoring native layer4 stride reduces
+the flattened temporal-attention batch from 49 to 16 rows per tactile pad. With four heads, the
+SDPA batch-head multiplier drops from `196N` to `64N`: the profiled 772-pad case falls from
+151,312 to 49,408, below the common 65,535 launch-grid dimension limit. The corresponding
+approximate pad threshold rises from 334 to 1,023; an unusually dense rank above that still needs
+chunked attention. Restoring the native stride preserves all checkpoint tensor shapes.
 
 The decoder has no encoder skip connections, so a predicted latent is sufficient by itself.
 Both `t` and `t+H` are reconstruction targets. Training only `t` would omit the last horizon of
@@ -1852,23 +1859,22 @@ Public stage-two interfaces:
 
 ```text
 PhysicalEncoder.encode_tactile_patches:
-    (B,V,3,112,112) -> (B,V,512,7,7)
+    (B,V,3,112,112) -> (B,V,512,4,4)
 
 PhysicalEncoder.decode_tactile_patches:
-    (B,V,512,7,7) -> (B,V,3,112,112), in per-dataset z-score space
+    (B,V,512,4,4) -> (B,V,3,112,112), in per-dataset z-score space
 ```
 
 The contrastive temporal head and spatial pooling are deliberately outside this codec boundary.
-Stage two freezes the ResNet encoder and decoder, predicts the future `(512,7,7)` target, and
+Stage two freezes the ResNet encoder and decoder, predicts the future `(512,4,4)` target, and
 backpropagates through the frozen decoder when applying an image-space loss.
 
-**Measured on RTX A6000, bf16, real `debug_research_data`:**
+**Earlier 7×7 baseline measured on RTX A6000, bf16, real `debug_research_data`:**
 
 | batch | live tactile views / step | total step | ResNet encoder | endpoint decoder | CUDA allocated |
 |---:|---:|---:|---:|---:|---:|
 | 128 | 297 | 1.316 s | 0.055 s | 0.098 s | 16.14 GiB |
 | 256 | 604 | 2.580 s | 0.103 s | 0.198 s | 30.03 GiB |
 
-The model is 764.7M parameters / 396.7M trainable. Batch 256 still fits comfortably on a 48 GiB
-A6000, so retaining patch latents and decoding both endpoints does not violate the original
-single-GPU batch-size requirement.
+The model is 764.7M parameters / 396.7M trainable. The 4×4 change does not alter parameter counts
+or checkpoint shapes; its runtime and memory are no greater than this earlier 7×7 baseline.
