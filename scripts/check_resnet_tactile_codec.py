@@ -28,6 +28,7 @@ def main() -> int:
         dim=512,
         num_frames=args.frames,
         num_tokens=args.tokens,
+        spatial_pool_size=2,
     ).to(device=device, dtype=dtype)
     decoder = TactilePatchDecoder(512, args.image_size).to(device=device, dtype=dtype)
 
@@ -73,8 +74,8 @@ def main() -> int:
         args.batch_size,
         args.tokens,
         512,
-        expected_grid,
-        expected_grid,
+        2,
+        2,
     )
     if temporal_patches.shape != expected_temporal:
         raise AssertionError(

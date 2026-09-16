@@ -933,12 +933,11 @@ class TactilePadTemporal(nn.Module):
 
 
 class TactilePatchTemporal(nn.Module):
-    """Read four-frame dynamics independently at every tactile patch.
+    """Pool the codec grid, then read four-frame dynamics at each pooled patch.
 
-    The reusable encoder stays single-frame and spatial. This contrastive-only head sees both
-    each patch's state and its displacement from frame 0, emits one or two temporal grids,
-    and leaves spatial pooling to the caller. A 128-wide bottleneck keeps processing 49
-    patches cheaper than running the 512-wide pad-level transformer 49 times.
+    The reusable encoder stays single-frame and spatial. Only this contrastive head reduces
+    the spatial grid; reconstruction and the stage-two interface retain the full codec latent.
+    Each pooled patch sees its state and displacement from frame 0 before temporal attention.
     """
 
     def __init__(
@@ -949,15 +948,21 @@ class TactilePatchTemporal(nn.Module):
         temporal_dim: int = 128,
         num_heads: int = 4,
         dropout: float = 0.0,
+        spatial_pool_size: int | None = None,
     ):
         super().__init__()
         if temporal_dim % num_heads != 0:
             raise ValueError(
                 f"temporal_dim ({temporal_dim}) must be divisible by num_heads ({num_heads})."
             )
+        if spatial_pool_size is not None and spatial_pool_size <= 0:
+            raise ValueError(
+                f"spatial_pool_size must be positive, got {spatial_pool_size}."
+            )
         self.dim = dim
         self.num_frames = num_frames
         self.num_tokens = num_tokens
+        self.spatial_pool_size = spatial_pool_size
         self.input_norm = nn.LayerNorm(dim)
         self.state_change_projection = nn.Linear(2 * dim, temporal_dim)
         self.frame_embedding = nn.Parameter(
@@ -980,7 +985,7 @@ class TactilePatchTemporal(nn.Module):
         self.output_norm = nn.LayerNorm(dim)
 
     def forward(self, patches: torch.Tensor) -> torch.Tensor:
-        """``(N,F,D,H,W) -> (N,T,D,H,W)``."""
+        """``(N,F,D,H,W) -> (N,T,D,H',W')``, optionally pooling spatially first."""
         if patches.ndim != 5:
             raise ValueError(
                 f"Expected temporal tactile patches shaped (N,F,D,H,W), "
@@ -991,6 +996,15 @@ class TactilePatchTemporal(nn.Module):
             raise ValueError(
                 f"Expected F={self.num_frames}, D={self.dim}; got F={frames}, D={dim}."
             )
+        if self.spatial_pool_size is not None:
+            pooled_height = min(height, self.spatial_pool_size)
+            pooled_width = min(width, self.spatial_pool_size)
+            if (pooled_height, pooled_width) != (height, width):
+                patches = F.adaptive_avg_pool2d(
+                    patches.reshape(n * frames, dim, height, width),
+                    (pooled_height, pooled_width),
+                ).reshape(n, frames, dim, pooled_height, pooled_width)
+                height, width = pooled_height, pooled_width
         sequence = patches.permute(0, 3, 4, 1, 2).reshape(
             n * height * width, frames, dim
         )
@@ -1112,6 +1126,7 @@ class PhysicalEncoder(nn.Module):
                 config.tactile_frames,
                 config.tactile_tokens_per_pad,
                 dropout=config.dropout,
+                spatial_pool_size=2,
             )
         self.tactile_img_proj = nn.Linear(config.tactile_feat_dim, dim)
         self.tactile_recon = (
@@ -1330,7 +1345,7 @@ class PhysicalEncoder(nn.Module):
                 sel_pair = sel_pair * 0.0
             sel_tokens = self.tactile_temporal(sel_pair)
         else:
-            # Contrastive supervision reads temporal changes before spatial pooling, while the
+            # The contrastive head pools to 2x2 before reading temporal changes, while the
             # decoder and stage two retain the full per-frame 4x4 patch latent.
             _, patch_frames = self.tactile_cnn(sel_images)
             patch_frames = patch_frames.to(dtype)

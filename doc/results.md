@@ -1834,24 +1834,28 @@ trainable `(512,4,4)` latent. Projection and LayerNorm are applied independently
 
 ```text
 codec:       (N,F,512,4,4) ----------------------------> stage-two latent
-contrastive: (N,F,512,4,4) -> patch temporal -> mean -> (N,T,512)
+contrastive: (N,F,512,4,4) -> pool 2x2 -> patch temporal -> mean -> (N,T,512)
 reconstruct: (N,  512,4,4) -> spatial decoder --------> (N,3,112,112)
 ```
 
 The temporal head works independently at every spatial location. It concatenates each patch's
 state with its displacement from frame 0, projects to a 128-d bottleneck, and lets one or two
-learned queries cross-attend over the four frames. Only then is the 4×4 grid averaged for the
-Physical Transformer. Changing one future patch changes only that output location before pooling;
-`scripts/check_resnet_tactile_codec.py` checks this exactly.
+learned queries cross-attend over the four frames. The contrastive branch first adaptive-average
+pools the 4×4 codec grid to 2×2; only that 2×2 temporal result is averaged for the Physical
+Transformer. Reconstruction and the stage-two target still use the unpooled 4×4 codec latent.
 
-The first version used output stride 16 and a 7×7 grid. Restoring native layer4 stride reduces
-the flattened temporal-attention batch from 49 to 16 rows per tactile pad. With four heads, the
-SDPA batch-head multiplier drops from `196N` to `64N`: the profiled 772-pad case falls from
-151,312 to 49,408, below the common 65,535 launch-grid dimension limit. The corresponding
-approximate unchunked pad threshold rises from 334 to 1,023. To cover batch 512 and the theoretical
-maximum of six valid pads per sample, the temporal head additionally chunks the flattened batch
-at 8,192 rows while retaining fused SDPA. Each launch therefore sees at most 32,768 batch-heads.
-Restoring the native stride and adding launch chunking preserve all checkpoint tensor shapes.
+The first version used output stride 16 and a 7×7 temporal grid. The current path restores native
+layer4 stride for a 4×4 codec and pools only the contrastive input to 2×2. With four heads, the
+SDPA batch-head multiplier drops from `196N` to `16N`: the profiled 772-pad case falls from
+151,312 to 12,352. Even the theoretical batch-512 maximum of 3,072 valid pads is 49,152
+batch-heads, below the common 65,535 launch-grid dimension limit. The temporal head still chunks
+at 8,192 flattened rows as a guard for larger future batches. These changes preserve all
+checkpoint tensor shapes.
+
+This reduces temporal-head compute and launch pressure, but it does not turn a distributed
+`all_gather` timeout into an SDPA error. A rank waiting at the first contrastive gather still
+means at least one peer did not finish its first data/encoder path or exited; the missing rank's
+log remains the source of truth for that failure.
 
 The decoder has no encoder skip connections, so a predicted latent is sufficient by itself.
 Both `t` and `t+H` are reconstruction targets. Training only `t` would omit the last horizon of

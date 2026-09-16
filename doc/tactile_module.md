@@ -109,7 +109,7 @@ policy.tactile_backbone
 
 | backbone | 单帧/时序编码 | 输出 | 是否训练 | 触觉重建 |
 |---|---|---:|---|---|
-| `resnet18` | 每帧输出 4×4 patch grid，逐 patch 做时间融合 | codec: 4×16×512；Physical: 2×512/pad | 训练 | 112×112 spatial decoder |
+| `resnet18` | 每帧输出 4×4 codec grid，对比分支 pool 到 2×2 后做时间融合 | codec: 4×16×512；temporal: 2×4×512；Physical: 2×512/pad | 训练 | 112×112 spatial decoder |
 | `ftp1` | 4 帧分别经过 sensor-specific tokenizer，再做时序融合 | 2 × 512/pad | 主干冻结 | 关闭 |
 | `anytouch` | 两组三帧直接经过动态 ViT | 2 × 768/pad，再适配到 512 | 主干冻结 | 关闭 |
 
@@ -127,13 +127,14 @@ ResNet-18 layer4 原生的 stride-2 下采样，因此：
 → (N, F=4, 512, 4, 4)
 ```
 
-`4×4=16` 个 patch 仍保留空间布局，同时把逐 patch temporal attention 的展开规模从每个
-pad 49 行降到 16 行。四个 attention head 下，772 个有效 pad 的 batch-head 数从 151,312
-降到 49,408。恢复原生 stride 不改变任何预训练参数或 checkpoint tensor 的形状。
+`4×4=16` 个 patch 仍作为第二阶段和重建的完整 latent。对比分支先使用 adaptive average
+pooling 压到 `2×2=4` 个位置，再读取每个位置的时间变化。四个 attention head 下，772 个
+有效 pad 的 batch-head 数从原 7×7 路径的 151,312 降到 12,352。恢复原生 stride 和增加
+无参数 pooling 都不改变任何 checkpoint tensor 的形状。
 
-temporal attention 继续使用 fused SDPA，但会沿展开后的 `N×16` 维度按最多 8192 行分块。
+temporal attention 继续使用 fused SDPA，并沿展开后的 `N×4` 维度按最多 8192 行分块。
 因此每次 CUDA launch 最多处理 `8192×4=32768` 个 batch-head；即使单卡 batch 512 且每个
-样本都有 6 个有效 pad，也不会把全部 `3072×16×4` 个 batch-head 放进同一次 kernel launch。
+样本都有 6 个有效 pad，全部 temporal attention 也只有 `3072×4×4=49152` 个 batch-head。
 
 同一个 patch grid 有两个独立消费者。
 
@@ -141,10 +142,12 @@ temporal attention 继续使用 fused SDPA，但会沿展开后的 `N×16` 维�
 
 ```text
 (N,4,512,4,4)
-→ reshape (N×16,4,512)
+→ adaptive average pool
+→ (N,4,512,2,2)
+→ reshape (N×4,4,512)
 → [patch state, patch state - frame0 state]
 → 128-d temporal cross-attention
-→ (N,2,512,4,4)
+→ (N,2,512,2,2)
 → spatial mean
 → (N,2,512)
 ```
