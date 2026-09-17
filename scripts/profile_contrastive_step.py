@@ -213,6 +213,7 @@ def main() -> int:
         episode_group_frac=cfg.policy.episode_group_frac,
         episode_group_size=cfg.policy.episode_group_size,
         min_frame_gap=cfg.policy.min_frame_gap,
+        sample_costs=dataset.sample_costs,
     )
     loader = DataLoader(
         dataset=dataset, batch_sampler=sampler, num_workers=args.num_workers,

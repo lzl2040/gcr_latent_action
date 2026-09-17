@@ -1884,3 +1884,37 @@ backpropagates through the frozen decoder when applying an image-space loss.
 
 The model is 764.7M parameters / 396.7M trainable. The 4×4 change does not alter parameter counts
 or checkpoint shapes; its runtime and memory are no greater than this earlier 7×7 baseline.
+
+## 24. Full-mixture NCCL timeout was rank-local data concentration
+
+`debug_research_data` could start at micro batch 512, while `hq_research_data_stage1` sometimes
+left surviving ranks at their first contrastive `all_gather` until the 600 s store timeout. The
+all-gather traceback was secondary: W&B showed GPU memory disappearing from peer ranks, meaning
+they had exited or been killed before publishing the first NCCL communicator ID.
+
+The sampler made this failure likely. Each rank independently chose one main dataset for 75% of
+its local batch. Replaying the first eight rank batches at seed 1000 with the locally available
+HQ datasets gave the following nominal tactile-view counts:
+
+```text
+old: 1031, 2592, 1036, 233, 1035, 1818, 271, 279
+```
+
+The 2,592-view rank had more than eleven times the tactile/video work of the 233-view rank.
+Differences in storage latency make the skew worse for the full cluster mixture. The fast rank
+then reaches `_all_gather_detached()` while a heavy rank is still decoding/encoding, has OOMed,
+or has been killed for host memory pressure.
+
+Training now constructs exactly the same eight virtual-rank batches, concatenates them, and
+re-shards that unchanged global sample multiset by per-dataset frequency and
+`1 + tactile_view_count` cost. On the same replay:
+
+```text
+balanced: 1038, 1038, 1037, 1037, 1037, 1037, 1035, 1036
+```
+
+The view-count spread falls from 2,359 to 3. Samples are grouped by dataset again within each
+local batch for decoder locality. Since the contrastive loss gathers all ranks before forming
+negatives, splitting an episode group across ranks does not weaken the global hard-negative set.
+The fixed held-out evaluator does not enable this option, so its historical local-batch
+difficulty remains unchanged.

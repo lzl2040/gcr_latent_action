@@ -521,6 +521,7 @@ or distillation into the existing smaller tower is more economical than unfreezi
 | Patch temporal head / Physical input | `(N,4,512,4,4) → pool 2×2 → (N,2,512,2,2) → (N,2,512)` |
 | Temporal SDPA launch bound | 8192 patch rows/chunk = at most 32,768 batch-heads |
 | Spatial decoder | `(N,512,4,4) → (N,3,112,112)`, no skip connections |
+| Distributed train sampler | unchanged global samples; per-dataset/tactile cost balanced across ranks |
 | Full DINOv3 model parameter split | 764.7M / 396.7M |
 | `K=1` similarity is bit-identical to the old formula | max abs diff 0.0 |
 | Degenerate `K=4` reduces to `K=1` | max abs diff 5.6e-08 |

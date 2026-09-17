@@ -25,7 +25,15 @@ from torch.utils.data import Sampler
 
 
 class ContrastiveBatchSampler(Sampler):
-    """Distributed batch sampler yielding lists of ``(dataset_idx, frame_idx)`` tuples."""
+    """Distributed batch sampler yielding lists of ``(dataset_idx, frame_idx)`` tuples.
+
+    With ``balance_across_ranks=True``, the old rank-local hard-negative batches are first
+    constructed as one global batch and then re-sharded across ranks. This preserves the exact
+    global sample set while preventing one rank from receiving nearly all expensive
+    tactile/video samples and becoming a straggler or OOM victim before the contrastive
+    all-gather. The option is explicit because fixed evaluation intentionally preserves its
+    historical rank-local batch structure.
+    """
 
     def __init__(
         self,
@@ -41,10 +49,23 @@ class ContrastiveBatchSampler(Sampler):
         episode_group_frac: float = 0.75,
         episode_group_size: int = 8,
         min_frame_gap: int = 32,
+        sample_costs: np.ndarray | list[float] | None = None,
+        balance_across_ranks: bool = False,
     ):
         self.episode_ranges = episode_ranges
         self.sample_weights = np.asarray(sample_weights, dtype=np.float64)
         self.sample_weights = self.sample_weights / self.sample_weights.sum()
+        if sample_costs is None:
+            self.sample_costs = np.ones(len(self.sample_weights), dtype=np.float64)
+        else:
+            self.sample_costs = np.asarray(sample_costs, dtype=np.float64)
+            if self.sample_costs.shape != self.sample_weights.shape:
+                raise ValueError(
+                    f"sample_costs has shape {self.sample_costs.shape}, expected "
+                    f"{self.sample_weights.shape}."
+                )
+            if not np.isfinite(self.sample_costs).all() or (self.sample_costs <= 0).any():
+                raise ValueError("sample_costs must contain only finite positive values.")
         self.batch_size = batch_size
         self.num_replicas = max(1, num_replicas)
         self.rank = rank
@@ -66,6 +87,7 @@ class ContrastiveBatchSampler(Sampler):
         self.episode_group_frac = float(np.clip(episode_group_frac, 0.0, 1.0))
         self.episode_group_size = max(2, episode_group_size)
         self.min_frame_gap = max(1, min_frame_gap)
+        self.balance_across_ranks = bool(balance_across_ranks)
         self.epoch = 0
 
         # Usable frame span per episode: [start, end - horizon). Episodes too short to host a
@@ -137,10 +159,81 @@ class ContrastiveBatchSampler(Sampler):
         perm = rng.permutation(len(batch))
         return [batch[i] for i in perm]
 
+    def _global_batch(self, local_batch_id: int) -> list[tuple[int, int]]:
+        """Reproduce the old per-rank batches, concatenated in virtual-rank order."""
+        batch = []
+        for virtual_rank in range(self.num_replicas):
+            global_batch_id = local_batch_id * self.num_replicas + virtual_rank
+            rng = np.random.default_rng([self.seed, self.epoch, global_batch_id])
+            batch.extend(self._build_batch(rng))
+        return batch
+
+    def _balanced_rank_batches(
+        self,
+        global_batch: list[tuple[int, int]],
+    ) -> list[list[tuple[int, int]]]:
+        """Partition a fixed global batch by dataset frequency and estimated sample cost."""
+        if len(global_batch) != self.batch_size * self.num_replicas:
+            raise ValueError(
+                f"Expected {self.batch_size * self.num_replicas} global samples, "
+                f"got {len(global_batch)}."
+            )
+
+        assignments: list[list[tuple[int, tuple[int, int]]]] = [
+            [] for _ in range(self.num_replicas)
+        ]
+        loads = np.zeros(self.num_replicas, dtype=np.float64)
+        dataset_counts = np.zeros(
+            (self.num_replicas, len(self.sample_weights)),
+            dtype=np.int64,
+        )
+
+        # Assign expensive samples first. For each dataset, prefer the rank that has seen the
+        # fewest of its samples, then the lowest total estimated load. This balances unknown
+        # dataset-specific I/O as well as the known tactile-view cost.
+        indexed = list(enumerate(global_batch))
+        indexed.sort(
+            key=lambda item: (
+                -self.sample_costs[item[1][0]],
+                item[0],
+            )
+        )
+        for original_position, sample in indexed:
+            ds_idx = sample[0]
+            candidates = [
+                rank
+                for rank in range(self.num_replicas)
+                if len(assignments[rank]) < self.batch_size
+            ]
+            rank = min(
+                candidates,
+                key=lambda candidate: (
+                    dataset_counts[candidate, ds_idx],
+                    loads[candidate],
+                    len(assignments[candidate]),
+                    candidate,
+                ),
+            )
+            assignments[rank].append((original_position, sample))
+            dataset_counts[rank, ds_idx] += 1
+            loads[rank] += self.sample_costs[ds_idx]
+
+        # Group each local batch by dataset to retain decoder/cache locality. Relative order
+        # within a dataset follows the original global plan.
+        rank_batches = []
+        for assignment in assignments:
+            assignment.sort(key=lambda item: (item[1][0], item[0]))
+            rank_batches.append([sample for _, sample in assignment])
+        return rank_batches
+
     def __iter__(self):
         for local_batch_id in range(self.num_batches):
-            global_batch_id = local_batch_id * self.num_replicas + self.rank
-            rng = np.random.default_rng(
-                [self.seed, self.epoch, global_batch_id]
-            )
-            yield self._build_batch(rng)
+            if self.num_replicas == 1 or not self.balance_across_ranks:
+                global_batch_id = local_batch_id * self.num_replicas + self.rank
+                rng = np.random.default_rng(
+                    [self.seed, self.epoch, global_batch_id]
+                )
+                yield self._build_batch(rng)
+                continue
+            global_batch = self._global_batch(local_batch_id)
+            yield self._balanced_rank_batches(global_batch)[self.rank]

@@ -179,6 +179,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.dataset_sizes: list[int] = []
         self.specs: list[dict] = []
         self.image_key_maps: list[dict] = []
+        self.tactile_view_counts: list[int] = []
         self.norm_stats: list[dict] = []
         self.episode_ranges: list[np.ndarray] = []
         kept_weights: list[float] = []
@@ -223,6 +224,15 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             self.dataset_sizes.append(len(dataset))
             self.specs.append(spec)
             self.image_key_maps.append(img_keys)
+            self.tactile_view_counts.append(
+                len(
+                    [
+                        key
+                        for key in tactile_image_keys(spec)
+                        if key in ds_meta.video_keys
+                    ][: self.max_tactile_views]
+                )
+            )
             self.norm_stats.append(self._build_norm_stats(dataset, spec))
             self.episode_ranges.append(self._build_episode_ranges(dataset, version))
             # The horizon recorded here is the one ``_build_dataset`` actually read with, not a
@@ -263,6 +273,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # Balance by dataset size, as in the original pipeline.
         weights = np.array(kept_weights, dtype=np.float64) * np.array(self.dataset_sizes, dtype=np.float64)
         self.sample_weights = weights / weights.sum()
+        # Every sample reads one primary video stream. Each tactile view adds another video
+        # stream plus four ResNet frames and two decoder endpoints, so view count is a useful
+        # rank-balancing proxy even though dead-pad masking can reduce the actual GPU work.
+        self.sample_costs = 1.0 + np.asarray(self.tactile_view_counts, dtype=np.float64)
         self.dataset_size_one_epoch = dataset_size_one_epoch
         self.dataset_sample_counts = (self.sample_weights * dataset_size_one_epoch).astype(int)
 

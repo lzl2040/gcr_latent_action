@@ -142,8 +142,8 @@ def train(cfg: TrainPipelineConfig):
     batch_size = deepspeed_configs_in_dict["train_micro_batch_size_per_gpu"]
 
     # ------------------------------------------------------------------ data
-    # The seed is shared across ranks: the sampler itself de-correlates ranks by offsetting
-    # the batch id, so every rank must agree on the sampling plan.
+    # The seed is shared across ranks: every process reconstructs the same virtual global
+    # batch before deterministically taking its balanced local shard.
     dataset = MultiModalContrastiveDataset(
         cfg=cfg,
         data_mix=cfg.data_mix,
@@ -165,6 +165,8 @@ def train(cfg: TrainPipelineConfig):
         episode_group_frac=cfg.policy.episode_group_frac,
         episode_group_size=cfg.policy.episode_group_size,
         min_frame_gap=cfg.policy.min_frame_gap,
+        sample_costs=dataset.sample_costs,
+        balance_across_ranks=True,
     )
 
     dataloader = DataLoader(
@@ -282,6 +284,21 @@ def train(cfg: TrainPipelineConfig):
         batch_ready = time.perf_counter()
         for batch in dataloader:
             dataloading_s += time.perf_counter() - batch_ready
+            if step == 0:
+                dataset_ids, dataset_counts = torch.unique(
+                    batch["dataset_id"],
+                    return_counts=True,
+                )
+                mix = ", ".join(
+                    f"{dataset.dataset_names[int(dataset_id)]}:{int(count)}"
+                    for dataset_id, count in zip(dataset_ids, dataset_counts, strict=True)
+                )
+                logger.warning(
+                    "First batch rank=%d tactile_pads=%d datasets={%s}",
+                    rank,
+                    int(batch["tactile_image_mask"].sum().item()),
+                    mix,
+                )
 
             fwd_bwd_start = time.perf_counter()
             loss, output_dict = update_policy(model_engine, batch, cfg.task_type, step=step)

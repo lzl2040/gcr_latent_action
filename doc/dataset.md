@@ -317,8 +317,19 @@ batch (256)
 
 每个 episode 的可用区间是 `[start, end - horizon)`，保证未来帧和完整动作块都存在、无需 clamp。
 
-分布式方面：所有 rank 共享同一个 seed，由 `global_batch_id = local_batch_id * num_replicas + rank`
-去相关，因此各 rank 必须对采样计划取得一致——这也是训练脚本里不给各 rank 分配不同 seed 的原因。
+分布式训练会先按旧算法构造 `world_size` 个 virtual-rank batch，再把它们合成完全相同的 global
+batch，并重新分配到真实 rank。重分配同时最小化：
+
+- 每个数据集在各 rank 的样本数差；
+- `1 + tactile_view_count` 估算的读取与 GPU 负载；
+- 每张卡的样本总数约束（始终严格等于配置的 micro batch）。
+
+因此 global batch 的样本集合、`same_dataset_frac` 和同 episode hard negatives 都不变；只是原来
+集中在某一张卡上的主数据集被摊到全部 rank。每张卡内部最终按数据集重新分组，保留视频 decoder
+cache 的局部性。
+
+这项重分配只在训练入口启用。固定评测集仍使用旧的 rank-local 采样，因为它不做跨 rank
+all-gather，改变本地 batch 构成会改变评测难度。
 
 ---
 
