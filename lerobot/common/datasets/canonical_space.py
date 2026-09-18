@@ -157,6 +157,10 @@ PHYSICAL_SPECS: dict[str, dict] = {
         "action": [_seg("action", 0, 20, 0)],
         "state": [_seg("observation.state", 0, 20, 0)],
     },
+    "droid": {
+        "action": [_seg("action", 0, 10, 0)],
+        "state": [_seg("observation.state", 0, 10, 0)],
+    },
     "robomind_franka_dual_arm": {
         "action": [_seg("action", 0, 20, 0)],
         "state": [_seg("observation.state", 0, 20, 0)],
