@@ -15,8 +15,9 @@ run -- scores exactly those. What remains is the model.
 Two splits are built:
 
 ``mixture``
-    Sampled with the training weights, with the same hard-negative structure the training
-    sampler uses. This is the headline number.
+    Sampled from the physical-supervision subset with renormalised training weights and the
+    same hard-negative structure the training sampler uses. Video-only samples are excluded
+    because they have no physical target to retrieve.
 ``tactile``
     Sampled only from datasets that carry tactile. In ``debug_research_data`` tactile is 2.7%
     of the mixture, so the headline number would contain about seven tactile rows per batch
@@ -135,8 +136,18 @@ def build_eval_loaders(
     horizon = dataset.frame_horizons
     loaders: dict[str, DataLoader] = {}
 
-    splits: dict[str, np.ndarray] = {"mixture": np.asarray(dataset.sample_weights, dtype=np.float64)}
-    tactile_weights = np.asarray(dataset.sample_weights, dtype=np.float64) * dataset.has_tactile
+    physical_weights = (
+        np.asarray(dataset.sample_weights, dtype=np.float64)
+        * np.asarray(dataset.has_physical, dtype=np.float64)
+    )
+    splits: dict[str, np.ndarray] = {}
+    if physical_weights.sum() > 0:
+        splits["mixture"] = physical_weights / physical_weights.sum()
+    tactile_weights = (
+        np.asarray(dataset.sample_weights, dtype=np.float64)
+        * dataset.has_tactile
+        * dataset.has_physical
+    )
     if tactile_weights.sum() > 0:
         splits["tactile"] = tactile_weights / tactile_weights.sum()
 
@@ -202,11 +213,16 @@ def evaluate(model_engine, loaders: dict[str, DataLoader], move_batch) -> dict[s
             batch = move_batch(batch, device)
             perception, _, _ = policy.encode_perception(batch)
             physical, _ = policy.encode_physical(batch)
+            valid = batch["has_physical"].to(device).reshape(-1) > 0.5
+            if not valid.any():
+                continue
+            perception = perception[valid]
+            physical = physical[valid]
 
             n = perception.shape[0]
             sim = pairwise_similarity(perception, physical)
-            episode_uid = batch["episode_uid"].to(device).long().reshape(-1)
-            frame_index = batch["frame_index"].to(device).long().reshape(-1)
+            episode_uid = batch["episode_uid"].to(device).long().reshape(-1)[valid]
+            frame_index = batch["frame_index"].to(device).long().reshape(-1)[valid]
             labels = torch.arange(n, device=device)
             invalid = policy._false_negative_mask(
                 episode_uid, frame_index, episode_uid, frame_index

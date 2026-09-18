@@ -232,8 +232,8 @@ PHYSICAL_SPECS: dict[str, dict] = {
         "state": [_seg("observation.state", 0, 20, 0)],
     },
     # Human egocentric video without robot action, proprioception, or tactile data.
-    # It is valid for `train_perception`, whose loader bypasses this table entirely, but
-    # cannot provide a physical-side positive for contrastive training.
+    # `train_contrastive` keeps these samples for the perception reconstruction objective
+    # and excludes them from both sides of InfoNCE because no physical positive exists.
     "ego10k_part1": {
         "action": [],
         "state": [],

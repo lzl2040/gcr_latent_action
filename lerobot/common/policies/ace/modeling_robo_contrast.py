@@ -83,6 +83,38 @@ def _rank_world() -> tuple[int, int]:
     return 0, 1
 
 
+def _distributed_mean_from_local_sum(
+    local_sum: torch.Tensor,
+    global_count: torch.Tensor,
+    world_size: int,
+) -> torch.Tensor:
+    """Return one global mean value while preserving correctly scaled local gradients."""
+    gradient_value = local_sum * (world_size / global_count)
+    detached_sum = local_sum.detach().clone()
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(detached_sum, op=dist.ReduceOp.SUM)
+    detached_mean = detached_sum / global_count
+    return gradient_value + (detached_mean - gradient_value.detach())
+
+
+def _global_sum_detached(values: torch.Tensor) -> torch.Tensor:
+    total = values.detach().clone()
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    return total
+
+
+def _zero_parameter_anchor(module: nn.Module | None, reference: torch.Tensor) -> torch.Tensor:
+    """Attach every trainable parameter to an exact-zero loss without running the module."""
+    if module is None:
+        return reference.sum() * 0.0
+    anchor = reference.sum() * 0.0
+    for parameter in module.parameters():
+        if parameter.requires_grad and parameter.numel() > 0:
+            anchor = anchor + parameter.reshape(-1)[0] * 0.0
+    return anchor
+
+
 def pairwise_similarity(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Similarity between every row of ``a`` and every row of ``b``.
 
@@ -1736,6 +1768,13 @@ class RoboContrast(PreTrainedPolicy):
         self.physical_encoder = None if config.perception_only else PhysicalEncoder(config)
         self.logit_scale = nn.Parameter(torch.log(torch.tensor(1.0 / config.temperature)))
         self._max_logit_scale = math.log(config.logit_scale_max)
+        if config.perception_only:
+            # Reconstruction consumes the change queries before their contrastive pooling and
+            # projection. ZeRO-2 flattens missing gradients to zeros, so merely leaving these
+            # heads unused would still let AdamW weight decay alter them on every video step.
+            self.perception_encoder.out_proj.requires_grad_(False)
+            self.perception_encoder.query_pool.requires_grad_(False)
+            self.logit_scale.requires_grad_(False)
 
     # -- PreTrainedPolicy API ---------------------------------------------
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
@@ -1809,6 +1848,46 @@ class RoboContrast(PreTrainedPolicy):
         emb, recon_loss = self.physical_encoder(batch)
         return F.normalize(emb.float(), dim=-1), recon_loss
 
+    def _physical_gate_values(self) -> tuple[float, float]:
+        if self.physical_encoder is None:
+            return 0.0, 0.0
+        return (
+            torch.tanh(self.physical_encoder.tactile_signal_gate).item(),
+            torch.tanh(self.physical_encoder.tactile_image_gate).item(),
+        )
+
+    def _video_only_loss(
+        self,
+        percep_recon: torch.Tensor | None,
+        percep_aux: dict[str, float],
+        global_rows: int,
+    ):
+        """Train only the visual-change latent when no rank has a physical positive."""
+        if percep_recon is None or self.config.perception_recon_weight <= 0:
+            raise RuntimeError(
+                "This global batch contains only video samples, so it needs the perception "
+                "reconstruction objective. Set perception_recon_weight > 0 and "
+                "num_predictor_layers > 0."
+            )
+        loss = self.config.perception_recon_weight * percep_recon
+        tactile_sig_gate, tactile_img_gate = self._physical_gate_values()
+        loss_dict = {
+            "contrastive_loss": 0.0,
+            "recon_loss": 0.0,
+            "percep_recon_loss": percep_recon.item(),
+            "retrieval_acc": 0.0,
+            "physical_rows": 0.0,
+            "video_only_rows": float(global_rows),
+            "tactile_hits": 0.0,
+            "tactile_rows": 0.0,
+            "pos_sim": 0.0,
+            "logit_scale": self.logit_scale.clamp(max=self._max_logit_scale).exp().item(),
+            "tactile_sig_gate": tactile_sig_gate,
+            "tactile_img_gate": tactile_img_gate,
+        }
+        loss_dict.update(percep_aux)
+        return loss, loss_dict
+
     # -- loss --------------------------------------------------------------
     def _false_negative_mask(self, episode_uid, frame_index, all_episode_uid, all_frame_index):
         """``True`` where a candidate must be excluded from the denominator.
@@ -1828,15 +1907,39 @@ class RoboContrast(PreTrainedPolicy):
         perception, percep_recon, percep_aux = self.encode_perception(
             batch, probe=self._should_probe(step)
         )
-        physical, tactile_recon = self.encode_physical(batch)
 
         rank, world_size = _rank_world()
         local_bs = perception.shape[0]
+        device = perception.device
+        has_physical = batch.get("has_physical")
+        if has_physical is None:
+            has_physical = torch.ones(local_bs, device=device, dtype=torch.bool)
+        else:
+            has_physical = has_physical.to(device=device).reshape(-1) > 0.5
+        local_physical_rows = has_physical.sum().to(torch.float32)
+        global_physical_rows = _global_sum_detached(local_physical_rows)
+        global_rows = local_bs * world_size
 
+        # Every rank takes the same branch because the count was all-reduced. Physical
+        # parameters stay unused (`grad=None`), so AdamW neither updates its moments nor
+        # applies weight decay on a batch with no physical supervision.
+        if global_physical_rows.item() == 0:
+            return self._video_only_loss(
+                percep_recon,
+                percep_aux,
+                global_rows,
+            )
+        if self.physical_encoder is None:
+            raise RuntimeError(
+                "The batch contains physical supervision, but `perception_only=True` omitted "
+                "the physical encoder."
+            )
+
+        physical, tactile_recon = self.encode_physical(batch)
         all_perception = _all_gather_detached(perception)
         all_physical = _all_gather_detached(physical)
+        all_has_physical = _all_gather_detached(has_physical.to(torch.float32)) > 0.5
 
-        device = perception.device
         episode_uid = batch["episode_uid"].to(device).long().reshape(-1)
         frame_index = batch["frame_index"].to(device).long().reshape(-1)
         all_episode_uid = _all_gather_detached(episode_uid)
@@ -1848,13 +1951,37 @@ class RoboContrast(PreTrainedPolicy):
 
         labels = torch.arange(local_bs, device=device) + rank * local_bs
         invalid = self._false_negative_mask(episode_uid, frame_index, all_episode_uid, all_frame_index)
-        invalid[torch.arange(local_bs, device=device), labels] = False
+        invalid = invalid | ~all_has_physical.unsqueeze(0)
+        local_rows = torch.arange(local_bs, device=device)
+        invalid[local_rows[has_physical], labels[has_physical]] = False
         logits_p2r = logits_p2r.masked_fill(invalid, float("-inf"))
         logits_r2p = logits_r2p.masked_fill(invalid, float("-inf"))
 
-        loss_p2r = F.cross_entropy(logits_p2r, labels)
-        loss_r2p = F.cross_entropy(logits_r2p, labels)
-        contrastive = 0.5 * (loss_p2r + loss_r2p)
+        if has_physical.any():
+            loss_p2r = F.cross_entropy(
+                logits_p2r[has_physical],
+                labels[has_physical],
+                reduction="sum",
+            )
+            loss_r2p = F.cross_entropy(
+                logits_r2p[has_physical],
+                labels[has_physical],
+                reduction="sum",
+            )
+            local_contrastive_sum = 0.5 * (loss_p2r + loss_r2p)
+        else:
+            # Other ranks may have valid pairs. Keep every local branch in the autograd graph
+            # with an exact zero so distributed gradient reduction has the same parameter set.
+            local_contrastive_sum = (
+                perception.sum() * 0.0
+                + logit_scale * 0.0
+                + _zero_parameter_anchor(self.physical_encoder, physical)
+            )
+        contrastive = _distributed_mean_from_local_sum(
+            local_contrastive_sum,
+            global_physical_rows,
+            world_size,
+        )
 
         loss = contrastive
         recon_value = 0.0
@@ -1868,8 +1995,16 @@ class RoboContrast(PreTrainedPolicy):
 
         with torch.no_grad():
             correct = (logits_p2r.argmax(dim=-1) == labels).float()
-            acc = correct.mean()
-            pos_sim = paired_similarity(perception, physical).mean()
+            local_stats = torch.stack(
+                [
+                    correct[has_physical].sum(),
+                    local_physical_rows,
+                    paired_similarity(perception, physical)[has_physical].sum(),
+                ]
+            )
+            global_stats = _global_sum_detached(local_stats)
+            acc = global_stats[0] / global_stats[1].clamp_min(1.0)
+            pos_sim = global_stats[2] / global_stats[1].clamp_min(1.0)
             # Retrieval accuracy restricted to the rows that actually carry tactile.
             # The tactile datasets are only ~2.7% of this mixture, so the aggregate accuracy
             # is nearly blind to anything the tactile path does: a change that helped tactile
@@ -1878,13 +2013,16 @@ class RoboContrast(PreTrainedPolicy):
             has_tac = (
                 (batch["tactile_image_mask"].to(device).sum(dim=-1) > 0)
                 | (batch["tactile_signal_mask"].to(device).reshape(-1) > 0)
-            ).float()
+            ).float() * has_physical.to(torch.float32)
             n_tac = has_tac.sum()
+            tactile_sig_gate, tactile_img_gate = self._physical_gate_values()
         loss_dict = {
             "contrastive_loss": contrastive.item(),
             "recon_loss": recon_value,
             "percep_recon_loss": percep_recon_value,
             "retrieval_acc": acc.item(),
+            "physical_rows": global_physical_rows.item(),
+            "video_only_rows": float(global_rows) - global_physical_rows.item(),
             # Reported as a hit count and a row count rather than a ratio: most batches contain
             # no tactile at all, and averaging a per-step ratio over those would fold in a
             # meaningless zero. Summing both over a window and dividing gives the true
@@ -1893,8 +2031,8 @@ class RoboContrast(PreTrainedPolicy):
             "tactile_rows": n_tac.item(),
             "pos_sim": pos_sim.item(),
             "logit_scale": logit_scale.item(),
-            "tactile_sig_gate": torch.tanh(self.physical_encoder.tactile_signal_gate).item(),
-            "tactile_img_gate": torch.tanh(self.physical_encoder.tactile_image_gate).item(),
+            "tactile_sig_gate": tactile_sig_gate,
+            "tactile_img_gate": tactile_img_gate,
         }
         loss_dict.update(percep_aux)
         return loss, loss_dict

@@ -104,3 +104,64 @@ def test_setting_epoch_resets_resume_offset() -> None:
 
     assert len(sampler) == sampler.num_batches
     assert sampler.start_batch == 0
+
+
+def test_sampler_keeps_physical_pairs_in_mixed_video_batches() -> None:
+    sampler = ContrastiveBatchSampler(
+        episode_ranges=_episode_ranges(3),
+        sample_weights=np.asarray([0.499, 0.499, 0.002]),
+        dataset_has_physical=np.asarray([False, False, True]),
+        batch_size=64,
+        num_replicas=1,
+        seed=1000,
+        samples_per_epoch=64 * 20,
+        horizon=32,
+    )
+
+    for batch in sampler:
+        assert sum(dataset_idx == 2 for dataset_idx, _ in batch) >= 2
+
+
+def test_rank_balancing_preserves_physical_floor_on_every_rank() -> None:
+    samplers = [
+        ContrastiveBatchSampler(
+            episode_ranges=_episode_ranges(12),
+            sample_weights=np.asarray([0.24] * 4 + [0.005] * 8),
+            dataset_has_physical=np.asarray([False] * 4 + [True] * 8),
+            batch_size=16,
+            num_replicas=2,
+            rank=rank,
+            seed=2,
+            samples_per_epoch=16 * 2 * 20,
+            horizon=32,
+            balance_across_ranks=True,
+        )
+        for rank in range(2)
+    ]
+
+    for rank_batches in zip(*samplers):
+        for sampler, batch in zip(samplers, rank_batches, strict=True):
+            assert (
+                sum(
+                    sampler.dataset_has_physical[dataset_idx]
+                    for dataset_idx, _ in batch
+                )
+                >= 2
+            )
+
+
+def test_sampler_allows_all_video_batches_when_no_physical_dataset_exists() -> None:
+    sampler = ContrastiveBatchSampler(
+        episode_ranges=_episode_ranges(2),
+        sample_weights=np.asarray([0.5, 0.5]),
+        dataset_has_physical=np.asarray([False, False]),
+        batch_size=16,
+        num_replicas=1,
+        seed=1000,
+        samples_per_epoch=16,
+        horizon=32,
+    )
+
+    batch = next(iter(sampler))
+    assert len(batch) == 16
+    assert not any(sampler.dataset_has_physical[dataset_idx] for dataset_idx, _ in batch)

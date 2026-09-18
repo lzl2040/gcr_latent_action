@@ -228,6 +228,7 @@ offsets = [round(i * H_ds / (chunk_size - 1)) for i in range(chunk_size)]
 | `image_t0` | `(3, S, S)` uint8 | 主相机在 `t` 时刻 |
 | `image_t1` | `(3, S, S)` uint8 | 主相机在 `t + H` 时刻 |
 | `pair_is_valid` | `()` float32 | `t + H` 越过 episode 结尾被 clamp 时为 0 |
+| `has_physical` | `()` float32 | action/state/触觉至少一种真实存在时为 1；纯视频样本为 0 |
 | `task` | `str` | 语言指令（**不是 tensor**） |
 
 ### 物理侧
@@ -299,6 +300,11 @@ backbone 共用同一份 batch schema，切换时不需要动 collate。
 - `sample_rate` 是必要的：同样 16 帧动作，在 10 fps 和 30 fps 数据集上覆盖的物理时长差三倍，
   不告诉模型的话它没法把动作块和视觉变化对齐。
 - `episode_uid` 与 `frame_index` 供损失函数排除假负样本（同 episode 且帧距过近的样本）。
+- `has_physical=0` 的视频样本（例如 `ego10k_part1`）仍会进入
+  `train_contrastive`，但只计算感知侧的未来帧特征重建。它们不会作为 InfoNCE 的 query、
+  positive 或 negative；若整个全局 batch 都是视频，所有 rank 同时跳过 PhysicalEncoder，
+  物理参数保持 `grad=None`，AdamW 不更新动量也不施加 weight decay。若整个 mixture 都是视频，
+  训练器会直接不构建 PhysicalEncoder。
 - `pair_is_valid` 目前**由数据集产出但模型未消费**，是一个已知的待办。
 - 某个 key 若因故没读到窗口（只回来一帧），`_build_canonical_vector` /
   `_build_tactile_*` 会把它广播成整个窗口而不是报错。这保证了鲁棒性，但也意味着**"窗口读取
@@ -312,6 +318,12 @@ backbone 共用同一份 batch schema，切换时不需要动 collate。
 
 均匀随机采样会让对比任务过于简单：把厨房场景和工厂场景区分开完全不需要理解运动。这个采样器
 **从构造上**制造困难负样本：
+
+当 mixture 同时包含纯视频和机器人数据时，每个本地 batch 至少保留 2 条
+`has_physical=1` 的样本。这个下限只替换原本的纯视频槽位，不改变 batch size；跨卡负载重排时
+还会为每个 rank 预留对应槽位，保证最终交给 DataLoader 的 shard 仍满足下限。它避免视频权重
+很大时连续产生没有任何 InfoNCE 正样本的 batch。若整个 mixture 都没有物理数据，则不启用该
+下限，训练退化为纯感知重建。
 
 ```
 batch (256)

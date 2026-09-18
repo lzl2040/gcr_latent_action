@@ -50,9 +50,12 @@ class ContrastiveBatchSampler(Sampler):
         episode_group_size: int = 8,
         min_frame_gap: int = 32,
         sample_costs: np.ndarray | list[float] | None = None,
+        dataset_has_physical: np.ndarray | list[bool] | None = None,
+        min_physical_per_batch: int = 2,
         balance_across_ranks: bool = False,
     ):
         self.episode_ranges = episode_ranges
+        self.batch_size = batch_size
         self.sample_weights = np.asarray(sample_weights, dtype=np.float64)
         self.sample_weights = self.sample_weights / self.sample_weights.sum()
         if sample_costs is None:
@@ -66,7 +69,25 @@ class ContrastiveBatchSampler(Sampler):
                 )
             if not np.isfinite(self.sample_costs).all() or (self.sample_costs <= 0).any():
                 raise ValueError("sample_costs must contain only finite positive values.")
-        self.batch_size = batch_size
+        if dataset_has_physical is None:
+            self.dataset_has_physical = np.ones(len(self.sample_weights), dtype=bool)
+        else:
+            self.dataset_has_physical = np.asarray(dataset_has_physical, dtype=bool)
+            if self.dataset_has_physical.shape != self.sample_weights.shape:
+                raise ValueError(
+                    f"dataset_has_physical has shape {self.dataset_has_physical.shape}, "
+                    f"expected {self.sample_weights.shape}."
+                )
+        physical_weights = self.sample_weights * self.dataset_has_physical
+        if physical_weights.sum() > 0:
+            self.physical_sample_weights = physical_weights / physical_weights.sum()
+            self.min_physical_per_batch = min(
+                self.batch_size,
+                max(1, int(min_physical_per_batch)),
+            )
+        else:
+            self.physical_sample_weights = None
+            self.min_physical_per_batch = 0
         self.num_replicas = max(1, num_replicas)
         self.rank = rank
         self.seed = seed
@@ -119,6 +140,14 @@ class ContrastiveBatchSampler(Sampler):
     def _pick_dataset(self, rng: np.random.Generator) -> int:
         return int(rng.choice(len(self.sample_weights), p=self.sample_weights))
 
+    def _pick_physical_dataset(self, rng: np.random.Generator) -> int:
+        return int(
+            rng.choice(
+                len(self.physical_sample_weights),
+                p=self.physical_sample_weights,
+            )
+        )
+
     def _random_frame(self, rng: np.random.Generator, ds_idx: int) -> int:
         usable = self.usable[ds_idx]
         ep = int(rng.integers(0, len(usable)))
@@ -165,6 +194,23 @@ class ContrastiveBatchSampler(Sampler):
             batch.append((ds_idx, self._random_frame(rng, ds_idx)))
 
         batch = batch[: self.batch_size]
+        num_physical = sum(
+            self.dataset_has_physical[dataset_idx] for dataset_idx, _ in batch
+        )
+        if num_physical < self.min_physical_per_batch:
+            replace_positions = [
+                index
+                for index in range(len(batch) - 1, -1, -1)
+                if not self.dataset_has_physical[batch[index][0]]
+            ]
+            for position in replace_positions[
+                : self.min_physical_per_batch - num_physical
+            ]:
+                dataset_idx = self._pick_physical_dataset(rng)
+                batch[position] = (
+                    dataset_idx,
+                    self._random_frame(rng, dataset_idx),
+                )
         perm = rng.permutation(len(batch))
         return [batch[i] for i in perm]
 
@@ -196,10 +242,13 @@ class ContrastiveBatchSampler(Sampler):
             (self.num_replicas, len(self.sample_weights)),
             dtype=np.int64,
         )
+        physical_counts = np.zeros(self.num_replicas, dtype=np.int64)
 
         # Assign expensive samples first. For each dataset, prefer the rank that has seen the
         # fewest of its samples, then the lowest total estimated load. This balances unknown
-        # dataset-specific I/O as well as the known tactile-view cost.
+        # dataset-specific I/O as well as the known tactile-view cost. Video samples cannot
+        # consume slots reserved for a rank's physical-pair floor; otherwise this rebalance
+        # could undo the guarantee established by each virtual-rank sampling plan.
         indexed = list(enumerate(global_batch))
         indexed.sort(
             key=lambda item: (
@@ -214,6 +263,28 @@ class ContrastiveBatchSampler(Sampler):
                 for rank in range(self.num_replicas)
                 if len(assignments[rank]) < self.batch_size
             ]
+            is_physical = self.dataset_has_physical[ds_idx]
+            if self.min_physical_per_batch:
+                if is_physical:
+                    deficient = [
+                        rank
+                        for rank in candidates
+                        if physical_counts[rank] < self.min_physical_per_batch
+                    ]
+                    if deficient:
+                        candidates = deficient
+                else:
+                    candidates = [
+                        rank
+                        for rank in candidates
+                        if self.batch_size - len(assignments[rank])
+                        > self.min_physical_per_batch - physical_counts[rank]
+                    ]
+                    if not candidates:
+                        raise RuntimeError(
+                            "Rank balancing exhausted every non-reserved video slot before "
+                            "placing the guaranteed physical samples."
+                        )
             rank = min(
                 candidates,
                 key=lambda candidate: (
@@ -226,6 +297,15 @@ class ContrastiveBatchSampler(Sampler):
             assignments[rank].append((original_position, sample))
             dataset_counts[rank, ds_idx] += 1
             loads[rank] += self.sample_costs[ds_idx]
+            physical_counts[rank] += int(is_physical)
+
+        if self.min_physical_per_batch and np.any(
+            physical_counts < self.min_physical_per_batch
+        ):
+            raise RuntimeError(
+                "Rank balancing failed to preserve the physical sample floor: "
+                f"{physical_counts.tolist()}."
+            )
 
         # Group each local batch by dataset to retain decoder/cache locality. Relative order
         # within a dataset follows the original global plan.

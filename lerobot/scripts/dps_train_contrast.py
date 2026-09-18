@@ -203,6 +203,21 @@ def train(cfg: TrainPipelineConfig):
         dataset_size_one_epoch=cfg.dataset.dataset_size_one_epoch,
     )
     logger.info(f"Dataset: {dataset}")
+    if not dataset.has_physical.any():
+        if (
+            cfg.policy.perception_recon_weight <= 0
+            or cfg.policy.num_predictor_layers <= 0
+        ):
+            raise ValueError(
+                "The selected mixture contains only video, so train_contrastive needs "
+                "perception_recon_weight > 0 and num_predictor_layers > 0."
+            )
+        cfg.policy.perception_only = True
+        logger.warning(
+            "The mixture contains no physical supervision. PhysicalEncoder will not be "
+            "built; train_contrastive will optimize only the visual-change latent "
+            "reconstruction objective."
+        )
 
     sampler = ContrastiveBatchSampler(
         episode_ranges=dataset.episode_ranges,
@@ -218,6 +233,7 @@ def train(cfg: TrainPipelineConfig):
         episode_group_size=cfg.policy.episode_group_size,
         min_frame_gap=cfg.policy.min_frame_gap,
         sample_costs=dataset.sample_costs,
+        dataset_has_physical=dataset.has_physical,
         balance_across_ranks=True,
     )
     epoch_schedule = _compute_epoch_schedule(
@@ -347,10 +363,12 @@ def train(cfg: TrainPipelineConfig):
 
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
-        "contra_loss": AverageMeter("contra_loss", ":.3f"),
+        "contrastive_loss": AverageMeter("contra_loss", ":.3f"),
         "recon_loss": AverageMeter("trecon", ":.4f"),
         "percep_recon_loss": AverageMeter("precon", ":.4f"),
         "retrieval_acc": AverageMeter("acc", ":.3f"),
+        "physical_rows": AverageMeter("phys_n", ":.1f"),
+        "video_only_rows": AverageMeter("video_n", ":.1f"),
         "tactile_hits": AverageMeter("tac_hit", ":.1f"),
         "tactile_rows": AverageMeter("tac_n", ":.1f"),
         "pos_sim": AverageMeter("pos_sim", ":.3f"),
@@ -419,8 +437,11 @@ def train(cfg: TrainPipelineConfig):
                     for dataset_id, count in zip(dataset_ids, dataset_counts, strict=True)
                 )
                 logger.warning(
-                    "First batch rank=%d tactile_pads=%d datasets={%s}",
+                    "First batch rank=%d physical=%d video_only=%d tactile_pads=%d "
+                    "datasets={%s}",
                     rank,
+                    int(batch["has_physical"].sum().item()),
+                    int((batch["has_physical"] < 0.5).sum().item()),
                     int(batch["tactile_image_mask"].sum().item()),
                     mix,
                 )
@@ -434,13 +455,26 @@ def train(cfg: TrainPipelineConfig):
                 train_tracker.dataloading_s = dataloading_s
                 train_tracker.update_s = fwd_bwd_time
                 train_tracker.loss = loss.detach().mean().item()
-                train_tracker.contra_loss = output_dict.get("contrastive_loss", 0.0)
                 train_tracker.recon_loss = output_dict.get("recon_loss", 0.0)
                 train_tracker.percep_recon_loss = output_dict.get("percep_recon_loss", 0.0)
-                train_tracker.retrieval_acc = output_dict.get("retrieval_acc", 0.0)
+                physical_rows = output_dict.get("physical_rows", 0.0)
+                if physical_rows > 0:
+                    train_tracker.contrastive_loss.update(
+                        output_dict.get("contrastive_loss", 0.0),
+                        n=physical_rows,
+                    )
+                    train_tracker.retrieval_acc.update(
+                        output_dict.get("retrieval_acc", 0.0),
+                        n=physical_rows,
+                    )
+                    train_tracker.pos_sim.update(
+                        output_dict.get("pos_sim", 0.0),
+                        n=physical_rows,
+                    )
+                train_tracker.physical_rows = physical_rows
+                train_tracker.video_only_rows = output_dict.get("video_only_rows", 0.0)
                 train_tracker.tactile_hits = output_dict.get("tactile_hits", 0.0)
                 train_tracker.tactile_rows = output_dict.get("tactile_rows", 0.0)
-                train_tracker.pos_sim = output_dict.get("pos_sim", 0.0)
                 train_tracker.logit_scale = output_dict.get("logit_scale", 0.0)
                 train_tracker.tac_sig_gate = output_dict.get("tactile_sig_gate", 0.0)
                 train_tracker.tac_img_gate = output_dict.get("tactile_img_gate", 0.0)
@@ -502,7 +536,8 @@ def train(cfg: TrainPipelineConfig):
                     wandb_log_dict["sampler_epoch/current"] = epoch + 1
                     wandb_log_dict["sampler_epoch/total"] = epoch_schedule.total_epochs
                     if output_dict:
-                        wandb_log_dict.update(output_dict)
+                        for key, value in output_dict.items():
+                            wandb_log_dict.setdefault(key, value)
                     wandb_logger.log_dict(wandb_log_dict, step)
                 train_tracker.reset_averages()
 

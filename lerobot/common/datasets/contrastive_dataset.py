@@ -6,6 +6,7 @@ Perception side
     * ``image_t0`` / ``image_t1``  : the primary camera at time ``t`` and ``t + horizon``
     * ``task``                     : the language instruction
     * ``pair_is_valid``            : 0 when ``t + horizon`` had to be clamped inside the episode
+    * ``has_physical``             : 1 only when this sample can form a contrastive pair
 
 Physical side
     * ``action`` / ``action_mask`` : action chunk in the canonical 40-dim slotted space
@@ -204,11 +205,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             )
             if spec.get("perception_only", False):
                 logger.info(
-                    "%s has no physical-side supervision; skipping it in contrastive training. "
-                    "Use task_type=train_perception to train on this video source.",
+                    "%s has no physical-side supervision; loading it for perception "
+                    "reconstruction only.",
                     dataset_name,
                 )
-                continue
 
             dataset, ds_meta, img_keys, horizon_ds, true_fps_ds = self._build_dataset(
                 cfg, dataset_name, data_root, version, spec
@@ -257,6 +257,19 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # to build a tactile-only split that can.
         self.has_tactile = np.array(
             [bool(tactile_signal_keys(s)) or bool(tactile_image_keys(s)) for s in self.specs],
+            dtype=bool,
+        )
+        self.has_physical = np.array(
+            [
+                not spec.get("perception_only", False)
+                and bool(
+                    spec.get("action")
+                    or spec.get("state")
+                    or tactile_signal_keys(spec)
+                    or tactile_image_keys(spec)
+                )
+                for spec in self.specs
+            ],
             dtype=bool,
         )
 
@@ -309,12 +322,13 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         These are source totals, independent of mixture weights and the sampled epoch size.
         """
         statistics = []
-        for name, frames, fps, ratio, episode_ranges in zip(
+        for name, frames, fps, ratio, episode_ranges, has_physical in zip(
             self.dataset_names,
             self.dataset_sizes,
             self.true_fps,
             self.sample_weights,
             self.episode_ranges,
+            self.has_physical,
             strict=True,
         ):
             if fps <= 0:
@@ -327,6 +341,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                     "hours": float(frames) / float(fps) / 3600.0,
                     "sample_ratio": float(ratio),
                     "episodes": int(len(episode_ranges)),
+                    "training": "contrastive" if has_physical else "perception-only",
                 }
             )
         return statistics
@@ -340,6 +355,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 f"{stat['hours']:.2f}",
                 f"{stat['sample_ratio']:.4f}",
                 stat["episodes"],
+                stat["training"],
             ]
             for stat in self.dataset_statistics
         ]
@@ -351,12 +367,21 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 f"{self.total_source_hours:.2f}",
                 f"{sum(self.sample_weights):.4f}",
                 self.total_source_episodes,
+                "-",
             ]
         )
         print(
             tabulate(
                 rows,
-                headers=["Dataset", "Frames", "FPS", "Hours", "Ratio", "Episodes"],
+                headers=[
+                    "Dataset",
+                    "Frames",
+                    "FPS",
+                    "Hours",
+                    "Ratio",
+                    "Episodes",
+                    "Training",
+                ],
                 tablefmt="grid",
             )
         )
@@ -959,6 +984,12 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         tactile_signal, tactile_signal_mask = self._build_tactile_signal(item, spec, norm["tactile_signal"])
         tactile_image, tactile_image_mask = self._build_tactile_images(item, spec)
         sensor_id, sensor_mean, sensor_std = self.tactile_sensor_meta[ds_idx]
+        has_physical = bool(
+            action_mask.any().item()
+            or state_mask.any().item()
+            or tactile_signal_mask.item() > 0
+            or tactile_image_mask.any().item()
+        )
 
         episode_index = int(_to_tensor(item.get("episode_index", 0)).reshape(-1)[0].item())
         task = item.get("task", "")
@@ -973,6 +1004,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "image_t0": image_t0,
             "image_t1": image_t1,
             "pair_is_valid": torch.tensor(pair_valid, dtype=torch.float32),
+            "has_physical": torch.tensor(float(has_physical), dtype=torch.float32),
             "task": task if has_text else "",
             "has_text": torch.tensor(float(has_text), dtype=torch.float32),
             "action": action,

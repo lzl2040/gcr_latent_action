@@ -1977,3 +1977,35 @@ alpha, dropout and layer-count metadata. DeepSpeed checkpoints record an ordered
 topology signature and data-parallel world size. Legacy checkpoints, changed parameter groups,
 or changed world size fall back to model weights only, rebuild optimizer state, and position
 the fresh scheduler at the saved optimizer step instead of failing during checkpoint load.
+
+## 27. Video-only samples inside `train_contrastive`
+
+`MultiModalContrastiveDataset` no longer drops sources marked `perception_only`, such as
+`ego10k_part1`. Each sample now emits `has_physical`, derived from the actual canonical
+action/state/tactile masks. The loss uses that flag in two distinct ways:
+
+```text
+has_physical = 1: perception reconstruction + symmetric perception/physical InfoNCE
+has_physical = 0: perception reconstruction only
+```
+
+Video-only rows are removed from both the query rows and candidate columns of InfoNCE, so
+they cannot create a fake positive from learned missing-modality tokens and cannot become
+easy dataset-identity negatives. The remaining contrastive loss is normalised by the global
+number of physical pairs rather than the per-rank count, which keeps its scale correct when
+the load balancer gives ranks different numbers of video rows.
+
+When a complete distributed batch is video-only, every rank takes the same reconstruction-only
+branch. In an all-video mixture the trainer sets `perception_only=true` before model construction
+and omits the physical tower entirely. It also freezes the reconstruction-unused contrastive
+projection, query-pooling matrix and temperature: ZeRO-2 turns missing gradients in its flat
+optimizer partition into zeros, so leaving those parameters merely unused would still let AdamW
+weight decay change them.
+`physical_rows` and `video_only_rows` are logged for auditing, while contrastive loss,
+retrieval accuracy and positive similarity are accumulated with `physical_rows` as their
+weight so video batches cannot dilute them. Fixed contrastive evaluation renormalises its
+sampling weights over physical datasets and excludes video-only rows. For a mixed mixture,
+the sampler reserves at least two physical pairs in every final rank shard, including after
+cross-rank cost balancing. This prevents ZeRO's flat AdamW parameters from receiving
+unsupervised momentum/weight-decay updates on an all-video step while preserving the configured
+video sampling ratio up to at most two replacements per rank.
