@@ -522,7 +522,8 @@ or distillation into the existing smaller tower is more economical than unfreezi
 | Temporal SDPA launch bound | 8192 patch rows/chunk = at most 32,768 batch-heads |
 | Spatial decoder | `(N,512,4,4) → (N,3,112,112)`, no skip connections |
 | Distributed train sampler | unchanged global samples; per-dataset/tactile cost balanced across ranks |
-| Full DINOv3 model parameter split | 764.7M / 396.7M |
+| Vision tuning | `frozen`, last-block attention `lora` (default), or `full`; vision LR is independently scaled |
+| DINOv3 parameter split, frozen / default LoRA / full | 764.7M/396.7M · 765.1M/397.1M · 764.7M/482.4M |
 | `K=1` similarity is bit-identical to the old formula | max abs diff 0.0 |
 | Degenerate `K=4` reduces to `K=1` | max abs diff 5.6e-08 |
 | End-to-end `train_ace_local.sh`, `cosmos3` + `vae` + `K=4` | 12 steps + eval + checkpoint, clean exit |

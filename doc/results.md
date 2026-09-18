@@ -1942,3 +1942,38 @@ plateau, without changing the legacy scheduler behavior used by other policies. 
 local run warms up for 500 steps, holds `1e-4` through step 20,500, then smoothly cosine-decays
 for 100,000 steps to `1.5e-6` at step 120,500 and keeps that floor thereafter. The tactile
 encoder/decoder parameter group follows the same multiplier from `1e-5` to `1.5e-7`.
+
+## 26. Vision LoRA and full fine-tuning modes
+
+The perception tower now exposes three explicit modes:
+
+| mode | trainable vision parameters | intended use |
+|---|---|---|
+| `frozen` | none | reproduce the original frozen-feature baseline |
+| `lora` | attention LoRA in the last N blocks | default alignment training with bounded optimizer state |
+| `full` | the complete vision backbone | maximum adaptation at substantially higher activation/optimizer cost |
+
+For compatibility, an unset mode maps the old `freeze_vision_encoder=true` to `lora` and
+`false` to `full`. The default LoRA setup uses rank 16, alpha 16, zero adapter dropout and the
+last four transformer blocks. It targets Q/K/V/output projections for DINOv3 and Cosmos3 and
+the fused QKV/output projections for Qwen3-VL. Measured trainable adapter counts are:
+
+```text
+DINOv3 ViT-B:       0.393M
+Cosmos3 vision:     0.590M
+Qwen3-VL-4B vision: 0.393M
+```
+
+Both LoRA and full tuning use a dedicated vision optimizer group with
+`vision_lr_scale=0.1`. With the standard main LR schedule this gives a vision peak of `1e-5`
+and floor of `1.5e-7`. The detached future-frame reconstruction target remains fixed within
+each forward, while gradients from the contrastive loss and the predictor input update the
+adapters. Only the last four blocks carry adapter gradients by default, limiting activation
+retention compared with adapting the complete tower. Frozen/full checkpoints are remapped
+onto PEFT's wrapped base-layer keys when starting LoRA, so their learned vision weights are
+retained. Loading a LoRA checkpoint into `frozen` or `full` is rejected rather than silently
+discarding the adapter update; LoRA checkpoints also persist and validate backbone, rank,
+alpha, dropout and layer-count metadata. DeepSpeed checkpoints record an ordered optimizer
+topology signature and data-parallel world size. Legacy checkpoints, changed parameter groups,
+or changed world size fall back to model weights only, rebuild optimizer state, and position
+the fresh scheduler at the saved optimizer step instead of failing during checkpoint load.

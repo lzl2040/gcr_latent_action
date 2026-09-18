@@ -50,7 +50,10 @@ usage() {
   --num_cls_tokens N --num_change_queries N
   --num_evidence_layers N --num_fusion_layers N --num_predictor_layers N
   --perception_recon_weight FLOAT --vae_repeat_frames N
-  --patch_token_stride N --freeze_vision true|false --freeze_text true|false
+  --patch_token_stride N --vision_tuning_mode frozen|lora|full
+  --freeze_vision true|false（兼容参数：true=lora，false=full）
+  --vision_lora_rank N --vision_lora_alpha N --vision_lora_dropout FLOAT
+  --vision_lora_layers N --vision_lr_scale FLOAT --freeze_text true|false
   --perception_only true|false --perception_camera_mode primary|all
   --query_probe_freq N
 
@@ -152,7 +155,13 @@ NUM_PREDICTOR_LAYERS=3
 PERCEPTION_RECON_WEIGHT=1.0
 VAE_REPEAT_FRAMES=1
 PATCH_TOKEN_STRIDE=1
+VISION_TUNING_MODE=""
 FREEZE_VISION_ENCODER=true
+VISION_LORA_RANK=16
+VISION_LORA_ALPHA=16
+VISION_LORA_DROPOUT=0.0
+VISION_LORA_LAYERS=4
+VISION_LR_SCALE=0.1
 FREEZE_TEXT_ENCODER=true
 PERCEPTION_ONLY=false
 PERCEPTION_CAMERA_MODE="primary"
@@ -270,7 +279,13 @@ while [[ $# -gt 0 ]]; do
         --perception_recon_weight) PERCEPTION_RECON_WEIGHT="$2"; shift 2 ;;
         --vae_repeat_frames) VAE_REPEAT_FRAMES="$2"; shift 2 ;;
         --patch_token_stride) PATCH_TOKEN_STRIDE="$2"; shift 2 ;;
+        --vision_tuning_mode|--vision_tuning) VISION_TUNING_MODE="$2"; shift 2 ;;
         --freeze_vision) FREEZE_VISION_ENCODER="$2"; shift 2 ;;
+        --vision_lora_rank) VISION_LORA_RANK="$2"; shift 2 ;;
+        --vision_lora_alpha) VISION_LORA_ALPHA="$2"; shift 2 ;;
+        --vision_lora_dropout) VISION_LORA_DROPOUT="$2"; shift 2 ;;
+        --vision_lora_layers) VISION_LORA_LAYERS="$2"; shift 2 ;;
+        --vision_lr_scale) VISION_LR_SCALE="$2"; shift 2 ;;
         --freeze_text) FREEZE_TEXT_ENCODER="$2"; shift 2 ;;
         --perception_only) PERCEPTION_ONLY="$2"; shift 2 ;;
         --perception_camera_mode) PERCEPTION_CAMERA_MODE="$2"; shift 2 ;;
@@ -381,6 +396,19 @@ require_choice "task_type" "$TASK_TYPE" train_contrastive train_perception
 require_choice "perception_camera_mode" "$PERCEPTION_CAMERA_MODE" primary all
 
 require_bool "freeze_vision" "$FREEZE_VISION_ENCODER"
+if [[ -z "$VISION_TUNING_MODE" ]]; then
+    if [[ "$FREEZE_VISION_ENCODER" == "true" ]]; then
+        VISION_TUNING_MODE="lora"
+    else
+        VISION_TUNING_MODE="full"
+    fi
+fi
+require_choice "vision_tuning_mode" "$VISION_TUNING_MODE" frozen lora full
+if [[ "$VISION_TUNING_MODE" == "full" ]]; then
+    FREEZE_VISION_ENCODER=false
+else
+    FREEZE_VISION_ENCODER=true
+fi
 require_bool "freeze_text" "$FREEZE_TEXT_ENCODER"
 require_bool "perception_only" "$PERCEPTION_ONLY"
 require_bool "tactile_pretrained" "$TACTILE_PRETRAINED"
@@ -409,6 +437,9 @@ require_nonnegative_int "num_fusion_layers" "$NUM_FUSION_LAYERS"
 require_nonnegative_int "num_predictor_layers" "$NUM_PREDICTOR_LAYERS"
 require_positive_int "vae_repeat_frames" "$VAE_REPEAT_FRAMES"
 require_positive_int "patch_token_stride" "$PATCH_TOKEN_STRIDE"
+require_positive_int "vision_lora_rank" "$VISION_LORA_RANK"
+require_positive_int "vision_lora_alpha" "$VISION_LORA_ALPHA"
+require_positive_int "vision_lora_layers" "$VISION_LORA_LAYERS"
 require_positive_int "num_physical_layers" "$NUM_PHYSICAL_LAYERS"
 require_positive_int "tactile_frames" "$TACTILE_FRAMES"
 require_positive_int "tactile_tokens_per_pad" "$TACTILE_TOKENS_PER_PAD"
@@ -470,6 +501,7 @@ PREDICTOR_ENABLED="$(
     python - \
         "$OPTIMIZER_LR" "$SCHEDULER_DECAY_LR" "$WEIGHT_DECAY" \
         "$SAMPLE_RATIO" "$CHUNK_SECONDS" "$PERCEPTION_RECON_WEIGHT" \
+        "$VISION_LORA_DROPOUT" "$VISION_LR_SCALE" \
         "$TACTILE_DEAD_STD" "$TACTILE_RECON_WEIGHT" "$TACTILE_LR_SCALE" \
         "$SAME_DATASET_FRAC" "$EPISODE_GROUP_FRAC" \
         "$MODALITY_DROPOUT_TACTILE" "$MODALITY_DROPOUT_STATE" \
@@ -484,6 +516,8 @@ names = (
     "sample_ratio",
     "chunk_seconds",
     "perception_recon_weight",
+    "vision_lora_dropout",
+    "vision_lr_scale",
     "tactile_dead_std",
     "tactile_recon_weight",
     "tactile_lr_scale",
@@ -502,13 +536,20 @@ except ValueError as exc:
 if any(not math.isfinite(value) for value in values.values()):
     print("错误：浮点参数不能是 NaN 或 Inf", file=sys.stderr)
     raise SystemExit(1)
-for name in ("optimizer_lr", "scheduler_decay_lr", "sample_ratio", "chunk_seconds"):
+for name in (
+    "optimizer_lr",
+    "scheduler_decay_lr",
+    "sample_ratio",
+    "chunk_seconds",
+    "vision_lr_scale",
+):
     if values[name] <= 0:
         print(f"错误：{name} 必须大于 0，当前为 {values[name]}", file=sys.stderr)
         raise SystemExit(1)
 for name in (
     "weight_decay",
     "perception_recon_weight",
+    "vision_lora_dropout",
     "tactile_dead_std",
     "tactile_recon_weight",
     "tactile_lr_scale",
@@ -526,6 +567,13 @@ for name in (
     if not 0 <= values[name] <= 1:
         print(f"错误：{name} 必须位于 [0, 1]，当前为 {values[name]}", file=sys.stderr)
         raise SystemExit(1)
+if not 0 <= values["vision_lora_dropout"] < 1:
+    print(
+        "错误：vision_lora_dropout 必须位于 [0, 1)，"
+        f"当前为 {values['vision_lora_dropout']}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 print(
     "true"
     if int(sys.argv[-1]) > 0 and values["perception_recon_weight"] > 0
@@ -654,7 +702,13 @@ PERCEPTION_ARGS=(
     --policy.num_fusion_layers="$NUM_FUSION_LAYERS"
     --policy.num_predictor_layers="$NUM_PREDICTOR_LAYERS"
     --policy.patch_token_stride="$PATCH_TOKEN_STRIDE"
+    --policy.vision_tuning_mode="$VISION_TUNING_MODE"
     --policy.freeze_vision_encoder="$FREEZE_VISION_ENCODER"
+    --policy.vision_lora_rank="$VISION_LORA_RANK"
+    --policy.vision_lora_alpha="$VISION_LORA_ALPHA"
+    --policy.vision_lora_dropout="$VISION_LORA_DROPOUT"
+    --policy.vision_lora_layers="$VISION_LORA_LAYERS"
+    --policy.vision_lr_scale="$VISION_LR_SCALE"
     --policy.freeze_text_encoder="$FREEZE_TEXT_ENCODER"
     --policy.perception_only="$PERCEPTION_ONLY"
     --policy.perception_camera_mode="$PERCEPTION_CAMERA_MODE"
@@ -735,7 +789,12 @@ PY
 GLOBAL_BATCH=$((BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * NPROC_PER_NODE * NNODES))
 echo "distributed: nodes=${NNODES} rank=${NODE_RANK} gpus/node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 echo "batch: micro=${BATCH_SIZE}/gpu grad_acc=${GRADIENT_ACCUMULATION_STEPS} global=${GLOBAL_BATCH}"
-echo "perception: backbone=${VISION_BACKBONE} recon=${PERCEPTION_RECON_TARGET} predictor=${PREDICTOR_ENABLED} cls=${NUM_CLS_TOKENS} only=${PERCEPTION_ONLY}"
+echo "perception: backbone=${VISION_BACKBONE} tuning=${VISION_TUNING_MODE} recon=${PERCEPTION_RECON_TARGET} predictor=${PREDICTOR_ENABLED} cls=${NUM_CLS_TOKENS} only=${PERCEPTION_ONLY}"
+if [[ "$VISION_TUNING_MODE" == "lora" ]]; then
+    echo "  vision_lora: rank=${VISION_LORA_RANK} alpha=${VISION_LORA_ALPHA} layers=${VISION_LORA_LAYERS} dropout=${VISION_LORA_DROPOUT} lr_scale=${VISION_LR_SCALE}"
+elif [[ "$VISION_TUNING_MODE" == "full" ]]; then
+    echo "  vision_full_lr_scale=${VISION_LR_SCALE}"
+fi
 if [[ "$PERCEPTION_ONLY" == "true" ]]; then
     echo "physical: disabled"
 else

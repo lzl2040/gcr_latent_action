@@ -50,7 +50,19 @@ class RoboContrastConfig(PreTrainedConfig):
     # same shape as Cosmos3-Edge's tower) are a directory change apart. Only the shard
     # holding `model.visual.*` is needed.
     qwen3vl_dir: str = "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct"
+    # Vision adaptation mode:
+    #   "frozen" -- no gradient through the vision tower;
+    #   "lora"   -- freeze pretrained weights and train attention LoRA in the last blocks;
+    #   "full"   -- fine-tune every vision parameter.
+    # ``None`` preserves the legacy CLI: freeze_vision_encoder=True now selects LoRA, while
+    # False selects full fine-tuning. Set "frozen" explicitly to keep the old frozen behavior.
+    vision_tuning_mode: str | None = None
     freeze_vision_encoder: bool = True
+    vision_lora_rank: int = 16
+    vision_lora_alpha: int = 16
+    vision_lora_dropout: float = 0.0
+    vision_lora_layers: int = 4
+    vision_lr_scale: float = 0.1
     freeze_text_encoder: bool = True
     text_max_length: int = 32
     # Number of latent "what changed?" queries used to read the two-frame visual evidence.
@@ -363,6 +375,35 @@ class RoboContrastConfig(PreTrainedConfig):
             raise ValueError(
                 "`vision_backbone` must be 'dinov3', 'cosmos3' or 'qwen3vl', got "
                 f"{self.vision_backbone!r}."
+            )
+        if self.vision_tuning_mode is None:
+            self.vision_tuning_mode = "lora" if self.freeze_vision_encoder else "full"
+        if self.vision_tuning_mode not in ("frozen", "lora", "full"):
+            raise ValueError(
+                "`vision_tuning_mode` must be 'frozen', 'lora' or 'full', got "
+                f"{self.vision_tuning_mode!r}."
+            )
+        self.freeze_vision_encoder = self.vision_tuning_mode != "full"
+        if self.vision_lora_rank < 1:
+            raise ValueError(
+                f"`vision_lora_rank` must be positive, got {self.vision_lora_rank}."
+            )
+        if self.vision_lora_alpha < 1:
+            raise ValueError(
+                f"`vision_lora_alpha` must be positive, got {self.vision_lora_alpha}."
+            )
+        if self.vision_lora_layers < 1:
+            raise ValueError(
+                f"`vision_lora_layers` must be positive, got {self.vision_lora_layers}."
+            )
+        if not 0.0 <= self.vision_lora_dropout < 1.0:
+            raise ValueError(
+                "`vision_lora_dropout` must be in [0, 1), got "
+                f"{self.vision_lora_dropout}."
+            )
+        if self.vision_lr_scale <= 0:
+            raise ValueError(
+                f"`vision_lr_scale` must be positive, got {self.vision_lr_scale}."
             )
         if self.perception_recon_target not in ("vision", "vae"):
             raise ValueError(

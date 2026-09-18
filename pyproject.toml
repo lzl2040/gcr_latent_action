@@ -80,12 +80,19 @@ intelrealsense = ["pyrealsense2>=2.55.1.6486 ; sys_platform != 'darwin'"]
 contrast = [
     # DINOv3 (`dinov3_vit`) 从 4.56.0 才进 transformers，更早的版本会直接不认识这个 model type
     "transformers>=4.56.0",
+    # Frozen vision towers use parameter-efficient attention adapters for alignment.
+    "peft>=0.18.0",
     # 训练脚本 dps_train_contrast.py 直接 import deepspeed，两个启动脚本也都走 deepspeed/ZeRO-2
     "deepspeed>=0.14.0",
     # tactile_backbone="ftp1" 时用它读 hpt_tokenizer/*.safetensors
     "safetensors>=0.4.0",
 ]
-pi0 = ["transformers>=4.56.0", "deepspeed>=0.14.0", "safetensors>=0.4.0"]
+pi0 = [
+    "transformers>=4.56.0",
+    "peft>=0.18.0",
+    "deepspeed>=0.14.0",
+    "safetensors>=0.4.0",
+]
 pusht = ["gym-pusht>=0.1.5 ; python_version < '4.0'"]
 stretch = [
     "hello-robot-stretch-body>=0.7.27 ; python_version < '4.0' and sys_platform == 'linux'",

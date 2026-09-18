@@ -33,6 +33,13 @@ from lerobot.common.datasets.contrastive_eval import build_eval_loaders, evaluat
 from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
+from lerobot.common.utils.deepspeed_checkpoint import (
+    DATA_PARALLEL_WORLD_SIZE_KEY,
+    OPTIMIZER_GROUP_SIGNATURE_KEY,
+    align_fresh_scheduler_to_step,
+    load_checkpoint_with_optimizer_fallback,
+    optimizer_group_signature,
+)
 from lerobot.common.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.utils import format_big_number
@@ -273,9 +280,9 @@ def train(cfg: TrainPipelineConfig):
         policy,
         num_training_steps=epoch_schedule.total_steps,
     )
+    optimizer_signature = optimizer_group_signature(policy, optimizer)
 
-    # Cast weights to bf16 but never *unfreeze* anything: the SigLIP towers are frozen on
-    # purpose, and re-enabling their gradients would blow up both memory and step time.
+    # Cast weights to bf16 without changing the configured frozen/LoRA/full trainability.
     for params in policy.parameters():
         params.data = params.data.bfloat16()
 
@@ -303,16 +310,24 @@ def train(cfg: TrainPipelineConfig):
         model_parameters=[p for p in policy.parameters() if p.requires_grad],
     )
     logger.info(f"Training batch size: {model_engine.train_batch_size()}")
+    logger.info(
+        "Optimizer learning rates: %s",
+        ", ".join(
+            f"{group.get('group_name', f'group_{index}')}={group['lr']:.3e}"
+            for index, group in enumerate(optimizer.param_groups)
+        ),
+    )
 
     step = 0
     cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
     if cfg.weight_resume:
         logger.info(f"Resuming training from {cfg.output_dir}")
-        load_path, loaded_state = model_engine.load_checkpoint(
+        load_path, loaded_state, optimizer_restored = load_checkpoint_with_optimizer_fallback(
+            model_engine,
             cfg.output_dir,
-            load_optimizer_states=True,
-            load_lr_scheduler_states=True,
-            load_module_strict=False,
+            optimizer_signature,
+            world_size,
+            lr_scheduler,
         )
         if load_path is not None and loaded_state is not None:
             # load_checkpoint returns every non-DeepSpeed-owned key it finds in the
@@ -322,6 +337,12 @@ def train(cfg: TrainPipelineConfig):
             # raises "client_state contains reserved checkpoint key", so only pick out
             # the fields this script actually owns.
             step = loaded_state.get("step", 0)
+            if not optimizer_restored:
+                align_fresh_scheduler_to_step(
+                    lr_scheduler,
+                    step,
+                    model_engine.gradient_accumulation_steps(),
+                )
             logger.info(f"Resumed training from step {step}")
 
     train_metrics = {
@@ -337,6 +358,7 @@ def train(cfg: TrainPipelineConfig):
         "tac_sig_gate": AverageMeter("tsig", ":.3f"),
         "tac_img_gate": AverageMeter("timg", ":.3f"),
         "lr": AverageMeter("lr", ":0.1e"),
+        "vision_lr": AverageMeter("vlr", ":0.1e"),
         "update_s": AverageMeter("updt_s", ":.3f"),
         "dataloading_s": AverageMeter("data_s", ":.3f"),
     }
@@ -423,6 +445,14 @@ def train(cfg: TrainPipelineConfig):
                 train_tracker.tac_sig_gate = output_dict.get("tactile_sig_gate", 0.0)
                 train_tracker.tac_img_gate = output_dict.get("tactile_img_gate", 0.0)
                 train_tracker.lr = optimizer.param_groups[0]["lr"]
+                train_tracker.vision_lr = next(
+                    (
+                        group["lr"]
+                        for group in optimizer.param_groups
+                        if group.get("group_name") == "vision"
+                    ),
+                    0.0,
+                )
                 train_tracker.step()
                 fwd_bwd_time = 0.0
                 dataloading_s = 0.0
@@ -455,6 +485,8 @@ def train(cfg: TrainPipelineConfig):
                         "step": step,
                         "epoch": epoch,
                         "batch_in_epoch": batch_idx + 1,
+                        OPTIMIZER_GROUP_SIGNATURE_KEY: optimizer_signature,
+                        DATA_PARALLEL_WORLD_SIZE_KEY: world_size,
                     },
                 )
 

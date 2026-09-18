@@ -29,8 +29,10 @@ Guarding against tactile domination
 from __future__ import annotations
 
 import itertools
+import logging
 import math
 import os
+import re
 from collections import deque
 
 import torch
@@ -42,6 +44,8 @@ from torch.utils.checkpoint import checkpoint
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.ace.ftp1_tactile import FTP1_SENSOR_NAMES, FTP1TactileTower
 from lerobot.common.policies.pretrained import PreTrainedPolicy
+
+logger = logging.getLogger(__name__)
 
 # DINOv3 is normalised with ImageNet statistics (see its preprocessor_config.json), unlike
 # SigLIP2 which uses 0.5/0.5.
@@ -280,6 +284,266 @@ class ChangePredictor(nn.Module, _CheckpointMixin):
         return self.head(self.norm(x))
 
 
+_VISION_BLOCK_PATTERNS = {
+    "dinov3": re.compile(r"^layer\.(\d+)\."),
+    "cosmos3": re.compile(r"^vision_model\.encoder\.layers\.(\d+)\."),
+    "qwen3vl": re.compile(r"^vision_model\.blocks\.(\d+)\."),
+}
+_VISION_STATE_PREFIX = "perception_encoder.vision_backbone."
+_PEFT_BASE_PREFIX = "base_model.model."
+_VISION_LORA_CONFIG_BUFFER = "_robo_contrast_lora_config"
+_VISION_LORA_CONFIG_KEY = _VISION_STATE_PREFIX + _VISION_LORA_CONFIG_BUFFER
+_VISION_BACKBONE_IDS = {"dinov3": 0, "cosmos3": 1, "qwen3vl": 2}
+
+
+def _canonical_vision_state_key(key: str) -> str | None:
+    if not key.startswith(_VISION_STATE_PREFIX) or ".lora_" in key:
+        return None
+    suffix = key[len(_VISION_STATE_PREFIX) :]
+    if suffix.startswith(_PEFT_BASE_PREFIX):
+        suffix = suffix[len(_PEFT_BASE_PREFIX) :]
+    suffix = suffix.replace(".base_layer.weight", ".weight")
+    suffix = suffix.replace(".base_layer.bias", ".bias")
+    return _VISION_STATE_PREFIX + suffix
+
+
+def _prepare_vision_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    expected_state: dict[str, torch.Tensor],
+    vision_tuning_mode: str,
+) -> dict[str, torch.Tensor]:
+    """Adapt frozen/full vision keys to PEFT's LoRA wrapper without losing base weights."""
+    incoming_adapters = [
+        key
+        for key in state_dict
+        if key.startswith(_VISION_STATE_PREFIX) and ".lora_" in key
+    ]
+    incoming_lora_config = state_dict.get(_VISION_LORA_CONFIG_KEY)
+    expected_lora_config = expected_state.get(_VISION_LORA_CONFIG_KEY)
+    if vision_tuning_mode == "lora" and expected_lora_config is None:
+        raise RuntimeError("LoRA vision tower is missing its configuration metadata.")
+    if (incoming_adapters or incoming_lora_config is not None) and vision_tuning_mode != "lora":
+        raise RuntimeError(
+            "The checkpoint contains vision LoRA adapters, but the current "
+            f"`vision_tuning_mode` is {vision_tuning_mode!r}. Resume with "
+            "`vision_tuning_mode=lora`; loading adapters into a non-LoRA tower would "
+            "silently discard their learned update."
+        )
+    if incoming_adapters:
+        if incoming_lora_config is None:
+            raise RuntimeError(
+                "Vision LoRA checkpoint is missing its adapter configuration metadata."
+            )
+        if expected_lora_config is None or not torch.equal(
+            incoming_lora_config.detach().cpu(),
+            expected_lora_config.detach().cpu(),
+        ):
+            raise RuntimeError(
+                "Vision LoRA checkpoint does not match the configured "
+                "backbone/rank/alpha/dropout/layers."
+            )
+    expected_adapters = {
+        key: value
+        for key, value in expected_state.items()
+        if key.startswith(_VISION_STATE_PREFIX) and ".lora_" in key
+    }
+    if incoming_adapters:
+        incoming_adapter_set = set(incoming_adapters)
+        expected_adapter_set = set(expected_adapters)
+        missing = sorted(expected_adapter_set - incoming_adapter_set)
+        unexpected = sorted(incoming_adapter_set - expected_adapter_set)
+        shape_mismatches = sorted(
+            key
+            for key in incoming_adapter_set & expected_adapter_set
+            if state_dict[key].shape != expected_adapters[key].shape
+        )
+        if missing or unexpected or shape_mismatches:
+            details = []
+            if missing:
+                details.append(f"missing={missing[:3]}")
+            if unexpected:
+                details.append(f"unexpected={unexpected[:3]}")
+            if shape_mismatches:
+                details.append(f"shape_mismatch={shape_mismatches[:3]}")
+            raise RuntimeError(
+                "Vision LoRA checkpoint does not match the configured rank/layers: "
+                + ", ".join(details)
+            )
+
+    remapped = state_dict.copy()
+    if hasattr(state_dict, "_metadata"):
+        remapped._metadata = state_dict._metadata
+    expected_keys = set(expected_state)
+    expected_by_canonical = {
+        canonical: key
+        for key in expected_keys
+        if (canonical := _canonical_vision_state_key(key)) is not None
+    }
+    remap_count = 0
+    for key in list(remapped):
+        if key in expected_keys:
+            continue
+        canonical = _canonical_vision_state_key(key)
+        target = expected_by_canonical.get(canonical)
+        if target is None:
+            continue
+        if target not in remapped:
+            remapped[target] = remapped[key]
+        del remapped[key]
+        remap_count += 1
+
+    if vision_tuning_mode == "lora" and not incoming_adapters:
+        for key, value in expected_adapters.items():
+            remapped.setdefault(key, value)
+        remapped.setdefault(_VISION_LORA_CONFIG_KEY, expected_lora_config)
+
+    if remap_count:
+        logger.info(
+            "Remapped %d vision backbone checkpoint tensors for tuning mode %s.",
+            remap_count,
+            vision_tuning_mode,
+        )
+    return remapped
+
+
+def _vision_lora_target_modules(
+    backbone: nn.Module,
+    backbone_kind: str,
+    num_layers: int,
+) -> tuple[list[str], list[int]]:
+    """Find attention projections in the last ``num_layers`` vision blocks."""
+    pattern = _VISION_BLOCK_PATTERNS[backbone_kind]
+    block_indices = sorted(
+        {
+            int(match.group(1))
+            for name, _ in backbone.named_modules()
+            if (match := pattern.match(name)) is not None
+        }
+    )
+    if not block_indices:
+        raise RuntimeError(
+            f"Could not find transformer blocks in {backbone_kind!r} vision backbone."
+        )
+    if num_layers > len(block_indices):
+        raise ValueError(
+            f"`vision_lora_layers` is {num_layers}, but {backbone_kind} has only "
+            f"{len(block_indices)} transformer blocks."
+        )
+
+    selected_layers = block_indices[-num_layers:]
+    selected = set(selected_layers)
+    targets = []
+    for name, module in backbone.named_modules():
+        match = pattern.match(name)
+        if match is None or int(match.group(1)) not in selected:
+            continue
+        if not isinstance(module, nn.Linear):
+            continue
+        if any(marker in name for marker in (".attention.", ".self_attn.", ".attn.")):
+            targets.append(name)
+    if not targets:
+        raise RuntimeError(
+            f"No attention linear layers found in the last {num_layers} "
+            f"{backbone_kind} blocks."
+        )
+    return targets, selected_layers
+
+
+def _add_vision_lora(
+    backbone: nn.Module,
+    config: RoboContrastConfig,
+) -> nn.Module:
+    """Freeze a vision tower and add trainable LoRA adapters to its last attention blocks."""
+    try:
+        from peft import LoraConfig, get_peft_model
+    except ImportError as exc:
+        raise ImportError(
+            "Vision LoRA requires `peft`; install the contrast dependencies with "
+            '`pip install -e ".[contrast]"`.'
+        ) from exc
+
+    for parameter in backbone.parameters():
+        parameter.requires_grad_(False)
+    targets, selected_layers = _vision_lora_target_modules(
+        backbone,
+        config.vision_backbone,
+        config.vision_lora_layers,
+    )
+    backbone = get_peft_model(
+        backbone,
+        LoraConfig(
+            r=config.vision_lora_rank,
+            lora_alpha=config.vision_lora_alpha,
+            lora_dropout=config.vision_lora_dropout,
+            target_modules=targets,
+            bias="none",
+            init_lora_weights=True,
+        ),
+    )
+    backbone.register_buffer(
+        _VISION_LORA_CONFIG_BUFFER,
+        torch.tensor(
+            [
+                1,
+                _VISION_BACKBONE_IDS[config.vision_backbone],
+                config.vision_lora_rank,
+                config.vision_lora_alpha,
+                config.vision_lora_layers,
+                round(config.vision_lora_dropout * 1_000_000),
+            ],
+            dtype=torch.int64,
+        ),
+        persistent=True,
+    )
+    unexpected = [
+        name
+        for name, parameter in backbone.named_parameters()
+        if parameter.requires_grad and "lora_" not in name
+    ]
+    if unexpected:
+        raise RuntimeError(
+            "Vision LoRA left non-adapter parameters trainable: "
+            f"{unexpected[:5]}."
+        )
+    trainable = sum(
+        parameter.numel()
+        for parameter in backbone.parameters()
+        if parameter.requires_grad
+    )
+    logger.info(
+        "Enabled %s vision LoRA: layers=%s, targets=%d, rank=%d, alpha=%d, "
+        "trainable=%.3fM, lr_scale=%g",
+        config.vision_backbone,
+        selected_layers,
+        len(targets),
+        config.vision_lora_rank,
+        config.vision_lora_alpha,
+        trainable / 1e6,
+        config.vision_lr_scale,
+    )
+    return backbone
+
+
+def _configure_vision_tuning(
+    backbone: nn.Module,
+    config: RoboContrastConfig,
+) -> nn.Module:
+    if config.vision_tuning_mode == "lora":
+        return _add_vision_lora(backbone, config)
+
+    trainable = config.vision_tuning_mode == "full"
+    for parameter in backbone.parameters():
+        parameter.requires_grad_(trainable)
+    logger.info(
+        "Vision tuning mode=%s: %.1fM/%0.1fM backbone parameters trainable, lr_scale=%g",
+        config.vision_tuning_mode,
+        sum(p.numel() for p in backbone.parameters() if p.requires_grad) / 1e6,
+        sum(p.numel() for p in backbone.parameters()) / 1e6,
+        config.vision_lr_scale,
+    )
+    return backbone
+
+
 class PerceptionEncoder(nn.Module, _CheckpointMixin):
     """Text-conditioned extractor of the visual change between ``t`` and ``t + H``."""
 
@@ -338,16 +602,15 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         dim = config.hidden_dim
         self.patch_stride = max(1, config.patch_token_stride)
 
-        self.freeze_vision = config.freeze_vision_encoder
+        self.vision_tuning_mode = config.vision_tuning_mode
+        self.freeze_vision = self.vision_tuning_mode == "frozen"
         self.freeze_text = config.freeze_text_encoder
-        if self.freeze_vision:
-            for p in self.vision_backbone.parameters():
-                p.requires_grad = False
+        self.vision_backbone = _configure_vision_tuning(self.vision_backbone, config)
         if self.freeze_text:
             for p in self.text_backbone.parameters():
                 p.requires_grad = False
 
-        # Normalise the frozen features before projecting them. Backbones differ wildly in
+        # Normalise pretrained features before projecting them. Backbones differ wildly in
         # output scale -- DINOv3 patch tokens have L2 ~12.6 where SigLIP2's have ~43.9 -- and
         # without this the rest of the encoder is implicitly tuned to one particular backbone.
         self.vision_norm = nn.LayerNorm(vision_dim)
@@ -544,8 +807,8 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         dtype = self.visual_proj.weight.dtype
         batch = image_t0.shape[0]
 
-        # The pixels are consumed by the vision backbone, not by `visual_proj`; a frozen
-        # backbone is exactly the kind of module a mixed-precision backend may leave in a
+        # The pixels are consumed by the vision backbone, not by `visual_proj`; a separately
+        # tuned backbone is exactly the kind of module a mixed-precision backend may leave in a
         # different dtype than the trainable trunk.
         pixel_dtype = _module_dtype(self.vision_backbone, default=dtype)
         pixels = torch.cat(
@@ -631,9 +894,8 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
             if self.recon_target == "vae":
                 target = self._vae_target(image_t1).to(dtype)
             else:
-                # From the frozen backbone and detached: there is no trainable path into the
-                # target, so the pair cannot collapse onto a constant the way a jointly
-                # trained student/teacher would.
+                # The future-frame target is detached even when the backbone uses LoRA/full
+                # tuning, so reconstruction cannot lower its loss by moving the target side.
                 target = p1.detach()
             recon_loss, aux = self._recon_loss(v0, queries, text_tokens, text_mask, target, probe=probe)
         return embedding, recon_loss, aux
@@ -1476,8 +1738,16 @@ class RoboContrast(PreTrainedPolicy):
         self._max_logit_scale = math.log(config.logit_scale_max)
 
     # -- PreTrainedPolicy API ---------------------------------------------
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        state_dict = _prepare_vision_state_dict(
+            state_dict,
+            super().state_dict(),
+            self.config.vision_tuning_mode,
+        )
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
     def get_optim_params(self):
-        """Two groups: the tactile CNN gets a reduced learning rate.
+        """Separate reduced-LR groups for vision adaptation and the tactile CNN.
 
         UniVTAC gives its tactile backbone its own ``lr_tactile_backbone`` group. Here the
         motivation is sharper: the ResNet-18 arrives ImageNet-pretrained and is by far the
@@ -1489,18 +1759,36 @@ class RoboContrast(PreTrainedPolicy):
         so it is absent from the optimizer. AnyTouch's new 768->``tactile_feat_dim`` adapter
         and the physical projection remain in the main parameter group.
         """
-        tactile_params, other_params = [], []
+        vision_params, tactile_params, other_params = [], [], []
+        vision_prefix = "perception_encoder.vision_backbone."
         tactile_prefix = ("physical_encoder.tactile_cnn.", "physical_encoder.tactile_recon.")
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            (tactile_params if name.startswith(tactile_prefix) else other_params).append(param)
-        groups = [{"params": other_params}]
+            if name.startswith(vision_prefix):
+                vision_params.append(param)
+            elif name.startswith(tactile_prefix):
+                tactile_params.append(param)
+            else:
+                other_params.append(param)
+        groups = [{"params": other_params, "group_name": "main"}]
+        if vision_params:
+            groups.append(
+                {
+                    "params": vision_params,
+                    "lr": self.config.optimizer_lr * self.config.vision_lr_scale,
+                    "group_name": "vision",
+                }
+            )
         if tactile_params:
             # LambdaLR captures each group's `lr` as its `initial_lr` and scales it by the same
             # schedule, so a per-group lr survives warmup and cosine decay.
             groups.append(
-                {"params": tactile_params, "lr": self.config.optimizer_lr * self.config.tactile_lr_scale}
+                {
+                    "params": tactile_params,
+                    "lr": self.config.optimizer_lr * self.config.tactile_lr_scale,
+                    "group_name": "tactile",
+                }
             )
         return groups
 
