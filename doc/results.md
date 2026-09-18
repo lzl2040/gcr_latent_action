@@ -1936,3 +1936,9 @@ The contrastive trainer derives its run length from that source size rather than
 It computes how many complete sampler epochs are needed for the sampled row count to reach the
 source-frame count, appends 100 training epochs, and configures the LR scheduler for the resulting
 step count. Both the startup schedule and periodic logs report current/total sampler epochs.
+
+The contrastive LR schedule now treats `scheduler_decay_steps` as a duration after warmup and
+plateau, without changing the legacy scheduler behavior used by other policies. The standard
+local run warms up for 500 steps, holds `1e-4` through step 20,500, then smoothly cosine-decays
+for 100,000 steps to `1.5e-6` at step 120,500 and keeps that floor thereafter. The tactile
+encoder/decoder parameter group follows the same multiplier from `1e-5` to `1.5e-7`.

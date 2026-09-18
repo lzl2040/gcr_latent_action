@@ -79,13 +79,19 @@ class VQBeTSchedulerConfig(LRSchedulerConfig):
 @LRSchedulerConfig.register_subclass("cosine_decay_with_warmup")
 @dataclass
 class CosineDecayWithWarmupSchedulerConfig(LRSchedulerConfig):
-    """Used by Physical Intelligence to train Pi0"""
+    """Warm up, optionally hold the peak, then cosine-decay the learning rate.
+
+    ``decay_from_platform_end`` is opt-in so existing policies retain the historical
+    absolute-step interpretation of ``num_decay_steps``. New contrastive training treats it
+    as the decay duration after warmup and plateau, which keeps the transition continuous.
+    """
 
     num_warmup_steps: int
     num_decay_steps: int
     peak_lr: float
     decay_lr: float
     num_platform_steps: int = 20000
+    decay_from_platform_end: bool = False
 
     def build(self, optimizer: Optimizer, num_training_steps: int) -> LambdaLR:
         del num_training_steps
@@ -101,6 +107,9 @@ class CosineDecayWithWarmupSchedulerConfig(LRSchedulerConfig):
                 return 1
 
             def cosine_decay_schedule(current_step):
+                if self.decay_from_platform_end:
+                    decay_start = self.num_warmup_steps + self.num_platform_steps
+                    current_step = max(0, current_step - decay_start)
                 step = min(current_step, self.num_decay_steps)
                 cosine_decay = 0.5 * (1 + math.cos(math.pi * step / self.num_decay_steps))
                 alpha = self.decay_lr / self.peak_lr

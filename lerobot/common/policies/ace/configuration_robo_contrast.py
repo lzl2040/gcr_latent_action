@@ -314,9 +314,9 @@ class RoboContrastConfig(PreTrainedConfig):
     optimizer_betas: tuple[float, float] = (0.9, 0.95)
 
     scheduler_warmup_steps: int = 1_000
-    scheduler_decay_steps: int = -1
+    scheduler_decay_steps: int = 100_000
     scheduler_platform_steps: int = 20_000
-    scheduler_decay_lr: float = 2.5e-6
+    scheduler_decay_lr: float = 1.5e-6
 
     # kept for CLI compatibility with the previous ACE pipeline
     frozen_ace: bool = False
@@ -458,6 +458,7 @@ class RoboContrastConfig(PreTrainedConfig):
             num_platform_steps=self.scheduler_platform_steps,
             num_warmup_steps=self.scheduler_warmup_steps,
             num_decay_steps=self.scheduler_decay_steps,
+            decay_from_platform_end=True,
         )
 
     @property

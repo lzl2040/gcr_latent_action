@@ -1,3 +1,4 @@
+import pytest
 from torch.optim.lr_scheduler import LambdaLR
 
 from lerobot.common.constants import SCHEDULER_STATE
@@ -67,6 +68,37 @@ def test_cosine_decay_with_warmup_scheduler(optimizer):
         "verbose": False,
     }
     assert scheduler.state_dict() == expected_state_dict
+
+
+def test_cosine_decay_can_start_smoothly_after_platform(optimizer):
+    config = CosineDecayWithWarmupSchedulerConfig(
+        num_warmup_steps=2,
+        num_platform_steps=3,
+        num_decay_steps=10,
+        peak_lr=0.01,
+        decay_lr=0.001,
+        decay_from_platform_end=True,
+    )
+    scheduler = config.build(optimizer, num_training_steps=100)
+    lr_lambda = scheduler.lr_lambdas[0]
+
+    assert lr_lambda(5) == pytest.approx(1.0)
+    assert lr_lambda(10) == pytest.approx(0.55)
+    assert lr_lambda(15) == pytest.approx(0.1)
+    assert lr_lambda(20) == pytest.approx(0.1)
+
+
+def test_cosine_decay_legacy_absolute_step_is_unchanged(optimizer):
+    config = CosineDecayWithWarmupSchedulerConfig(
+        num_warmup_steps=2,
+        num_platform_steps=3,
+        num_decay_steps=10,
+        peak_lr=0.01,
+        decay_lr=0.001,
+    )
+    scheduler = config.build(optimizer, num_training_steps=100)
+
+    assert scheduler.lr_lambdas[0](5) == pytest.approx(0.55)
 
 
 def test_save_scheduler_state(scheduler, tmp_path):

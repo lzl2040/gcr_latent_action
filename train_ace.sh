@@ -79,7 +79,7 @@ usage() {
   --steps N --save_freq N --log_freq N --eval_freq N --num_workers N
   --dataset_len N --sample_ratio FLOAT
   --optimizer_lr FLOAT --scheduler_decay_lr FLOAT --weight_decay FLOAT
-  --scheduler_warmup_steps N --scheduler_decay_steps N
+  --scheduler_warmup_steps N --scheduler_decay_steps N（plateau 后的衰减时长）
   --scheduler_platform_steps N
   --weight_resume true|false --resume true|false --save_checkpoint true|false
   --seed N --deepspeed_config FILE --dry_run
@@ -109,9 +109,9 @@ CHECK_PATHS=true
 
 # 优化器 / 调度器
 OPTIMIZER_LR=1e-4
-SCHEDULER_DECAY_LR=2.5e-6
+SCHEDULER_DECAY_LR=1.5e-6
 SCHEDULER_WARMUP_STEPS=500
-SCHEDULER_DECAY_STEPS=30000
+SCHEDULER_DECAY_STEPS=100000
 SCHEDULER_PLATFORM_STEPS=2000
 WEIGHT_DECAY=1e-5
 
