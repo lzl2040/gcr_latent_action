@@ -103,6 +103,19 @@ dataset[(ds_idx, frame_idx)] # 显式指定数据集与帧，供 ContrastiveBatc
 数据集的 frame 总数，不再创建按 epoch 预抽的 Python tuple 列表。即使源数据达到百亿帧，索引
 元数据也只有每个子数据集一个累计边界。
 
+训练停止条件也以这个采样 epoch 为单位。启动时先按实际 global batch 对齐后的样本数计算：
+
+```text
+samples_per_epoch = len(sampler) × micro_batch × world_size
+source_equivalent_epochs = ceil(total_source_frames / samples_per_epoch)
+total_epochs = source_equivalent_epochs + 100
+total_steps = total_epochs × len(sampler)
+```
+
+训练运行到 `total_epochs`，不再使用 `cfg.steps` 作为退出条件；scheduler 同步使用计算出的
+`total_steps`。这里的 source equivalent 表示累计采样量达到源 frame 数，不代表随机 sampler
+无重复地遍历了每一帧。日志在启动时输出完整计划，并在训练中输出 `epoch:current/total`。
+
 任何一帧读取失败都会被 catch 并回退到 `dataset[0]`，只打 warning——一个损坏的视频帧不应该
 让整个训练崩掉。
 

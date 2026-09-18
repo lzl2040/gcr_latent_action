@@ -10,8 +10,10 @@ state/action and tactile all at once.
 
 import json
 import logging
+import math
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from pprint import pformat
@@ -41,6 +43,49 @@ from lerobot.configs.train import TrainPipelineConfig
 # Images stay uint8 all the way to the GPU (4x less PCIe traffic than bf16) and are
 # normalised inside the model; index-like tensors must stay integral.
 _KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "tactile_image")
+_EXTRA_TRAINING_EPOCHS = 100
+
+
+@dataclass(frozen=True)
+class EpochSchedule:
+    steps_per_epoch: int
+    global_samples_per_step: int
+    samples_per_epoch: int
+    source_equivalent_epochs: int
+    extra_epochs: int
+    total_epochs: int
+    source_equivalent_steps: int
+    total_steps: int
+
+
+def _compute_epoch_schedule(
+    total_source_frames: int,
+    steps_per_epoch: int,
+    global_samples_per_step: int,
+    extra_epochs: int = _EXTRA_TRAINING_EPOCHS,
+) -> EpochSchedule:
+    if total_source_frames <= 0:
+        raise ValueError("total_source_frames must be positive.")
+    if steps_per_epoch <= 0:
+        raise ValueError("steps_per_epoch must be positive.")
+    if global_samples_per_step <= 0:
+        raise ValueError("global_samples_per_step must be positive.")
+    if extra_epochs < 0:
+        raise ValueError("extra_epochs must be non-negative.")
+
+    samples_per_epoch = steps_per_epoch * global_samples_per_step
+    source_equivalent_epochs = math.ceil(total_source_frames / samples_per_epoch)
+    total_epochs = source_equivalent_epochs + extra_epochs
+    return EpochSchedule(
+        steps_per_epoch=steps_per_epoch,
+        global_samples_per_step=global_samples_per_step,
+        samples_per_epoch=samples_per_epoch,
+        source_equivalent_epochs=source_equivalent_epochs,
+        extra_epochs=extra_epochs,
+        total_epochs=total_epochs,
+        source_equivalent_steps=source_equivalent_epochs * steps_per_epoch,
+        total_steps=total_epochs * steps_per_epoch,
+    )
 
 
 def init_logger(cfg, subdir: str = "contrast"):
@@ -168,6 +213,28 @@ def train(cfg: TrainPipelineConfig):
         sample_costs=dataset.sample_costs,
         balance_across_ranks=True,
     )
+    epoch_schedule = _compute_epoch_schedule(
+        total_source_frames=dataset.total_source_frames,
+        steps_per_epoch=len(sampler),
+        global_samples_per_step=batch_size * world_size,
+    )
+    if rank == 0:
+        logger.info(
+            "Epoch schedule: source_frames=%s configured_samples_per_epoch=%s "
+            "actual_samples_per_epoch=%s steps_per_epoch=%s "
+            "source_equivalent_epochs=%s extra_epochs=%s total_epochs=%s "
+            "source_equivalent_steps=%s total_steps=%s; cfg.steps=%s is ignored",
+            format_big_number(dataset.total_source_frames),
+            format_big_number(cfg.dataset.dataset_size_one_epoch),
+            format_big_number(epoch_schedule.samples_per_epoch),
+            format_big_number(epoch_schedule.steps_per_epoch),
+            format_big_number(epoch_schedule.source_equivalent_epochs),
+            format_big_number(epoch_schedule.extra_epochs),
+            format_big_number(epoch_schedule.total_epochs),
+            format_big_number(epoch_schedule.source_equivalent_steps),
+            format_big_number(epoch_schedule.total_steps),
+            format_big_number(cfg.steps),
+        )
 
     dataloader = DataLoader(
         dataset=dataset,
@@ -201,7 +268,11 @@ def train(cfg: TrainPipelineConfig):
         weight_pt_path=cfg.policy.pretrained_path,
     )
 
-    optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
+    optimizer, lr_scheduler = make_optimizer_and_scheduler(
+        cfg,
+        policy,
+        num_training_steps=epoch_schedule.total_steps,
+    )
 
     # Cast weights to bf16 but never *unfreeze* anything: the SigLIP towers are frozen on
     # purpose, and re-enabling their gradients would blow up both memory and step time.
@@ -212,7 +283,13 @@ def train(cfg: TrainPipelineConfig):
         num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         num_total_params = sum(p.numel() for p in policy.parameters())
         logger.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
-        logger.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
+        logger.info(
+            "Training epochs: %s source-equivalent + %s extra = %s; total steps: %s",
+            format_big_number(epoch_schedule.source_equivalent_epochs),
+            format_big_number(epoch_schedule.extra_epochs),
+            format_big_number(epoch_schedule.total_epochs),
+            format_big_number(epoch_schedule.total_steps),
+        )
         logger.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
         logger.info(f"{dataset.num_episodes=}")
         logger.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
@@ -275,14 +352,40 @@ def train(cfg: TrainPipelineConfig):
     fwd_bwd_time = 0.0
     dataloading_s = 0.0
     dist_step = 50
-    start_epoch = step // max(1, len(sampler))
+    start_epoch, start_batch = divmod(step, epoch_schedule.steps_per_epoch)
+    if step:
+        if start_epoch < epoch_schedule.total_epochs:
+            logger.info(
+                "Resume position: epoch %d/%d, batch %d/%d",
+                start_epoch + 1,
+                epoch_schedule.total_epochs,
+                start_batch,
+                epoch_schedule.steps_per_epoch,
+            )
+        else:
+            logger.info(
+                "Checkpoint step %s has already reached planned total step %s.",
+                format_big_number(step),
+                format_big_number(epoch_schedule.total_steps),
+            )
 
-    for epoch in range(start_epoch, 100000):
-        logger.info(f"Epoch {epoch} start...")
+    for epoch in range(start_epoch, epoch_schedule.total_epochs):
+        epoch_start_batch = start_batch if epoch == start_epoch else 0
+        logger.info(
+            "Epoch %d/%d start at batch %d/%d (step %s/%s)",
+            epoch + 1,
+            epoch_schedule.total_epochs,
+            epoch_start_batch,
+            epoch_schedule.steps_per_epoch,
+            format_big_number(step),
+            format_big_number(epoch_schedule.total_steps),
+        )
         sampler.set_epoch(epoch)
+        sampler.set_start_batch(epoch_start_batch)
         dataset.set_epoch(epoch)
         batch_ready = time.perf_counter()
-        for batch in dataloader:
+        for batch_offset, batch in enumerate(dataloader):
+            batch_idx = epoch_start_batch + batch_offset
             dataloading_s += time.perf_counter() - batch_ready
             if step == 0:
                 dataset_ids, dataset_counts = torch.unique(
@@ -339,17 +442,33 @@ def train(cfg: TrainPipelineConfig):
                     if wandb_logger:
                         wandb_logger.log_dict(eval_metrics, step)
 
-            if cfg.save_checkpoint and (step % cfg.save_freq == 0 or step == cfg.steps):
+            is_last_batch = (
+                epoch + 1 == epoch_schedule.total_epochs
+                and batch_idx + 1 == epoch_schedule.steps_per_epoch
+            )
+            if cfg.save_checkpoint and (step % cfg.save_freq == 0 or is_last_batch):
                 logger.info(f"Checkpoint policy after step {step}")
                 os.makedirs(cfg.output_dir, exist_ok=True)
                 model_engine.save_checkpoint(
-                    save_dir=cfg.output_dir, client_state={"step": step, "epoch": epoch}
+                    save_dir=cfg.output_dir,
+                    client_state={
+                        "step": step,
+                        "epoch": epoch,
+                        "batch_in_epoch": batch_idx + 1,
+                    },
                 )
 
             if rank == 0 and cfg.log_freq > 0 and step % cfg.log_freq == 0:
-                logger.info(train_tracker)
+                logger.info(
+                    "epoch:%d/%d %s",
+                    epoch + 1,
+                    epoch_schedule.total_epochs,
+                    train_tracker,
+                )
                 if wandb_logger:
                     wandb_log_dict = train_tracker.to_dict()
+                    wandb_log_dict["sampler_epoch/current"] = epoch + 1
+                    wandb_log_dict["sampler_epoch/total"] = epoch_schedule.total_epochs
                     if output_dict:
                         wandb_log_dict.update(output_dict)
                     wandb_logger.log_dict(wandb_log_dict, step)
@@ -358,12 +477,7 @@ def train(cfg: TrainPipelineConfig):
             if step % dist_step == 0 and dist.is_initialized():
                 dist.barrier(device_ids=[model_engine.local_rank])
 
-            if step >= cfg.steps:
-                break
             batch_ready = time.perf_counter()
-
-        if step >= cfg.steps:
-            break
 
     logger.info("Training finished")
 

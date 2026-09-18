@@ -89,6 +89,7 @@ class ContrastiveBatchSampler(Sampler):
         self.min_frame_gap = max(1, min_frame_gap)
         self.balance_across_ranks = bool(balance_across_ranks)
         self.epoch = 0
+        self.start_batch = 0
 
         # Usable frame span per episode: [start, end - horizon). Episodes too short to host a
         # full chunk fall back to their single first frame (clamping is handled downstream).
@@ -103,9 +104,17 @@ class ContrastiveBatchSampler(Sampler):
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
+        self.start_batch = 0
+
+    def set_start_batch(self, start_batch: int) -> None:
+        if start_batch < 0 or start_batch > self.num_batches:
+            raise ValueError(
+                f"start_batch must be in [0, {self.num_batches}], got {start_batch}."
+            )
+        self.start_batch = int(start_batch)
 
     def __len__(self) -> int:
-        return self.num_batches
+        return self.num_batches - self.start_batch
 
     def _pick_dataset(self, rng: np.random.Generator) -> int:
         return int(rng.choice(len(self.sample_weights), p=self.sample_weights))
@@ -227,7 +236,7 @@ class ContrastiveBatchSampler(Sampler):
         return rank_batches
 
     def __iter__(self):
-        for local_batch_id in range(self.num_batches):
+        for local_batch_id in range(self.start_batch, self.num_batches):
             if self.num_replicas == 1 or not self.balance_across_ranks:
                 global_batch_id = local_batch_id * self.num_replicas + self.rank
                 rng = np.random.default_rng(

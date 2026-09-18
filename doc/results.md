@@ -1931,3 +1931,8 @@ The dataset now reports the sum of all source frame counts as its length. Intege
 one int64 cumulative frame boundary per sub-dataset and `searchsorted`, so even a ten-billion
 frame mixture needs only O(number of datasets) indexing metadata. Explicit tuple indexing and
 the contrastive sampler's configured `samples_per_epoch` behavior are unchanged.
+
+The contrastive trainer derives its run length from that source size rather than `cfg.steps`.
+It computes how many complete sampler epochs are needed for the sampled row count to reach the
+source-frame count, appends 100 training epochs, and configures the LR scheduler for the resulting
+step count. Both the startup schedule and periodic logs report current/total sampler epochs.

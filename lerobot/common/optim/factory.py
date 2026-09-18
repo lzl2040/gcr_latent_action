@@ -23,13 +23,16 @@ from lerobot.configs.train import TrainPipelineConfig
 
 
 def make_optimizer_and_scheduler(
-    cfg: TrainPipelineConfig, policy: PreTrainedPolicy
+    cfg: TrainPipelineConfig,
+    policy: PreTrainedPolicy,
+    num_training_steps: int | None = None,
 ) -> tuple[Optimizer, LRScheduler | None]:
     """Generates the optimizer and scheduler based on configs.
 
     Args:
         cfg (TrainPipelineConfig): The training config that contains optimizer and scheduler configs
         policy (PreTrainedPolicy): The policy config from which parameters and presets must be taken from.
+        num_training_steps: Optional scheduler length override. Defaults to ``cfg.steps``.
 
     Returns:
         tuple[Optimizer, LRScheduler | None]: The couple (Optimizer, Scheduler). Scheduler can be `None`.
@@ -54,5 +57,11 @@ def make_optimizer_and_scheduler(
     else:
         params = [p for p in params if p.requires_grad]
     optimizer = cfg.optimizer.build(params)
-    lr_scheduler = cfg.scheduler.build(optimizer, cfg.steps) if cfg.scheduler is not None else None
+    if num_training_steps is None:
+        num_training_steps = cfg.steps
+    lr_scheduler = (
+        cfg.scheduler.build(optimizer, num_training_steps)
+        if cfg.scheduler is not None
+        else None
+    )
     return optimizer, lr_scheduler

@@ -83,3 +83,24 @@ def test_distributed_sampler_keeps_legacy_partition_when_balancing_is_disabled()
         np.random.default_rng([sampler.seed, sampler.epoch, 3])
     )
     assert next(iter(sampler)) == expected
+
+
+def test_sampler_can_resume_from_a_batch_offset() -> None:
+    sampler = _sampler(rank=0)
+    full_epoch = list(sampler)
+
+    sampler.set_epoch(0)
+    sampler.set_start_batch(1)
+
+    assert len(sampler) == len(full_epoch) - 1
+    assert list(sampler) == full_epoch[1:]
+
+
+def test_setting_epoch_resets_resume_offset() -> None:
+    sampler = _sampler(rank=0)
+    sampler.set_start_batch(1)
+
+    sampler.set_epoch(2)
+
+    assert len(sampler) == sampler.num_batches
+    assert sampler.start_batch == 0
