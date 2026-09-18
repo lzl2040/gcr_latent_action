@@ -18,7 +18,7 @@ mapped into the same slotted vector plus a validity mask, so datasets that only 
 positions, only end-effector poses, or both, all coexist without silently overlapping.
 
 Indexing supports two forms:
-    * ``dataset[i]``                    -> the ``i``-th entry of the per-epoch sampling plan
+    * ``dataset[i]``                    -> the ``i``-th frame of the flattened source mixture
     * ``dataset[(ds_idx, frame_idx)]``  -> an explicit sample, used by the contrastive sampler
 """
 
@@ -29,7 +29,6 @@ import json
 import logging
 import math
 import os
-import random
 from datetime import datetime
 
 import numpy as np
@@ -277,8 +276,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # stream plus four ResNet frames and two decoder endpoints, so view count is a useful
         # rank-balancing proxy even though dead-pad masking can reduce the actual GPU work.
         self.sample_costs = 1.0 + np.asarray(self.tactile_view_counts, dtype=np.float64)
+        # This controls the custom batch sampler's epoch length, not the source dataset length.
         self.dataset_size_one_epoch = dataset_size_one_epoch
-        self.dataset_sample_counts = (self.sample_weights * dataset_size_one_epoch).astype(int)
 
         self.dataset_statistics = self._build_dataset_statistics()
         self.dataset_hours = [stat["hours"] for stat in self.dataset_statistics]
@@ -287,8 +286,15 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.total_source_hours = sum(stat["hours"] for stat in self.dataset_statistics)
         self._print_dataset_statistics()
 
-        self.id2dataset, self.num_episodes = self._build_sampling_plan(seed)
-        self.dataset_len = len(self.id2dataset)
+        # Flatten integer indexing with one int64 boundary per source dataset. The contrastive
+        # sampler supplies explicit (dataset, frame) tuples, while direct DataLoader users can
+        # traverse every source frame without materialising a multi-million-entry sampling plan.
+        self.dataset_frame_ends = np.cumsum(
+            np.asarray(self.dataset_sizes, dtype=np.int64),
+            dtype=np.int64,
+        )
+        self.dataset_len = int(self.dataset_frame_ends[-1])
+        self.num_episodes = self.total_source_episodes
 
         self.meta = self._build_unified_meta(cfg, meta_features)
 
@@ -716,40 +722,35 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         return meta
 
     # ------------------------------------------------------------------
-    # sampling plan
+    # indexing
     # ------------------------------------------------------------------
-    def _build_sampling_plan(self, seed: int):
-        rng = random.Random(seed)
-        plan: list[tuple[int, int]] = []
-        episode_count = 0
-        for ds_idx, (dataset, count) in enumerate(zip(self.datasets, self.dataset_sample_counts, strict=True)):
-            size = len(dataset)
-            if count <= 0 or size == 0:
-                continue
-            if count <= size:
-                indices = rng.sample(range(size), count)
-            else:
-                indices = rng.choices(range(size), k=count)
-            plan.extend((ds_idx, i) for i in indices)
-            episode_count += int(len(self.episode_ranges[ds_idx]) * min(1.0, count / size))
-        return plan, max(episode_count, 1)
-
     def set_epoch(self, epoch: int):
         self.epoch = epoch
-        self.id2dataset, self.num_episodes = self._build_sampling_plan(self.seed + epoch)
-        self.dataset_len = len(self.id2dataset)
 
     def __len__(self):
         return self.dataset_len
+
+    def _resolve_index(self, index) -> tuple[int, int]:
+        if isinstance(index, (tuple, list)) and len(index) == 2:
+            return int(index[0]), int(index[1])
+
+        flat_index = int(index)
+        if flat_index < 0:
+            flat_index += self.dataset_len
+        if flat_index < 0 or flat_index >= self.dataset_len:
+            raise IndexError(
+                f"Index {index} is out of range for dataset of length {self.dataset_len}."
+            )
+
+        ds_idx = int(np.searchsorted(self.dataset_frame_ends, flat_index, side="right"))
+        dataset_start = 0 if ds_idx == 0 else int(self.dataset_frame_ends[ds_idx - 1])
+        return ds_idx, flat_index - dataset_start
 
     # ------------------------------------------------------------------
     # item construction
     # ------------------------------------------------------------------
     def __getitem__(self, index):
-        if isinstance(index, (tuple, list)) and len(index) == 2:
-            ds_idx, frame_idx = int(index[0]), int(index[1])
-        else:
-            ds_idx, frame_idx = self.id2dataset[int(index)]
+        ds_idx, frame_idx = self._resolve_index(index)
 
         dataset = self.datasets[ds_idx]
         frame_idx = int(np.clip(frame_idx, 0, len(dataset) - 1))

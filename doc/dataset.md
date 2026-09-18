@@ -94,12 +94,14 @@ delta_timestamps = {k: v for k, v in resolved.items() if k in wanted_action_keys
 ### 2.2 两种索引方式
 
 ```python
-dataset[i]                  # 第 i 条 per-epoch 采样计划
+dataset[i]                  # 所有源数据集按顺序展平后的第 i 帧
 dataset[(ds_idx, frame_idx)] # 显式指定数据集与帧，供 ContrastiveBatchSampler 使用
 ```
 
-训练走的是第二种。第一种（`_build_sampling_plan` 按权重预抽一份计划）保留给不使用自定义
-采样器的场景。`set_epoch(epoch)` 会用 `seed + epoch` 重建计划。
+训练走的是第二种；`dataset_size_one_epoch` 只控制 `ContrastiveBatchSampler` 每个 epoch 产生
+多少样本。第一种使用各子数据集长度的 `int64` 累计边界进行映射，`len(dataset)` 等于所有源
+数据集的 frame 总数，不再创建按 epoch 预抽的 Python tuple 列表。即使源数据达到百亿帧，索引
+元数据也只有每个子数据集一个累计边界。
 
 任何一帧读取失败都会被 catch 并回退到 `dataset[0]`，只打 warning——一个损坏的视频帧不应该
 让整个训练崩掉。

@@ -1918,3 +1918,16 @@ local batch for decoder locality. Since the contrastive loss gathers all ranks b
 negatives, splitting an episode group across ranks does not weaken the global hard-negative set.
 The fixed held-out evaluator does not enable this option, so its historical local-batch
 difficulty remains unchanged.
+
+## 25. Source-sized contrastive dataset indexing
+
+`MultiModalContrastiveDataset` previously materialised `dataset_size_one_epoch` Python
+`(dataset_idx, frame_idx)` tuples during construction and rebuilt them in every `set_epoch`.
+The contrastive batch sampler never consumed this table: it supplies explicit tuple indices
+directly. With the default ten-million-sample epoch, the unused list could retain roughly a
+gigabyte per training rank and add another large temporary allocation while rebuilding.
+
+The dataset now reports the sum of all source frame counts as its length. Integer indexing uses
+one int64 cumulative frame boundary per sub-dataset and `searchsorted`, so even a ten-billion
+frame mixture needs only O(number of datasets) indexing metadata. Explicit tuple indexing and
+the contrastive sampler's configured `samples_per_epoch` behavior are unchanged.
