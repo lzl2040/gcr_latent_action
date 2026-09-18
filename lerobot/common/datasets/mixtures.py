@@ -636,7 +636,8 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     ],
     
     "debug_research_data":[
-        # ("agibot_alpha", 0.1),
+        ("agibot_alpha", 0.1),
+        ("language_table", 0.1),
         ("fractal20220817_data", 1.0),
         ("taco_play", 1.0),
         # ("ms_data_xdof_1", 0.01),
