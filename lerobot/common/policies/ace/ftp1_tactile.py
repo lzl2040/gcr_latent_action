@@ -225,6 +225,14 @@ FTP1_TACTILE_DATASETS: dict[str, dict] = {
         "sensors": ["MCTac"] * 2,
         "stats": {"MCTac": _stats([0.100668, 0.096691, 0.073532], [0.340254, 0.331455, 0.313227])},
     },
+    "open_neo_umi": {
+        "sensors": ["MCTac"] * 4,
+        "stats": {"MCTac": _stats([0.100668, 0.096691, 0.073532], [0.340254, 0.331455, 0.313227])},
+    },
+    "open_neo_umi_single": {
+        "sensors": ["MCTac"] * 2,
+        "stats": {"MCTac": _stats([0.100668, 0.096691, 0.073532], [0.340254, 0.331455, 0.313227])},
+    },
 }
 
 # Fallback for a tactile dataset we have no FTP-1 entry for. ``div255_mul2_minus1`` already
