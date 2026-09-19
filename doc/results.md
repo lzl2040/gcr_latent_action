@@ -1969,7 +1969,11 @@ Both LoRA and full tuning use a dedicated vision optimizer group with
 and floor of `1.5e-7`. The detached future-frame reconstruction target remains fixed within
 each forward, while gradients from the contrastive loss and the predictor input update the
 adapters. Only the last four blocks carry adapter gradients by default, limiting activation
-retention compared with adapting the complete tower. Frozen/full checkpoints are remapped
+retention compared with adapting the complete tower. When `gradient_checkpointing=true`, the
+trainable vision tower is now checkpointed as well as the evidence and predictor trunks. On
+DINOv3 ViT-B with 64 samples/GPU (128 images), this reduced measured LoRA activation memory
+from 3.143 GiB to 1.208 GiB. Frozen vision skips checkpointing because it has no backward graph.
+Frozen/full checkpoints are remapped
 onto PEFT's wrapped base-layer keys when starting LoRA, so their learned vision weights are
 retained. Loading a LoRA checkpoint into `frozen` or `full` is rejected rather than silently
 discarding the adapter update; LoRA checkpoints also persist and validate backbone, rank,

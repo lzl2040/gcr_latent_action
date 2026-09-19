@@ -9,6 +9,7 @@ from transformers.models.dinov3_vit.modeling_dinov3_vit import DINOv3ViTModel
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.ace.modeling_robo_contrast import (
     RoboContrast,
+    _configure_vision_checkpointing,
     _configure_vision_tuning,
     _vision_lora_target_modules,
 )
@@ -112,6 +113,52 @@ def test_full_and_frozen_vision_modes_set_base_trainability() -> None:
 
     assert all(parameter.requires_grad for parameter in full.parameters())
     assert not any(parameter.requires_grad for parameter in frozen.parameters())
+
+
+@pytest.mark.parametrize("mode", ["lora", "full"])
+def test_trainable_vision_modes_enable_activation_checkpointing(mode: str) -> None:
+    backbone = _tiny_dinov3()
+    config = RoboContrastConfig(
+        vision_tuning_mode=mode,
+        gradient_checkpointing=True,
+    )
+
+    _configure_vision_checkpointing(backbone, config)
+
+    assert backbone.is_gradient_checkpointing
+
+
+@pytest.mark.parametrize(
+    ("mode", "gradient_checkpointing"),
+    [("frozen", True), ("full", False)],
+)
+def test_frozen_or_disabled_vision_skips_activation_checkpointing(
+    mode: str,
+    gradient_checkpointing: bool,
+) -> None:
+    backbone = _tiny_dinov3()
+    config = RoboContrastConfig(
+        vision_tuning_mode=mode,
+        gradient_checkpointing=gradient_checkpointing,
+    )
+
+    _configure_vision_checkpointing(backbone, config)
+
+    assert not backbone.is_gradient_checkpointing
+
+
+def test_wrapped_vision_model_enables_inner_activation_checkpointing() -> None:
+    wrapper = nn.Module()
+    wrapper.vision_model = _tiny_dinov3()
+    config = RoboContrastConfig(
+        vision_backbone="qwen3vl",
+        vision_tuning_mode="lora",
+        gradient_checkpointing=True,
+    )
+
+    _configure_vision_checkpointing(wrapper, config)
+
+    assert wrapper.vision_model.is_gradient_checkpointing
 
 
 def test_optimizer_uses_reduced_lr_for_trainable_vision_parameters() -> None:

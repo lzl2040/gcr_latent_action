@@ -282,8 +282,9 @@ class RoboContrastConfig(PreTrainedConfig):
     # same trick keeps a 11.7M-parameter CNN from racing ahead of the rest of the model.
     tactile_lr_scale: float = 0.1
 
-    # Recompute trunk activations in the backward pass instead of storing them. Costs ~30%
-    # compute and saves ~15 GB at batch 256, which is worth it while the disk is the ceiling.
+    # Recompute trainable vision, evidence-trunk and predictor activations in backward instead
+    # of storing them. This is especially important for LoRA: its parameters are tiny, but
+    # gradients through the last vision blocks would otherwise retain large image activations.
     gradient_checkpointing: bool = True
 
     dropout: float = 0.0

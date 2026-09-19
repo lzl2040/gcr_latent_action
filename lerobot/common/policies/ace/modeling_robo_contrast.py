@@ -576,6 +576,32 @@ def _configure_vision_tuning(
     return backbone
 
 
+def _configure_vision_checkpointing(
+    backbone: nn.Module,
+    config: RoboContrastConfig,
+) -> None:
+    """Checkpoint a trainable vision tower before PEFT wraps it."""
+    if not config.gradient_checkpointing or config.vision_tuning_mode == "frozen":
+        return
+
+    target = backbone
+    enable = getattr(target, "gradient_checkpointing_enable", None)
+    if enable is None:
+        # Qwen3VLPatchTrunk is a thin nn.Module wrapper around the HF vision model.
+        target = getattr(backbone, "vision_model", None)
+        enable = getattr(target, "gradient_checkpointing_enable", None)
+    if enable is None:
+        raise RuntimeError(
+            f"{config.vision_backbone} vision backbone does not support activation checkpointing."
+        )
+
+    enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    logger.info(
+        "Enabled activation checkpointing for the trainable %s vision backbone.",
+        config.vision_backbone,
+    )
+
+
 class PerceptionEncoder(nn.Module, _CheckpointMixin):
     """Text-conditioned extractor of the visual change between ``t`` and ``t + H``."""
 
@@ -637,6 +663,7 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         self.vision_tuning_mode = config.vision_tuning_mode
         self.freeze_vision = self.vision_tuning_mode == "frozen"
         self.freeze_text = config.freeze_text_encoder
+        _configure_vision_checkpointing(self.vision_backbone, config)
         self.vision_backbone = _configure_vision_tuning(self.vision_backbone, config)
         if self.freeze_text:
             for p in self.text_backbone.parameters():
