@@ -123,6 +123,21 @@ def resolve_pair_horizon(
     return max(1, horizon)
 
 
+def _evenly_spaced_frame_timestamps(
+    horizon: int,
+    count: int,
+    index_fps: float,
+) -> list[float]:
+    """Sample a window on actual frame boundaries, including both endpoints."""
+    if count < 2:
+        raise ValueError(f"At least two temporal samples are required, got {count}.")
+    offsets = [
+        int(round(horizon * index / (count - 1)))
+        for index in range(count)
+    ]
+    return [offset / index_fps for offset in offsets]
+
+
 class MultiModalContrastiveDataset(torch.utils.data.Dataset):
     """Mixture of LeRobot datasets emitting aligned perception/physical modalities."""
 
@@ -160,6 +175,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.tactile_frames = max(2, int(getattr(policy_cfg, "tactile_frames", 2)))
         self.tactile_dead_std = getattr(policy_cfg, "tactile_dead_std", 0.002)
         self.max_tactile_views = min(getattr(policy_cfg, "max_tactile_views", MAX_TACTILE_VIEWS), MAX_TACTILE_VIEWS)
+        self.world_video_frames = getattr(policy_cfg, "world_video_frames", None)
+        if self.world_video_frames is not None and self.world_video_frames < 2:
+            raise ValueError("`world_video_frames` must be at least 2 when enabled.")
         self._video_backend = self._resolve_video_backend(cfg.dataset.video_backend)
         self.use_wrist_image = getattr(policy_cfg, "use_wrist_image", False)
 
@@ -559,12 +577,19 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # seeking to a keyframe and decoding across the span -- the interior frames are already
         # being decoded and discarded. Tactile therefore reads ``tactile_frames`` evenly spaced
         # samples; RGB stays at the pair.
-        pair_stamps = [0.0, horizon / index_fps]
+        if self.world_video_frames is None:
+            rgb_stamps = [0.0, horizon / index_fps]
+        else:
+            rgb_stamps = _evenly_spaced_frame_timestamps(
+                horizon,
+                self.world_video_frames,
+                index_fps,
+            )
         for key in rgb_keys:
             if key in ds_meta.video_keys:
-                delta_timestamps[key] = pair_stamps
+                delta_timestamps[key] = rgb_stamps
         n_tac = self.tactile_frames
-        tac_stamps = [horizon * i / ((n_tac - 1) * index_fps) for i in range(n_tac)]
+        tac_stamps = _evenly_spaced_frame_timestamps(horizon, n_tac, index_fps)
         for key in tac_img_keys:
             delta_timestamps[key] = tac_stamps
 
@@ -838,6 +863,40 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         last = self._resize_rgb(last)
         return first, last, valid
 
+    def _extract_video(self, item, primary_key):
+        """Return the evenly sampled RGB window as uint8 ``(T,C,H,W)``."""
+        if self.world_video_frames is None:
+            raise RuntimeError("World-video extraction was requested without `world_video_frames`.")
+        size = self.cfg.dataset.image_transforms.img_size
+        frames = item.get(primary_key) if primary_key else None
+        if frames is None:
+            return torch.zeros(
+                self.world_video_frames,
+                3,
+                size,
+                size,
+                dtype=torch.uint8,
+            )
+        if frames.ndim == 3:
+            frames = frames.unsqueeze(0)
+        if frames.shape[0] < self.world_video_frames:
+            frames = torch.cat(
+                [
+                    frames,
+                    frames[-1:].expand(self.world_video_frames - frames.shape[0], -1, -1, -1),
+                ],
+                dim=0,
+            )
+        frames = self._as_uint8(frames[: self.world_video_frames])
+        if frames.shape[-2:] != (size, size):
+            frames = F.interpolate(
+                frames.float(),
+                size=(size, size),
+                mode="bilinear",
+                align_corners=False,
+            ).clamp(0, 255).to(torch.uint8)
+        return frames
+
     def _build_canonical_vector(self, item, instructions, norm, is_chunk: bool):
         width = CANON_DIM
         chunk = self.chunk_size if is_chunk else 1
@@ -1000,7 +1059,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # branch pre-trained there meets an identical batch schema here.
         has_text = is_real_instruction(task, self.dataset_names[ds_idx])
 
-        return {
+        result = {
             "image_t0": image_t0,
             "image_t1": image_t1,
             "pair_is_valid": torch.tensor(pair_valid, dtype=torch.float32),
@@ -1026,6 +1085,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "episode_uid": torch.tensor(ds_idx * 1_000_000 + episode_index, dtype=torch.long),
             "frame_index": torch.tensor(frame_idx, dtype=torch.long),
         }
+        if self.world_video_frames is not None:
+            result["video"] = self._extract_video(item, primary_key)
+        return result
 
     # ------------------------------------------------------------------
     @property

@@ -83,7 +83,7 @@ class ContrastiveBatchSampler(Sampler):
             self.physical_sample_weights = physical_weights / physical_weights.sum()
             self.min_physical_per_batch = min(
                 self.batch_size,
-                max(1, int(min_physical_per_batch)),
+                max(0, int(min_physical_per_batch)),
             )
         else:
             self.physical_sample_weights = None

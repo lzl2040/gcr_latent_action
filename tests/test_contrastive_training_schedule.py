@@ -5,7 +5,11 @@ import pytest
 import torch
 
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
-from lerobot.scripts.dps_train_contrast import _compute_epoch_schedule
+from lerobot.common.policies.qwen3vl_mot.configuration_qwen3vl_mot import Qwen3VLMoTConfig
+from lerobot.scripts.dps_train_contrast import (
+    _compute_epoch_schedule,
+    _load_stage2_resume_policy_config,
+)
 
 
 def test_epoch_schedule_covers_source_then_adds_extra_epochs() -> None:
@@ -67,3 +71,34 @@ def test_optimizer_factory_uses_computed_schedule_length() -> None:
     make_optimizer_and_scheduler(cfg, policy, num_training_steps=4_567)
 
     assert recorded["num_training_steps"] == 4_567
+
+
+def test_stage2_resume_uses_saved_embedded_stage1_config(tmp_path) -> None:
+    checkpoint_root = tmp_path / "run"
+    checkpoint_root.mkdir()
+    saved_policy = Qwen3VLMoTConfig(
+        stage1_checkpoint="/path/that/no/longer/exists",
+        stage1_policy_config={"vision_backbone": "qwen3vl"},
+        initialize_from_stage1=False,
+        generation_depth=3,
+        optimizer_lr=3e-5,
+        scheduler_decay_steps=77_000,
+    )
+    saved_policy._save_pretrained(checkpoint_root)
+    cfg = SimpleNamespace(
+        weight_resume=True,
+        output_dir=checkpoint_root,
+        job_name="run",
+        policy=Qwen3VLMoTConfig(stage1_checkpoint=""),
+        use_policy_training_preset=True,
+        optimizer=None,
+        scheduler=None,
+    )
+
+    _load_stage2_resume_policy_config(cfg)
+
+    assert cfg.policy.generation_depth == 3
+    assert cfg.policy.initialize_from_stage1 is False
+    assert cfg.policy.stage1_checkpoint == "/path/that/no/longer/exists"
+    assert cfg.optimizer.lr == 3e-5
+    assert cfg.scheduler.num_decay_steps == 77_000

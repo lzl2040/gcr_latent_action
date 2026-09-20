@@ -165,3 +165,23 @@ def test_sampler_allows_all_video_batches_when_no_physical_dataset_exists() -> N
     batch = next(iter(sampler))
     assert len(batch) == 16
     assert not any(sampler.dataset_has_physical[dataset_idx] for dataset_idx, _ in batch)
+
+
+def test_stage2_sampler_keeps_video_only_datasets_with_micro_batch_one() -> None:
+    sampler = ContrastiveBatchSampler(
+        episode_ranges=_episode_ranges(2),
+        sample_weights=np.asarray([0.5, 0.5]),
+        dataset_has_physical=np.asarray([True, False]),
+        batch_size=1,
+        num_replicas=4,
+        rank=0,
+        seed=1000,
+        samples_per_epoch=400,
+        horizon=32,
+        min_physical_per_batch=0,
+        balance_across_ranks=True,
+    )
+
+    sampled_datasets = [batch[0][0] for batch in sampler]
+    assert 0 in sampled_datasets
+    assert 1 in sampled_datasets

@@ -23,15 +23,16 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
 from lerobot.common.datasets.utils import dataset_to_policy_features
 from lerobot.common.envs.configs import EnvConfig
 from lerobot.common.envs.utils import env_to_policy_features
+from lerobot.common.policies.ace.configuration_robo_clip import RobotCLIPConfig
+from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.act.configuration_act import ACTConfig
 from lerobot.common.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.common.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.common.policies.pretrained import PreTrainedPolicy
+from lerobot.common.policies.qwen3vl_mot.configuration_qwen3vl_mot import Qwen3VLMoTConfig
 from lerobot.common.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.common.policies.vqbet.configuration_vqbet import VQBeTConfig
-from lerobot.common.policies.ace.configuration_robo_clip import RobotCLIPConfig
-from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 
@@ -77,6 +78,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
     elif name == "robo_contrast":
         from lerobot.common.policies.ace.modeling_robo_contrast import RoboContrast
         return RoboContrast
+    elif name == "qwen3vl_mot":
+        from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import Qwen3VLMoTPolicy
+
+        return Qwen3VLMoTPolicy
     elif name == "pi05":
         from lerobot.common.policies.pi05.modeling_pi05 import PI05Policy
         return PI05Policy
@@ -101,6 +106,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return RobotCLIPConfig(**kwargs)
     elif policy_type == "robo_contrast":
         return RoboContrastConfig(**kwargs)
+    elif policy_type == "qwen3vl_mot":
+        return Qwen3VLMoTConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 
@@ -192,7 +199,7 @@ def make_policy(
         #         print(key, value.shape)
 
         key_to_remove = []
-        for k, v in weights.items():
+        for k, _v in weights.items():
             if "awa_model.lm_head" in k or "qwen_expert.lm_head" in k:
                 key_to_remove.append(k)
         for k in key_to_remove:

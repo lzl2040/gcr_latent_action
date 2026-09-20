@@ -105,14 +105,13 @@ def build_cosmos3_vision(model_dir: str | Path) -> tuple[nn.Module, int, int]:
     return model, config.hidden_size, image_size
 
 
-def build_cosmos3_vae(model_dir: str | Path):
+def build_cosmos3_vae(model_dir: str | Path, *, encoder_only: bool = True):
     """Load ``vae/`` (the Wan2.2 causal 3D video VAE) for use as a reconstruction target.
 
     Returns ``(vae, z_dim, temporal_compression, latents_mean, latents_std)``.
 
-    The decoder is dropped. It is 555M of the checkpoint's 705M parameters and this branch
-    only ever calls ``encode``; keeping it would cost more memory than the entire trainable
-    perception trunk for a module that never runs.
+    The decoder is dropped by default. Stage one only calls ``encode``; stage two passes
+    ``encoder_only=False`` because sampled video latents must remain decodable.
 
     ``latents_mean``/``latents_std`` are Wan2.2's own per-channel latent statistics. They
     matter for the same reason section 19's tactile statistics did: an unnormalised target
@@ -125,10 +124,12 @@ def build_cosmos3_vae(model_dir: str | Path):
     vae = AutoencoderKLWan.from_pretrained(model_dir / "vae", torch_dtype=torch.float32)
     cfg = json.loads((model_dir / "vae" / "config.json").read_text())
     total = sum(p.numel() for p in vae.parameters()) / 1e6
-    vae.decoder = None
+    if encoder_only:
+        vae.decoder = None
     logging.info(
-        "Loaded Cosmos3 VAE (Wan2.2) encoder: %.1fM params (decoder dropped, was %.1fM total), "
+        "Loaded Cosmos3 VAE (Wan2.2) %s: %.1fM params (full model %.1fM), "
         "z_dim=%d, spatial/%d, temporal/%d",
+        "encoder" if encoder_only else "encoder/decoder",
         sum(p.numel() for p in vae.parameters()) / 1e6,
         total,
         cfg["z_dim"],

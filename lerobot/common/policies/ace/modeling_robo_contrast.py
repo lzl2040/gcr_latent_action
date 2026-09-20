@@ -852,7 +852,15 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
         tokens = out.last_hidden_state
         return tokens.detach() if self.freeze_text else tokens
 
-    def forward(self, image_t0, image_t1, texts, has_text=None, probe: bool = False):
+    def forward(
+        self,
+        image_t0,
+        image_t1,
+        texts,
+        has_text=None,
+        probe: bool = False,
+        return_latent_action: bool = False,
+    ):
         """``has_text``: per-sample 0/1: 0 means the sample carries no real instruction.
 
         Stage-1 video pre-training runs largely on caption-free data, so this is the common
@@ -949,6 +957,10 @@ class PerceptionEncoder(nn.Module, _CheckpointMixin):
 
         recon_loss = None
         aux: dict[str, float] = {}
+        if return_latent_action:
+            # Stage two distils exactly the post-fusion change queries, before the
+            # contrastive pooling/projection can discard their per-query structure.
+            aux["latent_action"] = queries
         if self.predictor is not None and self.training:
             if self.recon_target == "vae":
                 target = self._vae_target(image_t1).to(dtype)
@@ -1527,7 +1539,15 @@ class PhysicalEncoder(nn.Module):
             )
         return self.tactile_recon(patches)
 
-    def forward(self, batch: dict) -> torch.Tensor:
+    def forward(
+        self,
+        batch: dict,
+        *,
+        return_tokens: bool = False,
+        apply_modality_dropout: bool = True,
+        include_tactile: bool = True,
+        compute_reconstruction: bool = True,
+    ) -> torch.Tensor:
         dtype = self.state_proj.weight.dtype
         device = self.state_proj.weight.device
 
@@ -1539,6 +1559,9 @@ class PhysicalEncoder(nn.Module):
         signal_present = batch["tactile_signal_mask"].to(device=device, dtype=dtype).reshape(-1, 1)
         tac_images = batch["tactile_image"].to(device=device)
         tac_img_mask = batch["tactile_image_mask"].to(device=device, dtype=dtype)
+        if not include_tactile:
+            signal_present = torch.zeros_like(signal_present)
+            tac_img_mask = torch.zeros_like(tac_img_mask)
         sample_rate = batch["sample_rate"].to(device=device).long().clamp(0, 63).reshape(-1)
 
         b = state.shape[0]
@@ -1551,7 +1574,8 @@ class PhysicalEncoder(nn.Module):
         # against is the consequence of the latter. The two also diverge in the ways that
         # matter most here -- contact, compliance, a slipping gripper.
         keep_state = self._maybe_drop(
-            (state_mask.sum(dim=-1, keepdim=True) > 0).to(dtype), self.config.modality_dropout_state
+            (state_mask.sum(dim=-1, keepdim=True) > 0).to(dtype),
+            self.config.modality_dropout_state if apply_modality_dropout else 0.0,
         )
         st_mask_chunk = state_mask.unsqueeze(1).expand(-1, self.chunk_size, -1)
         st_feat = self._with_mask(state, st_mask_chunk)
@@ -1567,7 +1591,8 @@ class PhysicalEncoder(nn.Module):
 
         # -- action chunk --------------------------------------------------
         keep_action = self._maybe_drop(
-            (action_mask.sum(dim=-1, keepdim=True) > 0).to(dtype), self.config.modality_dropout_action
+            (action_mask.sum(dim=-1, keepdim=True) > 0).to(dtype),
+            self.config.modality_dropout_action if apply_modality_dropout else 0.0,
         )
         act_mask_chunk = action_mask.unsqueeze(1).expand(-1, self.chunk_size, -1)
         act_feat = self._with_mask(action, act_mask_chunk)
@@ -1579,7 +1604,10 @@ class PhysicalEncoder(nn.Module):
         action_tokens = action_tokens + group_pos + mod[self.MOD_ACTION] + rate_embed
 
         # -- tactile signal ------------------------------------------------
-        keep_signal = self._maybe_drop(signal_present, self.config.modality_dropout_tactile)
+        keep_signal = self._maybe_drop(
+            signal_present,
+            self.config.modality_dropout_tactile if apply_modality_dropout else 0.0,
+        )
         sig_mask = signal_present.unsqueeze(1).expand(-1, self.chunk_size, self.signal_dim)
         sig_feat = self._with_mask(signal, sig_mask)
         sig_feat = sig_feat.view(b, self.num_groups, self.group_size * sig_feat.shape[-1])
@@ -1609,7 +1637,10 @@ class PhysicalEncoder(nn.Module):
         # sequence from 19% to 32%, which is why ``tactile_tokens_per_pad`` is a knob.
         num_views = tac_images.shape[1]
         any_view = (tac_img_mask.sum(dim=-1, keepdim=True) > 0).to(dtype)
-        keep_tac_img = self._maybe_drop(any_view, self.config.modality_dropout_tactile)
+        keep_tac_img = self._maybe_drop(
+            any_view,
+            self.config.modality_dropout_tactile if apply_modality_dropout else 0.0,
+        )
         recon_loss = None
         flat_valid = tac_img_mask.reshape(-1) > 0
         flat_images = tac_images.reshape(b * num_views, *tac_images.shape[2:])
@@ -1683,7 +1714,7 @@ class PhysicalEncoder(nn.Module):
         )
         view_feats = view_feats.index_put((selected,), sel_tokens)
         img_tokens = self.tactile_img_proj(view_feats.view(b, num_views * tok_per_pad, feat_dim))
-        if self.tactile_recon is not None and self.training:
+        if self.tactile_recon is not None and self.training and compute_reconstruction:
             # Reconstruct both endpoints directly from their spatial latents. In particular,
             # the last horizon of an episode never appears as frame t, so training only on
             # the first frame would leave exactly the future states needed by stage two out
@@ -1744,7 +1775,11 @@ class PhysicalEncoder(nn.Module):
         for block in self.blocks:
             tokens = block(tokens, token_keep)
 
-        summary = self.out_proj(self.out_norm(tokens[:, : self.num_cls_tokens]))
+        contextual_tokens = self.out_norm(tokens)
+        if return_tokens:
+            return contextual_tokens, token_keep, recon_loss
+
+        summary = self.out_proj(contextual_tokens[:, : self.num_cls_tokens])
         if self.num_cls_tokens == 1:
             summary = summary.squeeze(1)
         return summary, recon_loss

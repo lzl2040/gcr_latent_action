@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""DeepSpeed entry point for perception <-> physical contrastive pre-training.
+"""DeepSpeed entry point for contrastive stage one and Qwen3-VL MoT stage two.
 
 This is the counterpart of ``dps_train_ace.py`` for the ``robo_contrast`` policy. It is a
 separate script because the data path is fundamentally different: batches are built by a
@@ -45,11 +45,12 @@ from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.utils import format_big_number
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs import parser
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.train import TrainPipelineConfig
 
 # Images stay uint8 all the way to the GPU (4x less PCIe traffic than bf16) and are
 # normalised inside the model; index-like tensors must stay integral.
-_KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "tactile_image")
+_KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "video", "tactile_image")
 _EXTRA_TRAINING_EPOCHS = 100
 
 
@@ -167,16 +168,45 @@ def update_policy(model_engine, batch: Any, task_type: str, step: int):
     return loss, output_dict
 
 
+def _load_stage2_resume_policy_config(cfg: TrainPipelineConfig) -> None:
+    if not cfg.weight_resume or cfg.policy.type != "qwen3vl_mot":
+        return
+    checkpoint_root = Path(cfg.output_dir)
+    config_path = checkpoint_root / "config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Cannot resume qwen3vl_mot: {config_path} is missing. Start a fresh run with "
+            "`weight_resume=false` and a valid stage-one checkpoint."
+        )
+    saved_policy = PreTrainedConfig.from_pretrained(checkpoint_root)
+    if saved_policy.type != "qwen3vl_mot":
+        raise ValueError(
+            f"Expected a qwen3vl_mot config in {config_path}, got {saved_policy.type!r}."
+        )
+    if saved_policy.stage1_policy_config is None:
+        raise ValueError(
+            "The saved stage-two config does not embed its stage-one architecture. Resume "
+            "this older checkpoint with the original stage-one checkpoint available."
+        )
+    saved_policy.initialize_from_stage1 = False
+    cfg.policy = saved_policy
+    if cfg.use_policy_training_preset:
+        cfg.optimizer = saved_policy.get_optimizer_preset()
+        cfg.scheduler = saved_policy.get_scheduler_preset()
+
+
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
     cfg.validate()
+    _load_stage2_resume_policy_config(cfg)
 
     os.environ.setdefault("DECORD_LOG_LEVEL", "error")
     deepspeed.init_distributed()
-    logger = init_logger(cfg)
+    logger = init_logger(cfg, subdir="qwen3vl_mot" if cfg.policy.type == "qwen3vl_mot" else "contrast")
 
     rank = int(os.environ.get("RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
+    is_stage2 = cfg.policy.type == "qwen3vl_mot"
 
     if rank == 0:
         logger.info(pformat(cfg.to_dict()))
@@ -203,7 +233,7 @@ def train(cfg: TrainPipelineConfig):
         dataset_size_one_epoch=cfg.dataset.dataset_size_one_epoch,
     )
     logger.info(f"Dataset: {dataset}")
-    if not dataset.has_physical.any():
+    if cfg.policy.type == "robo_contrast" and not dataset.has_physical.any():
         if (
             cfg.policy.perception_recon_weight <= 0
             or cfg.policy.num_predictor_layers <= 0
@@ -234,6 +264,7 @@ def train(cfg: TrainPipelineConfig):
         min_frame_gap=cfg.policy.min_frame_gap,
         sample_costs=dataset.sample_costs,
         dataset_has_physical=dataset.has_physical,
+        min_physical_per_batch=0 if is_stage2 else 2,
         balance_across_ranks=True,
     )
     epoch_schedule = _compute_epoch_schedule(
@@ -273,14 +304,16 @@ def train(cfg: TrainPipelineConfig):
     # A fixed set of frames, identical in every run, scored periodically. In-batch retrieval
     # accuracy on random training batches is too noisy to compare runs with -- see
     # ``contrastive_eval`` for the measurement -- so this is the number to judge a change on.
-    eval_loaders = build_eval_loaders(
-        dataset=dataset,
-        policy_cfg=cfg.policy,
-        collate_fn=contrastive_collate_fn,
-        num_workers=max(2, cfg.num_workers // 2),
-        rank=rank,
-        world_size=world_size,
-    )
+    eval_loaders = None
+    if cfg.policy.type == "robo_contrast":
+        eval_loaders = build_eval_loaders(
+            dataset=dataset,
+            policy_cfg=cfg.policy,
+            collate_fn=contrastive_collate_fn,
+            num_workers=max(2, cfg.num_workers // 2),
+            rank=rank,
+            world_size=world_size,
+        )
 
     # ------------------------------------------------------------------ policy
     logger.info("Creating policy...")
@@ -325,6 +358,7 @@ def train(cfg: TrainPipelineConfig):
         config=cfg.deepspeed,
         model_parameters=[p for p in policy.parameters() if p.requires_grad],
     )
+    model_engine.train()
     logger.info(f"Training batch size: {model_engine.train_batch_size()}")
     logger.info(
         "Optimizer learning rates: %s",
@@ -335,7 +369,14 @@ def train(cfg: TrainPipelineConfig):
     )
 
     step = 0
-    cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
+    if not is_stage2:
+        cfg.output_dir = os.path.join(cfg.output_dir, cfg.job_name)
+    if rank == 0:
+        output_path = Path(cfg.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        cfg.policy._save_pretrained(output_path)
+    if dist.is_initialized():
+        dist.barrier()
     if cfg.weight_resume:
         logger.info(f"Resuming training from {cfg.output_dir}")
         load_path, loaded_state, optimizer_restored = load_checkpoint_with_optimizer_fallback(
@@ -345,6 +386,12 @@ def train(cfg: TrainPipelineConfig):
             world_size,
             lr_scheduler,
         )
+        if is_stage2 and (load_path is None or loaded_state is None):
+            raise FileNotFoundError(
+                f"`weight_resume=true` was requested, but no DeepSpeed checkpoint exists in "
+                f"{cfg.output_dir}. Start a fresh run with `weight_resume=false` and a valid "
+                "stage-one checkpoint."
+            )
         if load_path is not None and loaded_state is not None:
             # load_checkpoint returns every non-DeepSpeed-owned key it finds in the
             # checkpoint, which includes internal metadata such as
@@ -361,25 +408,45 @@ def train(cfg: TrainPipelineConfig):
                 )
             logger.info(f"Resumed training from step {step}")
 
-    train_metrics = {
-        "loss": AverageMeter("loss", ":.3f"),
-        "contrastive_loss": AverageMeter("contra_loss", ":.3f"),
-        "recon_loss": AverageMeter("trecon", ":.4f"),
-        "percep_recon_loss": AverageMeter("precon", ":.4f"),
-        "retrieval_acc": AverageMeter("acc", ":.3f"),
-        "physical_rows": AverageMeter("phys_n", ":.1f"),
-        "video_only_rows": AverageMeter("video_n", ":.1f"),
-        "tactile_hits": AverageMeter("tac_hit", ":.1f"),
-        "tactile_rows": AverageMeter("tac_n", ":.1f"),
-        "pos_sim": AverageMeter("pos_sim", ":.3f"),
-        "logit_scale": AverageMeter("scale", ":.2f"),
-        "tac_sig_gate": AverageMeter("tsig", ":.3f"),
-        "tac_img_gate": AverageMeter("timg", ":.3f"),
-        "lr": AverageMeter("lr", ":0.1e"),
-        "vision_lr": AverageMeter("vlr", ":0.1e"),
-        "update_s": AverageMeter("updt_s", ":.3f"),
-        "dataloading_s": AverageMeter("data_s", ":.3f"),
-    }
+    if is_stage2:
+        train_metrics = {
+            "loss": AverageMeter("loss", ":.3f"),
+            "latent_action_loss": AverageMeter("latent", ":.4f"),
+            "video_flow_loss": AverageMeter("video", ":.4f"),
+            "action_flow_loss": AverageMeter("action", ":.4f"),
+            "state_flow_loss": AverageMeter("state", ":.4f"),
+            "tactile_flow_loss": AverageMeter("tactile", ":.4f"),
+            "valid_rows": AverageMeter("valid", ":.1f"),
+            **{
+                f"task_{name}": AverageMeter(name, ":.2f")
+                for name in cfg.policy.task_names
+            },
+            "lr": AverageMeter("lr", ":0.1e"),
+            "understanding_lr": AverageMeter("ulr", ":0.1e"),
+            "physical_lr": AverageMeter("plr", ":0.1e"),
+            "update_s": AverageMeter("updt_s", ":.3f"),
+            "dataloading_s": AverageMeter("data_s", ":.3f"),
+        }
+    else:
+        train_metrics = {
+            "loss": AverageMeter("loss", ":.3f"),
+            "contrastive_loss": AverageMeter("contra_loss", ":.3f"),
+            "recon_loss": AverageMeter("trecon", ":.4f"),
+            "percep_recon_loss": AverageMeter("precon", ":.4f"),
+            "retrieval_acc": AverageMeter("acc", ":.3f"),
+            "physical_rows": AverageMeter("phys_n", ":.1f"),
+            "video_only_rows": AverageMeter("video_n", ":.1f"),
+            "tactile_hits": AverageMeter("tac_hit", ":.1f"),
+            "tactile_rows": AverageMeter("tac_n", ":.1f"),
+            "pos_sim": AverageMeter("pos_sim", ":.3f"),
+            "logit_scale": AverageMeter("scale", ":.2f"),
+            "tac_sig_gate": AverageMeter("tsig", ":.3f"),
+            "tac_img_gate": AverageMeter("timg", ":.3f"),
+            "lr": AverageMeter("lr", ":0.1e"),
+            "vision_lr": AverageMeter("vlr", ":0.1e"),
+            "update_s": AverageMeter("updt_s", ":.3f"),
+            "dataloading_s": AverageMeter("data_s", ":.3f"),
+        }
     train_tracker = MetricsTracker(
         model_engine.train_batch_size(),
         dataset.num_frames,
@@ -447,7 +514,10 @@ def train(cfg: TrainPipelineConfig):
                 )
 
             fwd_bwd_start = time.perf_counter()
-            loss, output_dict = update_policy(model_engine, batch, cfg.task_type, step=step)
+            task_type = cfg.task_type
+            if cfg.policy.type == "qwen3vl_mot" and task_type == "train_contrastive":
+                task_type = "train_stage2"
+            loss, output_dict = update_policy(model_engine, batch, task_type, step=step)
             step += 1
             fwd_bwd_time += time.perf_counter() - fwd_bwd_start
 
@@ -455,38 +525,59 @@ def train(cfg: TrainPipelineConfig):
                 train_tracker.dataloading_s = dataloading_s
                 train_tracker.update_s = fwd_bwd_time
                 train_tracker.loss = loss.detach().mean().item()
-                train_tracker.recon_loss = output_dict.get("recon_loss", 0.0)
-                train_tracker.percep_recon_loss = output_dict.get("percep_recon_loss", 0.0)
-                physical_rows = output_dict.get("physical_rows", 0.0)
-                if physical_rows > 0:
-                    train_tracker.contrastive_loss.update(
-                        output_dict.get("contrastive_loss", 0.0),
-                        n=physical_rows,
-                    )
-                    train_tracker.retrieval_acc.update(
-                        output_dict.get("retrieval_acc", 0.0),
-                        n=physical_rows,
-                    )
-                    train_tracker.pos_sim.update(
-                        output_dict.get("pos_sim", 0.0),
-                        n=physical_rows,
-                    )
-                train_tracker.physical_rows = physical_rows
-                train_tracker.video_only_rows = output_dict.get("video_only_rows", 0.0)
-                train_tracker.tactile_hits = output_dict.get("tactile_hits", 0.0)
-                train_tracker.tactile_rows = output_dict.get("tactile_rows", 0.0)
-                train_tracker.logit_scale = output_dict.get("logit_scale", 0.0)
-                train_tracker.tac_sig_gate = output_dict.get("tactile_sig_gate", 0.0)
-                train_tracker.tac_img_gate = output_dict.get("tactile_img_gate", 0.0)
                 train_tracker.lr = optimizer.param_groups[0]["lr"]
-                train_tracker.vision_lr = next(
-                    (
-                        group["lr"]
-                        for group in optimizer.param_groups
-                        if group.get("group_name") == "vision"
-                    ),
-                    0.0,
-                )
+                if is_stage2:
+                    for key in train_metrics:
+                        if key in output_dict:
+                            setattr(train_tracker, key, output_dict[key])
+                    train_tracker.understanding_lr = next(
+                        (
+                            group["lr"]
+                            for group in optimizer.param_groups
+                            if group.get("group_name") == "understanding"
+                        ),
+                        0.0,
+                    )
+                    train_tracker.physical_lr = next(
+                        (
+                            group["lr"]
+                            for group in optimizer.param_groups
+                            if group.get("group_name") == "physical"
+                        ),
+                        0.0,
+                    )
+                else:
+                    train_tracker.recon_loss = output_dict.get("recon_loss", 0.0)
+                    train_tracker.percep_recon_loss = output_dict.get("percep_recon_loss", 0.0)
+                    physical_rows = output_dict.get("physical_rows", 0.0)
+                    if physical_rows > 0:
+                        train_tracker.contrastive_loss.update(
+                            output_dict.get("contrastive_loss", 0.0),
+                            n=physical_rows,
+                        )
+                        train_tracker.retrieval_acc.update(
+                            output_dict.get("retrieval_acc", 0.0),
+                            n=physical_rows,
+                        )
+                        train_tracker.pos_sim.update(
+                            output_dict.get("pos_sim", 0.0),
+                            n=physical_rows,
+                        )
+                    train_tracker.physical_rows = physical_rows
+                    train_tracker.video_only_rows = output_dict.get("video_only_rows", 0.0)
+                    train_tracker.tactile_hits = output_dict.get("tactile_hits", 0.0)
+                    train_tracker.tactile_rows = output_dict.get("tactile_rows", 0.0)
+                    train_tracker.logit_scale = output_dict.get("logit_scale", 0.0)
+                    train_tracker.tac_sig_gate = output_dict.get("tactile_sig_gate", 0.0)
+                    train_tracker.tac_img_gate = output_dict.get("tactile_img_gate", 0.0)
+                    train_tracker.vision_lr = next(
+                        (
+                            group["lr"]
+                            for group in optimizer.param_groups
+                            if group.get("group_name") == "vision"
+                        ),
+                        0.0,
+                    )
                 train_tracker.step()
                 fwd_bwd_time = 0.0
                 dataloading_s = 0.0
