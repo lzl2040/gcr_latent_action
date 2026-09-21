@@ -38,6 +38,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --policy.understanding_lora_alpha="${UNDERSTANDING_LORA_ALPHA:-16}" \
     --policy.understanding_text_lora_layers="${UNDERSTANDING_TEXT_LORA_LAYERS:-0}" \
     --policy.understanding_vision_lora_layers="${UNDERSTANDING_VISION_LORA_LAYERS:-4}" \
+    --policy.understanding_lr_scale="${UNDERSTANDING_LR_SCALE:-0.1}" \
     --policy.physical_tuning_mode="${PHYSICAL_TUNING_MODE:-frozen}" \
     --policy.window_mode="frames" \
     --policy.chunk_size=32 \
