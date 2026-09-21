@@ -2,9 +2,64 @@
 
 本文记录的是工程估计，不是 8×H100 的实机 benchmark。估计先在单张
 RTX A6000 48GB 上分别测量理解专家、Generation Expert、Wan VAE 和阶段一
-teacher，再按照 H100 SXM 的 BF16 吞吐、显存带宽以及 8 卡 NVLink/FSDP2
+teacher，再按照 H100 SXM 的 BF16 吞吐、显存带宽以及 8 卡 NVLink/FSDP
 通信开销给出区间。视频解码和共享存储的速度会直接影响端到端结果，因此不应把
 “模型计算时间”当成最终 dataloader 吞吐。
+
+## 已实现的 8×H100 FSDP + FP8 + AdamW8bit 路径
+
+正式入口是：
+
+```bash
+STAGE1_CHECKPOINT=/path/to/exported_robo_contrast \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+启动脚本默认使用：
+
+```text
+8 GPUs
+micro-batch/GPU = 16
+gradient accumulation = 1
+global batch = 128
+understanding_tuning_mode = full
+FP8 scope = Generation Expert + VLM Transformer layers
+FP8 recipe = rowwise_with_gw_hp
+optimizer = bitsandbytes AdamW8bit
+```
+
+这里采用的是 classic FSDP `FULL_SHARD + use_orig_params=True`，而不是 FSDP2。
+实测 bitsandbytes 0.48.2 的 CUDA optimizer kernel 不能直接更新 FSDP2 的
+DTensor 参数，会在 `optimizer_update_8bit_blockwise` 报 mixed Tensor/DTensor
+错误。classic FSDP 保留普通参数视图，能够执行真正的 8-bit AdamW step。
+
+“FP8 模型参数”在训练语义上需要区分：
+
+- 可训练 master parameter 保持 BF16，保证 optimizer update 和 checkpoint 精度；
+- TorchAO `Float8Linear` 动态将 eligible Linear 的输入、权重和梯度 GEMM 转为
+  FP8；`rowwise_with_gw_hp` 会让 weight-gradient 路径保持更高精度；
+- classic FSDP 当前仍以 BF16 all-gather 权重，不是将持久化 checkpoint 或所有
+  通信权重直接保存为 FP8；
+- LayerNorm、embedding、LoRA adapter、不满足 16 对齐的小输出 head、teacher、
+  physical encoder 和 Wan VAE 不转换为 FP8。
+
+冻结参数默认复制在每张卡上，避免 teacher、VAE、冻结 vision/text 权重每次前向
+都发生 FSDP all-gather；Generation blocks 和打开训练的 VLM Transformer blocks
+按 block full-shard。
+
+checkpoint 使用组合格式：
+
+- 模型权重由 Distributed Checkpoint 保存，可做模型分片重组；
+- bitsandbytes optimizer state 按 rank 保存，因为标准 FSDP optimizer state
+  转换不支持同一 state key 同时包含 uint8 大张量和 FP32 小张量；
+- resume 必须保持相同 world size、FSDP/FP8 wrap、per-rank batch、gradient
+  accumulation 和 sampler geometry，避免 8-bit moment 绑定到不同参数分片或
+  数据游标静默错位。
+
+本地已在 2×RTX A6000 上用 `fp8_emulate=true` 完成
+forward/backward、gradient clipping、AdamW8bit step、模型/optimizer/scheduler
+保存、恢复后继续 step 的 smoke。optimizer moment 包含 uint8 `state1/state2`；
+A6000 没有 H100 FP8 Tensor Core，因此该 smoke 只验证正确性，不代表 FP8 性能。
 
 ## 基于 Qwen3-VL-4B 文本冻结、视觉 LoRA 和 1.429B Generation Expert 的估计
 
@@ -60,13 +115,15 @@ tokens。Qwen understanding 序列约为 146 tokens。
 | 训练方式 | 建议 micro-batch/GPU | 8 卡 global batch | 说明 |
 |---|---:|---:|---|
 | 当前 DeepSpeed ZeRO-2 BF16 | 8 起步，目标 16 | 64–128 | 权重复制，但优化器和梯度分片 |
-| FSDP2 BF16 + activation checkpoint | **16 起步，目标 32** | **128–256** | 推荐正式训练方案 |
-| FSDP2 + Generation FP8 | 32 起步，可尝试 48 | 256–384 | Qwen、teacher、VAE 仍保持 BF16 |
+| FSDP BF16 + activation checkpoint | **16 起步，目标 32** | **128–256** | classic FSDP full shard |
+| FSDP + Generation/VLM FP8 Linear | 16 起步，可尝试 24–32 | 128–256 | master weights、teacher、VAE 保持 BF16 |
 
-在 8 卡 FSDP2 下，按 BF16 参数和梯度、FP32 master weight 与 Adam moments 共
-约 16 bytes/可训练参数估算，1.433B 可训练参数的训练状态约为
-**2.67 GiB/GPU**。实际还需要冻结权重、FSDP all-gather buffer、activation、
-CUDA workspace 和 dataloader 输入。
+在 8 卡 FSDP + AdamW8bit 下，按 BF16 参数 2 bytes、BF16 梯度 2 bytes 和两份
+8-bit moments 约 2 bytes，即约 6 bytes/可训练参数估算，1.433B 可训练参数的
+分片训练状态约为 **1.00 GiB/GPU**。小于 `min_8bit_size` 的 tensor 仍使用
+FP32 moments，另外还需要复制的冻结权重、FSDP all-gather buffer、activation、
+CUDA workspace 和 dataloader 输入。FP8 Linear 主要减少 GEMM 成本，不会把这
+部分持久化训练状态再减半。
 
 从显存角度看，micro-batch 48–64 可能仍能放下，但 Wan VAE 的临时显存约随
 batch 线性增长，A6000 上从 batch 16 的 4.55 GiB 增加到 batch 32 的
@@ -146,22 +203,22 @@ optimizer state。
 
 ### 显存变化
 
-同样按照约 16 bytes/可训练参数估算，8 卡 FSDP2 下训练状态约为：
+按照约 6 bytes/可训练参数估算，8 卡 FSDP + AdamW8bit 下分片训练状态约为：
 
 ```text
-5.066B × 16 bytes ÷ 8 = 9.44 GiB/GPU
+5.066B × 6 bytes ÷ 8 = 3.54 GiB/GPU
 ```
 
-相比默认视觉 LoRA 配置增加约 **6.77 GiB/GPU**。Activation checkpoint 后，
-activation 规模变化不大；主要新增项是 36 个 VLM Transformer blocks 的梯度、
-FP32 master weights 和 Adam moments。正式长训练仍推荐 FSDP2 full shard；
+相比默认视觉 LoRA 配置增加约 **2.54 GiB/GPU** 的分片训练状态。Activation
+checkpoint 后，activation 规模变化不大；主要新增项是 36 个 VLM Transformer
+blocks 的 BF16 参数/梯度和 8-bit Adam moments。正式长训练使用 FSDP full shard；
 当前 ZeRO-2 可以用于容量验证，但会在每张卡复制所有模型权重。
 
 | 训练方式 | 建议 micro-batch/GPU | 8 卡 global batch | 说明 |
 |---|---:|---:|---|
 | DeepSpeed ZeRO-2 BF16 | 8 起步，可尝试 16 | 64–128 | 权重仍在每卡复制 |
-| FSDP2 BF16 + activation checkpoint | **16 起步，可尝试 32** | **128–256** | 32 需实机确认通信和 VAE 峰值 |
-| FSDP2 + Generation FP8 | 16 起步，可尝试 24–32 | 128–256 | VLM 仍为 BF16 时收益有限 |
+| FSDP BF16 + activation checkpoint | **16 起步，可尝试 32** | **128–256** | 32 需实机确认通信和 VAE 峰值 |
+| FSDP + Generation/VLM FP8 Linear | **16 起步，可尝试 24–32** | **128–256** | 默认同时转换打开训练的两个分支 |
 
 micro-batch 16/GPU 已经能在 8 卡上形成 global batch 128，不需要梯度累积。
 如果从 8/GPU 起步，则设置 gradient accumulation 2 得到相同 global batch。
@@ -172,6 +229,8 @@ micro-batch 16/GPU 已经能在 8 卡上形成 global batch 128，不需要梯�
 latent queries 和 vision LoRA。将 36 个 Transformer blocks 全量打开后，需要
 额外计算这些 Linear 的 weight gradient，因此 Qwen understanding 部分预计慢约
 25–35%，整个训练 step 预计慢约 12–25%；同时还增加 FSDP reduce-scatter 通信。
+H100 上同时启用 VLM FP8 后会回收其中一部分计算成本，但下表仍是未做 H100
+实机 benchmark 前的保守估计。
 
 | micro-batch/GPU | gradient accumulation | global batch/optimizer step | 端到端估计 | 全局吞吐 |
 |---:|---:|---:|---:|---:|
@@ -193,7 +252,7 @@ LoRA 放在同一个 understanding parameter group，可以通过
 ```bash
 UNDERSTANDING_TUNING_MODE=full \
 UNDERSTANDING_LR_SCALE=0.05 \
-bash train_qwen3vl_mot_local.sh
+bash train_qwen3vl_mot_fsdp.sh
 ```
 
 对应：
