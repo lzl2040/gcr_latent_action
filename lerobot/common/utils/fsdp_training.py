@@ -6,7 +6,7 @@ import json
 import random
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 import numpy as np
 import torch
@@ -33,6 +33,7 @@ _METADATA_FILE = "metadata.json"
 _TRAINER_STATE_FILE = "trainer_state.pt"
 _FP8_RECIPES = {"tensorwise", "rowwise", "rowwise_with_gw_hp"}
 _FP8_SCOPES = {"generation", "generation_vlm"}
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -279,8 +280,47 @@ def _restore_replicated_frozen_parameters(
         parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
 
 
-def _barrier(device: torch.device) -> None:
-    dist.barrier(device_ids=[device.index])
+def _run_checkpoint_phase(
+    phase: str,
+    operation: Callable[[], _T],
+    device: torch.device,
+) -> _T:
+    """Run rank-local I/O and make every rank fail before the next collective."""
+    result = None
+    local_exception = None
+    try:
+        result = operation()
+    except Exception as exc:  # noqa: BLE001
+        local_exception = exc
+
+    failure_count = torch.tensor(
+        int(local_exception is not None),
+        device=device,
+        dtype=torch.int32,
+    )
+    dist.all_reduce(failure_count, op=dist.ReduceOp.SUM)
+    if failure_count.item() > 0:
+        local_error = (
+            None
+            if local_exception is None
+            else {
+                "rank": dist.get_rank(),
+                "type": type(local_exception).__name__,
+                "message": str(local_exception)[:2_000],
+            }
+        )
+        gathered_errors = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered_errors, local_error)
+        details = "; ".join(
+            f"rank {error['rank']}: {error['type']}: {error['message']}"
+            for error in gathered_errors
+            if error is not None
+        )
+        message = f"Distributed checkpoint phase {phase!r} failed: {details}"
+        if local_exception is not None:
+            raise RuntimeError(message) from local_exception
+        raise RuntimeError(message)
+    return result
 
 
 def _local_training_state(
@@ -320,28 +360,37 @@ def save_fsdp_checkpoint(
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    preparation_error = [None]
-    if rank == 0:
+
+    def prepare_directory() -> None:
+        if rank != 0:
+            return
         if checkpoint_dir.exists() or temporary_dir.exists():
-            preparation_error[0] = (
+            raise FileExistsError(
                 f"Refusing to overwrite an existing FSDP checkpoint at {checkpoint_dir} "
                 f"or {temporary_dir}."
             )
-        else:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            temporary_dir.mkdir()
-    dist.broadcast_object_list(preparation_error, src=0, device=device)
-    if preparation_error[0] is not None:
-        raise FileExistsError(preparation_error[0])
-    _barrier(device)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        temporary_dir.mkdir()
 
-    model_state = get_model_state_dict(model, options=_checkpoint_options())
-    dcp.save({"model": model_state}, checkpoint_id=temporary_dir / "model")
-    torch.save(
-        _local_training_state(optimizer, model, device),
-        temporary_dir / f"optimizer_rank_{rank:05d}.pt",
+    _run_checkpoint_phase("prepare save directory", prepare_directory, device)
+
+    def save_model() -> None:
+        model_state = get_model_state_dict(model, options=_checkpoint_options())
+        dcp.save({"model": model_state}, checkpoint_id=temporary_dir / "model")
+
+    _run_checkpoint_phase("save model shards", save_model, device)
+    _run_checkpoint_phase(
+        "save rank-local optimizer state",
+        lambda: torch.save(
+            _local_training_state(optimizer, model, device),
+            temporary_dir / f"optimizer_rank_{rank:05d}.pt",
+        ),
+        device,
     )
-    if rank == 0:
+
+    def save_metadata() -> None:
+        if rank != 0:
+            return
         metadata = {
             "format_version": 1,
             "micro_step": micro_step,
@@ -360,14 +409,18 @@ def save_fsdp_checkpoint(
             {"scheduler": scheduler.state_dict() if scheduler is not None else None},
             temporary_dir / _TRAINER_STATE_FILE,
         )
-    _barrier(device)
 
-    if rank == 0:
+    _run_checkpoint_phase("save checkpoint metadata", save_metadata, device)
+
+    def publish_checkpoint() -> None:
+        if rank != 0:
+            return
         temporary_dir.rename(checkpoint_dir)
         pointer_tmp = output_dir / f".{_LATEST_CHECKPOINT}.tmp"
         pointer_tmp.write_text(checkpoint_name, encoding="utf-8")
         pointer_tmp.replace(output_dir / _LATEST_CHECKPOINT)
-    _barrier(device)
+
+    _run_checkpoint_phase("publish checkpoint", publish_checkpoint, device)
     return checkpoint_dir
 
 
@@ -397,11 +450,21 @@ def load_fsdp_checkpoint(
     training_geometry: dict[str, Any],
     device: torch.device,
 ) -> FSDPResumeState:
-    checkpoint_dir = resolve_latest_fsdp_checkpoint(output_dir)
-    metadata_path = checkpoint_dir / _METADATA_FILE
-    if not metadata_path.is_file():
-        raise FileNotFoundError(f"FSDP checkpoint metadata is missing: {metadata_path}.")
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    def load_metadata() -> tuple[Path, dict[str, Any]]:
+        checkpoint_dir = resolve_latest_fsdp_checkpoint(output_dir)
+        metadata_path = checkpoint_dir / _METADATA_FILE
+        if not metadata_path.is_file():
+            raise FileNotFoundError(
+                f"FSDP checkpoint metadata is missing: {metadata_path}."
+            )
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return checkpoint_dir, metadata
+
+    checkpoint_dir, metadata = _run_checkpoint_phase(
+        "load checkpoint metadata",
+        load_metadata,
+        device,
+    )
     world_size = dist.get_world_size()
     if metadata.get("world_size") != world_size:
         raise ValueError(
@@ -422,54 +485,80 @@ def load_fsdp_checkpoint(
             f"{saved_training_geometry}, current geometry is {training_geometry}."
         )
 
-    model_state = {"model": get_model_state_dict(model, options=_checkpoint_options())}
-    dcp.load(model_state, checkpoint_id=checkpoint_dir / "model")
-    set_model_state_dict(
-        model,
-        model_state["model"],
-        options=_checkpoint_options(),
-    )
-    if fsdp_config.replicate_frozen_params:
-        _restore_replicated_frozen_parameters(model, model_state["model"])
+    def load_model() -> None:
+        model_state = {
+            "model": get_model_state_dict(model, options=_checkpoint_options())
+        }
+        dcp.load(model_state, checkpoint_id=checkpoint_dir / "model")
+        set_model_state_dict(
+            model,
+            model_state["model"],
+            options=_checkpoint_options(),
+        )
+        if fsdp_config.replicate_frozen_params:
+            _restore_replicated_frozen_parameters(model, model_state["model"])
+
+    _run_checkpoint_phase("load model shards", load_model, device)
 
     rank = dist.get_rank()
-    local_state_path = checkpoint_dir / f"optimizer_rank_{rank:05d}.pt"
-    if not local_state_path.is_file():
-        raise FileNotFoundError(
-            f"Rank-local AdamW8bit state is missing: {local_state_path}."
+    def load_optimizer() -> dict[str, Any]:
+        local_state_path = checkpoint_dir / f"optimizer_rank_{rank:05d}.pt"
+        if not local_state_path.is_file():
+            raise FileNotFoundError(
+                f"Rank-local AdamW8bit state is missing: {local_state_path}."
+            )
+        local_state = torch.load(
+            local_state_path,
+            map_location="cpu",
+            weights_only=False,
         )
-    local_state = torch.load(local_state_path, map_location="cpu", weights_only=False)
-    expected_signature = optimizer_group_signature(model, optimizer)
-    if local_state.get("optimizer_signature") != expected_signature:
-        raise ValueError(
-            "Optimizer parameter groups changed across resume; refusing to attach 8-bit "
-            "moments to different parameters."
-        )
-    optimizer.load_state_dict(local_state["optimizer"])
+        expected_signature = optimizer_group_signature(model, optimizer)
+        if local_state.get("optimizer_signature") != expected_signature:
+            raise ValueError(
+                "Optimizer parameter groups changed across resume; refusing to attach "
+                "8-bit moments to different parameters."
+            )
+        optimizer.load_state_dict(local_state["optimizer"])
+        return local_state
 
-    trainer_state_path = checkpoint_dir / _TRAINER_STATE_FILE
-    if not trainer_state_path.is_file():
-        raise FileNotFoundError(
-            f"FSDP scheduler state is missing: {trainer_state_path}."
-        )
-    trainer_state = torch.load(
-        trainer_state_path,
-        map_location="cpu",
-        weights_only=False,
+    local_state = _run_checkpoint_phase(
+        "load rank-local optimizer state",
+        load_optimizer,
+        device,
     )
-    saved_scheduler = trainer_state.get("scheduler")
-    if scheduler is None and saved_scheduler is not None:
-        raise ValueError("Checkpoint has a scheduler state but the current run does not.")
-    if scheduler is not None and saved_scheduler is None:
-        raise ValueError("Current run has a scheduler but the checkpoint does not.")
-    if scheduler is not None:
-        scheduler.load_state_dict(saved_scheduler)
 
-    random.setstate(local_state["python_rng_state"])
-    np.random.set_state(local_state["numpy_rng_state"])
-    torch.set_rng_state(local_state["torch_rng_state"])
-    torch.cuda.set_rng_state(local_state["cuda_rng_state"], device)
-    _barrier(device)
+    def load_trainer_state() -> None:
+        trainer_state_path = checkpoint_dir / _TRAINER_STATE_FILE
+        if not trainer_state_path.is_file():
+            raise FileNotFoundError(
+                f"FSDP scheduler state is missing: {trainer_state_path}."
+            )
+        trainer_state = torch.load(
+            trainer_state_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        saved_scheduler = trainer_state.get("scheduler")
+        if scheduler is None and saved_scheduler is not None:
+            raise ValueError(
+                "Checkpoint has a scheduler state but the current run does not."
+            )
+        if scheduler is not None and saved_scheduler is None:
+            raise ValueError(
+                "Current run has a scheduler but the checkpoint does not."
+            )
+        if scheduler is not None:
+            scheduler.load_state_dict(saved_scheduler)
+
+    _run_checkpoint_phase("load scheduler state", load_trainer_state, device)
+
+    def restore_rng_state() -> None:
+        random.setstate(local_state["python_rng_state"])
+        np.random.set_state(local_state["numpy_rng_state"])
+        torch.set_rng_state(local_state["torch_rng_state"])
+        torch.cuda.set_rng_state(local_state["cuda_rng_state"], device)
+
+    _run_checkpoint_phase("restore random state", restore_rng_state, device)
     return FSDPResumeState(
         checkpoint_dir=checkpoint_dir,
         micro_step=int(metadata["micro_step"]),

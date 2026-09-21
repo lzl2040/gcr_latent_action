@@ -7,6 +7,7 @@ from torch import nn
 from lerobot.common.utils.fsdp_training import (
     FSDPTrainingConfig,
     _restore_replicated_frozen_parameters,
+    _run_checkpoint_phase,
     convert_policy_to_fp8,
     find_fsdp_wrap_modules,
     resolve_latest_fsdp_checkpoint,
@@ -136,3 +137,28 @@ def test_restore_replicated_frozen_parameters_uses_canonical_fsdp_names() -> Non
     )
 
     torch.testing.assert_close(inner.weight, torch.full((2, 3), 7.0))
+
+
+def test_checkpoint_phase_reports_rank_local_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda tensor, op: None)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+
+    def gather_error(output, error) -> None:
+        output[0] = error
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather_error)
+
+    def fail() -> None:
+        raise OSError("rank-local write failed")
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "Distributed checkpoint phase 'save optimizer' failed: "
+            "rank 3: OSError: rank-local write failed"
+        ),
+    ):
+        _run_checkpoint_phase("save optimizer", fail, torch.device("cpu"))
