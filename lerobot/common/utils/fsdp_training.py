@@ -6,7 +6,6 @@ import json
 import random
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import torch
@@ -38,12 +37,8 @@ _FP8_SCOPES = {"generation", "generation_vlm"}
 @dataclass
 class FSDPTrainingConfig:
     fp8: bool = True
-    fp8_recipe: Literal[
-        "tensorwise",
-        "rowwise",
-        "rowwise_with_gw_hp",
-    ] = "rowwise_with_gw_hp"
-    fp8_scope: Literal["generation", "generation_vlm"] = "generation_vlm"
+    fp8_recipe: str = "rowwise_with_gw_hp"
+    fp8_scope: str = "generation_vlm"
     fp8_emulate: bool = False
     fp8_min_features: int = 128
     min_wrap_params: int = 1_000_000

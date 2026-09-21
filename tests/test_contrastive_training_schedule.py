@@ -1,6 +1,7 @@
 import math
 from types import SimpleNamespace
 
+import draccus
 import pytest
 import torch
 
@@ -10,6 +11,10 @@ from lerobot.scripts.dps_train_contrast import (
     _compute_epoch_schedule,
     _data_read_batch_counts,
     _load_stage2_resume_policy_config,
+)
+from lerobot.scripts.fsdp_train_contrast import (
+    FSDPTrainPipelineConfig,
+    _normalize_resume_position,
 )
 
 
@@ -85,6 +90,28 @@ def test_optimizer_factory_uses_computed_schedule_length() -> None:
     make_optimizer_and_scheduler(cfg, policy, num_training_steps=4_567)
 
     assert recorded["num_training_steps"] == 4_567
+
+
+def test_fsdp_cli_decodes_nested_runtime_config() -> None:
+    cfg = draccus.parse(
+        FSDPTrainPipelineConfig,
+        args=[
+            "--dataset.repo_id=whatever",
+            "--policy.type=qwen3vl_mot",
+            "--fsdp.fp8=false",
+            "--fsdp.fp8_scope=generation",
+            "--batch_size=16",
+        ],
+    )
+
+    assert cfg.fsdp.fp8 is False
+    assert cfg.fsdp.fp8_scope == "generation"
+    assert cfg.batch_size == 16
+
+
+def test_fsdp_resume_position_advances_completed_epoch() -> None:
+    assert _normalize_resume_position(3, 100, 100) == (4, 0)
+    assert _normalize_resume_position(3, 137, 100) == (4, 37)
 
 
 def test_stage2_resume_uses_saved_embedded_stage1_config(tmp_path) -> None:
