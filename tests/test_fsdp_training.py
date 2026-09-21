@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 import torch
 from torch import nn
-from torchao.float8.float8_linear import Float8Linear
 
 from lerobot.common.utils.fsdp_training import (
     FSDPTrainingConfig,
@@ -47,6 +46,9 @@ class _Policy(nn.Module):
 
 
 def test_fp8_conversion_respects_scope_alignment_and_lora_exclusion() -> None:
+    float8_linear_cls = pytest.importorskip(
+        "torchao.float8.float8_linear"
+    ).Float8Linear
     policy = _Policy()
     converted = convert_policy_to_fp8(
         policy,
@@ -59,13 +61,16 @@ def test_fp8_conversion_respects_scope_alignment_and_lora_exclusion() -> None:
     )
 
     assert converted == ("generation.eligible",)
-    assert isinstance(policy.generation.eligible, Float8Linear)
+    assert isinstance(policy.generation.eligible, float8_linear_cls)
     assert type(policy.generation.output) is nn.Linear
     assert type(policy.generation.lora_A) is nn.Linear
     assert type(policy.understanding.model.language_model.layers[0]) is nn.Linear
 
 
 def test_fp8_conversion_can_include_vlm_transformer() -> None:
+    float8_linear_cls = pytest.importorskip(
+        "torchao.float8.float8_linear"
+    ).Float8Linear
     policy = _Policy()
     converted = convert_policy_to_fp8(
         policy,
@@ -83,7 +88,7 @@ def test_fp8_conversion_can_include_vlm_transformer() -> None:
     )
     assert isinstance(
         policy.understanding.model.language_model.layers[0],
-        Float8Linear,
+        float8_linear_cls,
     )
 
 

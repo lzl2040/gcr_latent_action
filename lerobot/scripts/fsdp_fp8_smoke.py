@@ -128,6 +128,13 @@ def main() -> None:
         min_wrap_params=1_000_000,
         replicate_frozen_params=True,
     )
+    training_geometry = {
+        "batch_size_per_rank": args.batch_size,
+        "gradient_accumulation_steps": 1,
+        "sequence_length": args.sequence_length,
+        "hidden_dim": args.hidden_dim,
+        "depth": args.depth,
+    }
 
     torch.manual_seed(1234)
     torch.cuda.manual_seed_all(1234)
@@ -157,6 +164,7 @@ def main() -> None:
         scheduler=scheduler,
         output_dir=args.checkpoint_dir,
         fsdp_config=config,
+        training_geometry=training_geometry,
         micro_step=1,
         update_step=1,
         epoch=0,
@@ -178,6 +186,7 @@ def main() -> None:
         scheduler=restored_scheduler,
         output_dir=args.checkpoint_dir,
         fsdp_config=config,
+        training_geometry=training_geometry,
         device=device,
     )
     restored_loss = _step(

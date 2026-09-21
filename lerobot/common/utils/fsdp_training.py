@@ -6,6 +6,7 @@ import json
 import random
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -267,6 +268,7 @@ def save_fsdp_checkpoint(
     scheduler,
     output_dir: str | Path,
     fsdp_config: FSDPTrainingConfig,
+    training_geometry: dict[str, Any],
     micro_step: int,
     update_step: int,
     epoch: int,
@@ -306,6 +308,7 @@ def save_fsdp_checkpoint(
             "batch_in_epoch": batch_in_epoch,
             "world_size": world_size,
             "fsdp_config": asdict(fsdp_config),
+            "training_geometry": training_geometry,
         }
         (temporary_dir / _METADATA_FILE).write_text(
             json.dumps(metadata, indent=2, sort_keys=True),
@@ -349,6 +352,7 @@ def load_fsdp_checkpoint(
     scheduler,
     output_dir: str | Path,
     fsdp_config: FSDPTrainingConfig,
+    training_geometry: dict[str, Any],
     device: torch.device,
 ) -> FSDPResumeState:
     checkpoint_dir = resolve_latest_fsdp_checkpoint(output_dir)
@@ -368,6 +372,12 @@ def load_fsdp_checkpoint(
         raise ValueError(
             "FSDP/FP8 settings changed across resume. Checkpoint settings are "
             f"{saved_fsdp_config}, current settings are {current_fsdp_config}."
+        )
+    saved_training_geometry = metadata.get("training_geometry")
+    if saved_training_geometry != training_geometry:
+        raise ValueError(
+            "Batching or sampler geometry changed across resume. Checkpoint geometry is "
+            f"{saved_training_geometry}, current geometry is {training_geometry}."
         )
 
     model_state = {"model": get_model_state_dict(model, options=_checkpoint_options())}

@@ -173,6 +173,18 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     total_update_steps = math.ceil(
         epoch_schedule.total_steps / cfg.gradient_accumulation_steps
     )
+    training_geometry = {
+        "batch_size_per_rank": cfg.batch_size,
+        "gradient_accumulation_steps": cfg.gradient_accumulation_steps,
+        "data_mix": cfg.data_mix,
+        "dataset_names": list(dataset.dataset_names),
+        "dataset_size_one_epoch": cfg.dataset.dataset_size_one_epoch,
+        "total_source_frames": dataset.total_source_frames,
+        "steps_per_epoch": epoch_schedule.steps_per_epoch,
+        "total_epochs": epoch_schedule.total_epochs,
+        "total_micro_steps": epoch_schedule.total_steps,
+        "seed": cfg.seed,
+    }
     dataloader = DataLoader(
         dataset=dataset,
         batch_sampler=sampler,
@@ -278,6 +290,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
             scheduler=lr_scheduler,
             output_dir=output_path,
             fsdp_config=cfg.fsdp,
+            training_geometry=training_geometry,
             device=device,
         )
         micro_step = resume.micro_step
@@ -420,6 +433,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
                     scheduler=lr_scheduler,
                     output_dir=output_path,
                     fsdp_config=cfg.fsdp,
+                    training_geometry=training_geometry,
                     micro_step=micro_step,
                     update_step=update_step,
                     epoch=epoch,
