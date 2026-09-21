@@ -103,9 +103,11 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         vision_layers: int,
     ) -> None:
         for parameter in self.model.parameters():
-            parameter.requires_grad_(tuning_mode == "full")
-        if tuning_mode != "lora":
+            parameter.requires_grad_(False)
+        if tuning_mode == "frozen":
             return
+        if tuning_mode not in ("lora", "full"):
+            raise ValueError(f"Unsupported understanding tuning mode {tuning_mode!r}.")
 
         try:
             from peft import LoraConfig, get_peft_model
@@ -122,7 +124,8 @@ class Qwen3VLUnderstandingExpert(nn.Module):
                 "Requested more Qwen LoRA layers than the checkpoint contains: "
                 f"text {text_layers}/{text_depth}, vision {vision_layers}/{vision_depth}."
             )
-        text_start = text_depth - text_layers
+        effective_text_layers = text_layers if tuning_mode == "lora" else 0
+        text_start = text_depth - effective_text_layers
         vision_start = vision_depth - vision_layers
         targets = []
         for name, module in base.named_modules():
@@ -156,6 +159,12 @@ class Qwen3VLUnderstandingExpert(nn.Module):
                 init_lora_weights=True,
             ),
         )
+        if tuning_mode == "full":
+            # Qwen3-VL performs multimodal fusion inside its decoder transformer. Train those
+            # blocks fully, but keep token embeddings/final norm frozen and retain LoRA-only
+            # adaptation for the visual backbone.
+            for parameter in _base_qwen(self.model).language_model.layers.parameters():
+                parameter.requires_grad_(True)
 
     def _pack_images(
         self,

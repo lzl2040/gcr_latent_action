@@ -241,6 +241,7 @@ def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients():
 
     from lerobot.common.policies.qwen3vl_mot.modeling_understanding import (
         Qwen3VLUnderstandingExpert,
+        _base_qwen,
         _selected_layers,
     )
 
@@ -337,6 +338,35 @@ def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients():
     ]
     assert any("visual.blocks" in name and "lora_" in name for name in trainable_names)
     assert not any("language_model.layers" in name for name in trainable_names)
+
+    full_expert = object.__new__(Qwen3VLUnderstandingExpert)
+    nn.Module.__init__(full_expert)
+    full_expert.model = Qwen3VLModel(config)
+    full_expert._configure_tuning(
+        tuning_mode="full",
+        rank=2,
+        alpha=2,
+        dropout=0.0,
+        text_layers=0,
+        vision_layers=1,
+    )
+    full_base = _base_qwen(full_expert.model)
+    assert all(
+        parameter.requires_grad
+        for parameter in full_base.language_model.layers.parameters()
+    )
+    assert not full_base.language_model.embed_tokens.weight.requires_grad
+    assert not full_base.language_model.norm.weight.requires_grad
+    full_trainable_names = [
+        name
+        for name, parameter in full_expert.model.named_parameters()
+        if parameter.requires_grad
+    ]
+    assert any("visual.blocks" in name and "lora_" in name for name in full_trainable_names)
+    assert not any(
+        "visual.blocks" in name and "base_layer" in name
+        for name in full_trainable_names
+    )
 
 
 def test_stage1_transfer_strips_wrapper_prefixes():

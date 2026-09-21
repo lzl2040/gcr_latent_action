@@ -27,6 +27,9 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
 
     qwen3vl_dir: str = "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct"
     cosmos3_dir: str = "/Data/lzl/huggingface/Cosmos3-Edge"
+    # "full" means full tuning of Qwen's multimodal language transformer layers.
+    # The visual backbone still uses LoRA, while token embeddings and the final language
+    # norm remain frozen.
     understanding_tuning_mode: str = "lora"
     understanding_lora_rank: int = 16
     understanding_lora_alpha: int = 16
@@ -123,6 +126,22 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
         ):
             raise ValueError(
                 "LoRA tuning requires at least one text or vision layer."
+            )
+        if (
+            self.understanding_tuning_mode == "full"
+            and self.understanding_text_lora_layers != 0
+        ):
+            raise ValueError(
+                "Full VLM-transformer tuning keeps the text embedding path free of LoRA; "
+                "set `understanding_text_lora_layers=0`."
+            )
+        if (
+            self.understanding_tuning_mode == "full"
+            and self.understanding_vision_lora_layers == 0
+        ):
+            raise ValueError(
+                "Full VLM-transformer tuning still adapts the visual backbone with LoRA; "
+                "set `understanding_vision_lora_layers` to a positive value."
             )
         if self.physical_tuning_mode not in ("frozen", "full"):
             raise ValueError(
