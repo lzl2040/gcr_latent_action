@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import torch
 
 from lerobot.common.datasets.contrastive_dataset import MultiModalContrastiveDataset
 
@@ -54,9 +55,42 @@ def test_getitem_uses_flat_mapping_for_direct_integer_indices() -> None:
     dataset = _dataset_with_sizes([2, 3])
     dataset.datasets = [["a0", "a1"], ["b0", "b1", "b2"]]
     dataset.dataset_names = ["a", "b"]
-    dataset._to_canonical = lambda item, ds_idx, frame_idx: (item, ds_idx, frame_idx)
+    dataset._to_canonical = lambda item, ds_idx, frame_idx: {
+        "item": item,
+        "dataset_id": torch.tensor(ds_idx),
+        "frame_index": torch.tensor(frame_idx),
+    }
 
-    assert dataset[0] == ("a0", 0, 0)
-    assert dataset[2] == ("b0", 1, 0)
-    assert dataset[-1] == ("b2", 1, 2)
-    assert dataset[(1, 1)] == ("b1", 1, 1)
+    assert dataset[0]["item"] == "a0"
+    assert dataset[2]["item"] == "b0"
+    assert dataset[-1]["item"] == "b2"
+    assert dataset[(1, 1)]["item"] == "b1"
+    assert dataset[0]["data_read_fallback"].item() == 0
+    assert dataset[(1, 1)]["requested_frame_index"].item() == 1
+
+
+def test_getitem_marks_worker_read_fallbacks() -> None:
+    class BrokenDataset:
+        def __len__(self):
+            return 2
+
+        def __getitem__(self, index):
+            if index == 1:
+                raise RuntimeError("broken frame")
+            return "fallback"
+
+    dataset = _dataset_with_sizes([2])
+    dataset.datasets = [BrokenDataset()]
+    dataset.dataset_names = ["broken"]
+    dataset._to_canonical = lambda item, ds_idx, frame_idx: {
+        "item": item,
+        "dataset_id": torch.tensor(ds_idx),
+        "frame_index": torch.tensor(frame_idx),
+    }
+
+    item = dataset[1]
+
+    assert item["item"] == "fallback"
+    assert item["frame_index"].item() == 0
+    assert item["requested_frame_index"].item() == 1
+    assert item["data_read_fallback"].item() == 1
