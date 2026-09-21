@@ -110,6 +110,38 @@ def test_generation_expert_preserves_stream_shapes():
     assert output["action"].shape == (2, 3, 8)
 
 
+def test_default_generation_expert_is_between_one_and_two_billion_parameters():
+    config = Qwen3VLMoTConfig()
+    with torch.device("meta"):
+        model = GenerationExpert(
+            understanding_dim=2560,
+            hidden_dim=config.generation_hidden_dim,
+            depth=config.generation_depth,
+            num_heads=config.generation_num_heads,
+            num_kv_heads=config.generation_num_kv_heads,
+            intermediate_dim=config.generation_intermediate_dim,
+            hidden_act=config.generation_hidden_act,
+            dropout=config.generation_dropout,
+            input_dims={
+                "video": config.video_latent_dim * config.video_latent_patch_size**2,
+                "state": config.physical_hidden_dim,
+                "action": config.physical_hidden_dim,
+                "tactile": config.physical_hidden_dim,
+            },
+            output_dims={
+                "video": config.video_latent_dim * config.video_latent_patch_size**2,
+                "state": config.group_size * config.max_state_dim,
+                "action": config.group_size * config.max_action_dim,
+                "tactile": config.physical_hidden_dim,
+            },
+            task_names=config.task_names,
+            gradient_checkpointing=True,
+        )
+    parameters = sum(parameter.numel() for parameter in model.parameters())
+    assert 1_000_000_000 <= parameters <= 2_000_000_000
+    assert parameters == 1_429_469_696
+
+
 def test_native_kv_checkpointing_matches_non_checkpointed_gradients():
     from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig
 
@@ -120,7 +152,7 @@ def test_native_kv_checkpointing_matches_non_checkpointed_gradients():
         intermediate_size=32,
         num_hidden_layers=1,
         num_attention_heads=4,
-        num_key_value_heads=4,
+        num_key_value_heads=2,
         head_dim=4,
         max_position_embeddings=128,
         rope_scaling={"rope_type": "default", "mrope_section": [1, 1, 0]},
@@ -130,6 +162,7 @@ def test_native_kv_checkpointing_matches_non_checkpointed_gradients():
         hidden_dim=16,
         depth=2,
         num_heads=4,
+        num_kv_heads=2,
         mlp_ratio=2.0,
         dropout=0.0,
         input_dims={"video": 4},
@@ -150,8 +183,8 @@ def test_native_kv_checkpointing_matches_non_checkpointed_gradients():
     values_checkpointed = values.detach().clone().requires_grad_(True)
     key_values = [
         (
-            torch.randn(2, 4, 7, 4, requires_grad=True),
-            torch.randn(2, 4, 7, 4, requires_grad=True),
+            torch.randn(2, 2, 7, 4, requires_grad=True),
+            torch.randn(2, 2, 7, 4, requires_grad=True),
         )
         for _ in range(2)
     ]

@@ -122,10 +122,15 @@ class AsymmetricAttention(nn.Module):
         num_kv_heads: int | None = None,
     ):
         super().__init__()
+        if hidden_dim % num_heads:
+            raise ValueError("Generation hidden size must be divisible by query heads.")
+        num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        if num_heads % num_kv_heads:
+            raise ValueError("Generation query heads must be divisible by KV heads.")
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.num_kv_heads = num_kv_heads
         self.dropout = dropout
         self.q_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         kv_dim = self.num_kv_heads * self.head_dim
