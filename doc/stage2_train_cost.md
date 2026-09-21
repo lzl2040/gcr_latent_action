@@ -105,49 +105,62 @@ Vision LoRA:                         1e-5
 Text model:                          frozen
 ```
 
-## 基于 Qwen3-VL-4B VLM 全量微调和 1.429B Generation Expert 的估计
+## 基于 Qwen3-VL-4B VLM Transformer 全量、视觉 LoRA 和 1.429B Generation Expert 的估计
 
 ### 模型配置
 
-Generation Expert、Wan VAE、physical expert 和 teacher 均保持上一节配置，只把
-Qwen3-VL-4B 的 language model 与 vision model 从冻结/LoRA 改为全量训练：
+这里的“VLM Transformer 全量”不是把整个 Qwen3-VL 全量训练。Qwen3-VL 没有
+额外独立的 cross-attention fusion tower：视觉 token 和文本 token 共同进入
+`language_model.layers`，因此这 36 个 decoder blocks 就是本节所指的多模态
+Transformer。
+
+具体训练范围是：
+
+- `language_model.layers`：全量训练；
+- vision encoder：基础权重冻结，最后 4 层继续使用 rank-16 LoRA；
+- text token embedding 与 language final norm：冻结；
+- text attention 不使用 LoRA；
+- Generation Expert：全量训练；
+- Wan VAE、physical expert 和阶段一 teacher：冻结。
 
 ```text
 understanding_tuning_mode = "full"
-understanding_text_lora_layers 和 understanding_vision_lora_layers 不再生效
+understanding_text_lora_layers = 0
+understanding_vision_lora_layers = 4
 understanding_gradient_checkpointing = true
 generation_gradient_checkpointing = true
 ```
 
 | 参数集合 | 参数量 |
 |---|---:|
-| 全量 Qwen3-VL-4B | 4,437,815,808 |
+| 全量 VLM Transformer layers | 3,633,509,376 |
+| Vision LoRA | 393,216 |
 | Latent query 参数 | 40,960 |
 | Generation Expert | 1,429,469,696 |
 | Latent-action projection | 2,629,632 |
-| **总可训练参数** | **5,869,956,096** |
+| **总可训练参数** | **5,066,042,880** |
 
-这不是一个 5.87B 独立模型，而是约 4.44B 的 Qwen understanding 路径与
-1.43B generation 路径同时训练。阶段一 teacher、physical expert 和 Wan VAE
-仍然冻结，不计入可训练参数。
+冻结的 Qwen 参数仍包括约 415M 的 vision base、388,956,160 个 token embedding
+参数和 final norm。模型前向仍使用这些权重，但它们不产生 weight gradient 或
+optimizer state。
 
 ### 显存变化
 
 同样按照约 16 bytes/可训练参数估算，8 卡 FSDP2 下训练状态约为：
 
 ```text
-5.870B × 16 bytes ÷ 8 = 10.93 GiB/GPU
+5.066B × 16 bytes ÷ 8 = 9.44 GiB/GPU
 ```
 
-相比视觉 LoRA 配置增加约 **8.27 GiB/GPU**。Activation checkpoint 后，
-activation 规模变化不大；主要新增项是 Qwen 权重的梯度、FP32 master weights
-和 Adam moments。全量微调必须优先使用 FSDP2 full shard 或 ZeRO-3，不建议把
-当前 ZeRO-2 作为长期训练配置。
+相比默认视觉 LoRA 配置增加约 **6.77 GiB/GPU**。Activation checkpoint 后，
+activation 规模变化不大；主要新增项是 36 个 VLM Transformer blocks 的梯度、
+FP32 master weights 和 Adam moments。正式长训练仍推荐 FSDP2 full shard；
+当前 ZeRO-2 可以用于容量验证，但会在每张卡复制所有模型权重。
 
 | 训练方式 | 建议 micro-batch/GPU | 8 卡 global batch | 说明 |
 |---|---:|---:|---|
-| DeepSpeed ZeRO-2 BF16 | 4–8 起步，可尝试 16 | 32–128 | 权重仍在每卡复制 |
-| FSDP2 BF16 + activation checkpoint | **8 起步，推荐 16** | **64–128** | 预计 32 能放下，但需实机确认通信峰值 |
+| DeepSpeed ZeRO-2 BF16 | 8 起步，可尝试 16 | 64–128 | 权重仍在每卡复制 |
+| FSDP2 BF16 + activation checkpoint | **16 起步，可尝试 32** | **128–256** | 32 需实机确认通信和 VAE 峰值 |
 | FSDP2 + Generation FP8 | 16 起步，可尝试 24–32 | 128–256 | VLM 仍为 BF16 时收益有限 |
 
 micro-batch 16/GPU 已经能在 8 卡上形成 global batch 128，不需要梯度累积。
@@ -155,25 +168,27 @@ micro-batch 16/GPU 已经能在 8 卡上形成 global batch 128，不需要梯�
 
 ### 速度变化
 
-视觉 LoRA 配置虽然不计算 Qwen 基础权重梯度，但仍需把梯度传回 latent queries
-和 vision LoRA。全量微调额外计算每个 Qwen Linear 的 weight gradient，因此
-Qwen understanding 部分预计慢约 25–35%，整个训练 step 预计慢约 15–30%；
-同时还增加 FSDP reduce-scatter 通信。
+默认配置虽然不计算 VLM Transformer 的 weight gradient，但仍需把梯度传回
+latent queries 和 vision LoRA。将 36 个 Transformer blocks 全量打开后，需要
+额外计算这些 Linear 的 weight gradient，因此 Qwen understanding 部分预计慢约
+25–35%，整个训练 step 预计慢约 12–25%；同时还增加 FSDP reduce-scatter 通信。
 
 | micro-batch/GPU | gradient accumulation | global batch/optimizer step | 端到端估计 | 全局吞吐 |
 |---:|---:|---:|---:|---:|
-| 8 | 2 | 128 | 1.3–1.9 s | 约 67–98 samples/s |
-| 16 | 1 | 128 | **1.1–1.6 s** | **约 80–116 samples/s** |
-| 32 | 1 | 256 | 2.0–2.9 s | 约 88–128 samples/s |
+| 8 | 2 | 128 | 1.2–1.8 s | 约 71–107 samples/s |
+| 16 | 1 | 128 | **1.0–1.5 s** | **约 85–128 samples/s** |
+| 32 | 1 | 256 | 1.8–2.7 s | 约 95–142 samples/s |
 
-全量微调时，micro-batch 16 通常比 8×gradient accumulation 2 更快，因为后者
-需要执行两次 VAE、teacher、Qwen 和 Generation forward/backward。
+VLM Transformer 全量时，micro-batch 16 通常比 8×gradient accumulation 2
+更快，因为后者需要执行两次 VAE、teacher、Qwen 和 Generation
+forward/backward。
 
 ### 推荐启动参数
 
-全量微调建议先把 Qwen learning rate 设为 `5e-6`，Generation Expert 保持
-`1e-4`。当前 optimizer 已将 understanding 参数放在独立 parameter group，
-可以通过 `UNDERSTANDING_LR_SCALE` 调整：
+VLM Transformer 全量建议先把 understanding learning rate 设为 `5e-6`，
+Generation Expert 保持 `1e-4`。当前 optimizer 将 VLM Transformer 和 vision
+LoRA 放在同一个 understanding parameter group，可以通过
+`UNDERSTANDING_LR_SCALE` 调整：
 
 ```bash
 UNDERSTANDING_TUNING_MODE=full \
@@ -185,25 +200,26 @@ bash train_qwen3vl_mot_local.sh
 
 ```text
 Generation Expert / latent queries: 1e-4
-Qwen3-VL vision + language:          5e-6
+VLM Transformer layers:              5e-6
+Vision LoRA:                         5e-6
+Text embedding / final norm:         frozen
 ```
 
-`1e-5` 可以作为 Qwen 全量微调的上限实验，但不建议直接从该值开始。阶段一迁移
-后的视觉权重和 Qwen 原始语言权重来自不同训练目标，全量使用较大学习率更容易导致
-语言能力与视觉表示同时漂移。
+`1e-5` 可以作为 VLM Transformer 全量微调的上限实验，但不建议直接从该值开始。
+这些层同时处理视觉和文本 token，较大学习率仍可能造成语言能力和跨模态表示漂移。
 
 ### 两种方案的建议
 
-| 项目 | 文本冻结 + 视觉 LoRA | VLM 全量微调 |
+| 项目 | Transformer 冻结 + 视觉 LoRA | VLM Transformer 全量 + 视觉 LoRA |
 |---|---:|---:|
-| 可训练参数 | 1.433B | 5.870B |
-| 推荐 micro-batch/GPU | 16，目标 32 | 8 起步，推荐 16 |
+| 可训练参数 | 1.433B | 5.066B |
+| 推荐 micro-batch/GPU | 16，目标 32 | 16 起步，可尝试 32 |
 | global batch 128 | 16×8，无累积 | 16×8，或 8×8×累积 2 |
-| 预计端到端 step | 0.9–1.3 s | 1.1–1.6 s |
-| 语言能力漂移风险 | 低 | 高 |
+| 预计端到端 step | 0.9–1.3 s | 1.0–1.5 s |
+| 语言能力漂移风险 | 低 | 中高 |
 | 推荐优先级 | **默认方案** | 第二阶段消融或后期解冻 |
 
-建议先训练“文本冻结 + 视觉 LoRA + Generation 全量”版本。若 latent-action
-distillation 和 generation loss 已稳定收敛，再从该 checkpoint 解冻整个 VLM，
-使用更低的 Qwen learning rate 做短周期联合微调，而不是一开始就同时训练
-5.87B 参数。
+建议先训练“VLM Transformer 冻结 + 视觉 LoRA + Generation 全量”版本。若
+latent-action distillation 和 generation loss 已稳定收敛，再从该 checkpoint
+解冻 `language_model.layers`，使用更低的 learning rate 做短周期联合微调，
+而不是一开始就同时训练 5.066B 参数。
