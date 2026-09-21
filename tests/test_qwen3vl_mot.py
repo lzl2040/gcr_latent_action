@@ -9,6 +9,7 @@ from lerobot.common.datasets.contrastive_dataset import (
     MultiModalContrastiveDataset,
     _evenly_spaced_frame_timestamps,
 )
+from lerobot.common.optim.optimizers import AdamW8bitConfig
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.qwen3vl_mot.configuration_qwen3vl_mot import Qwen3VLMoTConfig
 from lerobot.common.policies.qwen3vl_mot.modeling_generation import (
@@ -421,6 +422,7 @@ def test_default_stage2_lora_tunes_vision_but_not_text():
     assert config.understanding_tuning_mode == "lora"
     assert config.understanding_text_lora_layers == 0
     assert config.understanding_vision_lora_layers > 0
+    assert isinstance(config.get_optimizer_preset(), AdamW8bitConfig)
 
 
 def test_stage2_scheduler_uses_plateau_argument():

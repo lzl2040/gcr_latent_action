@@ -15,7 +15,6 @@
 # limitations under the License.
 import abc
 from dataclasses import asdict, dataclass
-import bitsandbytes as bnb
 from pathlib import Path
 
 import draccus
@@ -77,45 +76,34 @@ class AdamWNormConfig(OptimizerConfig):
         kwargs.pop("grad_clip_norm")
         return torch.optim.AdamW(params, **kwargs)
 
-@OptimizerConfig.register_subclass("adamw")
+@OptimizerConfig.register_subclass("adamw_8bit")
 @dataclass
-# class AdamWConfig(OptimizerConfig):
-#     lr: float = 1e-3
-#     betas: tuple[float, float] = (0.9, 0.999)
-#     eps: float = 1e-8
-#     weight_decay: float = 1e-2
-#     grad_clip_norm: float = 10.0
-
-#     def build(self, params: dict) -> torch.optim.Optimizer:
-#         kwargs = asdict(self)
-#         kwargs.pop("grad_clip_norm")
-#         return torch.optim.AdamW(params, **kwargs)
-
-# class AdamWConfig(OptimizerConfig):
-#     lr: float = 1e-3
-#     beta2_decay: float = -0.8
-#     eps: tuple[float | None, float] = (None, 0.001)
-#     weight_decay: float = 1e-2
-#     d: float = 1.0
-#     grad_clip_norm: float = 10.0
-    
-#     def build(self, params: dict) -> torch.optim.Optimizer:
-#         kwargs = asdict(self)
-#         kwargs.pop("grad_clip_norm")
-#         return torch.optim.Adafactor(params, **kwargs)
-class AdamWConfig(OptimizerConfig):
+class AdamW8bitConfig(OptimizerConfig):
     lr: float = 1e-3
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
     weight_decay: float = 1e-2
     grad_clip_norm: float = 10.0
+    min_8bit_size: int = 4096
+    percentile_clipping: int = 100
+    block_wise: bool = True
 
     def build(self, params: dict) -> torch.optim.Optimizer:
+        try:
+            from bitsandbytes.optim import AdamW8bit
+        except ImportError as exc:
+            raise ImportError(
+                "AdamW 8-bit requires bitsandbytes; install the repository's contrast extras."
+            ) from exc
         kwargs = asdict(self)
         kwargs.pop("grad_clip_norm")
-        adam8bit = bnb.optim.Adam8bit(params, **kwargs)
-        return adam8bit
-        # return torch.optim.AdamW(params, **kwargs)
+        return AdamW8bit(params, **kwargs)
+
+
+@OptimizerConfig.register_subclass("adamw")
+@dataclass
+class AdamWConfig(AdamW8bitConfig):
+    """Backward-compatible registry alias for the historical 8-bit AdamW preset."""
 
 
 @OptimizerConfig.register_subclass("sgd")

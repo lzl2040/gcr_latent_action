@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from lerobot.common.optim.optimizers import AdamWNormConfig
+from lerobot.common.optim.optimizers import AdamW8bitConfig
 from lerobot.common.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 from lerobot.configs.policies import PreTrainedConfig
 
@@ -225,8 +225,8 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     def validate_features(self) -> None:
         return None
 
-    def get_optimizer_preset(self) -> AdamWNormConfig:
-        return AdamWNormConfig(
+    def get_optimizer_preset(self) -> AdamW8bitConfig:
+        return AdamW8bitConfig(
             lr=self.optimizer_lr,
             betas=self.optimizer_betas,
             eps=self.optimizer_eps,

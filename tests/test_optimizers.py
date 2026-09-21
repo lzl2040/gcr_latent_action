@@ -7,7 +7,9 @@ from lerobot.common.constants import (
 )
 from lerobot.common.optim.optimizers import (
     AdamConfig,
+    AdamW8bitConfig,
     AdamWConfig,
+    AdamWNormConfig,
     SGDConfig,
     load_optimizer_state,
     save_optimizer_state,
@@ -18,7 +20,7 @@ from lerobot.common.optim.optimizers import (
     "config_cls, expected_class",
     [
         (AdamConfig, torch.optim.Adam),
-        (AdamWConfig, torch.optim.AdamW),
+        (AdamWNormConfig, torch.optim.AdamW),
         (SGDConfig, torch.optim.SGD),
     ],
 )
@@ -27,6 +29,18 @@ def test_optimizer_build(config_cls, expected_class, model_params):
     optimizer = config.build(model_params)
     assert isinstance(optimizer, expected_class)
     assert optimizer.defaults["lr"] == config.lr
+
+
+@pytest.mark.parametrize("config_cls", [AdamW8bitConfig, AdamWConfig])
+def test_8bit_adamw_build(config_cls, model_params):
+    from bitsandbytes.optim import AdamW8bit
+
+    config = config_cls()
+    optimizer = config.build(model_params)
+
+    assert isinstance(optimizer, AdamW8bit)
+    assert optimizer.defaults["lr"] == config.lr
+    assert optimizer.args.optim_bits == 8
 
 
 def test_save_optimizer_state(optimizer, tmp_path):
