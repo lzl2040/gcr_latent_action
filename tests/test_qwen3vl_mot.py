@@ -319,6 +319,25 @@ def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients():
     assert expert.query_tokens.grad is not None
     assert vision_parameter.grad is not None
 
+    vision_lora_expert = object.__new__(Qwen3VLUnderstandingExpert)
+    nn.Module.__init__(vision_lora_expert)
+    vision_lora_expert.model = Qwen3VLModel(config)
+    vision_lora_expert._configure_tuning(
+        tuning_mode="lora",
+        rank=2,
+        alpha=2,
+        dropout=0.0,
+        text_layers=0,
+        vision_layers=1,
+    )
+    trainable_names = [
+        name
+        for name, parameter in vision_lora_expert.model.named_parameters()
+        if parameter.requires_grad
+    ]
+    assert any("visual.blocks" in name and "lora_" in name for name in trainable_names)
+    assert not any("language_model.layers" in name for name in trainable_names)
+
 
 def test_stage1_transfer_strips_wrapper_prefixes():
     source = nn.Module()
@@ -365,6 +384,13 @@ def test_config_rejects_non_divisible_grouping():
         assert "must be divisible" in str(exc)
     else:
         raise AssertionError("Expected an invalid grouping configuration to fail.")
+
+
+def test_default_stage2_lora_tunes_vision_but_not_text():
+    config = Qwen3VLMoTConfig()
+    assert config.understanding_tuning_mode == "lora"
+    assert config.understanding_text_lora_layers == 0
+    assert config.understanding_vision_lora_layers > 0
 
 
 def test_stage2_scheduler_uses_plateau_argument():

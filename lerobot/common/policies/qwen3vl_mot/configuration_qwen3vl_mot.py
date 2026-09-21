@@ -31,7 +31,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     understanding_lora_rank: int = 16
     understanding_lora_alpha: int = 16
     understanding_lora_dropout: float = 0.0
-    understanding_text_lora_layers: int = 8
+    understanding_text_lora_layers: int = 0
     understanding_vision_lora_layers: int = 4
     understanding_lr_scale: float = 0.1
     understanding_gradient_checkpointing: bool = True
@@ -113,6 +113,16 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
             raise ValueError(
                 "`understanding_tuning_mode` must be 'frozen', 'lora', or 'full', got "
                 f"{self.understanding_tuning_mode!r}."
+            )
+        if self.understanding_text_lora_layers < 0 or self.understanding_vision_lora_layers < 0:
+            raise ValueError("Understanding LoRA layer counts must be non-negative.")
+        if (
+            self.understanding_tuning_mode == "lora"
+            and self.understanding_text_lora_layers == 0
+            and self.understanding_vision_lora_layers == 0
+        ):
+            raise ValueError(
+                "LoRA tuning requires at least one text or vision layer."
             )
         if self.physical_tuning_mode not in ("frozen", "full"):
             raise ValueError(
