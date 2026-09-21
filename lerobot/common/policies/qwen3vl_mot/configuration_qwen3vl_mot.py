@@ -55,7 +55,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
 
     chunk_size: int = 32
     group_size: int = 4
-    n_action_steps: int = 16
+    n_action_steps: int = 32
     max_action_dim: int = 40
     max_state_dim: int = 40
     max_tactile_signal_dim: int = 32
@@ -76,7 +76,10 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     tactile_loss_weight: float = 0.25
     inference_steps: int = 20
 
-    window_mode: str = "duration"
+    # Stage two predicts executable action chunks, so these must be consecutive source
+    # commands rather than the duration-resampled trajectories used by stage-one contrastive
+    # pre-training. Video is sampled sparsely inside the same [t, t + chunk_size - 1] window.
+    window_mode: str = "frames"
     chunk_seconds: float = 1.6
     chunk_frames_min: int = 8
     chunk_frames_max: int = 48
@@ -115,6 +118,21 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
             raise ValueError(
                 f"`chunk_size` ({self.chunk_size}) must be divisible by positive "
                 f"`group_size` ({self.group_size})."
+            )
+        if not 1 <= self.n_action_steps <= self.chunk_size:
+            raise ValueError(
+                f"`n_action_steps` must be in [1, chunk_size], got {self.n_action_steps} "
+                f"for chunk_size={self.chunk_size}."
+            )
+        if self.window_mode != "frames":
+            raise ValueError(
+                "qwen3vl_mot requires `window_mode='frames'` so action/state chunks are "
+                "consecutive executable commands."
+            )
+        if self.frame_horizon not in (None, self.chunk_size - 1):
+            raise ValueError(
+                "`frame_horizon` must be unset or equal to `chunk_size - 1` in frame mode; "
+                "otherwise video and action would end at different timesteps."
             )
         if self.world_video_frames < 2:
             raise ValueError("`world_video_frames` must contain the current and at least one future frame.")

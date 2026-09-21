@@ -335,6 +335,38 @@ def test_stage2_scheduler_uses_plateau_argument():
     assert scheduler.num_platform_steps == config.scheduler_plateau_steps
 
 
+def test_stage2_defaults_use_consecutive_32_step_actions():
+    config = Qwen3VLMoTConfig()
+    assert config.window_mode == "frames"
+    assert config.chunk_size == 32
+    assert config.n_action_steps == 32
+
+    dataset = object.__new__(MultiModalContrastiveDataset)
+    dataset.window_mode = config.window_mode
+    dataset.chunk_size = config.chunk_size
+    dataset.chunk_seconds = config.chunk_seconds
+    dataset.chunk_frames_min = config.chunk_frames_min
+    dataset.chunk_frames_max = config.chunk_frames_max
+    dataset.frame_horizon_override = config.frame_horizon
+    offsets, horizon = dataset._window_offsets(fps=30)
+
+    assert offsets == list(range(32))
+    assert horizon == 31
+
+
+def test_stage2_rejects_resampled_or_misaligned_action_windows():
+    for kwargs in (
+        {"window_mode": "duration"},
+        {"frame_horizon": 48},
+    ):
+        try:
+            Qwen3VLMoTConfig(**kwargs)
+        except ValueError as exc:
+            assert "action" in str(exc) or "frame_horizon" in str(exc)
+        else:
+            raise AssertionError(f"Expected invalid temporal config to fail: {kwargs}")
+
+
 class _FakePerception(nn.Module):
     def __init__(self, queries: int, width: int):
         super().__init__()
