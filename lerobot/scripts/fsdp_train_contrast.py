@@ -212,8 +212,8 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         )
 
     # All ranks construct identical random Generation weights before FSDP shards them.
-    if cfg.seed is not None:
-        set_seed(cfg.seed)
+    model_seed = cfg.seed if cfg.seed is not None else 0
+    set_seed(model_seed)
     logger.info("Creating stage-two policy...")
     policy = make_policy(
         cfg=cfg.policy,
@@ -240,8 +240,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     model.train()
     optimizer.zero_grad(set_to_none=True)
 
-    if cfg.seed is not None:
-        set_seed(cfg.seed + rank)
+    set_seed(model_seed + rank)
 
     if rank == 0:
         num_total_params = sum(parameter.numel() for parameter in model.parameters())

@@ -6,6 +6,7 @@ from torch import nn
 
 from lerobot.common.utils.fsdp_training import (
     FSDPTrainingConfig,
+    _restore_replicated_frozen_parameters,
     convert_policy_to_fp8,
     find_fsdp_wrap_modules,
     resolve_latest_fsdp_checkpoint,
@@ -119,3 +120,19 @@ def test_fsdp_training_config_rejects_invalid_settings() -> None:
 def test_resolve_latest_checkpoint_requires_pointer(tmp_path) -> None:
     with pytest.raises(FileNotFoundError, match="latest_checkpoint"):
         resolve_latest_fsdp_checkpoint(tmp_path)
+
+
+def test_restore_replicated_frozen_parameters_uses_canonical_fsdp_names() -> None:
+    inner = nn.Module()
+    inner.weight = nn.Parameter(torch.zeros(2, 3), requires_grad=False)
+    root = nn.Module()
+    root.block = nn.Module()
+    root.block._fsdp_wrapped_module = inner
+    wrapper = type("Wrapper", (), {"module": root})()
+
+    _restore_replicated_frozen_parameters(
+        wrapper,
+        {"block.weight": torch.full((2, 3), 7.0)},
+    )
+
+    torch.testing.assert_close(inner.weight, torch.full((2, 3), 7.0))

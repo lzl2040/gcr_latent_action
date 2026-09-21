@@ -242,6 +242,43 @@ def _checkpoint_options() -> StateDictOptions:
     )
 
 
+def _canonical_fsdp_name(name: str) -> str:
+    return name.replace("_fsdp_wrapped_module.", "")
+
+
+@torch.no_grad()
+def _restore_replicated_frozen_parameters(
+    model: FullyShardedDataParallel,
+    model_state: dict[str, Any],
+) -> None:
+    """FSDP does not copy ignored parameters in set_model_state_dict."""
+    frozen_parameters = {
+        _canonical_fsdp_name(name): parameter
+        for name, parameter in model.module.named_parameters()
+        if not parameter.requires_grad
+    }
+    missing = sorted(set(frozen_parameters) - set(model_state))
+    if missing:
+        preview = ", ".join(missing[:5])
+        raise KeyError(
+            "Checkpoint is missing replicated frozen parameters "
+            f"({len(missing)} total): {preview}."
+        )
+    for name, parameter in frozen_parameters.items():
+        value = model_state[name]
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(
+                f"Replicated frozen parameter {name!r} must load as a Tensor, got "
+                f"{type(value).__name__}."
+            )
+        if value.shape != parameter.shape:
+            raise ValueError(
+                f"Replicated frozen parameter {name!r} changed shape from "
+                f"{tuple(value.shape)} to {tuple(parameter.shape)}."
+            )
+        parameter.copy_(value.to(device=parameter.device, dtype=parameter.dtype))
+
+
 def _barrier(device: torch.device) -> None:
     dist.barrier(device_ids=[device.index])
 
@@ -280,17 +317,22 @@ def save_fsdp_checkpoint(
     checkpoint_name = f"checkpoint_{update_step:08d}"
     checkpoint_dir = output_dir / checkpoint_name
     temporary_dir = output_dir / f".{checkpoint_name}.tmp"
-    if checkpoint_dir.exists() or temporary_dir.exists():
-        raise FileExistsError(
-            f"Refusing to overwrite an existing FSDP checkpoint at {checkpoint_dir} "
-            f"or {temporary_dir}."
-        )
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    preparation_error = [None]
     if rank == 0:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        temporary_dir.mkdir()
+        if checkpoint_dir.exists() or temporary_dir.exists():
+            preparation_error[0] = (
+                f"Refusing to overwrite an existing FSDP checkpoint at {checkpoint_dir} "
+                f"or {temporary_dir}."
+            )
+        else:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            temporary_dir.mkdir()
+    dist.broadcast_object_list(preparation_error, src=0, device=device)
+    if preparation_error[0] is not None:
+        raise FileExistsError(preparation_error[0])
     _barrier(device)
 
     model_state = get_model_state_dict(model, options=_checkpoint_options())
@@ -387,6 +429,8 @@ def load_fsdp_checkpoint(
         model_state["model"],
         options=_checkpoint_options(),
     )
+    if fsdp_config.replicate_frozen_params:
+        _restore_replicated_frozen_parameters(model, model_state["model"])
 
     rank = dist.get_rank()
     local_state_path = checkpoint_dir / f"optimizer_rank_{rank:05d}.pt"
