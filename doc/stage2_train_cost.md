@@ -58,8 +58,17 @@ checkpoint 使用组合格式：
 
 本地已在 2×RTX A6000 上用 `fp8_emulate=true` 完成
 forward/backward、gradient clipping、AdamW8bit step、模型/optimizer/scheduler
-保存、恢复后继续 step 的 smoke。optimizer moment 包含 uint8 `state1/state2`；
-A6000 没有 H100 FP8 Tensor Core，因此该 smoke 只验证正确性，不代表 FP8 性能。
+保存、恢复后继续 step 的 smoke。之后又在真实 H100 80GB 上完成原生 FP8 验证：
+
+- 1×H100：native FP8、AdamW8bit 和 checkpoint/resume 通过；
+- 8×H100：classic FSDP full-shard、native FP8、8-bit moments 和每 rank
+  optimizer checkpoint/resume 全部通过；
+- 8 卡 synthetic smoke 每卡峰值约 0.567 GiB，首个 step 含 kernel warmup 和
+  通信初始化约 3.08–4.32 秒；该小模型数字不用于推算完整 6B 模型吞吐；
+- optimizer state 同时包含 FP32 scale/step 小 tensor 和 uint8 `state1/state2`。
+
+A6000 没有 H100 FP8 Tensor Core，因此本地 emulation 只验证逻辑；H100 smoke
+验证了真实 FP8 kernel，但仍不是完整 Qwen3-VL + VAE + 数据管线 benchmark。
 
 ## 基于 Qwen3-VL-4B 文本冻结、视觉 LoRA 和 1.429B Generation Expert 的估计
 
