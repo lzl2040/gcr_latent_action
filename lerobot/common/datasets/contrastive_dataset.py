@@ -779,14 +779,20 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         dataset = self.datasets[ds_idx]
         frame_idx = int(np.clip(frame_idx, 0, len(dataset) - 1))
+        requested_frame_idx = frame_idx
+        read_fallback = False
         try:
             item = dataset[frame_idx]
         except Exception as exc:  # noqa: BLE001 - never let one broken frame kill training
             logger.warning("Failed to read %s[%d]: %s", self.dataset_names[ds_idx], frame_idx, exc)
             item = dataset[0]
             frame_idx = 0
+            read_fallback = True
 
-        return self._to_canonical(item, ds_idx, frame_idx)
+        result = self._to_canonical(item, ds_idx, frame_idx)
+        result["data_read_fallback"] = torch.tensor(float(read_fallback), dtype=torch.float32)
+        result["requested_frame_index"] = torch.tensor(requested_frame_idx, dtype=torch.long)
+        return result
 
     @staticmethod
     def _as_uint8(image: torch.Tensor) -> torch.Tensor:

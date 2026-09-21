@@ -159,6 +159,29 @@ def move_batch(batch: dict, device, dtype=torch.bfloat16) -> dict:
     return out
 
 
+def _data_read_batch_counts(
+    batch: dict[str, Any],
+    num_datasets: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return per-dataset fallback and sample counts from one collated CPU batch."""
+    dataset_ids = batch["dataset_id"].detach().to(device="cpu", dtype=torch.long).reshape(-1)
+    fallback = batch.get("data_read_fallback")
+    if fallback is None:
+        fallback_mask = torch.zeros_like(dataset_ids, dtype=torch.bool)
+    else:
+        fallback_mask = fallback.detach().to(device="cpu").reshape(-1) > 0.5
+    if fallback_mask.numel() != dataset_ids.numel():
+        raise ValueError(
+            "`data_read_fallback` and `dataset_id` must contain the same number of rows."
+        )
+    sample_counts = torch.bincount(dataset_ids, minlength=num_datasets)
+    fallback_counts = torch.bincount(
+        dataset_ids[fallback_mask],
+        minlength=num_datasets,
+    )
+    return fallback_counts, sample_counts
+
+
 def update_policy(model_engine, batch: Any, task_type: str, step: int):
     batch = move_batch(batch, model_engine.device)
     loss, output_dict = model_engine(batch, task_type=task_type, step=step)
@@ -391,6 +414,10 @@ def train(cfg: TrainPipelineConfig):
     logger.info(f"Start training on {world_size} devices")
     fwd_bwd_time = 0.0
     dataloading_s = 0.0
+    interval_read_fallbacks = torch.zeros(len(dataset.dataset_names), dtype=torch.long)
+    interval_read_samples = torch.zeros(len(dataset.dataset_names), dtype=torch.long)
+    total_read_fallbacks = 0
+    total_read_samples = 0
     dist_step = 50
     start_epoch, start_batch = divmod(step, epoch_schedule.steps_per_epoch)
     if step:
@@ -427,6 +454,12 @@ def train(cfg: TrainPipelineConfig):
         for batch_offset, batch in enumerate(dataloader):
             batch_idx = epoch_start_batch + batch_offset
             dataloading_s += time.perf_counter() - batch_ready
+            batch_fallbacks, batch_samples = _data_read_batch_counts(
+                batch,
+                len(dataset.dataset_names),
+            )
+            interval_read_fallbacks += batch_fallbacks
+            interval_read_samples += batch_samples
             if step == 0:
                 dataset_ids, dataset_counts = torch.unique(
                     batch["dataset_id"],
@@ -524,17 +557,77 @@ def train(cfg: TrainPipelineConfig):
                     },
                 )
 
-            if rank == 0 and cfg.log_freq > 0 and step % cfg.log_freq == 0:
+            should_log = cfg.log_freq > 0 and step % cfg.log_freq == 0
+            read_stats = None
+            if should_log:
+                read_stats = torch.cat(
+                    [interval_read_fallbacks, interval_read_samples]
+                ).to(model_engine.device)
+                if dist.is_available() and dist.is_initialized():
+                    dist.all_reduce(read_stats, op=dist.ReduceOp.SUM)
+                interval_read_fallbacks.zero_()
+                interval_read_samples.zero_()
+
+            if rank == 0 and should_log:
+                num_datasets = len(dataset.dataset_names)
+                global_fallbacks = read_stats[:num_datasets].cpu()
+                global_samples = read_stats[num_datasets:].cpu()
+                interval_fallback_count = int(global_fallbacks.sum().item())
+                interval_sample_count = int(global_samples.sum().item())
+                interval_fallback_rate = interval_fallback_count / max(
+                    1,
+                    interval_sample_count,
+                )
+                total_read_fallbacks += interval_fallback_count
+                total_read_samples += interval_sample_count
+                total_fallback_rate = total_read_fallbacks / max(1, total_read_samples)
+
                 logger.info(
                     "epoch:%d/%d %s",
                     epoch + 1,
                     epoch_schedule.total_epochs,
                     train_tracker,
                 )
+                failed_datasets = {
+                    dataset.dataset_names[index]: int(global_fallbacks[index].item())
+                    for index in range(num_datasets)
+                    if global_fallbacks[index].item() > 0
+                }
+                if failed_datasets:
+                    logger.warning(
+                        "Data read fallbacks over the last %d samples: %d (%.4f%%), "
+                        "total=%d; by_dataset=%s",
+                        interval_sample_count,
+                        interval_fallback_count,
+                        100.0 * interval_fallback_rate,
+                        total_read_fallbacks,
+                        failed_datasets,
+                    )
                 if wandb_logger:
                     wandb_log_dict = train_tracker.to_dict()
                     wandb_log_dict["sampler_epoch/current"] = epoch + 1
                     wandb_log_dict["sampler_epoch/total"] = epoch_schedule.total_epochs
+                    wandb_log_dict["data/read_fallback_count_interval"] = (
+                        interval_fallback_count
+                    )
+                    wandb_log_dict["data/read_fallback_rate_interval"] = (
+                        interval_fallback_rate
+                    )
+                    wandb_log_dict["data/read_fallback_count_total"] = (
+                        total_read_fallbacks
+                    )
+                    wandb_log_dict["data/read_fallback_rate_total"] = total_fallback_rate
+                    for index, name in enumerate(dataset.dataset_names):
+                        fallback_count = int(global_fallbacks[index].item())
+                        if fallback_count == 0:
+                            continue
+                        sample_count = int(global_samples[index].item())
+                        wandb_log_dict[
+                            f"data/read_fallback_count_by_dataset/{name}"
+                        ] = fallback_count
+                        wandb_log_dict[
+                            f"data/read_fallback_rate_by_dataset/{name}"
+                        ] = fallback_count / max(1, sample_count)
                     if output_dict:
                         for key, value in output_dict.items():
                             wandb_log_dict.setdefault(key, value)

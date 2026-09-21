@@ -5,7 +5,10 @@ import pytest
 import torch
 
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
-from lerobot.scripts.dps_train_contrast import _compute_epoch_schedule
+from lerobot.scripts.dps_train_contrast import (
+    _compute_epoch_schedule,
+    _data_read_batch_counts,
+)
 
 
 def test_epoch_schedule_covers_source_then_adds_extra_epochs() -> None:
@@ -40,6 +43,19 @@ def test_epoch_schedule_rejects_invalid_sizes() -> None:
         _compute_epoch_schedule(100, 10, 0)
     with pytest.raises(ValueError):
         _compute_epoch_schedule(100, 10, 32, extra_epochs=-1)
+
+
+def test_data_read_batch_counts_are_grouped_by_dataset() -> None:
+    fallback_counts, sample_counts = _data_read_batch_counts(
+        {
+            "dataset_id": torch.tensor([0, 1, 1, 2, 2]),
+            "data_read_fallback": torch.tensor([0.0, 1.0, 0.0, 1.0, 1.0]),
+        },
+        num_datasets=3,
+    )
+
+    torch.testing.assert_close(sample_counts, torch.tensor([1, 2, 2]))
+    torch.testing.assert_close(fallback_counts, torch.tensor([0, 1, 2]))
 
 
 def test_optimizer_factory_uses_computed_schedule_length() -> None:
