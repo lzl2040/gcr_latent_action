@@ -210,14 +210,14 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         qwen_kv_heads = int(qwen_text_config.num_key_value_heads)
         qwen_head_dim = int(qwen_text_config.head_dim)
         if (
-            config.generation_num_heads != qwen_kv_heads
+            config.generation_num_kv_heads != qwen_kv_heads
             or config.generation_hidden_dim // config.generation_num_heads != qwen_head_dim
         ):
             raise ValueError(
                 "Native Qwen K/V reuse requires generation attention geometry "
-                f"{qwen_kv_heads} heads x {qwen_head_dim} dims; got "
-                f"{config.generation_num_heads} heads x "
-                f"{config.generation_hidden_dim // config.generation_num_heads} dims."
+                f"{qwen_kv_heads} KV heads x {qwen_head_dim} dims; got "
+                f"{config.generation_num_kv_heads} KV heads and "
+                f"{config.generation_hidden_dim // config.generation_num_heads}-dim heads."
             )
         if not restoring_embedded:
             vision_report, text_report = transfer_stage1_perception(
@@ -309,13 +309,13 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             nn.LayerNorm(config.latent_action_dim),
         )
         input_dims = {
-            "video": config.video_latent_dim,
+            "video": config.video_latent_dim * config.video_latent_patch_size**2,
             "state": config.physical_hidden_dim,
             "action": config.physical_hidden_dim,
             "tactile": config.physical_hidden_dim,
         }
         output_dims = {
-            "video": config.video_latent_dim,
+            "video": config.video_latent_dim * config.video_latent_patch_size**2,
             "state": config.group_size * config.max_state_dim,
             "action": config.group_size * config.max_action_dim,
             "tactile": config.physical_hidden_dim,
@@ -329,7 +329,9 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             hidden_dim=config.generation_hidden_dim,
             depth=config.generation_depth,
             num_heads=config.generation_num_heads,
-            mlp_ratio=config.generation_mlp_ratio,
+            num_kv_heads=config.generation_num_kv_heads,
+            intermediate_dim=config.generation_intermediate_dim,
+            hidden_act=config.generation_hidden_act,
             dropout=config.generation_dropout,
             input_dims=input_dims,
             output_dims=output_dims,
@@ -735,10 +737,30 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             - self.video_latent_mean.to(device=latent.device)
         ) / self.video_latent_std.to(device=latent.device)
         batch, channels, frames, height, width = latent.shape
-        tokens = latent.permute(0, 2, 3, 4, 1).reshape(batch, -1, channels)
+        patch = self.config.video_latent_patch_size
+        if height % patch or width % patch:
+            raise ValueError(
+                f"Wan latent grid {height}x{width} must be divisible by "
+                f"video_latent_patch_size={patch}."
+            )
+        patch_height, patch_width = height // patch, width // patch
+        tokens = latent.view(
+            batch,
+            channels,
+            frames,
+            patch_height,
+            patch,
+            patch_width,
+            patch,
+        )
+        tokens = tokens.permute(0, 2, 3, 5, 4, 6, 1).reshape(
+            batch,
+            frames * patch_height * patch_width,
+            channels * patch * patch,
+        )
         temporal = torch.arange(frames, device=latent.device)
-        rows = torch.arange(height, device=latent.device)
-        columns = torch.arange(width, device=latent.device)
+        rows = torch.arange(patch_height, device=latent.device)
+        columns = torch.arange(patch_width, device=latent.device)
         position_ids = torch.cartesian_prod(temporal, rows, columns)
         return tokens, position_ids
 

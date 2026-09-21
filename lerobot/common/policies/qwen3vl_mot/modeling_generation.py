@@ -95,6 +95,17 @@ class SwiGLU(nn.Module):
         return self.dropout(self.down(F.silu(self.gate(x)) * self.up(x)))
 
 
+class ReLUSquaredMLP(nn.Module):
+    def __init__(self, hidden_dim: int, intermediate_dim: int, dropout: float):
+        super().__init__()
+        self.up = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+        self.down = nn.Linear(intermediate_dim, hidden_dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.dropout(self.down(F.relu(self.up(x)).square()))
+
+
 class AsymmetricAttention(nn.Module):
     """Generation queries attend to understanding KV and generation KV.
 
@@ -103,20 +114,29 @@ class AsymmetricAttention(nn.Module):
     can consume understanding while understanding can never consume generation.
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int, dropout: float):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        dropout: float,
+        num_kv_heads: int | None = None,
+    ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.dropout = dropout
         self.q_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.k_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.v_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        kv_dim = self.num_kv_heads * self.head_dim
+        self.k_proj = nn.Linear(hidden_dim, kv_dim, bias=False)
+        self.v_proj = nn.Linear(hidden_dim, kv_dim, bias=False)
         self.out_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
-    def _heads(self, x: torch.Tensor) -> torch.Tensor:
+    def _heads(self, x: torch.Tensor, num_heads: int | None = None) -> torch.Tensor:
+        num_heads = x.shape[-1] // self.head_dim if num_heads is None else num_heads
         batch, length, _ = x.shape
-        return x.view(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
+        return x.view(batch, length, num_heads, self.head_dim).transpose(1, 2)
 
     def forward(
         self,
@@ -129,9 +149,9 @@ class AsymmetricAttention(nn.Module):
         generation_cos: torch.Tensor | None = None,
         generation_sin: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        q = self._heads(self.q_proj(generation))
-        generation_key = self._heads(self.k_proj(generation))
-        generation_value = self._heads(self.v_proj(generation))
+        q = self._heads(self.q_proj(generation), self.num_heads)
+        generation_key = self._heads(self.k_proj(generation), self.num_kv_heads)
+        generation_value = self._heads(self.v_proj(generation), self.num_kv_heads)
         if generation_cos is not None and generation_sin is not None:
             from transformers.models.qwen3_vl.modeling_qwen3_vl import apply_rotary_pos_emb
 
@@ -144,9 +164,15 @@ class AsymmetricAttention(nn.Module):
         if understanding_key is None or understanding_value is None:
             if understanding is None:
                 raise ValueError("Understanding hidden states or native key/value tensors are required.")
-            understanding_key = self._heads(self.k_proj(understanding))
-            understanding_value = self._heads(self.v_proj(understanding))
-        expected = (self.num_heads, self.head_dim)
+            understanding_key = self._heads(
+                self.k_proj(understanding),
+                self.num_kv_heads,
+            )
+            understanding_value = self._heads(
+                self.v_proj(understanding),
+                self.num_kv_heads,
+            )
+        expected = (self.num_kv_heads, self.head_dim)
         if understanding_key.shape[1:] != (
             expected[0],
             understanding_keep.shape[1],
@@ -176,22 +202,38 @@ class AsymmetricAttention(nn.Module):
             v,
             attn_mask=attention_bias,
             dropout_p=self.dropout if self.training else 0.0,
+            enable_gqa=self.num_heads != self.num_kv_heads,
         )
         out = out.transpose(1, 2).reshape(generation.shape)
         return self.out_proj(out) * generation_keep.unsqueeze(-1).to(out.dtype)
 
 
 class GenerationBlock(nn.Module):
-    def __init__(self, hidden_dim: int, num_heads: int, mlp_ratio: float, dropout: float):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        intermediate_dim: int,
+        hidden_act: str,
+        dropout: float,
+    ):
         super().__init__()
-        self.generation_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
+        self.generation_norm = nn.LayerNorm(hidden_dim)
         self.understanding_norm = nn.LayerNorm(hidden_dim)
-        self.attention = AsymmetricAttention(hidden_dim, num_heads, dropout)
-        self.mlp_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)
-        self.mlp = SwiGLU(hidden_dim, int(hidden_dim * mlp_ratio), dropout)
-        self.modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_dim, 6 * hidden_dim))
-        nn.init.zeros_(self.modulation[-1].weight)
-        nn.init.zeros_(self.modulation[-1].bias)
+        self.attention = AsymmetricAttention(
+            hidden_dim,
+            num_heads,
+            dropout,
+            num_kv_heads,
+        )
+        self.mlp_norm = nn.LayerNorm(hidden_dim)
+        if hidden_act == "silu":
+            self.mlp = SwiGLU(hidden_dim, intermediate_dim, dropout)
+        elif hidden_act == "relu2":
+            self.mlp = ReLUSquaredMLP(hidden_dim, intermediate_dim, dropout)
+        else:
+            raise ValueError(f"Unsupported generation activation {hidden_act!r}.")
 
     def forward(
         self,
@@ -199,18 +241,13 @@ class GenerationBlock(nn.Module):
         understanding: torch.Tensor | None,
         understanding_keep: torch.Tensor,
         generation_keep: torch.Tensor,
-        conditioning: torch.Tensor,
         understanding_key: torch.Tensor | None = None,
         understanding_value: torch.Tensor | None = None,
         generation_cos: torch.Tensor | None = None,
         generation_sin: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = self.modulation(
-            conditioning
-        ).chunk(6, dim=-1)
-        attn_input = self.generation_norm(generation) * (1 + scale_attn) + shift_attn
         attn = self.attention(
-            attn_input,
+            self.generation_norm(generation),
             self.understanding_norm(understanding) if understanding is not None else None,
             understanding_keep,
             generation_keep,
@@ -219,9 +256,8 @@ class GenerationBlock(nn.Module):
             generation_cos,
             generation_sin,
         )
-        generation = generation + torch.tanh(gate_attn) * attn
-        mlp_input = self.mlp_norm(generation) * (1 + scale_mlp) + shift_mlp
-        generation = generation + torch.tanh(gate_mlp) * self.mlp(mlp_input)
+        generation = generation + attn
+        generation = generation + self.mlp(self.mlp_norm(generation))
         return generation * generation_keep.unsqueeze(-1).to(generation.dtype)
 
 
@@ -235,18 +271,27 @@ class GenerationExpert(nn.Module):
         hidden_dim: int,
         depth: int,
         num_heads: int,
-        mlp_ratio: float,
+        mlp_ratio: float = 4.0,
         dropout: float,
         input_dims: dict[str, int],
         output_dims: dict[str, int],
         task_names: tuple[str, ...],
         gradient_checkpointing: bool,
         rotary_config=None,
+        num_kv_heads: int | None = None,
+        intermediate_dim: int | None = None,
+        hidden_act: str = "silu",
     ):
         super().__init__()
         if set(input_dims) != set(output_dims):
             raise ValueError("Generation input and output modality names must match.")
         self.hidden_dim = hidden_dim
+        num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        intermediate_dim = (
+            int(hidden_dim * mlp_ratio)
+            if intermediate_dim is None
+            else intermediate_dim
+        )
         self.gradient_checkpointing = gradient_checkpointing
         self.input_dims = dict(input_dims)
         self.input_projections = nn.ModuleDict(
@@ -276,7 +321,14 @@ class GenerationExpert(nn.Module):
             self.rotary_embedding = Qwen3VLTextRotaryEmbedding(config=rotary_config)
         self.blocks = nn.ModuleList(
             [
-                GenerationBlock(hidden_dim, num_heads, mlp_ratio, dropout)
+                GenerationBlock(
+                    hidden_dim,
+                    num_heads,
+                    num_kv_heads,
+                    intermediate_dim,
+                    hidden_act,
+                    dropout,
+                )
                 for _ in range(depth)
             ]
         )
@@ -286,7 +338,7 @@ class GenerationExpert(nn.Module):
         self,
         stream: GenerationStream,
         task_embedding: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         input_dim = self.input_dims[stream.name]
         stream.validate(input_dim)
         values = stream.values.to(self.input_projections[stream.name].weight.dtype)
@@ -309,12 +361,15 @@ class GenerationExpert(nn.Module):
                 for axis in range(3)
             ).to(hidden.dtype)
         modality_id = self.modality_to_id[stream.name]
-        hidden = hidden + positions + self.modality_embedding.weight[modality_id].to(hidden.dtype)
+        hidden = (
+            hidden
+            + positions
+            + self.modality_embedding.weight[modality_id].to(hidden.dtype)
+        )
         time = self.timestep_embedding(stream.sigma.to(hidden.device))
-        conditioning = time + task_embedding
-        conditioning = conditioning.unsqueeze(1).expand(-1, hidden.shape[1], -1)
+        hidden = hidden + (time + task_embedding).unsqueeze(1).to(hidden.dtype)
         keep = stream.keep.to(device=hidden.device, dtype=torch.bool)
-        return hidden * keep.unsqueeze(-1).to(hidden.dtype), conditioning, position_ids
+        return hidden * keep.unsqueeze(-1).to(hidden.dtype), position_ids
 
     def forward(
         self,
@@ -341,7 +396,6 @@ class GenerationExpert(nn.Module):
         task_embedding = self.task_embedding(task_id)
 
         hidden_parts: list[torch.Tensor] = []
-        condition_parts: list[torch.Tensor] = []
         keep_parts: list[torch.Tensor] = []
         position_parts: list[torch.Tensor] = []
         slices: dict[str, slice] = {}
@@ -349,16 +403,14 @@ class GenerationExpert(nn.Module):
         for stream in streams:
             if stream.name in slices:
                 raise ValueError(f"Generation stream {stream.name!r} was supplied twice.")
-            hidden, conditioning, position_ids = self._embed_stream(stream, task_embedding)
+            hidden, position_ids = self._embed_stream(stream, task_embedding)
             hidden_parts.append(hidden)
-            condition_parts.append(conditioning)
             keep_parts.append(stream.keep.to(hidden.device, dtype=torch.bool))
             position_parts.append(position_ids)
             slices[stream.name] = slice(offset, offset + hidden.shape[1])
             offset += hidden.shape[1]
 
         generation = torch.cat(hidden_parts, dim=1)
-        conditioning = torch.cat(condition_parts, dim=1)
         generation_keep = torch.cat(keep_parts, dim=1)
         generation_cos = generation_sin = None
         if self.rotary_embedding is not None:
@@ -398,12 +450,11 @@ class GenerationExpert(nn.Module):
             if self.gradient_checkpointing and self.training:
                 if native_key is None:
                     generation = checkpoint(
-                        lambda gen, context_hidden, keep_u, keep_g, cond, cos, sin, _block=block: _block(
+                        lambda gen, context_hidden, keep_u, keep_g, cos, sin, _block=block: _block(
                             gen,
                             context_hidden,
                             keep_u,
                             keep_g,
-                            cond,
                             None,
                             None,
                             cos,
@@ -413,19 +464,17 @@ class GenerationExpert(nn.Module):
                         context,
                         understanding_keep,
                         generation_keep,
-                        conditioning,
                         generation_cos,
                         generation_sin,
                         use_reentrant=False,
                     )
                 else:
                     generation = checkpoint(
-                        lambda gen, keep_u, keep_g, cond, key, value, cos, sin, _block=block: _block(
+                        lambda gen, keep_u, keep_g, key, value, cos, sin, _block=block: _block(
                             gen,
                             None,
                             keep_u,
                             keep_g,
-                            cond,
                             key,
                             value,
                             cos,
@@ -434,7 +483,6 @@ class GenerationExpert(nn.Module):
                         generation,
                         understanding_keep,
                         generation_keep,
-                        conditioning,
                         native_key,
                         native_value,
                         generation_cos,
@@ -447,7 +495,6 @@ class GenerationExpert(nn.Module):
                     context,
                     understanding_keep,
                     generation_keep,
-                    conditioning,
                     native_key,
                     native_value,
                     generation_cos,

@@ -42,13 +42,18 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     latent_action_dim: int = 1024
     latent_action_loss_weight: float = 1.0
 
-    generation_hidden_dim: int = 1024
-    generation_depth: int = 24
-    generation_num_heads: int = 8
-    generation_mlp_ratio: float = 4.0
+    # Cosmos3-Edge-sized generation path. Qwen3-VL-4B supplies 8 native KV heads
+    # of width 128; the generator expands only its query pathway to 16 heads.
+    generation_hidden_dim: int = 2048
+    generation_depth: int = 28
+    generation_num_heads: int = 16
+    generation_num_kv_heads: int = 8
+    generation_intermediate_dim: int = 9216
+    generation_hidden_act: str = "relu2"
     generation_dropout: float = 0.0
     generation_gradient_checkpointing: bool = True
     video_latent_dim: int = 48
+    video_latent_patch_size: int = 2
     world_video_frames: int = 9
     video_image_size: int = 256
     load_vae_decoder: bool = False
@@ -148,6 +153,21 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
                 f"`generation_hidden_dim` ({self.generation_hidden_dim}) must be divisible by "
                 f"`generation_num_heads` ({self.generation_num_heads})."
             )
+        if not 1 <= self.generation_num_kv_heads <= self.generation_num_heads:
+            raise ValueError(
+                "`generation_num_kv_heads` must be positive and no larger than "
+                "`generation_num_heads`."
+            )
+        if self.generation_num_heads % self.generation_num_kv_heads:
+            raise ValueError(
+                "`generation_num_heads` must be divisible by `generation_num_kv_heads`."
+            )
+        if self.generation_intermediate_dim <= 0:
+            raise ValueError("`generation_intermediate_dim` must be positive.")
+        if self.generation_hidden_act not in ("silu", "relu2"):
+            raise ValueError("`generation_hidden_act` must be 'silu' or 'relu2'.")
+        if self.video_latent_patch_size <= 0:
+            raise ValueError("`video_latent_patch_size` must be positive.")
         if self.understanding_kv_layers < 1:
             raise ValueError("`understanding_kv_layers` must be positive.")
         if not 0 <= self.sigma_min < self.sigma_max <= 1:

@@ -35,7 +35,12 @@ def test_task_family_has_requested_directional_roles():
 
 def test_asymmetric_attention_reads_only_unmasked_understanding_kv():
     torch.manual_seed(0)
-    attention = AsymmetricAttention(hidden_dim=16, num_heads=4, dropout=0.0).eval()
+    attention = AsymmetricAttention(
+        hidden_dim=16,
+        num_heads=4,
+        num_kv_heads=2,
+        dropout=0.0,
+    ).eval()
     generation = torch.randn(2, 3, 16)
     understanding = torch.randn(2, 4, 16)
     understanding_keep = torch.tensor([[1, 1, 0, 0], [1, 0, 1, 0]], dtype=torch.bool)
@@ -557,7 +562,8 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
         generation_hidden_dim=16,
         generation_depth=1,
         generation_num_heads=4,
-        generation_mlp_ratio=2,
+        generation_num_kv_heads=4,
+        generation_intermediate_dim=32,
         understanding_kv_layers=1,
         video_latent_dim=4,
         world_video_frames=9,
