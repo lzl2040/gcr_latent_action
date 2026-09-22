@@ -1,10 +1,10 @@
 # 阶段2训练花费估计
 
-本文记录的是工程估计，不是 8×H100 的实机 benchmark。估计先在单张
-RTX A6000 48GB 上分别测量理解专家、Generation Expert、Wan VAE 和阶段一
-teacher，再按照 H100 SXM 的 BF16 吞吐、显存带宽以及 8 卡 NVLink/FSDP
-通信开销给出区间。视频解码和共享存储的速度会直接影响端到端结果，因此不应把
-“模型计算时间”当成最终 dataloader 吞吐。
+本文同时记录组件级工程估计、H100 synthetic smoke 和 4×RTX A6000
+真实模型/真实数据端到端测量；目前仍没有 8×H100 完整模型 benchmark。H100
+区间根据 A6000 组件测量、H100 SXM 的 BF16/FP8 吞吐、显存带宽以及 8 卡
+NVLink/FSDP 通信开销估算。视频解码和共享存储速度会直接影响端到端结果，因此
+不应把“模型计算时间”当成最终 dataloader 吞吐。
 
 ## 已实现的 8×H100 FSDP + FP8 + AdamW8bit 路径
 
@@ -291,3 +291,144 @@ Text embedding / final norm:         frozen
 latent-action distillation 和 generation loss 已稳定收敛，再从该 checkpoint
 解冻 `language_model.layers`，使用更低的 learning rate 做短周期联合微调，
 而不是一开始就同时训练 5.066B 参数。
+
+## 使用 `step_16k` 的真实 Stage 2 端到端实测
+
+本节记录 2026-09-22 在提交 `04ebb99` 上完成的真实数据调试，不再是各组件独立
+benchmark。阶段一输入为：
+
+```text
+/Data/lzl/ace_stage1/step_16k/mp_rank_00_model_states.pt
+global_steps = 16000
+checkpoint format = DeepSpeed ZeRO-2 model state
+```
+
+根据 checkpoint 中的模型结构恢复出的 Stage 1 配置为 Qwen3-VL-4B vision、
+最后 4 层 rank-16 vision LoRA、5 层 evidence、5 层 fusion、3 层 predictor、
+14 层 physical transformer、16 个 change queries、ResNet-18 tactile encoder
+和 Wan VAE reconstruction target。加载检查结果为：
+
+```text
+checkpoint keys = 1397
+shape mismatches = 0
+missing keys = 0
+unexpected keys = 0
+Stage 1 -> Qwen vision transfer = 100% (293 tensors)
+Stage 1 -> Qwen text transfer = 0% (expected; Qwen text keeps pretrained weights)
+```
+
+精确匹配的配置已写入：
+
+```text
+/Data/lzl/ace_stage1/step_16k/config.json
+```
+
+### 实测配置
+
+| 项目 | 配置 |
+|---|---|
+| GPU | 4×RTX A6000 48GB |
+| PyTorch | 2.9.1 + CUDA 13.0 |
+| 数据 | `debug_research_data`，真实视频/state/action/tactile |
+| micro-batch/GPU | 1 |
+| global batch | 4 |
+| gradient accumulation | 1 |
+| Understanding | Qwen3-VL-4B Transformer 全量，vision 最后 4 层 LoRA |
+| Generation Expert | 1.429B，全量训练 |
+| Physical Expert | Stage 1 权重，冻结 |
+| Teacher / Wan VAE | 冻结 |
+| FSDP | classic `FULL_SHARD + use_orig_params=True` |
+| FP8 | TorchAO `rowwise_with_gw_hp`，A6000 上使用 emulation |
+| FP8 Linear 数 | 431 |
+| FSDP wrapped blocks | 64 |
+| Optimizer | bitsandbytes AdamW8bit |
+| 可训练参数 | 5.066B |
+
+A6000 不具备 H100 的原生 FP8 Tensor Core，因此这里的耗时**不能用于估计原生
+FP8 加速比**；它主要验证完整模型、真实数据、FSDP 分片、FP8 Linear 路径和
+AdamW8bit 更新能够一起运行。
+
+这次机器上的 `agibot_alpha` 打开失败，`language_table`、`ms_data_xdof_3`
+和 `ego_dex_split4` 未找到，因此统计对应成功加载的 9 个数据集。补齐这些数据后，
+模型单步计算量基本不变，但 source frames、自然训练步数和数据读取长尾需要重新
+计算。
+
+### 40 个 optimizer steps 的测量
+
+40 步覆盖了 `t2v`、`i2v`、forward/inverse dynamics、action/state prediction
+和 tactile prediction。`num_workers=0`，因此数据时间也包含同步视频读取。
+
+| 指标 | 平均 | 中位数 | P90 | 范围 |
+|---|---:|---:|---:|---:|
+| forward + backward | 10.61 s | 10.71 s | 11.22 s | 3.10–12.56 s |
+| dataloader | 1.07 s | 0.34 s | 0.86 s | 0.16–27.01 s |
+| 端到端 step | 11.68 s | 11.10 s | 11.82 s | 3.33–37.05 s |
+| PyTorch peak allocated/GPU | 11.45 GiB | 11.4 GiB | 11.4 GiB | 11.4–13.2 GiB |
+
+中位端到端吞吐约为：
+
+```text
+4 samples / 11.10 s = 0.36 samples/s
+```
+
+唯一一次 27.01 秒 dataloader 尖峰将平均数据时间从中位数 0.34 秒拉高到
+1.07 秒，说明共享存储长尾仍需要在正式训练中监控。运行期间 `nvidia-smi`
+观察到约 17.4 GiB/GPU device memory used；它高于 PyTorch
+`max_memory_allocated`，因为还包含 allocator reserve、CUDA context 和
+workspace。
+
+随后使用修复后的 `STEPS=1` 做了受控退出验证：
+
+```text
+loss = 3.729
+forward + backward = 4.825 s
+dataloader = 1.043 s
+peak allocated = 13.2 GiB/GPU
+completed optimizer steps = 1
+```
+
+该单步受益于前一次运行生成的 CUDA/NVRTC cache，不能替代 40 步统计；容量判断
+采用 13.2 GiB allocated 和约 17.4 GiB device-used，速度判断采用更保守的
+40 步中位数。
+
+### 当前默认 8×H100 完整训练预算
+
+正式 launcher 默认：
+
+```text
+micro-batch/GPU = 16
+global batch = 128
+dataset_size_one_epoch = 100000
+gradient accumulation = 1
+steps cap = 600000
+```
+
+按本次实际加载到的 42,629,776 个 source frames 计算：
+
+```text
+steps/sampler epoch = floor(100000 / 128) = 781
+actual samples/sampler epoch = 781 * 128 = 99,968
+source-equivalent epochs = ceil(42,629,776 / 99,968) = 427
+extra epochs = 100
+planned optimizer steps = (427 + 100) * 781 = 411,587
+planned sample draws = 411,587 * 128 = 52,683,136
+```
+
+自然 epoch 计划为 411,587 步，小于 `STEPS=600000`，所以当前默认完整训练会在
+约 411.6k 步结束。`STEPS` 现在是有效的 optimizer-step 上限，可用于更短的
+smoke 或训练预算控制。
+
+沿用上文“VLM Transformer 全量 + vision LoRA + Generation 全量”的
+**1.0–1.5 s/step H100 估计**：
+
+| 项目 | 乐观 | 保守 |
+|---|---:|---:|
+| 单步时间 | 1.0 s | 1.5 s |
+| 411,587 步墙钟 | 114.3 h | 171.5 h |
+| 墙钟天数 | 4.76 天 | 7.15 天 |
+| 8 卡 GPU-hours | 915 | 1,372 |
+
+若为数据长尾、checkpoint、评估和重启预留 10–20%，建议实际排期按约
+**5.2–8.6 天**准备。这个总成本仍是估算；只有在 8×H100 上使用完整模型、
+原生 FP8、micro-batch 16 和同一数据存储完成稳定多步 benchmark 后，才能替换
+为实测值。
