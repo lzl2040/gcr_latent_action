@@ -15,6 +15,7 @@ from lerobot.scripts.dps_train_contrast import (
 from lerobot.scripts.fsdp_train_contrast import (
     FSDPTrainPipelineConfig,
     _normalize_resume_position,
+    _planned_update_steps,
 )
 
 
@@ -50,6 +51,13 @@ def test_epoch_schedule_rejects_invalid_sizes() -> None:
         _compute_epoch_schedule(100, 10, 0)
     with pytest.raises(ValueError):
         _compute_epoch_schedule(100, 10, 32, extra_epochs=-1)
+
+
+def test_fsdp_stage2_steps_cap_optimizer_updates() -> None:
+    assert _planned_update_steps(1_001, 4, 1_000) == 251
+    assert _planned_update_steps(1_001, 4, 17) == 17
+    with pytest.raises(ValueError, match="steps must be positive"):
+        _planned_update_steps(1_001, 4, 0)
 
 
 def test_data_read_batch_counts_are_grouped_by_dataset() -> None:

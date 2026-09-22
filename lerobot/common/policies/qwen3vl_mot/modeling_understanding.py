@@ -31,6 +31,54 @@ def _selected_layers(total_layers: int, requested: int) -> tuple[int, ...]:
     return tuple(dict.fromkeys(int(position) for position in positions))
 
 
+def _forward_decoder_layer_with_kv(
+    layer: nn.Module,
+    hidden_states: torch.Tensor,
+    *,
+    attention_mask: torch.Tensor,
+    position_ids: torch.Tensor,
+    cache_position: torch.Tensor,
+    position_embeddings: tuple[torch.Tensor, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run a decoder block normally while retaining its native projected K/V."""
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import apply_rotary_pos_emb
+
+    wrapped_layer = getattr(layer, "_fsdp_wrapped_module", layer)
+    attention = wrapped_layer.self_attn
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture_key(_module, _inputs, output):
+        captured["key"] = output
+
+    def capture_value(_module, _inputs, output):
+        captured["value"] = output
+
+    handles = (
+        attention.k_norm.register_forward_hook(capture_key),
+        attention.v_proj.register_forward_hook(capture_value),
+    )
+    try:
+        output = layer(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=None,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    if "key" not in captured or "value" not in captured:
+        raise RuntimeError("Qwen decoder layer did not expose its projected key/value states.")
+    key = captured["key"].transpose(1, 2)
+    value_shape = (*captured["value"].shape[:-1], -1, attention.head_dim)
+    value = captured["value"].view(value_shape).transpose(1, 2)
+    _, key = apply_rotary_pos_emb(key, key, *position_embeddings)
+    return output, key, value
+
+
 class Qwen3VLUnderstandingExpert(nn.Module):
     """Runs Qwen3-VL on ``[image_t, instruction, learnable queries]``."""
 
@@ -270,7 +318,6 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         texts: list[str],
     ) -> UnderstandingOutput:
         from transformers.masking_utils import create_causal_mask
-        from transformers.models.qwen3_vl.modeling_qwen3_vl import apply_rotary_pos_emb
 
         base = _base_qwen(self.model)
         language_model = base.language_model
@@ -362,39 +409,50 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         selected_key_values: list[tuple[torch.Tensor, torch.Tensor]] = []
         selected_set = set(self.selected_layer_indices)
         for layer_index, layer in enumerate(language_model.layers):
-            if layer_index in selected_set:
-                normed = layer.input_layernorm(hidden_states)
-                attention = layer.self_attn
-                input_shape = normed.shape[:-1]
-                hidden_shape = (*input_shape, -1, attention.head_dim)
-                key = attention.k_norm(
-                    attention.k_proj(normed).view(hidden_shape)
-                ).transpose(1, 2)
-                value = attention.v_proj(normed).view(hidden_shape).transpose(1, 2)
-                _, key = apply_rotary_pos_emb(
-                    key,
-                    key,
-                    *position_embeddings,
-                )
-                selected_key_values.append((key, value))
+            capture_key_values = layer_index in selected_set
             if (
                 getattr(self, "gradient_checkpointing", False)
                 and self.training
                 and torch.is_grad_enabled()
             ):
-                hidden_states = checkpoint(
-                    lambda states, cos, sin, _layer=layer: _layer(
-                        states,
-                        attention_mask=causal_mask,
-                        position_ids=position_ids[0],
-                        past_key_values=None,
-                        cache_position=cache_position,
-                        position_embeddings=(cos, sin),
-                    ),
+                if capture_key_values:
+                    hidden_states, key, value = checkpoint(
+                        lambda states, cos, sin, _layer=layer: _forward_decoder_layer_with_kv(
+                            _layer,
+                            states,
+                            attention_mask=causal_mask,
+                            position_ids=position_ids[0],
+                            cache_position=cache_position,
+                            position_embeddings=(cos, sin),
+                        ),
+                        hidden_states,
+                        position_embeddings[0],
+                        position_embeddings[1],
+                        use_reentrant=False,
+                    )
+                else:
+                    hidden_states = checkpoint(
+                        lambda states, cos, sin, _layer=layer: _layer(
+                            states,
+                            attention_mask=causal_mask,
+                            position_ids=position_ids[0],
+                            past_key_values=None,
+                            cache_position=cache_position,
+                            position_embeddings=(cos, sin),
+                        ),
+                        hidden_states,
+                        position_embeddings[0],
+                        position_embeddings[1],
+                        use_reentrant=False,
+                    )
+            elif capture_key_values:
+                hidden_states, key, value = _forward_decoder_layer_with_kv(
+                    layer,
                     hidden_states,
-                    position_embeddings[0],
-                    position_embeddings[1],
-                    use_reentrant=False,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids[0],
+                    cache_position=cache_position,
+                    position_embeddings=position_embeddings,
                 )
             else:
                 hidden_states = layer(
@@ -405,6 +463,8 @@ class Qwen3VLUnderstandingExpert(nn.Module):
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
                 )
+            if capture_key_values:
+                selected_key_values.append((key, value))
             if image_slice is not None and layer_index < len(deepstack_features):
                 hidden_states = hidden_states.clone()
                 hidden_states[:, image_slice] = (

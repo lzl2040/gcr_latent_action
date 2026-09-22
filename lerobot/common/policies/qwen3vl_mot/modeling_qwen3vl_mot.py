@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import nullcontext
 from pathlib import Path
@@ -62,6 +63,20 @@ def _resolve_deepspeed_model_file(path: Path) -> Path:
     )
 
 
+def _load_stage1_config(config_source: Path) -> RoboContrastConfig:
+    config_file = (
+        config_source
+        if config_source.is_file() and config_source.suffix == ".json"
+        else config_source / "config.json"
+    )
+    if not config_file.is_file():
+        raise FileNotFoundError(
+            "A DeepSpeed stage-one checkpoint also needs its RoboContrast config. Put "
+            "config.json in the checkpoint root or pass `stage1_config=/path/to/config.json`."
+        )
+    return _decode_stage1_config(json.loads(config_file.read_text(encoding="utf-8")))
+
+
 def _load_stage1_policy(
     checkpoint_path: Path,
     config_path: str,
@@ -80,17 +95,7 @@ def _load_stage1_policy(
         return teacher, checkpoint_keys
 
     config_source = Path(config_path) if config_path else checkpoint_path
-    if config_source.is_file() and config_source.suffix == ".json":
-        import draccus
-
-        stage1_config = draccus.parse(RoboContrastConfig, config_source, args=[])
-    elif (config_source / "config.json").is_file():
-        stage1_config = RoboContrastConfig.from_pretrained(config_source)
-    else:
-        raise FileNotFoundError(
-            "A DeepSpeed stage-one checkpoint also needs its RoboContrast config. Put "
-            "config.json in the checkpoint root or pass `stage1_config=/path/to/config.json`."
-        )
+    stage1_config = _load_stage1_config(config_source)
 
     model_file = _resolve_deepspeed_model_file(checkpoint_path)
     payload = torch.load(model_file, map_location="cpu", weights_only=False)

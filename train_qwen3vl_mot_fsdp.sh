@@ -17,8 +17,29 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-MASTER_PORT="${MASTER_PORT:-$(python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")}"
+MASTER_PORT="${MASTER_PORT:-$("${PYTHON_BIN}" -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")}"
+
+# PyTorch wheels may ship a newer CUDA runtime than /usr/local/cuda. NVRTC loads its
+# builtins dynamically, so put the matching wheel library first when it is available.
+PACKAGED_CUDA_LIB="$("${PYTHON_BIN}" - <<'PY'
+from pathlib import Path
+import site
+import torch
+
+cuda_major = (torch.version.cuda or "").split(".", 1)[0]
+for root in site.getsitepackages():
+    candidate = Path(root) / "nvidia" / f"cu{cuda_major}" / "lib"
+    if candidate.is_dir():
+        print(candidate)
+        break
+PY
+)"
+if [[ -n "${PACKAGED_CUDA_LIB}" ]]; then
+    export LD_LIBRARY_PATH="${PACKAGED_CUDA_LIB}:${LD_LIBRARY_PATH:-}"
+fi
+
 STAGE1_CONFIG_ARGS=()
 STAGE1_CHECKPOINT_ARGS=()
 if [[ -n "${STAGE1_CHECKPOINT:-}" ]]; then
@@ -28,7 +49,7 @@ if [[ -n "${STAGE1_CONFIG:-}" ]]; then
     STAGE1_CONFIG_ARGS+=(--policy.stage1_config="${STAGE1_CONFIG}")
 fi
 
-torchrun \
+"${PYTHON_BIN}" -m torch.distributed.run \
     --standalone \
     --nproc_per_node="${NPROC_PER_NODE}" \
     --master_port="${MASTER_PORT}" \

@@ -17,8 +17,22 @@ from lerobot.common.policies.qwen3vl_mot.modeling_generation import (
     GenerationExpert,
     GenerationStream,
 )
+from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import _load_stage1_config
 from lerobot.common.policies.qwen3vl_mot.stage1_transfer import TransferReport, transfer_matching_module
 from lerobot.common.policies.qwen3vl_mot.tasks import TASK_SPECS, ModalityRole
+
+
+def test_stage1_config_loader_accepts_saved_policy_config(tmp_path):
+    expected = RoboContrastConfig(
+        vision_backbone="qwen3vl",
+        vision_tuning_mode="lora",
+        perception_recon_target="vae",
+    )
+    expected._save_pretrained(tmp_path)
+
+    loaded = _load_stage1_config(tmp_path)
+
+    assert loaded == expected
 
 
 def test_task_family_has_requested_directional_roles():

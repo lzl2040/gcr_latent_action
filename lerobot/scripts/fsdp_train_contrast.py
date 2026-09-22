@@ -105,6 +105,19 @@ def _normalize_resume_position(
     return epoch, batch_in_epoch
 
 
+def _planned_update_steps(
+    total_micro_steps: int,
+    gradient_accumulation_steps: int,
+    configured_steps: int,
+) -> int:
+    if configured_steps <= 0:
+        raise ValueError("steps must be positive.")
+    natural_update_steps = math.ceil(
+        total_micro_steps / gradient_accumulation_steps
+    )
+    return min(natural_update_steps, configured_steps)
+
+
 def _train(cfg: FSDPTrainPipelineConfig) -> None:
     cfg.validate()
     _load_stage2_resume_policy_config(cfg)
@@ -170,8 +183,10 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         steps_per_epoch=len(sampler),
         global_samples_per_step=cfg.batch_size * world_size,
     )
-    total_update_steps = math.ceil(
-        epoch_schedule.total_steps / cfg.gradient_accumulation_steps
+    total_update_steps = _planned_update_steps(
+        epoch_schedule.total_steps,
+        cfg.gradient_accumulation_steps,
+        cfg.steps,
     )
     training_geometry = {
         "batch_size_per_rank": cfg.batch_size,
@@ -330,6 +345,8 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
 
     logger.info("Start FSDP training on %d devices", world_size)
     for epoch in range(start_epoch, epoch_schedule.total_epochs):
+        if update_step >= total_update_steps:
+            break
         epoch_start_batch = start_batch if epoch == start_epoch else 0
         sampler.set_epoch(epoch)
         sampler.set_start_batch(epoch_start_batch)
@@ -418,6 +435,9 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
                 dataloading_s = 0.0
 
             is_last_batch = (
+                should_update
+                and update_step >= total_update_steps
+            ) or (
                 epoch + 1 == epoch_schedule.total_epochs
                 and batch_idx + 1 == epoch_schedule.steps_per_epoch
             )
@@ -524,6 +544,8 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
                 torch.cuda.reset_peak_memory_stats(device)
 
             batch_ready = time.perf_counter()
+            if should_update and update_step >= total_update_steps:
+                break
 
     logger.info("FSDP training finished at optimizer step %d", update_step)
 
