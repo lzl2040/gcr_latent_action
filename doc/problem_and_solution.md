@@ -281,3 +281,662 @@ CUDA_VISIBLE_DEVICES=3 python -u scripts/check_qwen3vl_vision.py
   一致会互相抵消）；真正兜底的是那个不依赖任何推导的因果探测。
 - **不要从库的源码里读默认常数。** 归一化那条注记就是例子：类默认值是 Qwen2-VL 时代的 CLIP
   统计量，只有 checkpoint 的配置才是这个模型真正用的。常数要从权重目录里读，并写成断言。
+
+---
+
+> 第 1 章专门记录“不报错但会静默训练错误”的感知预处理问题。以下 Stage 2 专章同时记录
+> 显式运行错误、分布式死锁风险、checkpoint 恢复错误和数据解码容错。
+
+## 2. Stage 2 真实 checkpoint 不是普通 policy checkpoint
+
+**涉及文件**：
+
+```text
+lerobot/common/policies/qwen3vl_mot/modeling_qwen3vl_mot.py
+/Data/lzl/ace_stage1/step_16k/
+```
+
+### 2.1 现象
+
+用户提供的 Stage 1 权重目录不是 `save_pretrained()` 导出的普通 policy，而是 DeepSpeed
+ZeRO-2 checkpoint：
+
+```text
+mp_rank_00_model_states.pt
+global_steps = 16000
+```
+
+直接按普通 policy checkpoint 加载会找不到模型文件或无法恢复配置。
+
+同时，标准配置 JSON 顶层包含：
+
+```json
+{"type": "robo_contrast", ...}
+```
+
+旧 loader 直接交给 Draccus 解码，会报：
+
+```text
+The fields `type` are not valid for RoboContrastConfig
+```
+
+### 2.2 根因
+
+- DeepSpeed 把真正参数放在 `module` 字段；
+- checkpoint 目录没有最初完整的 Stage 1 config；
+- 配置解码的两个入口对顶层 `type` 处理不一致。
+
+### 2.3 解决
+
+1. 支持解析 `mp_rank_00_model_states.pt` 的 `module`；
+2. 根据权重 shape 恢复 Stage 1 精确配置；
+3. 将恢复后的配置写入：
+
+   ```text
+   /Data/lzl/ace_stage1/step_16k/config.json
+   ```
+
+4. 所有 Stage 1 config 入口统一复用 `_decode_stage1_config()`，先剥离 `type`；
+5. 加载前检查 Stage 2 必需的 vision、state/action projections 和 physical blocks。
+
+### 2.4 证据
+
+```text
+checkpoint keys = 1397
+model keys = 1397
+shape mismatches = 0
+missing = 0
+unexpected = 0
+```
+
+这比 `strict=False` 后没有异常更强：它证明实际恢复出的配置与 checkpoint 完全一致。
+
+---
+
+## 3. Stage 1 vision 能迁移，但 text 不能假装迁移成功
+
+**涉及文件**：
+
+```text
+lerobot/common/policies/qwen3vl_mot/stage1_transfer.py
+```
+
+### 3.1 现象
+
+Stage 1 perception 的 vision 是 Qwen3-VL-compatible，但 text 是 SigLIP2。若只使用
+`strict=False`，容易把大量 text missing keys 当成正常情况，而没有明确区分预期不兼容与
+真正漏加载。
+
+### 3.2 解决
+
+迁移逻辑只复制：
+
+- 去掉已知 wrapper prefix 后同名；
+- tensor shape 完全相同。
+
+vision 与 text 分别生成覆盖率报告，并允许独立设置：
+
+```text
+require_stage1_vision_transfer
+require_stage1_text_transfer
+```
+
+当前结果：
+
+```text
+vision coverage = 100%
+text coverage   = 0%
+```
+
+text 0% 是预期的，因此 Qwen text 保留自身 pretrained initialization；vision 若低于
+90% 则直接报错。
+
+---
+
+## 4. FSDP2 DTensor 与 bitsandbytes AdamW8bit 不兼容
+
+**涉及文件**：
+
+```text
+lerobot/common/utils/fsdp_training.py
+lerobot/scripts/fsdp_train_contrast.py
+```
+
+### 4.1 现象
+
+FSDP2 配合 bitsandbytes 0.48.2 做 optimizer step 时出现：
+
+```text
+bitsandbytes.optimizer_update_8bit_blockwise.default:
+got mixed torch.Tensor and DTensor
+```
+
+模型 forward/backward 可以运行，但 optimizer update 失败。
+
+### 4.2 根因
+
+FSDP2 暴露的是 DTensor 参数和梯度，bitsandbytes 8-bit optimizer kernel 当前要求普通
+`torch.Tensor`，不理解 DTensor placement。
+
+### 4.3 解决
+
+Stage 2 改用 classic FSDP：
+
+```text
+ShardingStrategy.FULL_SHARD
+use_orig_params = true
+```
+
+这保留普通参数视图，同时仍分片参数、梯度和 optimizer state。
+
+### 4.4 不能采用的替代方案
+
+- 退回普通 AdamW：失去用户要求的 8-bit optimizer；
+- 在 optimizer 前手工把 DTensor 转普通 Tensor：会破坏参数身份和分片语义；
+- 吞掉异常继续训练：optimizer 根本没有更新。
+
+---
+
+## 5. 不能绕过 FSDP wrapper 直接访问 Qwen block 内部子模块
+
+**涉及文件**：
+
+```text
+lerobot/common/policies/qwen3vl_mot/modeling_understanding.py
+```
+
+### 5.1 现象
+
+最初为了导出 Qwen K/V，代码直接调用 decoder layer 内的：
+
+```text
+input_layernorm
+k_proj
+v_proj
+```
+
+classic FSDP block wrap 后，部分 rank 看到长度为 0 的 parameter shard，真实模型 forward
+失败。
+
+### 5.2 根因
+
+FSDP 只在调用被包装模块的 `forward()` 时执行 all-gather。直接访问 wrapper 内部子模块，
+等于绕过 FSDP 的参数 materialization 生命周期。
+
+### 5.3 解决
+
+必须正常调用完整 decoder layer forward。为获取 native K/V：
+
+1. 在 `k_norm` 注册临时 forward hook；
+2. 在 `v_proj` 注册临时 forward hook；
+3. 正常执行 decoder block；
+4. 取出 hook 输出；
+5. 对 key 应用 Qwen 原生 rotary embedding；
+6. 立即移除 hooks。
+
+这样同时满足：
+
+- FSDP block all-gather；
+- gradient checkpointing；
+- native K/V gradient；
+- Qwen 原始 forward 语义。
+
+相关回归测试会比较 checkpointed 与 non-checkpointed 的输出和梯度。
+
+---
+
+## 6. FP8 不是把 checkpoint 和 optimizer 参数永久变成 FP8
+
+### 6.1 容易产生的误解
+
+“FSDP 模型参数 FP8”容易被理解为：
+
+- checkpoint 里存 FP8；
+- optimizer 直接更新 FP8 parameter；
+- FSDP 通信也是 FP8。
+
+当前实现并不是这样。
+
+### 6.2 当前训练语义
+
+TorchAO FP8 的实际行为：
+
+- trainable master parameters 保持 BF16；
+- optimizer-facing gradients 保持 BF16；
+- eligible Linear 的 GEMM 动态量化到 FP8；
+- FSDP all-gather 仍是 BF16；
+- checkpoint 保存 BF16 master weights；
+- LayerNorm、embedding、小输出头、LoRA、teacher、VAE 和 physical encoder 不转换。
+
+bitsandbytes AdamW8bit 只把大 tensor 的两个 moment 压到 8-bit；同一 optimizer state 中
+仍可能混合 `uint8` 和 FP32 tensor。
+
+### 6.3 A6000 与 H100 的区别
+
+A6000 没有原生 FP8 Tensor Core：
+
+```text
+fp8_emulate = true
+```
+
+只能验证数值路径和模块兼容性，不能用于估算 H100 原生 FP8 加速比。原生 FP8 要求 compute
+capability 9.0 或更高。
+
+---
+
+## 7. FSDP checkpoint 不能直接套标准 optimizer-state 聚合
+
+**涉及文件**：
+
+```text
+lerobot/common/utils/fsdp_training.py
+```
+
+### 7.1 问题一：AdamW8bit state 类型混合
+
+标准 FSDP optimizer-state 汇总假设 state tensor 能按统一规则重分片。bitsandbytes 中同一个
+逻辑 state 可能同时包含：
+
+- 8-bit moments；
+- FP32 scale 和 metadata。
+
+因此不能安全使用标准 FSDP optimizer state 汇总。
+
+### 7.2 解决
+
+- 模型使用 Distributed Checkpoint 保存可重分片的 FSDP model state；
+- optimizer state 按 rank 保存原始本地 state；
+- resume 要求 world size 不变；
+- metadata 锁定 batch、accumulation、dataset、FSDP 和 FP8 geometry。
+
+### 7.3 问题二：复制的冻结参数不会自动恢复
+
+冻结 teacher、VAE 等参数通过 `ignored_states` 在每张卡复制。FSDP
+`set_model_state_dict()` 不会自动复制这些 ignored parameters。
+
+解决方式是：
+
+1. 去掉 `_fsdp_wrapped_module.` 前缀得到 canonical name；
+2. 从 model state 中找到对应 tensor；
+3. 手动 `copy_()` 回冻结参数；
+4. 缺失任一冻结参数都直接报错。
+
+### 7.4 问题三：单 rank checkpoint I/O 失败会让其他 rank 永久等待
+
+如果一个 rank 在保存或加载时抛错，其他 rank 可能继续卡在 barrier。
+
+解决方式：
+
+- 把 checkpoint I/O 拆成阶段；
+- 每阶段后通过 collective 汇总成功/失败；
+- 任意 rank 失败时，让所有 rank 一致抛出包含原始 rank 和错误信息的异常；
+- 不让健康 rank 继续进入下一次 barrier。
+
+故障注入证明双卡下不会再出现一个 rank 报错、另一个 rank 永久挂起。
+
+### 7.5 模型初始化 seed
+
+Generation Expert 是随机初始化的。FSDP shard 前所有 rank 必须使用同一个模型 seed，否则
+每个 rank shard 的不是同一个全局模型。
+
+正确顺序：
+
+1. 所有 rank 设置同一个 model seed；
+2. 构造完整 policy；
+3. FSDP wrap；
+4. 再设置 `model_seed + rank` 作为各 rank 的训练随机 seed。
+
+---
+
+## 8. Python 与 CUDA 动态库版本不一致
+
+### 8.1 错误的 Python 环境
+
+首次真实运行时 launcher 使用了基础 Python 3.12，而不是 `lerobot_v2` 环境，导致依赖和
+扩展版本不一致。
+
+解决方式：
+
+- launcher 使用当前 `PYTHON_BIN`；
+- 通过当前 Python 执行 `python -m torch.distributed.run`；
+- 正式运行前显式进入 `lerobot_v2`。
+
+### 8.2 NVRTC builtins 版本冲突
+
+环境中：
+
+```text
+PyTorch = 2.9.1+cu130
+LD_LIBRARY_PATH 优先指向 CUDA 12.4
+```
+
+NVRTC 报：
+
+```text
+failed to open libnvrtc-builtins.so.13.0
+```
+
+根因是 PyTorch wheel 使用 CUDA 13.0 runtime，但动态链接器先找到系统 CUDA 12.4。
+
+launcher 会读取：
+
+```python
+torch.version.cuda
+```
+
+并优先把匹配的：
+
+```text
+site-packages/nvidia/cu13/lib
+```
+
+加入 `LD_LIBRARY_PATH`。
+
+---
+
+## 9. `--steps` 曾经不能限制 Stage 2 optimizer step
+
+### 9.1 现象
+
+设置：
+
+```text
+--steps=1
+```
+
+训练仍继续执行完整 epoch schedule，短 smoke 无法自动退出。
+
+### 9.2 根因
+
+训练循环只按 source-equivalent epoch schedule 结束，没有把 `cfg.steps` 作为 optimizer
+update 上限。
+
+### 9.3 解决
+
+计划步数改为：
+
+```text
+min(natural_optimizer_steps, configured_steps)
+```
+
+循环同时检查：
+
+- natural epoch schedule；
+- optimizer update step cap。
+
+最终真实数据 smoke 能在恰好 1 个 optimizer step 后退出。
+
+---
+
+## 10. 视频时间戳问题不是一种问题
+
+**涉及文件**：
+
+```text
+lerobot/common/datasets_v30/video_utils.py
+lerobot/common/datasets/contrastive_dataset.py
+scripts/check_timestamp.py
+```
+
+### 10.1 loaded timestamp 比 query 大不一定是数据错误
+
+视频只能返回真实存在的 frame PTS。query 落在两帧之间时，最近帧可能在 query 之后，因此：
+
+```text
+loaded_timestamp > query_timestamp
+```
+
+本身是正常的。真正需要判断的是绝对误差是否超过 tolerance。
+
+### 10.2 `ego10k` 的亚毫秒边界误差
+
+出现：
+
+```text
+tensor([0.0002]) > tolerance_s=0.0002
+```
+
+打印值被四舍五入，实际值略大于 `2e-4`。这类误差远小于一帧，不应丢弃样本。
+
+v3 dataset 默认 tolerance 调整为：
+
+```text
+2e-4 -> 5e-4 seconds
+```
+
+0.5 ms 仍远低于 30 FPS 的约 33.3 ms 帧间隔。
+
+### 10.3 `file-199.mp4` 的 33 ms 偏移不是同步错误
+
+问题视频：
+
+```text
+/media/v-wangxiaofa/新加卷/lerobot_data/file-199.mp4
+```
+
+报错：
+
+```text
+query  8830.5332, 8832.1338
+loaded 8830.5664, 8832.1670
+error  about 33.2 ms
+```
+
+MP4 中正确 PTS 实际存在：
+
+```text
+8830.533268
+8832.133268
+```
+
+视频在 `6206.6666s` 处只有一次极小 cadence 调整：
+
+```text
+normal PTS delta = 512 / 15360 s
+one PTS delta    = 511 / 15360 s
+```
+
+TorchCodec 0.8.0 的 `seek_mode=approximate` 会根据平均帧率估算 seek 位置。该微小 PTS
+提前使 approximate seek 在后半段跳到下一帧。`seek_mode=exact` 能返回正确帧，
+但每个 200 MB 文件的 decoder 初始化从约 0.02 s 增加到约 1.0–1.3 s，不适合全局启用。
+
+### 10.4 float32 不能用于长视频的亚毫秒 timestamp check
+
+在约 8832 秒处，float32 的 ULP 已达到：
+
+```text
+0.9765625 ms
+```
+
+原始查询：
+
+```text
+8832.133333...
+```
+
+转成 float32 后打印为：
+
+```text
+8832.1338
+```
+
+即使正确帧也可能因为 float32 量化看起来相差约 1 ms。`check_timestamp.py` 使用 float64，
+所以它能找到正确 PTS，而训练旧代码会误判。
+
+解决方式：
+
+- TorchCodec 和 PyAV 的 timestamp distance 全部使用 float64；
+- 不把 tolerance 粗暴提高到 34 ms。
+
+### 10.5 当前 decoder fallback 链
+
+现在的顺序是：
+
+```text
+TorchCodec
+  └─ FrameTimestampError -> PyAV 读取同一组 timestamps
+       └─ 仍失败 -> dataset 随机选择同数据集的另一个 frame
+```
+
+只对 `FrameTimestampError` 自动切换 PyAV；其他 TorchCodec 初始化或解码异常仍显式抛出，
+避免用 fallback 掩盖真正的软件错误。
+
+真实 `file-199.mp4` 上，PyAV 返回结果与 TorchCodec exact 模式逐像素一致。
+
+---
+
+## 11. 读取失败后固定回退到 `dataset[0]` 会产生偏置
+
+### 11.1 旧行为
+
+任何样本读取异常后：
+
+```python
+item = dataset[0]
+```
+
+训练继续，但会产生三个问题：
+
+- 高频错误时反复训练同一个第 0 帧；
+- sampler 设计的 episode grouping 被破坏；
+- 第 0 帧本身坏掉时会再次抛错，没有解释。
+
+### 11.2 新行为
+
+PyAV 仍失败后，从同一个 dataset 内选择另一个 frame：
+
+- 排除原失败 frame；
+- seed 由 dataset seed、epoch、dataset id 和请求索引组成；
+- 相同实验可复现；
+- 保持 dataset mixture 比例；
+- fallback frame 也失败时显式终止，而不是继续伪造成功。
+
+返回 batch 会包含：
+
+```text
+data_read_fallback = 1
+requested_frame_index = 原始索引
+frame_index = 随机替换索引
+```
+
+训练日志与 W&B 汇总：
+
+```text
+data/read_fallback_count_interval
+data/read_fallback_rate_interval
+data/read_fallback_count_total
+data/read_fallback_rate_total
+data/read_fallback_count_by_dataset/<name>
+data/read_fallback_rate_by_dataset/<name>
+```
+
+如果 PyAV 成功读取原样本，则不算 sample replacement，因此不会增加
+`data_read_fallback`。
+
+---
+
+## 12. 数据集声明 FPS、真实 FPS 和 timestamp time base 不能混用
+
+部分 FTP-1 数据声明 30 FPS，但真实采集只有约 10–15 FPS。
+
+需要区分：
+
+- `index_fps`：metadata 声明值，决定 parquet timestamp 和 delta query 的时间基准；
+- `true_fps`：真实采集率，决定一个时间窗口覆盖多少真实运动时间；
+- video PTS：解码器实际返回的 presentation timestamp。
+
+delta timestamps 必须使用 `index_fps` 构造，否则 loader 会查询错误帧；窗口长度和
+`sample_rate` 则应使用 `true_fps`，否则物理时间跨度错误。
+
+这也是 `dataset_fps.py` 单独存在的原因。
+
+---
+
+## 13. 缺失数据集和 dataloader 长尾必须显式记录
+
+真实 `debug_research_data` 运行时发现：
+
+```text
+agibot_alpha       打开失败
+language_table     不存在
+ms_data_xdof_3     不存在
+ego_dex_split4     不存在
+```
+
+dataset constructor 会记录 warning 并跳过无法打开的数据集，而不是让整个 mixture 初始化失败。
+因此训练开始日志必须记录实际成功加载的数据集和 source frame 数，不能只看配置 mixture。
+
+4×A6000 的 40 步真实训练中：
+
+```text
+dataloader median = 0.34 s
+single long tail  = 27.01 s
+```
+
+平均值会被少数冷读、seek 或损坏视频拉高，应同时看 median、P90 和最大值。
+
+---
+
+## 14. GitHub push 失败不是 Git 对象损坏
+
+提交：
+
+```text
+683b5fe2e34a3ac02dfedae010fd3e41a5f77581
+```
+
+无法上传时检查结果：
+
+- commit 很小；
+- 没有大文件；
+- Git 对象没有损坏；
+- HTTPS 没有 credential helper；
+- SSH key 对应用户 `Penation`；
+- 该账号对 `lzl2040/gcr_latent_action` 没有写权限；
+- 未发现可用的 `Penation/gcr_latent_action` fork。
+
+因此解决方向是仓库权限或 fork，而不是重写 commit、压缩 Git 对象或删除历史。用户选择
+“先不提交”，所以 commit 保留在本地，未 push。
+
+---
+
+## 15. 当前仍未解决或尚未接入的事项
+
+### 15.1 Stage 2 三视角
+
+OXE 数据已有 `primary / secondary / wrist` 三槽位，但 Stage 2 当前仍只使用 primary。
+后续接入时必须同时处理：
+
+- 缺失视角 camera mask；
+- `secondary` 在不同数据集中的语义差异；
+- 三路时间戳分别同步；
+- 总 visual token budget；
+- view dropout；
+- 是否只生成 primary future。
+
+### 15.2 Embodiment action adapter
+
+模型能够生成 normalized canonical 40D action，但 `select_action()` 尚未实现：
+
+- canonical slot 到真实机器人 action layout；
+- inverse normalization；
+- controller 输出格式。
+
+### 15.3 Video sampler
+
+目前只有 video flow training objective，没有完整的：
+
+- 多步采样；
+- unpatchify；
+- VAE decode；
+- 视频保存与评估。
+
+### 15.4 8×H100 完整模型速度
+
+当前有：
+
+- 1×H100 与 8×H100 synthetic native-FP8 smoke；
+- 4×A6000 完整模型、真实数据、FP8 emulation 实测。
+
+仍缺少 8×H100 上完整 6B+ 模型、真实数据、micro-batch 16 的稳定 20–50 步测量。
+因此 `doc/stage2_train_cost.md` 中完整训练天数仍是估计，而不是 H100 实测值。
