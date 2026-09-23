@@ -622,21 +622,21 @@ tactile_prediction  0.10
 
 对干净数据 `x` 和高斯噪声 `ε`：
 
-\[
+$$
 x_\sigma=(1-\sigma)x+\sigma\epsilon
-\]
+$$
 
 目标速度：
 
-\[
+$$
 v^\star=\epsilon-x
-\]
+$$
 
 模型预测：
 
-\[
+$$
 \hat v_\theta(x_\sigma,\sigma,\mathrm{condition})
-\]
+$$
 
 然后在有效 mask 上计算 MSE。
 
@@ -662,13 +662,13 @@ state：
 
 任务存在的 flow targets 参与：
 
-\[
-L_\mathrm{flow} =
-\lambda_v L_\mathrm{video}
+$$
+L_\mathrm{flow}
+= \lambda_v L_\mathrm{video}
 + \lambda_a L_\mathrm{action}
 + \lambda_s L_\mathrm{state}
 + \lambda_t L_\mathrm{tactile}
-\]
+$$
 
 默认：
 
@@ -681,7 +681,7 @@ tactile 0.25
 
 所有包含当前图像的任务还加入：
 
-\[
+$$
 L_\mathrm{latent}
 =
 \mathrm{MSE}
@@ -689,13 +689,13 @@ L_\mathrm{latent}
 \mathrm{Proj}(q_\mathrm{Qwen}),
 q_\mathrm{Stage1}
 \right)
-\]
+$$
 
 最终：
 
-\[
+$$
 L=L_\mathrm{flow}+\lambda_\mathrm{latent}L_\mathrm{latent}
-\]
+$$
 
 其中 `latent_action_loss_weight` 默认是 `1.0`。
 
@@ -722,14 +722,14 @@ sample_canonical_action(batch)
 
 更新公式：
 
-\[
+$$
 x_{\sigma_{next}}
 =
 x_\sigma
 +
 (\sigma_{next}-\sigma)
 \hat v_\theta
-\]
+$$
 
 ### 11.1 尚未实现的部署层
 
