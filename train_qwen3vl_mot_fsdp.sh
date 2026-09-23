@@ -28,7 +28,7 @@ LOG_DIR="${LOG_DIR:-/mnt/wangxiaofa/ace_logs}"
 CHECK_PATHS="${CHECK_PATHS:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 
-WEIGHT_RESUME="${WEIGHT_RESUME:-false}"
+WEIGHT_RESUME="${WEIGHT_RESUME:-true}"
 
 die() {
     echo "Error: $*" >&2
@@ -54,9 +54,6 @@ require_path() {
 require_bool "CHECK_PATHS" "$CHECK_PATHS"
 require_bool "DRY_RUN" "$DRY_RUN"
 require_bool "WEIGHT_RESUME" "$WEIGHT_RESUME"
-if [[ "$WEIGHT_RESUME" != "true" && -z "$STAGE1_CHECKPOINT" ]]; then
-    die "STAGE1_CHECKPOINT is required for a fresh stage-two run"
-fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export LEROBOT_VIDEO_DECODER_CACHE_SIZE="${LEROBOT_VIDEO_DECODER_CACHE_SIZE:-256}"
@@ -67,8 +64,40 @@ export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
+TORCHRUN_BIN="${TORCHRUN_BIN:-torchrun}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 MASTER_PORT="${MASTER_PORT:-$("${PYTHON_BIN}" -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")}"
+command -v "$TORCHRUN_BIN" >/dev/null 2>&1 \
+    || die "torchrun executable was not found: $TORCHRUN_BIN"
+
+LATEST_CHECKPOINT_POINTER="${OUTPUT_DIR}/latest_checkpoint"
+RESUME_CHECKPOINT=""
+if [[ "$WEIGHT_RESUME" == "true" ]]; then
+    if [[ ! -e "$LATEST_CHECKPOINT_POINTER" ]]; then
+        shopt -s nullglob
+        _orphan_checkpoints=("$OUTPUT_DIR"/checkpoint_*)
+        shopt -u nullglob
+        if (( ${#_orphan_checkpoints[@]} > 0 )); then
+            die "found checkpoint artifacts but no latest_checkpoint pointer in $OUTPUT_DIR"
+        fi
+        echo "resume: no ${LATEST_CHECKPOINT_POINTER}; starting a fresh Stage 2 run"
+        WEIGHT_RESUME=false
+    elif [[ ! -f "$LATEST_CHECKPOINT_POINTER" ]]; then
+        die "resume pointer is not a regular file: $LATEST_CHECKPOINT_POINTER"
+    else
+        CHECKPOINT_NAME="$(<"$LATEST_CHECKPOINT_POINTER")"
+        [[ "$CHECKPOINT_NAME" =~ ^checkpoint_[0-9]{8}$ ]] \
+            || die "invalid checkpoint name in $LATEST_CHECKPOINT_POINTER: $CHECKPOINT_NAME"
+        RESUME_CHECKPOINT="${OUTPUT_DIR}/${CHECKPOINT_NAME}"
+        require_dir "latest FSDP checkpoint" "$RESUME_CHECKPOINT"
+        echo "resume: found ${RESUME_CHECKPOINT}"
+    fi
+else
+    echo "resume: disabled explicitly; starting a fresh Stage 2 run"
+fi
+if [[ "$WEIGHT_RESUME" != "true" && -z "$STAGE1_CHECKPOINT" ]]; then
+    die "STAGE1_CHECKPOINT is required for a fresh stage-two run"
+fi
 
 # PyTorch wheels may ship a newer CUDA runtime than /usr/local/cuda. NVRTC loads its
 # builtins dynamically, so put the matching wheel library first when it is available.
@@ -107,18 +136,18 @@ if [[ "$CHECK_PATHS" == "true" ]]; then
     fi
     if [[ "$WEIGHT_RESUME" != "true" ]]; then
         require_path "Stage 1 checkpoint" "$STAGE1_CHECKPOINT"
-    fi
-    if [[ -n "$STAGE1_CONFIG" ]]; then
-        require_file "Stage 1 config" "$STAGE1_CONFIG"
+        if [[ -n "$STAGE1_CONFIG" ]]; then
+            require_file "Stage 1 config" "$STAGE1_CONFIG"
+        fi
     fi
 fi
 
 STAGE1_CONFIG_ARGS=()
 STAGE1_CHECKPOINT_ARGS=()
-if [[ -n "$STAGE1_CHECKPOINT" ]]; then
+if [[ "$WEIGHT_RESUME" != "true" && -n "$STAGE1_CHECKPOINT" ]]; then
     STAGE1_CHECKPOINT_ARGS+=(--policy.stage1_checkpoint="${STAGE1_CHECKPOINT}")
 fi
-if [[ -n "$STAGE1_CONFIG" ]]; then
+if [[ "$WEIGHT_RESUME" != "true" && -n "$STAGE1_CONFIG" ]]; then
     STAGE1_CONFIG_ARGS+=(--policy.stage1_config="${STAGE1_CONFIG}")
 fi
 
@@ -133,9 +162,10 @@ echo "  data_v30=${PARENT_DIR_V30}"
 echo "  data_extra=${PARENT_DIR_EXTRA:-<disabled>}"
 echo "  output=${OUTPUT_DIR}"
 echo "  logs=${LOG_DIR}"
+echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 
 CMD=(
-    "${PYTHON_BIN}" -m torch.distributed.run
+    "${TORCHRUN_BIN}"
     --standalone
     --nproc_per_node="${NPROC_PER_NODE}"
     --master_port="${MASTER_PORT}"

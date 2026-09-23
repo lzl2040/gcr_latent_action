@@ -8,6 +8,8 @@
 train_qwen3vl_mot_fsdp.sh
 ```
 
+该 launcher 默认使用当前环境中的 `torchrun`。
+
 本地轻量 LoRA/DeepSpeed 入口：
 
 ```text
@@ -139,6 +141,22 @@ CHECK_PATHS=false DRY_RUN=true bash train_qwen3vl_mot_fsdp.sh
 
 ## 4. 从 FSDP checkpoint 恢复
 
+launcher 默认：
+
+```bash
+WEIGHT_RESUME=true
+```
+
+这是自动恢复模式：
+
+1. 检查 `${OUTPUT_DIR}/latest_checkpoint`；
+2. pointer 不存在且目录中没有 `checkpoint_*` 时，自动改为 `WEIGHT_RESUME=false`，
+   从 Stage 1 开始新训练；
+3. pointer 指向有效的 `checkpoint_XXXXXXXX` 目录时恢复；
+4. pointer 损坏，或已有 `checkpoint_*` 但 pointer 丢失时直接报错，不会静默重新训练。
+
+因此新 `JOB_NAME/OUTPUT_DIR` 和已有 checkpoint 的任务可以使用同一条启动命令。
+
 恢复时必须保持以下训练几何不变：
 
 - GPU/world size；
@@ -163,13 +181,20 @@ GRADIENT_ACCUMULATION_STEPS=1 \
 FP8_ENABLED=true \
 FP8_RECIPE=rowwise_with_gw_hp \
 FP8_SCOPE=generation_vlm \
-WEIGHT_RESUME=true \
 WANDB_ENABLE=true \
 bash train_qwen3vl_mot_fsdp.sh
 ```
 
-`WEIGHT_RESUME=true` 时不重新加载 Stage 1 checkpoint；Stage 1 结构已经嵌入 Stage 2
-checkpoint 配置。
+检测到 checkpoint 并恢复时，不重新加载 Stage 1 checkpoint；Stage 1 结构已经嵌入
+Stage 2 checkpoint 配置。
+
+如果输出目录已经有 checkpoint，但明确要求从头开始：
+
+```bash
+WEIGHT_RESUME=false bash train_qwen3vl_mot_fsdp.sh
+```
+
+此时应使用新的 `OUTPUT_DIR`，避免后续保存与旧 checkpoint 名称冲突。
 
 ---
 
@@ -301,6 +326,7 @@ amlt show <experiment-name> :<job-name>
 | `STEPS` | `600000` | optimizer step 上限 |
 | `FP8_ENABLED` | `true` | 是否转换 eligible Linear |
 | `FP8_EMULATE` | `false` | 非 H100 上的功能模拟 |
-| `WEIGHT_RESUME` | `false` | 从 `OUTPUT_DIR` 最新 checkpoint 恢复 |
+| `TORCHRUN_BIN` | `torchrun` | 分布式启动程序 |
+| `WEIGHT_RESUME` | `true` | 自动检测并恢复 `OUTPUT_DIR` 最新 checkpoint；不存在则新训练 |
 | `CHECK_PATHS` | `true` | 启动前检查权重和数据路径 |
 | `DRY_RUN` | `false` | 只打印最终命令 |
