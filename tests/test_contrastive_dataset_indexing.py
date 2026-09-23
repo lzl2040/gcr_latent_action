@@ -72,16 +72,17 @@ def test_getitem_uses_flat_mapping_for_direct_integer_indices() -> None:
 def test_getitem_marks_worker_read_fallbacks() -> None:
     class BrokenDataset:
         def __len__(self):
-            return 2
+            return 3
 
         def __getitem__(self, index):
             if index == 1:
                 raise RuntimeError("broken frame")
-            return "fallback"
+            return f"fallback-{index}"
 
-    dataset = _dataset_with_sizes([2])
+    dataset = _dataset_with_sizes([3])
     dataset.datasets = [BrokenDataset()]
     dataset.dataset_names = ["broken"]
+    dataset._random_fallback_index = lambda ds_idx, requested_frame_idx, dataset_length: 2
     dataset._to_canonical = lambda item, ds_idx, frame_idx: {
         "item": item,
         "dataset_id": torch.tensor(ds_idx),
@@ -90,7 +91,19 @@ def test_getitem_marks_worker_read_fallbacks() -> None:
 
     item = dataset[1]
 
-    assert item["item"] == "fallback"
-    assert item["frame_index"].item() == 0
+    assert item["item"] == "fallback-2"
+    assert item["frame_index"].item() == 2
     assert item["requested_frame_index"].item() == 1
     assert item["data_read_fallback"].item() == 1
+
+
+def test_random_fallback_index_is_reproducible_and_excludes_failed_frame() -> None:
+    dataset = _dataset_with_sizes([8])
+    dataset.seed = 123
+    dataset.epoch = 4
+
+    first = [dataset._random_fallback_index(0, index, 8) for index in range(8)]
+    second = [dataset._random_fallback_index(0, index, 8) for index in range(8)]
+
+    assert first == second
+    assert all(fallback != requested for requested, fallback in enumerate(first))

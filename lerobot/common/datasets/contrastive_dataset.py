@@ -796,6 +796,26 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         dataset_start = 0 if ds_idx == 0 else int(self.dataset_frame_ends[ds_idx - 1])
         return ds_idx, flat_index - dataset_start
 
+    def _random_fallback_index(
+        self,
+        ds_idx: int,
+        requested_frame_idx: int,
+        dataset_length: int,
+    ) -> int:
+        """Choose a reproducible random replacement that is not the failed frame."""
+        if dataset_length <= 1:
+            return 0
+        seed = np.random.SeedSequence(
+            [
+                int(getattr(self, "seed", 0) or 0),
+                int(getattr(self, "epoch", 0)),
+                ds_idx,
+                requested_frame_idx,
+            ]
+        )
+        candidate = int(np.random.default_rng(seed).integers(dataset_length - 1))
+        return candidate + int(candidate >= requested_frame_idx)
+
     # ------------------------------------------------------------------
     # item construction
     # ------------------------------------------------------------------
@@ -809,9 +829,22 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         try:
             item = dataset[frame_idx]
         except Exception as exc:  # noqa: BLE001 - never let one broken frame kill training
-            logger.warning("Failed to read %s[%d]: %s", self.dataset_names[ds_idx], frame_idx, exc)
-            item = dataset[0]
-            frame_idx = 0
+            fallback_idx = self._random_fallback_index(ds_idx, frame_idx, len(dataset))
+            logger.warning(
+                "Failed to read %s[%d]: %s; retrying random frame %d from the same dataset.",
+                self.dataset_names[ds_idx],
+                frame_idx,
+                exc,
+                fallback_idx,
+            )
+            try:
+                item = dataset[fallback_idx]
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    f"Failed to read {self.dataset_names[ds_idx]}[{frame_idx}] and random "
+                    f"fallback frame {fallback_idx}."
+                ) from fallback_exc
+            frame_idx = fallback_idx
             read_fallback = True
 
         result = self._to_canonical(item, ds_idx, frame_idx)
