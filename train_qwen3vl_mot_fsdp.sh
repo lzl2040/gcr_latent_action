@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Single-node 8xH100 launcher for stage-two Qwen3-VL + Generation Expert training.
+# Single- or multi-node H100 launcher for stage-two Qwen3-VL + Generation Expert training.
 # FP8 accelerates eligible Linear GEMMs; trainable master parameters stay BF16 and
 # bitsandbytes stores AdamW moments in 8-bit blocks.
 #
@@ -39,6 +39,14 @@ require_bool() {
     [[ "$2" == "true" || "$2" == "false" ]] || die "$1 must be true or false, got $2"
 }
 
+require_positive_int() {
+    [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer, got $2"
+}
+
+require_nonnegative_int() {
+    [[ "$2" =~ ^[0-9]+$ ]] || die "$1 must be a non-negative integer, got $2"
+}
+
 require_dir() {
     [[ -d "$2" ]] || die "$1 directory does not exist: $2"
 }
@@ -65,8 +73,27 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 TORCHRUN_BIN="${TORCHRUN_BIN:-torchrun}"
+NNODES="${NNODES:-1}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-MASTER_PORT="${MASTER_PORT:-$("${PYTHON_BIN}" -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")}"
+NODE_RANK="${NODE_RANK:-0}"
+MASTER_ADDR="${MASTER_ADDR:-}"
+MASTER_PORT="${MASTER_PORT:-}"
+require_positive_int "NNODES" "$NNODES"
+require_positive_int "NPROC_PER_NODE" "$NPROC_PER_NODE"
+require_nonnegative_int "NODE_RANK" "$NODE_RANK"
+(( NODE_RANK < NNODES )) || die "NODE_RANK=$NODE_RANK must be smaller than NNODES=$NNODES"
+if (( NNODES == 1 )); then
+    MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+    MASTER_PORT="${MASTER_PORT:-$("${PYTHON_BIN}" -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")}"
+else
+    [[ -n "$MASTER_ADDR" ]] || die "MASTER_ADDR is required when NNODES > 1"
+    [[ -n "$MASTER_PORT" ]] || die "MASTER_PORT is required when NNODES > 1"
+    if [[ "$MASTER_ADDR" == "127.0.0.1" || "$MASTER_ADDR" == "localhost" ]]; then
+        die "MASTER_ADDR=$MASTER_ADDR is not reachable from other nodes"
+    fi
+fi
+require_positive_int "MASTER_PORT" "$MASTER_PORT"
+(( MASTER_PORT <= 65535 )) || die "MASTER_PORT=$MASTER_PORT is outside the valid port range"
 command -v "$TORCHRUN_BIN" >/dev/null 2>&1 \
     || die "torchrun executable was not found: $TORCHRUN_BIN"
 
@@ -163,12 +190,28 @@ echo "  data_extra=${PARENT_DIR_EXTRA:-<disabled>}"
 echo "  output=${OUTPUT_DIR}"
 echo "  logs=${LOG_DIR}"
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
+echo "distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
+
+TORCHRUN_ARGS=()
+if (( NNODES == 1 )); then
+    TORCHRUN_ARGS+=(
+        --standalone
+        --nproc_per_node="${NPROC_PER_NODE}"
+        --master_port="${MASTER_PORT}"
+    )
+else
+    TORCHRUN_ARGS+=(
+        --nnodes="${NNODES}"
+        --nproc_per_node="${NPROC_PER_NODE}"
+        --node_rank="${NODE_RANK}"
+        --master_addr="${MASTER_ADDR}"
+        --master_port="${MASTER_PORT}"
+    )
+fi
 
 CMD=(
     "${TORCHRUN_BIN}"
-    --standalone
-    --nproc_per_node="${NPROC_PER_NODE}"
-    --master_port="${MASTER_PORT}"
+    "${TORCHRUN_ARGS[@]}"
     lerobot/scripts/fsdp_train_contrast.py
     --policy.type="qwen3vl_mot"
     --policy.qwen3vl_dir="${QWEN3VL_DIR}"

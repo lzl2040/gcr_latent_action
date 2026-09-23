@@ -90,6 +90,52 @@ TorchAO FP8 = native H100
 optimizer = bitsandbytes AdamW8bit
 ```
 
+单节点时：
+
+```text
+NNODES=1
+NODE_RANK=0
+```
+
+launcher 会自动使用 `torchrun --standalone`。
+
+### 2.1 多节点
+
+多节点时，每个节点各运行一次相同命令，并设置不同的 `NODE_RANK`：
+
+```bash
+NNODES=2 \
+NODE_RANK=0 \
+MASTER_ADDR=<rank-0-node-address> \
+MASTER_PORT=29500 \
+NPROC_PER_NODE=8 \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+第二个节点：
+
+```bash
+NNODES=2 \
+NODE_RANK=1 \
+MASTER_ADDR=<rank-0-node-address> \
+MASTER_PORT=29500 \
+NPROC_PER_NODE=8 \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+所有节点必须保持相同的：
+
+- `NNODES`、`MASTER_ADDR` 和 `MASTER_PORT`；
+- `NPROC_PER_NODE`、batch 和 FP8/FSDP 配置；
+- `JOB_NAME/OUTPUT_DIR`；
+- 代码版本和共享数据挂载。
+
+多节点 global batch：
+
+```text
+BATCH_SIZE × NPROC_PER_NODE × NNODES × GRADIENT_ACCUMULATION_STEPS
+```
+
 如果 W&B secret 没有注入，先使用：
 
 ```bash
@@ -270,8 +316,8 @@ bash train_qwen3vl_mot_local.sh
 
 ## 7. AMLT 提交和查看任务
 
-当前仓库没有 Stage 2 专用 AMLT YAML，所以不能写死不存在的 config、target 或 job 名。
-在团队实际 AMLT YAML 中，job 的 command 应调用：
+当前工作区使用 `doc/amlt_example.yaml` 作为 Stage 2 AMLT 提交配置。该文件包含
+环境专属配置并保持未跟踪；若使用其他 AMLT YAML，job 的 command 同样应调用：
 
 ```bash
 bash train_qwen3vl_mot_fsdp.sh
@@ -306,6 +352,30 @@ amlt show <experiment-name> :<job-name>
 
 不要使用 `amlt logs tail -f` 写进自动化脚本，它会持续阻塞。
 
+AMLT/Singularity 使用 launcher 自己生成每节点 GPU 进程时，应保持：
+
+```yaml
+process_count_per_node: 1
+```
+
+AMLT 会为这一个外层进程提供：
+
+```text
+NODE_RANK
+MASTER_ADDR
+MASTER_PORT
+```
+
+job command 还需要把 YAML 的节点数传给 launcher：
+
+```yaml
+- conda run --name lerobot env NNODES=$NODES NPROC_PER_NODE=$GPUS \
+    JOB_NAME=$JOB_NAME bash train_qwen3vl_mot_fsdp.sh
+```
+
+launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 static rendezvous，
+由所有节点共同组成 `NNODES × NPROC_PER_NODE` 的全局进程组。
+
 ---
 
 ## 8. 常用覆盖参数
@@ -320,7 +390,11 @@ amlt show <experiment-name> :<job-name>
 | `OUTPUT_ROOT` | `/mnt/wangxiaofa/qwen3vl_mot_exp` | 默认输出根目录 |
 | `OUTPUT_DIR` | `${OUTPUT_ROOT}/${JOB_NAME}` | 当前任务 checkpoint 目录 |
 | `LOG_DIR` | `/mnt/wangxiaofa/ace_logs` | 文本日志目录 |
+| `NNODES` | `1` | 训练节点数 |
+| `NODE_RANK` | `0` | 当前节点编号，范围 `[0, NNODES)` |
 | `NPROC_PER_NODE` | `8` | 本节点 GPU 进程数 |
+| `MASTER_ADDR` | 单节点为 `127.0.0.1` | 多节点 rank 0 可访问地址 |
+| `MASTER_PORT` | 单节点自动选择 | 多节点共享 rendezvous 端口 |
 | `BATCH_SIZE` | `16` | 每卡 micro-batch |
 | `GRADIENT_ACCUMULATION_STEPS` | `1` | 梯度累积 |
 | `STEPS` | `600000` | optimizer step 上限 |
