@@ -1,0 +1,306 @@
+# Qwen3-VL MoT Stage 2 运行命令
+
+本文记录 `qwen3vl_mot_stage2` 分支当前可用的集群和本地启动命令。
+
+正式 H100 训练入口：
+
+```text
+train_qwen3vl_mot_fsdp.sh
+```
+
+本地轻量 LoRA/DeepSpeed 入口：
+
+```text
+train_qwen3vl_mot_local.sh
+```
+
+两个脚本都需要先激活：
+
+```bash
+conda activate lerobot_v2
+```
+
+不要把 `WANDB_API_KEY` 或其他凭据写入本文、launcher 或 AMLT YAML。集群运行时应通过
+任务系统 secret 或环境变量注入。
+
+---
+
+## 1. 集群默认路径
+
+`train_qwen3vl_mot_fsdp.sh` 使用与 `train_ace.sh` 一致的集群挂载：
+
+| 内容 | 默认路径 |
+|---|---|
+| 权重根目录 | `/mnt/wangxiaofa/pt_weights` |
+| Qwen3-VL-4B | `/mnt/wangxiaofa/pt_weights/Qwen3-VL-4B-Instruct` |
+| Cosmos3-Edge | `/mnt/wangxiaofa/pt_weights/Cosmos3-Edge` |
+| Stage 1 | `/mnt/wangxiaofa/ace_stage1/step_16k` |
+| v2.1/v3 主数据目录 | `/mnt/wangxiaofa/robot_dataset/lerobot-format-v30-0710/` |
+| 额外数据目录 | `/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/` |
+| Stage 2 输出根目录 | `/mnt/wangxiaofa/qwen3vl_mot_exp` |
+| 日志目录 | `/mnt/wangxiaofa/ace_logs` |
+
+若实际 Stage 1 权重放在其他位置，只需要覆盖 `STAGE1_CHECKPOINT`。launcher 默认会检查
+模型、数据和 Stage 1 路径，缺失时在创建分布式进程前直接报错。
+
+---
+
+## 2. 集群 8×H100 正式训练
+
+先在单个 8×H100 节点进入代码目录，然后运行：
+
+```bash
+conda activate lerobot_v2
+cd /path/to/gcr_latent_action
+
+JOB_NAME=qwen3vl_mot_stage2_full \
+STAGE1_CHECKPOINT=/mnt/wangxiaofa/ace_stage1/step_16k \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+BATCH_SIZE=16 \
+GRADIENT_ACCUMULATION_STEPS=1 \
+UNDERSTANDING_TUNING_MODE=full \
+UNDERSTANDING_LR_SCALE=0.05 \
+FP8_ENABLED=true \
+FP8_EMULATE=false \
+WANDB_ENABLE=true \
+WANDB_PROJECT=lerobot-stage2 \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+默认结果目录：
+
+```text
+/mnt/wangxiaofa/qwen3vl_mot_exp/qwen3vl_mot_stage2_full
+```
+
+该配置对应：
+
+```text
+8×H100
+micro-batch/GPU = 16
+global batch = 128
+Qwen language transformer = full tuning
+vision = last 4 blocks rank-16 LoRA
+Generation Expert = full tuning
+Physical Encoder = frozen
+TorchAO FP8 = native H100
+optimizer = bitsandbytes AdamW8bit
+```
+
+如果 W&B secret 没有注入，先使用：
+
+```bash
+WANDB_ENABLE=false
+```
+
+避免任务等待交互式登录。
+
+---
+
+## 3. 集群单步 smoke
+
+正式长跑前先确认路径、真实数据、checkpoint、FP8、FSDP 和 AdamW8bit 能一起运行：
+
+```bash
+conda activate lerobot_v2
+cd /path/to/gcr_latent_action
+
+JOB_NAME=qwen3vl_mot_stage2_smoke \
+STAGE1_CHECKPOINT=/mnt/wangxiaofa/ace_stage1/step_16k \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+BATCH_SIZE=1 \
+GRADIENT_ACCUMULATION_STEPS=1 \
+SAMPLES_PER_EPOCH=128 \
+NUM_WORKERS=4 \
+STEPS=1 \
+SAVE_FREQ=1 \
+WANDB_ENABLE=false \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+只检查最终命令和路径解析，不启动训练：
+
+```bash
+DRY_RUN=true \
+JOB_NAME=qwen3vl_mot_stage2_dry_run \
+STAGE1_CHECKPOINT=/mnt/wangxiaofa/ace_stage1/step_16k \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+路径尚未挂载但只想检查参数拼接时，可以额外设置：
+
+```bash
+CHECK_PATHS=false DRY_RUN=true bash train_qwen3vl_mot_fsdp.sh
+```
+
+---
+
+## 4. 从 FSDP checkpoint 恢复
+
+恢复时必须保持以下训练几何不变：
+
+- GPU/world size；
+- per-rank batch size；
+- gradient accumulation；
+- FSDP 配置；
+- FP8 scope 和 recipe；
+- sampler/data mixture 配置。
+
+使用与原任务相同的 `JOB_NAME` 或显式传入同一个 `OUTPUT_DIR`：
+
+```bash
+conda activate lerobot_v2
+cd /path/to/gcr_latent_action
+
+JOB_NAME=qwen3vl_mot_stage2_full \
+OUTPUT_DIR=/mnt/wangxiaofa/qwen3vl_mot_exp/qwen3vl_mot_stage2_full \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+BATCH_SIZE=16 \
+GRADIENT_ACCUMULATION_STEPS=1 \
+FP8_ENABLED=true \
+FP8_RECIPE=rowwise_with_gw_hp \
+FP8_SCOPE=generation_vlm \
+WEIGHT_RESUME=true \
+WANDB_ENABLE=true \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+`WEIGHT_RESUME=true` 时不重新加载 Stage 1 checkpoint；Stage 1 结构已经嵌入 Stage 2
+checkpoint 配置。
+
+---
+
+## 5. 本地 4×A6000 FSDP 单步调试
+
+该命令走与 H100 正式训练相同的 classic FSDP + AdamW8bit 路径。A6000 没有原生 FP8，
+因此必须设置 `FP8_EMULATE=true`；它只能验证功能，不能估计 H100 FP8 性能。
+
+```bash
+conda activate lerobot_v2
+cd /home/v-wangxiaofa/lzl/gcr_latent_action
+
+JOB_NAME=qwen3vl_mot_local_fsdp_smoke \
+WEIGHTS_ROOT=/Data/lzl/huggingface \
+STAGE1_CHECKPOINT=/Data/lzl/ace_stage1/step_16k \
+PARENT_DIR_V21=/Data/lerobot_data_ort6d \
+PARENT_DIR_V30=/Data/lerobot_data_ort6d/v30 \
+PARENT_DIR_EXTRA='' \
+OUTPUT_DIR=/Data/lzl/qwen3vl_mot_local_fsdp_smoke \
+LOG_DIR=/Data/lzl/qwen3vl_mot_logs \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+NPROC_PER_NODE=4 \
+BATCH_SIZE=1 \
+GRADIENT_ACCUMULATION_STEPS=1 \
+FP8_ENABLED=true \
+FP8_EMULATE=true \
+SAMPLES_PER_EPOCH=128 \
+NUM_WORKERS=4 \
+STEPS=1 \
+SAVE_FREQ=1 \
+WANDB_ENABLE=false \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+本地完整 40-step 稳定性检查只需将：
+
+```bash
+STEPS=40
+SAVE_FREQ=40
+```
+
+其余参数保持不变。
+
+---
+
+## 6. 本地 LoRA/DeepSpeed 调试
+
+如果只需要较轻的本地功能调试，而不是复现 H100 FSDP/FP8 路径：
+
+```bash
+conda activate lerobot_v2
+cd /home/v-wangxiaofa/lzl/gcr_latent_action
+
+STAGE1_CHECKPOINT=/Data/lzl/ace_stage1/step_16k \
+CUDA_VISIBLE_DEVICES=0,1 \
+UNDERSTANDING_TUNING_MODE=lora \
+UNDERSTANDING_TEXT_LORA_LAYERS=0 \
+UNDERSTANDING_VISION_LORA_LAYERS=4 \
+UNDERSTANDING_LORA_RANK=16 \
+UNDERSTANDING_LR_SCALE=0.1 \
+SAMPLES_PER_EPOCH=128 \
+NUM_WORKERS=4 \
+STEPS=1 \
+SAVE_FREQ=1 \
+OUTPUT_DIR=/Data/lzl/qwen3vl_mot_local_lora_smoke \
+WANDB_ENABLE=false \
+bash train_qwen3vl_mot_local.sh
+```
+
+这条命令使用 DeepSpeed ZeRO-2 BF16，不用于判断 H100 原生 FP8 吞吐。
+
+---
+
+## 7. AMLT 提交和查看任务
+
+当前仓库没有 Stage 2 专用 AMLT YAML，所以不能写死不存在的 config、target 或 job 名。
+在团队实际 AMLT YAML 中，job 的 command 应调用：
+
+```bash
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+并通过 AMLT 环境变量注入本节前面的 `JOB_NAME`、`STAGE1_CHECKPOINT`、batch 和 W&B
+配置。提交已有 YAML 的标准命令是：
+
+```bash
+amlt run <config.yaml> :<job-name> <experiment-name> \
+  --description "**Qwen3-VL MoT Stage 2**: 8xH100 FSDP + FP8 + AdamW8bit"
+```
+
+提交后等待后端接收，再检查状态：
+
+```bash
+sleep 180
+amlt status <experiment-name>
+```
+
+查看指定 job 最近 50 行日志：
+
+```bash
+amlt logs view -n 50 <experiment-name> :<job-name>
+```
+
+查看更详细的后端信息：
+
+```bash
+amlt show <experiment-name> :<job-name>
+```
+
+不要使用 `amlt logs tail -f` 写进自动化脚本，它会持续阻塞。
+
+---
+
+## 8. 常用覆盖参数
+
+| 环境变量 | 默认值 | 作用 |
+|---|---|---|
+| `WEIGHTS_ROOT` | `/mnt/wangxiaofa/pt_weights` | Qwen/Cosmos 权重根目录 |
+| `STAGE1_CHECKPOINT` | `/mnt/wangxiaofa/ace_stage1/step_16k` | Stage 1 权重目录 |
+| `PARENT_DIR_V21` | 集群 v30-0710 挂载 | v2.1 数据目录 |
+| `PARENT_DIR_V30` | 集群 v30-0710 挂载 | v3 数据目录 |
+| `PARENT_DIR_EXTRA` | 集群额外数据挂载 | 额外数据目录；允许设为空 |
+| `OUTPUT_ROOT` | `/mnt/wangxiaofa/qwen3vl_mot_exp` | 默认输出根目录 |
+| `OUTPUT_DIR` | `${OUTPUT_ROOT}/${JOB_NAME}` | 当前任务 checkpoint 目录 |
+| `LOG_DIR` | `/mnt/wangxiaofa/ace_logs` | 文本日志目录 |
+| `NPROC_PER_NODE` | `8` | 本节点 GPU 进程数 |
+| `BATCH_SIZE` | `16` | 每卡 micro-batch |
+| `GRADIENT_ACCUMULATION_STEPS` | `1` | 梯度累积 |
+| `STEPS` | `600000` | optimizer step 上限 |
+| `FP8_ENABLED` | `true` | 是否转换 eligible Linear |
+| `FP8_EMULATE` | `false` | 非 H100 上的功能模拟 |
+| `WEIGHT_RESUME` | `false` | 从 `OUTPUT_DIR` 最新 checkpoint 恢复 |
+| `CHECK_PATHS` | `true` | 启动前检查权重和数据路径 |
+| `DRY_RUN` | `false` | 只打印最终命令 |
