@@ -421,9 +421,35 @@ def decode_video_frames(
     if backend is None:
         backend = get_safe_default_codec()
     if backend == "torchcodec":
-        return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s, return_type=return_type, device=device)
+        try:
+            return decode_video_frames_torchcodec(
+                video_path,
+                timestamps,
+                tolerance_s,
+                return_type=return_type,
+                device=device,
+            )
+        except FrameTimestampError as exc:
+            logger.warning(
+                "TorchCodec returned timestamps outside tolerance for %s; retrying with PyAV: %s",
+                video_path,
+                exc,
+            )
+            return decode_video_frames_torchvision(
+                video_path,
+                timestamps,
+                tolerance_s,
+                backend="pyav",
+                return_type=return_type,
+            )
     elif backend in ["pyav", "video_reader"]:
-        return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
+        return decode_video_frames_torchvision(
+            video_path,
+            timestamps,
+            tolerance_s,
+            backend,
+            return_type=return_type,
+        )
     else:
         raise ValueError(f"Unsupported video backend: {backend}")
 
@@ -434,6 +460,7 @@ def decode_video_frames_torchvision(
     tolerance_s: float,
     backend: str = "pyav",
     log_loaded_timestamps: bool = False,
+    return_type: str = "float32",
 ) -> torch.Tensor:
     """Loads frames associated to the requested timestamps of a video
 
@@ -493,8 +520,11 @@ def decode_video_frames_torchvision(
 
     reader = None
 
-    query_ts = torch.as_tensor(timestamps, dtype=torch.float32, device="cpu")
-    loaded_ts = torch.as_tensor(loaded_ts, dtype=torch.float32, device="cpu")
+    # Absolute timestamps in long concatenated videos can be several hours large.
+    # float32 has nearly 1 ms spacing around 9,000 s, which is wider than the
+    # sub-millisecond tolerance used here and can reject the correct frame.
+    query_ts = torch.as_tensor(timestamps, dtype=torch.float64, device="cpu")
+    loaded_ts = torch.as_tensor(loaded_ts, dtype=torch.float64, device="cpu")
 
     # compute distances between each query timestamp and timestamps of all loaded frames
     dist = torch.cdist(query_ts[:, None], loaded_ts[:, None], p=1)
@@ -520,8 +550,12 @@ def decode_video_frames_torchvision(
     if log_loaded_timestamps:
         logger.info(f"{closest_ts=}")
 
-    # convert to the pytorch format which is float32 in [0,1] range (and channel first)
-    closest_frames = closest_frames.type(torch.float32) / 255
+    if return_type in ("float", "float32"):
+        closest_frames = closest_frames.type(torch.float32) / 255
+    elif return_type == "uint8":
+        closest_frames = closest_frames.to(torch.uint8)
+    else:
+        raise ValueError(f"Unsupported return_type for torchvision video decoding: {return_type}")
 
     if len(timestamps) != len(closest_frames):
         raise FrameTimestampError(
@@ -744,8 +778,8 @@ def decode_video_frames_torchcodec(
         if log_loaded_timestamps:
             logger.info(f"Frame loaded at timestamp={pts:.4f}")
 
-    query_ts = torch.as_tensor(timestamps, dtype=torch.float32, device="cpu")
-    loaded_ts = torch.as_tensor(loaded_ts, dtype=torch.float32, device="cpu")
+    query_ts = torch.as_tensor(timestamps, dtype=torch.float64, device="cpu")
+    loaded_ts = torch.as_tensor(loaded_ts, dtype=torch.float64, device="cpu")
 
     # compute distances between each query timestamp and loaded timestamps
     dist = torch.cdist(query_ts[:, None], loaded_ts[:, None], p=1)
