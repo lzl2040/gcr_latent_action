@@ -1,3 +1,4 @@
+import json
 import math
 from types import SimpleNamespace
 
@@ -5,9 +6,14 @@ import pytest
 import torch
 
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
+from lerobot.common.policies.ace.configuration_robo_contrast import (
+    RoboContrastConfig,
+)
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.scripts.dps_train_contrast import (
     _compute_epoch_schedule,
     _data_read_batch_counts,
+    _save_checkpoint_config,
 )
 
 
@@ -83,3 +89,25 @@ def test_optimizer_factory_uses_computed_schedule_length() -> None:
     make_optimizer_and_scheduler(cfg, policy, num_training_steps=4_567)
 
     assert recorded["num_training_steps"] == 4_567
+
+
+def test_checkpoint_config_round_trips_robo_contrast_config(tmp_path) -> None:
+    config = RoboContrastConfig(
+        hidden_dim=768,
+        num_attention_heads=12,
+        num_physical_layers=9,
+    )
+
+    config_path = _save_checkpoint_config(config, tmp_path)
+
+    payload = json.loads(config_path.read_text())
+    assert config_path == tmp_path / "config.json"
+    assert payload["type"] == "robo_contrast"
+    assert payload["hidden_dim"] == 768
+    assert payload["num_physical_layers"] == 9
+
+    loaded = PreTrainedConfig.from_pretrained(tmp_path)
+    assert isinstance(loaded, RoboContrastConfig)
+    assert loaded.hidden_dim == config.hidden_dim
+    assert loaded.num_attention_heads == config.num_attention_heads
+    assert loaded.num_physical_layers == config.num_physical_layers

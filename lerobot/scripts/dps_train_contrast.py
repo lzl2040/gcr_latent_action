@@ -21,6 +21,7 @@ from typing import Any
 
 import deepspeed
 import torch
+from huggingface_hub.constants import CONFIG_NAME
 from termcolor import colored
 from torch import distributed as dist
 from torch.utils.data import DataLoader
@@ -45,6 +46,7 @@ from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.utils import format_big_number
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs import parser
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.train import TrainPipelineConfig
 
 # Images stay uint8 all the way to the GPU (4x less PCIe traffic than bf16) and are
@@ -63,6 +65,19 @@ class EpochSchedule:
     total_epochs: int
     source_equivalent_steps: int
     total_steps: int
+
+
+def _save_checkpoint_config(
+    policy_config: PreTrainedConfig,
+    checkpoint_root: str | Path,
+) -> Path:
+    checkpoint_root = Path(checkpoint_root)
+    checkpoint_root.mkdir(parents=True, exist_ok=True)
+    policy_config._save_pretrained(checkpoint_root)
+    config_path = checkpoint_root / CONFIG_NAME
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Policy config serialization did not create {config_path}.")
+    return config_path
 
 
 def _compute_epoch_schedule(
@@ -546,6 +561,9 @@ def train(cfg: TrainPipelineConfig):
             if cfg.save_checkpoint and (step % cfg.save_freq == 0 or is_last_batch):
                 logger.info(f"Checkpoint policy after step {step}")
                 os.makedirs(cfg.output_dir, exist_ok=True)
+                if rank == 0:
+                    config_path = _save_checkpoint_config(cfg.policy, cfg.output_dir)
+                    logger.info("Saved Stage 1 policy config to %s", config_path)
                 model_engine.save_checkpoint(
                     save_dir=cfg.output_dir,
                     client_state={
