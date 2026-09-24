@@ -25,8 +25,8 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     require_stage1_vision_transfer: bool = True
     require_stage1_text_transfer: bool = False
 
-    qwen3vl_dir: str = "/Data/lzl/huggingface/Qwen3-VL-4B-Instruct"
-    cosmos3_dir: str = "/Data/lzl/huggingface/Cosmos3-Edge"
+    qwen3vl_dir: str = "/mnt/wangxiaofa/pt_weights/Qwen3-VL-4B-Instruct"
+    cosmos3_dir: str = "/mnt/wangxiaofa/pt_weights/Cosmos3-Edge"
     # "full" means full tuning of Qwen's multimodal language transformer layers.
     # The visual backbone still uses LoRA, while token embeddings and the final language
     # norm remain frozen.

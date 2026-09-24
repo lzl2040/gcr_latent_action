@@ -35,6 +35,13 @@ def test_stage1_config_loader_accepts_saved_policy_config(tmp_path):
     assert loaded == expected
 
 
+def test_stage2_model_path_defaults_use_cluster_mount():
+    config = Qwen3VLMoTConfig()
+
+    assert config.qwen3vl_dir == "/mnt/wangxiaofa/pt_weights/Qwen3-VL-4B-Instruct"
+    assert config.cosmos3_dir == "/mnt/wangxiaofa/pt_weights/Cosmos3-Edge"
+
+
 def test_task_family_has_requested_directional_roles():
     assert TASK_SPECS["t2v"].video is ModalityRole.NOISY
     assert not TASK_SPECS["t2v"].understanding_image
