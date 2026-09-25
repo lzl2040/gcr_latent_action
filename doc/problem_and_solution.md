@@ -922,9 +922,73 @@ single long tail  = 27.01 s
 
 ---
 
-## 15. 当前仍未解决或尚未接入的事项
+## 15. TorchAO 与 bitsandbytes 的版本 API 必须同时锁定
 
-### 15.1 Stage 2 三视角
+### 15.1 PEFT 0.19 与 PyTorch 2.9.1 的 TorchAO 配套冲突
+
+集群中的 PEFT 0.19 要求 TorchAO 至少为 0.16，因此在 LoRA 初始化阶段报：
+
+```text
+Found an incompatible version of torchao. Found version 0.15.0
+```
+
+不能直接把 TorchAO 升到 0.16。TorchAO 发布 wheel 与 PyTorch minor 版本绑定：
+
+```text
+torchao 0.15 -> torch 2.9.1
+torchao 0.16 -> torch 2.10.0
+```
+
+在 `torch 2.9.1+cu130` 下安装 TorchAO 0.16 会跳过不兼容的 C++ extensions；即使 Python
+FP8 API 仍能导入，也不是这条训练路径验证过的完整组合。
+
+因此当前固定：
+
+```text
+peft>=0.18,<0.19
+torchao>=0.15,<0.16
+```
+
+PEFT 0.18.1 不会把普通 BF16 Linear 的 LoRA 注入错误地绑定到 TorchAO 0.16，同时保留当前
+Qwen3-VL 所需的 PEFT API。
+
+### 15.2 bitsandbytes 0.50 删除了两个 AdamW8bit 参数
+
+bitsandbytes 0.48 的 `AdamW8bit` 接受：
+
+```text
+percentile_clipping
+block_wise
+```
+
+0.50 已删除这两个构造参数，直接传入会报：
+
+```text
+AdamW8bit.__init__() got an unexpected keyword argument 'percentile_clipping'
+```
+
+optimizer builder 现在读取实际构造器签名：
+
+- 当前版本支持旧参数时正常传入；
+- 不支持且使用历史默认值 `100 / true` 时省略，保持新版 optimizer 的默认语义；
+- 不支持但用户要求非默认值时明确报错，避免静默丢失配置。
+
+launcher 还会在启动分布式进程前检查：
+
+```text
+torch>=2.9.1,<2.9.2
+peft>=0.18,<0.19
+torchao>=0.15,<0.16
+bitsandbytes>=0.48,<0.51
+```
+
+这样依赖错误只报一次，不会等到多个 rank 构造大模型后才失败。
+
+---
+
+## 16. 当前仍未解决或尚未接入的事项
+
+### 16.1 Stage 2 三视角
 
 OXE 数据已有 `primary / secondary / wrist` 三槽位，但 Stage 2 当前仍只使用 primary。
 后续接入时必须同时处理：
@@ -936,7 +1000,7 @@ OXE 数据已有 `primary / secondary / wrist` 三槽位，但 Stage 2 当前仍
 - view dropout；
 - 是否只生成 primary future。
 
-### 15.2 Embodiment action adapter
+### 16.2 Embodiment action adapter
 
 模型能够生成 normalized canonical 40D action，但 `select_action()` 尚未实现：
 
@@ -944,7 +1008,7 @@ OXE 数据已有 `primary / secondary / wrist` 三槽位，但 Stage 2 当前仍
 - inverse normalization；
 - controller 输出格式。
 
-### 15.3 Video sampler
+### 16.3 Video sampler
 
 目前只有 video flow training objective，没有完整的：
 
@@ -953,7 +1017,7 @@ OXE 数据已有 `primary / secondary / wrist` 三槽位，但 Stage 2 当前仍
 - VAE decode；
 - 视频保存与评估。
 
-### 15.4 8×H100 完整模型速度
+### 16.4 8×H100 完整模型速度
 
 当前有：
 

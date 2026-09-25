@@ -43,6 +43,59 @@ def test_8bit_adamw_build(config_cls, model_params):
     assert optimizer.args.optim_bits == 8
 
 
+def test_8bit_adamw_omits_removed_default_arguments(monkeypatch, model_params):
+    import bitsandbytes.optim
+
+    captured = {}
+
+    class ModernAdamW8bit:
+        def __init__(
+            self,
+            params,
+            lr,
+            betas,
+            eps,
+            weight_decay,
+            min_8bit_size,
+        ):
+            captured.update(
+                params=params,
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                weight_decay=weight_decay,
+                min_8bit_size=min_8bit_size,
+            )
+
+    monkeypatch.setattr(bitsandbytes.optim, "AdamW8bit", ModernAdamW8bit)
+
+    optimizer = AdamW8bitConfig().build(model_params)
+
+    assert isinstance(optimizer, ModernAdamW8bit)
+    assert captured["min_8bit_size"] == 4096
+
+
+def test_8bit_adamw_rejects_removed_nondefault_arguments(monkeypatch, model_params):
+    import bitsandbytes.optim
+
+    class ModernAdamW8bit:
+        def __init__(
+            self,
+            params,
+            lr,
+            betas,
+            eps,
+            weight_decay,
+            min_8bit_size,
+        ):
+            pass
+
+    monkeypatch.setattr(bitsandbytes.optim, "AdamW8bit", ModernAdamW8bit)
+
+    with pytest.raises(ValueError, match="does not support percentile_clipping=99"):
+        AdamW8bitConfig(percentile_clipping=99).build(model_params)
+
+
 def test_save_optimizer_state(optimizer, tmp_path):
     save_optimizer_state(optimizer, tmp_path)
     assert (tmp_path / OPTIMIZER_STATE).is_file()

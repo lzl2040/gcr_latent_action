@@ -22,6 +22,19 @@ train_qwen3vl_mot_local.sh
 conda activate lerobot_v2
 ```
 
+首次运行或基础镜像更新后，安装 Stage 2 已验证的 FP8/8-bit optimizer 版本：
+
+```bash
+python -m pip install --upgrade \
+  "peft>=0.18,<0.19" \
+  "torchao>=0.15,<0.16" \
+  "bitsandbytes>=0.48,<0.51"
+```
+
+该组合对应 `torch 2.9.1`；不要仅为满足新版 PEFT 而把 TorchAO 升到 0.16，因为其发布 wheel
+面向 PyTorch 2.10。`train_qwen3vl_mot_fsdp.sh` 会在启动 `torchrun` 前检查整套版本。
+`DRY_RUN=true` 只检查命令拼接，因此跳过依赖检查。
+
 不要把 `WANDB_API_KEY` 或其他凭据写入本文、launcher 或 AMLT YAML。集群运行时应通过
 任务系统 secret 或环境变量注入。
 

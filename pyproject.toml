@@ -82,21 +82,21 @@ contrast = [
     # interface, so keep the supported range explicit instead of silently random-loading.
     "transformers>=4.57.0,<5.0",
     # Frozen vision towers use parameter-efficient attention adapters for alignment.
-    "peft>=0.18.0",
+    "peft>=0.18.0,<0.19.0",
     # 训练脚本 dps_train_contrast.py 直接 import deepspeed，两个启动脚本也都走 deepspeed/ZeRO-2
     "deepspeed>=0.14.0",
     # Stage-two FSDP uses quantized AdamW optimizer states.
-    "bitsandbytes>=0.48.0",
-    # PyTorch 2.9-compatible FP8 Linear kernels for H100 stage-two training.
+    "bitsandbytes>=0.48.0,<0.51.0",
+    # TorchAO wheels are tied to PyTorch minor releases: 0.15 is built for PyTorch 2.9.1.
     "torchao>=0.15.0,<0.16.0",
     # tactile_backbone="ftp1" 时用它读 hpt_tokenizer/*.safetensors
     "safetensors>=0.4.0",
 ]
 pi0 = [
     "transformers>=4.57.0,<5.0",
-    "peft>=0.18.0",
+    "peft>=0.18.0,<0.19.0",
     "deepspeed>=0.14.0",
-    "bitsandbytes>=0.48.0",
+    "bitsandbytes>=0.48.0,<0.51.0",
     "torchao>=0.15.0,<0.16.0",
     "safetensors>=0.4.0",
 ]

@@ -73,6 +73,50 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 TORCHRUN_BIN="${TORCHRUN_BIN:-torchrun}"
+
+check_python_dependencies() {
+    "${PYTHON_BIN}" - <<'PY'
+from importlib.metadata import PackageNotFoundError, version
+
+from packaging.version import Version
+
+requirements = {
+    "torch": (Version("2.9.1"), Version("2.9.2")),
+    "peft": (Version("0.18.0"), Version("0.19.0")),
+    "torchao": (Version("0.15.0"), Version("0.16.0")),
+    "bitsandbytes": (Version("0.48.0"), Version("0.51.0")),
+}
+errors = []
+for package, (minimum, maximum) in requirements.items():
+    try:
+        installed = Version(version(package))
+    except PackageNotFoundError:
+        errors.append(f"{package} is not installed")
+        continue
+    if not minimum <= installed < maximum:
+        errors.append(
+            f"{package}=={installed} is unsupported; expected >={minimum},<{maximum}"
+        )
+
+if not errors:
+    try:
+        from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+    except Exception as exc:
+        errors.append(f"TorchAO FP8 API is unavailable: {exc}")
+
+if errors:
+    details = "\n  - ".join(errors)
+    raise SystemExit(
+        "Stage 2 dependency check failed:\n"
+        f"  - {details}\n"
+        "Install the supported stack with:\n"
+        "  python -m pip install --upgrade "
+        "'peft>=0.18,<0.19' 'torchao>=0.15,<0.16' "
+        "'bitsandbytes>=0.48,<0.51'"
+    )
+PY
+}
+
 NNODES="${NNODES:-1}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 NODE_RANK="${NODE_RANK:-0}"
@@ -96,6 +140,9 @@ require_positive_int "MASTER_PORT" "$MASTER_PORT"
 (( MASTER_PORT <= 65535 )) || die "MASTER_PORT=$MASTER_PORT is outside the valid port range"
 command -v "$TORCHRUN_BIN" >/dev/null 2>&1 \
     || die "torchrun executable was not found: $TORCHRUN_BIN"
+if [[ "$DRY_RUN" != "true" ]]; then
+    check_python_dependencies
+fi
 
 LATEST_CHECKPOINT_POINTER="${OUTPUT_DIR}/latest_checkpoint"
 RESUME_CHECKPOINT=""

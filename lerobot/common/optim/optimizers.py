@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import abc
+import inspect
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -97,6 +98,30 @@ class AdamW8bitConfig(OptimizerConfig):
             ) from exc
         kwargs = asdict(self)
         kwargs.pop("grad_clip_norm")
+        optional_defaults = {
+            "percentile_clipping": 100,
+            "block_wise": True,
+        }
+        try:
+            signature = inspect.signature(AdamW8bit)
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+            supported_parameters = signature.parameters
+        except (TypeError, ValueError):
+            accepts_kwargs = False
+            supported_parameters = {}
+        for name, default in optional_defaults.items():
+            value = kwargs[name]
+            if accepts_kwargs or name in supported_parameters:
+                continue
+            kwargs.pop(name)
+            if value != default:
+                raise ValueError(
+                    f"The installed bitsandbytes AdamW8bit does not support {name}={value!r}. "
+                    f"Only its historical default {default!r} can be preserved by omission."
+                )
         return AdamW8bit(params, **kwargs)
 
 
