@@ -77,10 +77,35 @@ def _load_stage1_config(config_source: Path) -> RoboContrastConfig:
     return _decode_stage1_config(json.loads(config_file.read_text(encoding="utf-8")))
 
 
+def _override_stage1_model_paths(
+    stage1_config: RoboContrastConfig,
+    runtime_config: Qwen3VLMoTConfig,
+) -> RoboContrastConfig:
+    for field_name in ("qwen3vl_dir", "cosmos3_dir"):
+        saved_path = getattr(stage1_config, field_name)
+        runtime_path = getattr(runtime_config, field_name)
+        if runtime_path and runtime_path != saved_path:
+            logger.info(
+                "Overriding Stage 1 %s from checkpoint path %s to runtime path %s",
+                field_name,
+                saved_path,
+                runtime_path,
+            )
+            setattr(stage1_config, field_name, runtime_path)
+    return stage1_config
+
+
 def _load_stage1_policy(
     checkpoint_path: Path,
     config_path: str,
+    runtime_config: Qwen3VLMoTConfig,
 ) -> tuple[RoboContrast, tuple[str, ...]]:
+    config_source = Path(config_path) if config_path else checkpoint_path
+    stage1_config = _override_stage1_model_paths(
+        _load_stage1_config(config_source),
+        runtime_config,
+    )
+
     exported_model = checkpoint_path / "model.safetensors" if checkpoint_path.is_dir() else None
     if exported_model is not None and exported_model.is_file():
         from safetensors import safe_open
@@ -89,13 +114,11 @@ def _load_stage1_policy(
             checkpoint_keys = tuple(checkpoint.keys())
         teacher = RoboContrast.from_pretrained(
             checkpoint_path,
+            config=stage1_config,
             map_location="cpu",
             strict=False,
         )
         return teacher, checkpoint_keys
-
-    config_source = Path(config_path) if config_path else checkpoint_path
-    stage1_config = _load_stage1_config(config_source)
 
     model_file = _resolve_deepspeed_model_file(checkpoint_path)
     payload = torch.load(model_file, map_location="cpu", weights_only=False)
@@ -143,7 +166,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                     "A stage-two restore requires the embedded `stage1_policy_config`; "
                     "this checkpoint predates self-contained stage-two restoration."
                 )
-            stage1_config = _decode_stage1_config(config.stage1_policy_config)
+            stage1_config = _override_stage1_model_paths(
+                _decode_stage1_config(config.stage1_policy_config),
+                config,
+            )
             # These modules are removed from the stage-two policy, so constructing them only
             # wastes memory and can unnecessarily load the stage-one VAE.
             stage1_config.num_predictor_layers = 0
@@ -169,6 +195,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             teacher, checkpoint_keys = _load_stage1_policy(
                 stage1_path,
                 config.stage1_config,
+                config,
             )
             required_prefixes = (
                 "perception_encoder.vision_backbone.",

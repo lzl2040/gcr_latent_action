@@ -129,6 +129,8 @@ def test_stage2_resume_uses_saved_embedded_stage1_config(tmp_path) -> None:
         stage1_checkpoint="/path/that/no/longer/exists",
         stage1_policy_config={"vision_backbone": "qwen3vl"},
         initialize_from_stage1=False,
+        qwen3vl_dir="/Data/saved-qwen",
+        cosmos3_dir="/Data/saved-cosmos",
         generation_depth=3,
         optimizer_lr=3e-5,
         scheduler_decay_steps=77_000,
@@ -138,7 +140,11 @@ def test_stage2_resume_uses_saved_embedded_stage1_config(tmp_path) -> None:
         weight_resume=True,
         output_dir=checkpoint_root,
         job_name="run",
-        policy=Qwen3VLMoTConfig(stage1_checkpoint=""),
+        policy=Qwen3VLMoTConfig(
+            stage1_checkpoint="",
+            qwen3vl_dir="/mnt/runtime-qwen",
+            cosmos3_dir="/mnt/runtime-cosmos",
+        ),
         use_policy_training_preset=True,
         optimizer=None,
         scheduler=None,
@@ -149,5 +155,7 @@ def test_stage2_resume_uses_saved_embedded_stage1_config(tmp_path) -> None:
     assert cfg.policy.generation_depth == 3
     assert cfg.policy.initialize_from_stage1 is False
     assert cfg.policy.stage1_checkpoint == "/path/that/no/longer/exists"
+    assert cfg.policy.qwen3vl_dir == "/mnt/runtime-qwen"
+    assert cfg.policy.cosmos3_dir == "/mnt/runtime-cosmos"
     assert cfg.optimizer.lr == 3e-5
     assert cfg.scheduler.num_decay_steps == 77_000

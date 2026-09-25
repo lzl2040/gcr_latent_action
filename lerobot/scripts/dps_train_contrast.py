@@ -194,6 +194,7 @@ def update_policy(model_engine, batch: Any, task_type: str, step: int):
 def _load_stage2_resume_policy_config(cfg: TrainPipelineConfig) -> None:
     if not cfg.weight_resume or cfg.policy.type != "qwen3vl_mot":
         return
+    runtime_policy = cfg.policy
     checkpoint_root = Path(cfg.output_dir)
     config_path = checkpoint_root / "config.json"
     if not config_path.is_file():
@@ -211,6 +212,10 @@ def _load_stage2_resume_policy_config(cfg: TrainPipelineConfig) -> None:
             "The saved stage-two config does not embed its stage-one architecture. Resume "
             "this older checkpoint with the original stage-one checkpoint available."
         )
+    for field_name in ("qwen3vl_dir", "cosmos3_dir"):
+        runtime_path = getattr(runtime_policy, field_name)
+        if runtime_path:
+            setattr(saved_policy, field_name, runtime_path)
     saved_policy.initialize_from_stage1 = False
     cfg.policy = saved_policy
     if cfg.use_policy_training_preset:

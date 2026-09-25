@@ -625,6 +625,8 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
     )
     stage1_config = RoboContrastConfig(
         vision_backbone="qwen3vl",
+        qwen3vl_dir="/Data/old-qwen",
+        cosmos3_dir="/Data/old-cosmos",
         chunk_size=4,
         group_size=2,
         n_action_steps=2,
@@ -640,12 +642,18 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
         tactile_img_size=8,
         num_change_queries=2,
     )
+    stage1_config._save_pretrained(stage1_dir)
     teacher = SimpleNamespace(
         config=stage1_config,
         perception_encoder=_FakePerception(queries=2, width=8),
         physical_encoder=_FakePhysical(groups=2, hidden=8, tactile_tokens=4),
     )
-    monkeypatch.setattr(stage2.RoboContrast, "from_pretrained", lambda *args, **kwargs: teacher)
+
+    def load_fake_teacher(*args, **kwargs):
+        teacher.config = kwargs["config"]
+        return teacher
+
+    monkeypatch.setattr(stage2.RoboContrast, "from_pretrained", load_fake_teacher)
     monkeypatch.setattr(stage2, "Qwen3VLUnderstandingExpert", _FakeUnderstanding)
     monkeypatch.setattr(
         stage2,
@@ -668,6 +676,8 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
     )
     config = Qwen3VLMoTConfig(
         stage1_checkpoint=str(stage1_dir),
+        qwen3vl_dir="/mnt/runtime-qwen",
+        cosmos3_dir="/mnt/runtime-cosmos",
         understanding_tuning_mode="frozen",
         num_latent_queries=2,
         latent_action_dim=8,
@@ -695,6 +705,8 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
         generation_gradient_checkpointing=False,
     )
     policy = stage2.Qwen3VLMoTPolicy(config)
+    assert teacher.config.qwen3vl_dir == config.qwen3vl_dir
+    assert teacher.config.cosmos3_dir == config.cosmos3_dir
     batch = {
         "image_t0": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
         "image_t1": torch.ones(2, 3, 8, 8, dtype=torch.uint8),
@@ -742,12 +754,18 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
 
     stage2_dir = tmp_path / "stage2"
     stage2_dir.mkdir()
+    policy.config.stage1_policy_config["qwen3vl_dir"] = "/Data/embedded-old-qwen"
+    policy.config.stage1_policy_config["cosmos3_dir"] = "/Data/embedded-old-cosmos"
     policy._save_pretrained(stage2_dir)
     (stage1_dir / "model.safetensors").unlink()
+    (stage1_dir / "config.json").unlink()
     stage1_dir.rmdir()
+
+    restored_stage1_configs = []
 
     class _FakeRestoredStage1:
         def __init__(self, restored_config):
+            restored_stage1_configs.append(restored_config)
             self.config = restored_config
             self.perception_encoder = _FakePerception(queries=2, width=8)
             self.physical_encoder = _FakePhysical(groups=2, hidden=8, tactile_tokens=4)
@@ -756,3 +774,5 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
     restored = stage2.Qwen3VLMoTPolicy.from_pretrained(stage2_dir)
     assert restored.config.stage1_policy_config is not None
     assert restored.config.stage1_checkpoint == str(stage1_dir)
+    assert restored_stage1_configs[0].qwen3vl_dir == config.qwen3vl_dir
+    assert restored_stage1_configs[0].cosmos3_dir == config.cosmos3_dir

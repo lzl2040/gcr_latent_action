@@ -351,6 +351,28 @@ unexpected = 0
 
 这比 `strict=False` 后没有异常更强：它证明实际恢复出的配置与 checkpoint 完全一致。
 
+### 2.5 `config.json` 中的模型目录不能覆盖当前运行环境
+
+Stage 1 的 `config.json` 会完整保存训练时使用的资源路径，例如：
+
+```text
+qwen3vl_dir = /Data/lzl/huggingface/Qwen3-VL-4B-Instruct
+cosmos3_dir = /Data/lzl/huggingface/Cosmos3-Edge
+```
+
+这些路径描述训练机器，不属于 checkpoint 的结构。若 Stage 2 在集群直接采用它们，即使
+launcher 已传入 `/mnt/wangxiaofa/pt_weights/...`，构造 Stage 1 teacher 时仍会先访问旧的
+`/Data` 路径。
+
+Stage 2 现在只从 Stage 1 config 保留结构参数，并用当前 `Qwen3VLMoTConfig` 的
+`qwen3vl_dir`、`cosmos3_dir` 覆盖资源路径。该规则同时用于：
+
+- 首次从 Stage 1 DeepSpeed 或 safetensors checkpoint 初始化；
+- 从已嵌入 `stage1_policy_config` 的 Stage 2 checkpoint 恢复；
+- FSDP resume 读取已保存的 Stage 2 架构时，保留本次 launcher 传入的模型目录。
+
+因此 checkpoint 可以在本地与集群之间移动，而不需要手工修改其中的 JSON。
+
 ---
 
 ## 3. Stage 1 vision 能迁移，但 text 不能假装迁移成功
