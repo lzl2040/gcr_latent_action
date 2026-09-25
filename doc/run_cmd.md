@@ -31,8 +31,20 @@ python -m pip install --upgrade \
   "bitsandbytes>=0.48,<0.51"
 ```
 
-该组合对应 `torch 2.9.1`；不要仅为满足新版 PEFT 而把 TorchAO 升到 0.16，因为其发布 wheel
-面向 PyTorch 2.10。`train_qwen3vl_mot_fsdp.sh` 会在启动 `torchrun` 前检查整套版本。
+该命令**不会替换基础镜像中的 PyTorch/CUDA wheel**。launcher 当前支持两条明确路径：
+
+| PyTorch | TorchAO | TorchAO 扩展模式 |
+|---|---|---|
+| `2.7.x` | `0.15.x` | 只使用 Python FP8 wrapper，自动跳过为 2.9.1 编译的 C++ extensions |
+| `2.9.1` | `0.15.x` | 使用与 wheel 匹配的扩展 |
+
+集群原有的 `torch 2.7.0 + torchao 0.16.0` 不属于支持组合；只需用上面的命令把
+PEFT/TorchAO/bitsandbytes 调整到约束范围，不需要升级 PyTorch。不要仅为满足 PEFT 0.19
+而保留 TorchAO 0.16；这会重新引入版本冲突。
+
+`train_qwen3vl_mot_fsdp.sh` 在启动 `torchrun` 前会检查版本，并实际执行一次 CPU emulated FP8
+前后向；检测到 H100/B200 时还会执行一次 native CUDA FP8 前后向。同时检查 `_scaled_mm`
+schema、classic FSDP 和 distributed checkpoint API。
 `DRY_RUN=true` 只检查命令拼接，因此跳过依赖检查。
 
 不要把 `WANDB_API_KEY` 或其他凭据写入本文、launcher 或 AMLT YAML。集群运行时应通过

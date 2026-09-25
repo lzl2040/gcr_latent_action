@@ -924,7 +924,7 @@ single long tail  = 27.01 s
 
 ## 15. TorchAO 与 bitsandbytes 的版本 API 必须同时锁定
 
-### 15.1 PEFT 0.19 与 PyTorch 2.9.1 的 TorchAO 配套冲突
+### 15.1 PEFT 0.19、TorchAO 0.16 与现有 PyTorch 的配套冲突
 
 集群中的 PEFT 0.19 要求 TorchAO 至少为 0.16，因此在 LoRA 初始化阶段报：
 
@@ -932,25 +932,48 @@ single long tail  = 27.01 s
 Found an incompatible version of torchao. Found version 0.15.0
 ```
 
-不能直接把 TorchAO 升到 0.16。TorchAO 发布 wheel 与 PyTorch minor 版本绑定：
+不能直接把 TorchAO 升到 0.16。TorchAO 发布 wheel 与 PyTorch minor 版本绑定；本地和集群
+又不是同一个 PyTorch：
 
 ```text
-torchao 0.15 -> torch 2.9.1
-torchao 0.16 -> torch 2.10.0
+本地：torch 2.9.1 + torchao 0.15
+集群：torch 2.7.0 + torchao 0.16（原环境，不兼容）
 ```
 
-在 `torch 2.9.1+cu130` 下安装 TorchAO 0.16 会跳过不兼容的 C++ extensions；即使 Python
-FP8 API 仍能导入，也不是这条训练路径验证过的完整组合。
+TorchAO 0.15 的 C++ wheel 是为 PyTorch 2.9.1 编译的，但 Stage 2 的 FP8 路径不依赖这些
+TorchAO C++ extensions：它使用 Python wrapper，最终调用 PyTorch 自带的
+`aten::_scaled_mm`。因此集群 `torch 2.7.x` 路径会自动设置：
 
-因此当前固定：
+```text
+TORCHAO_FORCE_SKIP_LOADING_SO_FILES=1
+```
+
+并在创建大模型前验证：
+
+- `rowwise_with_gw_hp` 配置能构造；
+- CPU emulated FP8 前后向能得到有限梯度；
+- H100/B200 上 native CUDA FP8 前后向能得到有限梯度；
+- `aten::_scaled_mm` 仍包含 `scale_a / scale_b / out_dtype / use_fast_accum`；
+- classic FSDP 仍支持 `ignored_states / use_orig_params`；
+- distributed checkpoint 的 `StateDictOptions`、get/set API 存在。
+
+这使同一个 TorchAO 0.15 依赖能覆盖两条经过显式探测的运行环境：
+
+```text
+torch >=2.7,<2.8     + torchao >=0.15,<0.16  （Python-only TorchAO）
+torch >=2.9.1,<2.9.2 + torchao >=0.15,<0.16
+```
+
+PEFT 和其余依赖固定为：
 
 ```text
 peft>=0.18,<0.19
 torchao>=0.15,<0.16
+bitsandbytes>=0.48,<0.51
 ```
 
 PEFT 0.18.1 不会把普通 BF16 Linear 的 LoRA 注入错误地绑定到 TorchAO 0.16，同时保留当前
-Qwen3-VL 所需的 PEFT API。
+Qwen3-VL 所需的 PEFT API。安装命令故意不包含 `torch`，避免 pip 替换基础镜像的 CUDA build。
 
 ### 15.2 bitsandbytes 0.50 删除了两个 AdamW8bit 参数
 
@@ -976,13 +999,14 @@ optimizer builder 现在读取实际构造器签名：
 launcher 还会在启动分布式进程前检查：
 
 ```text
-torch>=2.9.1,<2.9.2
+torch>=2.7,<2.8 或 torch>=2.9.1,<2.9.2
 peft>=0.18,<0.19
 torchao>=0.15,<0.16
 bitsandbytes>=0.48,<0.51
 ```
 
-这样依赖错误只报一次，不会等到多个 rank 构造大模型后才失败。
+除了版本，它还执行 FP8/FSDP 特性探测。这样依赖错误只报一次，不会等到多个 rank 构造大模型
+后才失败，也不会把“版本号看起来接近”误当作实际 API 可用。
 
 ### 15.3 AMLT rerun 默认继续使用旧代码快照
 

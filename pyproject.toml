@@ -87,7 +87,8 @@ contrast = [
     "deepspeed>=0.14.0",
     # Stage-two FSDP uses quantized AdamW optimizer states.
     "bitsandbytes>=0.48.0,<0.51.0",
-    # TorchAO wheels are tied to PyTorch minor releases: 0.15 is built for PyTorch 2.9.1.
+    # 0.15 is exact for torch 2.9.1. The torch 2.7 cluster path skips its C++ extensions
+    # and feature-probes the Python FP8 wrappers against torch's native _scaled_mm.
     "torchao>=0.15.0,<0.16.0",
     # tactile_backbone="ftp1" 时用它读 hpt_tokenizer/*.safetensors
     "safetensors>=0.4.0",

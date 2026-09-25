@@ -132,7 +132,8 @@ def convert_policy_to_fp8(
         from torchao.float8 import Float8LinearConfig, convert_to_float8_training
     except ImportError as exc:
         raise ImportError(
-            "FP8 training requires torchao>=0.15,<0.16 for the supported PyTorch 2.9.1 stack."
+            "FP8 training requires torchao>=0.15,<0.16; run the Stage 2 launcher "
+            "dependency probe for the active PyTorch stack."
         ) from exc
 
     converted_names = tuple(

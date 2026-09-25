@@ -74,70 +74,28 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 TORCHRUN_BIN="${TORCHRUN_BIN:-torchrun}"
 
-check_python_dependencies() {
-    "${PYTHON_BIN}" - <<'PY'
+prepare_torchao_environment() {
+    local torch_series
+    torch_series="$("${PYTHON_BIN}" - <<'PY'
 from importlib.metadata import PackageNotFoundError, version
 
-from packaging.version import Version
-
-requirements = {
-    "torch": (Version("2.9.1"), Version("2.9.2")),
-    "peft": (Version("0.18.0"), Version("0.19.0")),
-    "torchao": (Version("0.15.0"), Version("0.16.0")),
-    "bitsandbytes": (Version("0.48.0"), Version("0.51.0")),
-}
-errors = []
-for package, (minimum, maximum) in requirements.items():
-    try:
-        installed = Version(version(package))
-    except PackageNotFoundError:
-        errors.append(f"{package} is not installed")
-        continue
-    if not minimum <= installed < maximum:
-        errors.append(
-            f"{package}=={installed} is unsupported; expected >={minimum},<{maximum}"
-        )
-
-if not errors:
-    try:
-        from torchao.float8 import Float8LinearConfig, convert_to_float8_training
-    except Exception as exc:
-        errors.append(f"TorchAO FP8 API is unavailable: {exc}")
-
-if not errors:
-    try:
-        import lerobot.common.optim.optimizers as optimizer_module
-    except Exception as exc:
-        errors.append(f"repository optimizer module cannot be imported: {exc}")
-    else:
-        compat_version = getattr(
-            optimizer_module,
-            "ADAMW8BIT_SIGNATURE_COMPAT_VERSION",
-            None,
-        )
-        if compat_version != 1:
-            errors.append(
-                "the uploaded source predates AdamW8bit signature compatibility "
-                f"(marker={compat_version!r}, expected=1)"
-            )
-
-if errors:
-    details = "\n  - ".join(errors)
-    raise SystemExit(
-        "Stage 2 dependency check failed:\n"
-        f"  - {details}\n"
-        "Install the supported stack with:\n"
-        "  python -m pip install --upgrade "
-        "'peft>=0.18,<0.19' 'torchao>=0.15,<0.16' "
-        "'bitsandbytes>=0.48,<0.51'"
-    )
-
-print(
-    "Stage 2 source check: "
-    f"optimizer={optimizer_module.__file__} "
-    f"adamw8bit_compat={compat_version}"
-)
+try:
+    release = version("torch").split("+", 1)[0].split(".")
+except PackageNotFoundError:
+    print("")
+else:
+    print(".".join(release[:2]))
 PY
+)"
+    if [[ "$torch_series" == "2.7" ]]; then
+        # torchao 0.15's C++ wheel targets torch 2.9.1. Stage 2 only needs its
+        # Python FP8 wrappers, which dispatch to torch 2.7's native _scaled_mm.
+        export TORCHAO_FORCE_SKIP_LOADING_SO_FILES=1
+    fi
+}
+
+check_python_dependencies() {
+    "${PYTHON_BIN}" -m lerobot.common.utils.stage2_dependencies
 }
 
 NNODES="${NNODES:-1}"
@@ -164,6 +122,7 @@ require_positive_int "MASTER_PORT" "$MASTER_PORT"
 command -v "$TORCHRUN_BIN" >/dev/null 2>&1 \
     || die "torchrun executable was not found: $TORCHRUN_BIN"
 if [[ "$DRY_RUN" != "true" ]]; then
+    prepare_torchao_environment
     check_python_dependencies
 fi
 
