@@ -104,6 +104,23 @@ if not errors:
     except Exception as exc:
         errors.append(f"TorchAO FP8 API is unavailable: {exc}")
 
+if not errors:
+    try:
+        import lerobot.common.optim.optimizers as optimizer_module
+    except Exception as exc:
+        errors.append(f"repository optimizer module cannot be imported: {exc}")
+    else:
+        compat_version = getattr(
+            optimizer_module,
+            "ADAMW8BIT_SIGNATURE_COMPAT_VERSION",
+            None,
+        )
+        if compat_version != 1:
+            errors.append(
+                "the uploaded source predates AdamW8bit signature compatibility "
+                f"(marker={compat_version!r}, expected=1)"
+            )
+
 if errors:
     details = "\n  - ".join(errors)
     raise SystemExit(
@@ -114,6 +131,12 @@ if errors:
         "'peft>=0.18,<0.19' 'torchao>=0.15,<0.16' "
         "'bitsandbytes>=0.48,<0.51'"
     )
+
+print(
+    "Stage 2 source check: "
+    f"optimizer={optimizer_module.__file__} "
+    f"adamw8bit_compat={compat_version}"
+)
 PY
 }
 

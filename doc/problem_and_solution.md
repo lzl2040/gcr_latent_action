@@ -984,6 +984,28 @@ bitsandbytes>=0.48,<0.51
 
 这样依赖错误只报一次，不会等到多个 rank 构造大模型后才失败。
 
+### 15.3 AMLT rerun 默认继续使用旧代码快照
+
+兼容修复后仍出现：
+
+```text
+optimizers.py line 100
+return AdamW8bit(params, **kwargs)
+```
+
+而修复后的第 100 行是 `kwargs.pop("grad_clip_norm")`，真正构造 optimizer 已移动到第 125 行。
+这说明集群执行的是修复前的 `/scratch/amlt_code`，不是新代码。
+
+`amlt rerun` 默认不重新上传任何内容。代码变化后必须通过 `amlt run` 提交新 job；必要时加
+`--no-md5` 强制覆盖缓存。launcher 现在还会导入本次上传的 optimizer 模块并检查：
+
+```text
+ADAMW8BIT_SIGNATURE_COMPAT_VERSION = 1
+```
+
+通过后打印实际文件路径；缺少标记则在 `torchrun` 前直接报“uploaded source predates
+AdamW8bit signature compatibility”。
+
 ---
 
 ## 16. 当前仍未解决或尚未接入的事项

@@ -29,6 +29,8 @@ from lerobot.common.constants import (
 from lerobot.common.datasets.utils import flatten_dict, unflatten_dict, write_json
 from lerobot.common.utils.io_utils import deserialize_json_into_object
 
+ADAMW8BIT_SIGNATURE_COMPAT_VERSION = 1
+
 
 @dataclass
 class OptimizerConfig(draccus.ChoiceRegistry, abc.ABC):

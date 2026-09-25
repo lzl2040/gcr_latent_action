@@ -344,6 +344,23 @@ amlt run <config.yaml> :<job-name> <experiment-name> \
   --description "**Qwen3-VL MoT Stage 2**: 8xH100 FSDP + FP8 + AdamW8bit"
 ```
 
+修改代码后不要直接使用 `amlt rerun`：它默认不重新上传代码，会继续执行旧的
+`/scratch/amlt_code/...` 快照。应使用新的 job 名重新 `amlt run`；若要强制覆盖代码缓存：
+
+```bash
+amlt run <config.yaml> :<job-name>=<new-job-name> <experiment-name> \
+  --no-md5 \
+  --description "**Qwen3-VL MoT Stage 2**: upload latest dependency compatibility fix"
+```
+
+新快照启动时日志必须包含：
+
+```text
+Stage 2 source check: optimizer=.../lerobot/common/optim/optimizers.py adamw8bit_compat=1
+```
+
+没有这行就不是包含 AdamW8bit 兼容修复的 launcher。
+
 提交后等待后端接收，再检查状态：
 
 ```bash
