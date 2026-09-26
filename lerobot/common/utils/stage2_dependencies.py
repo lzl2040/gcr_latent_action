@@ -237,6 +237,24 @@ def probe_stage2_runtime(
                 "the uploaded source predates AdamW8bit signature compatibility "
                 f"(marker={compat_version!r}, expected=1)"
             )
+
+    try:
+        import lerobot.common.utils.fsdp_training as fsdp_training_module
+    except Exception as exc:
+        errors.append(f"repository FSDP checkpoint module cannot be imported: {exc}")
+    else:
+        checkpoint_compat_version = getattr(
+            fsdp_training_module,
+            "FSDP_CHECKPOINT_IO_COMPAT_VERSION",
+            None,
+        )
+        details["fsdp_training_path"] = fsdp_training_module.__file__
+        details["checkpoint_io_compat_version"] = checkpoint_compat_version
+        if checkpoint_compat_version != 1:
+            errors.append(
+                "the uploaded source predates mounted-storage checkpoint "
+                f"compatibility (marker={checkpoint_compat_version!r}, expected=1)"
+            )
     return tuple(errors), details
 
 
@@ -267,7 +285,9 @@ def run_stage2_dependency_check() -> None:
     print(
         "Stage 2 source check: "
         f"optimizer={details['optimizer_path']} "
-        f"adamw8bit_compat={details['optimizer_compat_version']}"
+        f"adamw8bit_compat={details['optimizer_compat_version']} "
+        f"fsdp_training={details['fsdp_training_path']} "
+        f"checkpoint_io_compat={details['checkpoint_io_compat_version']}"
     )
 
 

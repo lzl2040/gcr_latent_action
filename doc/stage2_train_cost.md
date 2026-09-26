@@ -52,6 +52,10 @@ checkpoint 使用组合格式：
 - 模型权重由 Distributed Checkpoint 保存，可做模型分片重组；
 - bitsandbytes optimizer state 按 rank 保存，因为标准 FSDP optimizer state
   转换不支持同一 state key 同时包含 uint8 大张量和 FP32 小张量；
+- 训练 collective 使用 NCCL，DCP planning/metadata 和 checkpoint phase 状态汇总使用独立
+  Gloo group；
+- 集群 BlobFuse 输出默认关闭 DCP 的逐文件 `fsync`，但写完后会按 `.metadata` 检查所有
+  shard 的可见性和完整长度，再原子发布 checkpoint；
 - resume 必须保持相同 world size、FSDP/FP8 wrap、per-rank batch、gradient
   accumulation 和 sampler geometry，避免 8-bit moment 绑定到不同参数分片或
   数据游标静默错位。

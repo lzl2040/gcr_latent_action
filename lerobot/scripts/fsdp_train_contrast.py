@@ -23,8 +23,10 @@ from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.optim.optimizers import AdamW8bitConfig
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.utils.fsdp_training import (
+    FSDPCheckpointIOConfig,
     FSDPTrainingConfig,
     convert_policy_to_fp8,
+    create_checkpoint_process_group,
     load_fsdp_checkpoint,
     make_distributed_timeout,
     save_fsdp_checkpoint,
@@ -51,7 +53,13 @@ class FSDPTrainPipelineConfig(TrainPipelineConfig):
     fsdp: FSDPTrainingConfig = field(default_factory=FSDPTrainingConfig)
 
 
-def _initialize_distributed() -> tuple[int, int, int, torch.device]:
+def _initialize_distributed() -> tuple[
+    int,
+    int,
+    int,
+    torch.device,
+    dist.ProcessGroup,
+]:
     if not torch.cuda.is_available():
         raise RuntimeError("Stage-two FSDP training requires CUDA.")
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -60,9 +68,16 @@ def _initialize_distributed() -> tuple[int, int, int, torch.device]:
         os.environ.get("DISTRIBUTED_TIMEOUT_MINUTES", "60")
     )
     dist.init_process_group("nccl", timeout=timeout)
+    checkpoint_process_group = create_checkpoint_process_group(timeout)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    return rank, local_rank, world_size, torch.device("cuda", local_rank)
+    return (
+        rank,
+        local_rank,
+        world_size,
+        torch.device("cuda", local_rank),
+        checkpoint_process_group,
+    )
 
 
 def _stage2_metrics(cfg) -> dict[str, AverageMeter]:
@@ -144,12 +159,27 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         raise ValueError("save_freq must be positive when checkpoint saving is enabled.")
 
     os.environ.setdefault("DECORD_LOG_LEVEL", "error")
-    rank, local_rank, world_size, device = _initialize_distributed()
+    checkpoint_io = FSDPCheckpointIOConfig.from_environment()
+    rank, local_rank, world_size, device, checkpoint_process_group = (
+        _initialize_distributed()
+    )
     logger = init_logger(cfg, subdir="qwen3vl_mot_fsdp")
     logger.info(
         "Distributed collective timeout: %s minutes",
         os.environ.get("DISTRIBUTED_TIMEOUT_MINUTES", "60"),
     )
+    logger.info(
+        "Checkpoint I/O: control_backend=%s sync_files=%s threads=%d heartbeat=%ds",
+        dist.get_backend(checkpoint_process_group),
+        checkpoint_io.sync_files,
+        checkpoint_io.thread_count,
+        checkpoint_io.heartbeat_seconds,
+    )
+    if rank == 0 and not checkpoint_io.sync_files:
+        logger.warning(
+            "DCP file fsync is disabled for mounted-storage throughput; checkpoints "
+            "are published only after all closed shard files pass visibility checks."
+        )
 
     if rank == 0:
         logger.info(pformat(cfg.to_dict()))
@@ -314,6 +344,8 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
             fsdp_config=cfg.fsdp,
             training_geometry=training_geometry,
             device=device,
+            checkpoint_process_group=checkpoint_process_group,
+            checkpoint_io=checkpoint_io,
         )
         micro_step = resume.micro_step
         update_step = resume.update_step
@@ -466,6 +498,8 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
                     epoch=epoch,
                     batch_in_epoch=batch_idx + 1,
                     device=device,
+                    checkpoint_process_group=checkpoint_process_group,
+                    checkpoint_io=checkpoint_io,
                 )
 
             should_log = (

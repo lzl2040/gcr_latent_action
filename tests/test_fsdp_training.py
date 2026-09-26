@@ -4,13 +4,20 @@ import logging
 
 import pytest
 import torch
+import torch.distributed.checkpoint as dcp
 from torch import nn
 
 from lerobot.common.utils.fsdp_training import (
+    FSDP_CHECKPOINT_IO_COMPAT_VERSION,
+    FSDPCheckpointIOConfig,
     FSDPTrainingConfig,
+    _local_model_state_statistics,
+    _make_checkpoint_writer,
     _restore_replicated_frozen_parameters,
     _run_checkpoint_phase,
+    _verify_model_checkpoint,
     convert_policy_to_fp8,
+    create_checkpoint_process_group,
     find_fsdp_wrap_modules,
     make_distributed_timeout,
     resolve_latest_fsdp_checkpoint,
@@ -48,6 +55,23 @@ class _Policy(nn.Module):
         super().__init__()
         self.generation = _Generation()
         self.understanding = _Understanding()
+
+
+class _LocalShard:
+    def __init__(self, tensor: torch.Tensor) -> None:
+        self.tensor = tensor
+
+
+class _ShardedTensorLike(torch.Tensor):
+    def __new__(cls):
+        return torch.Tensor._make_subclass(
+            cls,
+            torch.empty(0),
+            False,
+        )
+
+    def local_shards(self):
+        return [_LocalShard(torch.ones(2, 3))]
 
 
 def test_fp8_conversion_respects_scope_alignment_and_lora_exclusion() -> None:
@@ -145,11 +169,15 @@ def test_restore_replicated_frozen_parameters_uses_canonical_fsdp_names() -> Non
 def test_checkpoint_phase_reports_rank_local_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(torch.distributed, "all_reduce", lambda tensor, op: None)
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_reduce",
+        lambda tensor, op, group=None: None,
+    )
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 3)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: 1)
 
-    def gather_error(output, error) -> None:
+    def gather_error(output, error, group=None) -> None:
         output[0] = error
 
     monkeypatch.setattr(torch.distributed, "all_gather_object", gather_error)
@@ -171,8 +199,12 @@ def test_checkpoint_phase_logs_start_and_completion(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr(torch.distributed, "all_reduce", lambda tensor, op: None)
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_reduce",
+        lambda tensor, op, group=None: None,
+    )
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
     caplog.set_level(
         logging.INFO,
         logger="lerobot.common.utils.fsdp_training",
@@ -189,7 +221,122 @@ def test_checkpoint_phase_logs_start_and_completion(
     assert "Distributed checkpoint phase completed: save model shards" in caplog.text
 
 
+def test_checkpoint_phase_uses_cpu_for_gloo_control_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint_group = object()
+    observed = {}
+
+    def all_reduce(tensor, op, group=None) -> None:
+        observed["device"] = tensor.device.type
+        observed["group"] = group
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda group=None: "gloo")
+
+    result = _run_checkpoint_phase(
+        "save model shards",
+        lambda: "saved",
+        torch.device("cuda", 0),
+        checkpoint_group,
+    )
+
+    assert result == "saved"
+    assert observed == {"device": "cpu", "group": checkpoint_group}
+
+
+def test_checkpoint_process_group_uses_gloo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint_group = object()
+    observed = {}
+
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda group=None: "nccl")
+
+    def new_group(*, backend, timeout):
+        observed["backend"] = backend
+        observed["timeout"] = timeout
+        return checkpoint_group
+
+    monkeypatch.setattr(torch.distributed, "new_group", new_group)
+    timeout = make_distributed_timeout("90")
+
+    assert create_checkpoint_process_group(timeout) is checkpoint_group
+    assert observed == {"backend": "gloo", "timeout": timeout}
+
+
+def test_checkpoint_io_defaults_disable_fsync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.delenv("FSDP_CHECKPOINT_SYNC_FILES", raising=False)
+    monkeypatch.delenv("FSDP_CHECKPOINT_THREADS", raising=False)
+    monkeypatch.delenv("FSDP_CHECKPOINT_HEARTBEAT_SECONDS", raising=False)
+
+    config = FSDPCheckpointIOConfig.from_environment()
+    writer = _make_checkpoint_writer(tmp_path / "model", config)
+
+    assert config == FSDPCheckpointIOConfig(
+        sync_files=False,
+        thread_count=1,
+        heartbeat_seconds=60,
+    )
+    assert writer.sync_files is False
+    assert writer.thread_count == 1
+    assert writer.overwrite is False
+
+
+def test_model_state_statistics_use_local_shards_before_tensor_dispatch() -> None:
+    tensor_count, total_bytes = _local_model_state_statistics(
+        {"weight": _ShardedTensorLike()}
+    )
+
+    assert tensor_count == 1
+    assert total_bytes == 2 * 3 * torch.ones(1).element_size()
+
+
+def test_checkpoint_writer_round_trip_is_visible(tmp_path) -> None:
+    checkpoint_dir = tmp_path / "model"
+    writer = _make_checkpoint_writer(
+        checkpoint_dir,
+        FSDPCheckpointIOConfig(sync_files=False),
+    )
+    dcp.save(
+        {"model": {"weight": torch.arange(8)}},
+        storage_writer=writer,
+        no_dist=True,
+    )
+
+    file_count, total_bytes = _verify_model_checkpoint(checkpoint_dir)
+
+    assert file_count == 1
+    assert total_bytes > 0
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("FSDP_CHECKPOINT_SYNC_FILES", "yes"),
+        ("FSDP_CHECKPOINT_THREADS", "0"),
+        ("FSDP_CHECKPOINT_THREADS", "1.5"),
+        ("FSDP_CHECKPOINT_HEARTBEAT_SECONDS", "-1"),
+    ],
+)
+def test_checkpoint_io_rejects_invalid_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=name):
+        FSDPCheckpointIOConfig.from_environment()
+
+
 def test_distributed_timeout_defaults_to_one_hour() -> None:
+    assert FSDP_CHECKPOINT_IO_COMPAT_VERSION == 1
     assert make_distributed_timeout().total_seconds() == 3_600
     assert make_distributed_timeout("90").total_seconds() == 5_400
 

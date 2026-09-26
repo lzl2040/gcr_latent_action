@@ -13,8 +13,10 @@ from bitsandbytes.optim import AdamW8bit
 from torch import nn
 
 from lerobot.common.utils.fsdp_training import (
+    FSDPCheckpointIOConfig,
     FSDPTrainingConfig,
     convert_policy_to_fp8,
+    create_checkpoint_process_group,
     load_fsdp_checkpoint,
     make_distributed_timeout,
     save_fsdp_checkpoint,
@@ -117,12 +119,15 @@ def main() -> None:
 
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
+    distributed_timeout = make_distributed_timeout(
+        os.environ.get("DISTRIBUTED_TIMEOUT_MINUTES", "60")
+    )
     dist.init_process_group(
         "nccl",
-        timeout=make_distributed_timeout(
-            os.environ.get("DISTRIBUTED_TIMEOUT_MINUTES", "60")
-        ),
+        timeout=distributed_timeout,
     )
+    checkpoint_process_group = create_checkpoint_process_group(distributed_timeout)
+    checkpoint_io = FSDPCheckpointIOConfig.from_environment()
     rank = dist.get_rank()
     device = torch.device("cuda", local_rank)
     config = FSDPTrainingConfig(
@@ -176,6 +181,8 @@ def main() -> None:
         epoch=0,
         batch_in_epoch=1,
         device=device,
+        checkpoint_process_group=checkpoint_process_group,
+        checkpoint_io=checkpoint_io,
     )
 
     del model, optimizer, scheduler
@@ -194,6 +201,8 @@ def main() -> None:
         fsdp_config=config,
         training_geometry=training_geometry,
         device=device,
+        checkpoint_process_group=checkpoint_process_group,
+        checkpoint_io=checkpoint_io,
     )
     restored_loss = _step(
         restored_model,
@@ -231,7 +240,12 @@ def main() -> None:
         "resume_step": resume.update_step,
     }
     gathered = [None] * dist.get_world_size() if rank == 0 else None
-    dist.gather_object(local_summary, gathered, dst=0)
+    dist.gather_object(
+        local_summary,
+        gathered,
+        dst=0,
+        group=checkpoint_process_group,
+    )
     if rank == 0:
         print("FP8_FSDP_SMOKE_OK", flush=True)
         print(json.dumps(gathered, indent=2, sort_keys=True), flush=True)

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
+import os
 import random
+import threading
 import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
 from pathlib import Path
@@ -38,7 +43,10 @@ _FP8_RECIPES = {"tensorwise", "rowwise", "rowwise_with_gw_hp"}
 _FP8_SCOPES = {"generation", "generation_vlm"}
 _T = TypeVar("_T")
 _DEFAULT_DISTRIBUTED_TIMEOUT_MINUTES = 60
+_DEFAULT_CHECKPOINT_HEARTBEAT_SECONDS = 60
+_CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS = 60
 _LOGGER = logging.getLogger(__name__)
+FSDP_CHECKPOINT_IO_COMPAT_VERSION = 1
 
 
 def make_distributed_timeout(
@@ -55,6 +63,67 @@ def make_distributed_timeout(
             f"DISTRIBUTED_TIMEOUT_MINUTES must be a positive integer, got {minutes!r}."
         )
     return timedelta(minutes=parsed_minutes)
+
+
+def create_checkpoint_process_group(timeout: timedelta) -> dist.ProcessGroup:
+    """Create a CPU process group for checkpoint planning and status collectives."""
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError(
+            "The default distributed process group must be initialized before "
+            "creating the checkpoint process group."
+        )
+    if dist.get_backend() == dist.Backend.GLOO:
+        return dist.group.WORLD
+    return dist.new_group(backend=dist.Backend.GLOO, timeout=timeout)
+
+
+def _environment_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name, str(default).lower())
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true or false, got {value!r}.")
+    return value == "true"
+
+
+def _environment_int(name: str, default: int, *, allow_zero: bool = False) -> int:
+    value = os.environ.get(name, str(default))
+    try:
+        parsed_value = int(value)
+    except ValueError as exc:
+        qualifier = "a non-negative" if allow_zero else "a positive"
+        raise ValueError(f"{name} must be {qualifier} integer, got {value!r}.") from exc
+    if parsed_value < 0 or (parsed_value == 0 and not allow_zero):
+        qualifier = "a non-negative" if allow_zero else "a positive"
+        raise ValueError(f"{name} must be {qualifier} integer, got {value!r}.")
+    return parsed_value
+
+
+@dataclass(frozen=True)
+class FSDPCheckpointIOConfig:
+    sync_files: bool = False
+    thread_count: int = 1
+    heartbeat_seconds: int = _DEFAULT_CHECKPOINT_HEARTBEAT_SECONDS
+
+    @classmethod
+    def from_environment(cls) -> FSDPCheckpointIOConfig:
+        config = cls(
+            sync_files=_environment_bool("FSDP_CHECKPOINT_SYNC_FILES", False),
+            thread_count=_environment_int("FSDP_CHECKPOINT_THREADS", 1),
+            heartbeat_seconds=_environment_int(
+                "FSDP_CHECKPOINT_HEARTBEAT_SECONDS",
+                _DEFAULT_CHECKPOINT_HEARTBEAT_SECONDS,
+                allow_zero=True,
+            ),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if self.thread_count <= 0:
+            raise ValueError("FSDP checkpoint thread_count must be positive.")
+        if self.heartbeat_seconds < 0:
+            raise ValueError(
+                "FSDP checkpoint heartbeat_seconds must be non-negative."
+            )
 
 
 @dataclass
@@ -306,9 +375,10 @@ def _run_checkpoint_phase(
     phase: str,
     operation: Callable[[], _T],
     device: torch.device,
+    process_group: dist.ProcessGroup | None = None,
 ) -> _T:
     """Run rank-local I/O and make every rank fail before the next collective."""
-    rank = dist.get_rank()
+    rank = dist.get_rank(process_group)
     start_time = time.monotonic()
     if rank == 0:
         _LOGGER.info("Distributed checkpoint phase started: %s", phase)
@@ -322,10 +392,19 @@ def _run_checkpoint_phase(
 
     failure_count = torch.tensor(
         int(local_exception is not None),
-        device=device,
+        device=(
+            torch.device("cpu")
+            if process_group is not None
+            and dist.get_backend(process_group) == dist.Backend.GLOO
+            else device
+        ),
         dtype=torch.int32,
     )
-    dist.all_reduce(failure_count, op=dist.ReduceOp.SUM)
+    dist.all_reduce(
+        failure_count,
+        op=dist.ReduceOp.SUM,
+        group=process_group,
+    )
     if failure_count.item() > 0:
         local_error = (
             None
@@ -336,8 +415,12 @@ def _run_checkpoint_phase(
                 "message": str(local_exception)[:2_000],
             }
         )
-        gathered_errors = [None] * dist.get_world_size()
-        dist.all_gather_object(gathered_errors, local_error)
+        gathered_errors = [None] * dist.get_world_size(process_group)
+        dist.all_gather_object(
+            gathered_errors,
+            local_error,
+            group=process_group,
+        )
         details = "; ".join(
             f"rank {error['rank']}: {error['type']}: {error['message']}"
             for error in gathered_errors
@@ -354,6 +437,180 @@ def _run_checkpoint_phase(
             time.monotonic() - start_time,
         )
     return result
+
+
+def _iter_local_tensors(
+    value: Any,
+    seen: set[int],
+) -> Iterator[torch.Tensor]:
+    value_id = id(value)
+    if value_id in seen:
+        return
+    seen.add(value_id)
+
+    to_local = getattr(value, "to_local", None)
+    if callable(to_local):
+        local_value = to_local()
+        if isinstance(local_value, torch.Tensor):
+            yield local_value
+        return
+    local_shards = getattr(value, "local_shards", None)
+    if callable(local_shards):
+        for shard in local_shards():
+            tensor = getattr(shard, "tensor", None)
+            if isinstance(tensor, torch.Tensor):
+                yield tensor
+        return
+    if isinstance(value, torch.Tensor):
+        yield value
+        return
+    if isinstance(value, Mapping):
+        for nested_value in value.values():
+            yield from _iter_local_tensors(nested_value, seen)
+        return
+    if isinstance(value, (list, tuple)):
+        for nested_value in value:
+            yield from _iter_local_tensors(nested_value, seen)
+
+
+def _local_model_state_statistics(model_state: Mapping[str, Any]) -> tuple[int, int]:
+    tensors = tuple(_iter_local_tensors(model_state, set()))
+    return len(tensors), sum(
+        tensor.numel() * tensor.element_size() for tensor in tensors
+    )
+
+
+def _checkpoint_file_summary(checkpoint_dir: Path) -> tuple[int, int]:
+    files = tuple(
+        path
+        for path in checkpoint_dir.glob("*.distcp")
+        if path.is_file()
+    )
+    return len(files), sum(path.stat().st_size for path in files)
+
+
+@contextmanager
+def _checkpoint_heartbeat(
+    phase: str,
+    interval_seconds: int,
+    checkpoint_dir: Path | None = None,
+) -> Iterator[None]:
+    if interval_seconds == 0 or dist.get_rank() != 0:
+        yield
+        return
+
+    stopped = threading.Event()
+    start_time = time.monotonic()
+
+    def log_progress() -> None:
+        while not stopped.wait(interval_seconds):
+            elapsed_seconds = time.monotonic() - start_time
+            if checkpoint_dir is None:
+                _LOGGER.info(
+                    "Distributed checkpoint phase still running: %s (%.1f s)",
+                    phase,
+                    elapsed_seconds,
+                )
+                continue
+            try:
+                file_count, total_bytes = _checkpoint_file_summary(checkpoint_dir)
+            except OSError as exc:
+                _LOGGER.warning(
+                    "Could not inspect checkpoint progress for %s after %.1f s: %s",
+                    phase,
+                    elapsed_seconds,
+                    exc,
+                )
+                continue
+            _LOGGER.info(
+                "Distributed checkpoint phase still running: %s "
+                "(%.1f s, %d shard files, %.2f GiB visible)",
+                phase,
+                elapsed_seconds,
+                file_count,
+                total_bytes / 2**30,
+            )
+
+    heartbeat = threading.Thread(
+        target=log_progress,
+        name="fsdp-checkpoint-heartbeat",
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        heartbeat.join(timeout=1)
+
+
+def _make_checkpoint_writer(
+    checkpoint_dir: Path,
+    checkpoint_io: FSDPCheckpointIOConfig,
+) -> dcp.FileSystemWriter:
+    checkpoint_io.validate()
+    return dcp.FileSystemWriter(
+        checkpoint_dir,
+        single_file_per_rank=True,
+        sync_files=checkpoint_io.sync_files,
+        thread_count=checkpoint_io.thread_count,
+        overwrite=False,
+    )
+
+
+def _verify_model_checkpoint(checkpoint_dir: Path) -> tuple[int, int]:
+    metadata_path = checkpoint_dir / ".metadata"
+    deadline = time.monotonic() + _CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS
+    while not metadata_path.is_file():
+        if time.monotonic() >= deadline:
+            raise FileNotFoundError(
+                f"DCP model metadata was not visible after "
+                f"{_CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS} seconds: {metadata_path}."
+            )
+        time.sleep(1)
+
+    metadata = dcp.FileSystemReader(checkpoint_dir).read_metadata()
+    if not metadata.state_dict_metadata:
+        raise RuntimeError(f"DCP model metadata is empty: {metadata_path}.")
+    if not metadata.storage_data:
+        raise RuntimeError(f"DCP model storage metadata is empty: {metadata_path}.")
+
+    expected_sizes: dict[str, int] = {}
+    for storage_info in metadata.storage_data.values():
+        relative_path = storage_info.relative_path
+        expected_sizes[relative_path] = max(
+            expected_sizes.get(relative_path, 0),
+            storage_info.offset + storage_info.length,
+        )
+
+    while True:
+        missing = []
+        truncated = []
+        actual_bytes = 0
+        for relative_path, expected_size in expected_sizes.items():
+            path = checkpoint_dir / relative_path
+            if not path.is_file():
+                missing.append(relative_path)
+                continue
+            actual_size = path.stat().st_size
+            actual_bytes += actual_size
+            if actual_size < expected_size:
+                truncated.append(
+                    f"{relative_path} ({actual_size} < {expected_size} bytes)"
+                )
+        if not missing and not truncated:
+            return len(expected_sizes), actual_bytes
+        if time.monotonic() >= deadline:
+            details = []
+            if missing:
+                details.append(f"missing={missing}")
+            if truncated:
+                details.append(f"truncated={truncated}")
+            raise RuntimeError(
+                "DCP model shards were not completely visible before checkpoint "
+                f"publication: {'; '.join(details)}."
+            )
+        time.sleep(1)
 
 
 def _local_training_state(
@@ -384,12 +641,17 @@ def save_fsdp_checkpoint(
     epoch: int,
     batch_in_epoch: int,
     device: torch.device,
+    checkpoint_process_group: dist.ProcessGroup | None = None,
+    checkpoint_io: FSDPCheckpointIOConfig | None = None,
 ) -> Path:
     """Save a reshardable model and same-world-size rank-local AdamW8bit states."""
+    checkpoint_io = checkpoint_io or FSDPCheckpointIOConfig.from_environment()
+    checkpoint_io.validate()
     output_dir = Path(output_dir)
     checkpoint_name = f"checkpoint_{update_step:08d}"
     checkpoint_dir = output_dir / checkpoint_name
     temporary_dir = output_dir / f".{checkpoint_name}.tmp"
+    model_checkpoint_dir = temporary_dir / "model"
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -405,13 +667,73 @@ def save_fsdp_checkpoint(
         output_dir.mkdir(parents=True, exist_ok=True)
         temporary_dir.mkdir()
 
-    _run_checkpoint_phase("prepare save directory", prepare_directory, device)
+    _run_checkpoint_phase(
+        "prepare save directory",
+        prepare_directory,
+        device,
+        checkpoint_process_group,
+    )
 
-    def save_model() -> None:
-        model_state = get_model_state_dict(model, options=_checkpoint_options())
-        dcp.save({"model": model_state}, checkpoint_id=temporary_dir / "model")
+    def materialize_model_state() -> dict[str, Any]:
+        with _checkpoint_heartbeat(
+            "materialize model state",
+            checkpoint_io.heartbeat_seconds,
+        ):
+            return get_model_state_dict(model, options=_checkpoint_options())
 
-    _run_checkpoint_phase("save model shards", save_model, device)
+    model_state = _run_checkpoint_phase(
+        "materialize model state",
+        materialize_model_state,
+        device,
+        checkpoint_process_group,
+    )
+    tensor_count, local_bytes = _local_model_state_statistics(model_state)
+    _LOGGER.info(
+        "Rank %d materialized %d local model tensors (%.2f GiB)",
+        rank,
+        tensor_count,
+        local_bytes / 2**30,
+    )
+
+    def write_model_shards() -> None:
+        writer = _make_checkpoint_writer(model_checkpoint_dir, checkpoint_io)
+        with _checkpoint_heartbeat(
+            "write model shards",
+            checkpoint_io.heartbeat_seconds,
+            model_checkpoint_dir,
+        ):
+            dcp.save(
+                {"model": model_state},
+                storage_writer=writer,
+                process_group=checkpoint_process_group,
+            )
+
+    _run_checkpoint_phase(
+        "write model shards",
+        write_model_shards,
+        device,
+        checkpoint_process_group,
+    )
+
+    def verify_model_checkpoint() -> None:
+        if rank != 0:
+            return
+        file_count, total_bytes = _verify_model_checkpoint(model_checkpoint_dir)
+        _LOGGER.info(
+            "Verified DCP model checkpoint: %d shard files, %.2f GiB",
+            file_count,
+            total_bytes / 2**30,
+        )
+
+    _run_checkpoint_phase(
+        "verify model checkpoint",
+        verify_model_checkpoint,
+        device,
+        checkpoint_process_group,
+    )
+    model_state.clear()
+    gc.collect()
+
     _run_checkpoint_phase(
         "save rank-local optimizer state",
         lambda: torch.save(
@@ -419,6 +741,7 @@ def save_fsdp_checkpoint(
             temporary_dir / f"optimizer_rank_{rank:05d}.pt",
         ),
         device,
+        checkpoint_process_group,
     )
 
     def save_metadata() -> None:
@@ -432,6 +755,7 @@ def save_fsdp_checkpoint(
             "batch_in_epoch": batch_in_epoch,
             "world_size": world_size,
             "fsdp_config": asdict(fsdp_config),
+            "checkpoint_io": asdict(checkpoint_io),
             "training_geometry": training_geometry,
         }
         (temporary_dir / _METADATA_FILE).write_text(
@@ -443,7 +767,12 @@ def save_fsdp_checkpoint(
             temporary_dir / _TRAINER_STATE_FILE,
         )
 
-    _run_checkpoint_phase("save checkpoint metadata", save_metadata, device)
+    _run_checkpoint_phase(
+        "save checkpoint metadata",
+        save_metadata,
+        device,
+        checkpoint_process_group,
+    )
 
     def publish_checkpoint() -> None:
         if rank != 0:
@@ -453,7 +782,12 @@ def save_fsdp_checkpoint(
         pointer_tmp.write_text(checkpoint_name, encoding="utf-8")
         pointer_tmp.replace(output_dir / _LATEST_CHECKPOINT)
 
-    _run_checkpoint_phase("publish checkpoint", publish_checkpoint, device)
+    _run_checkpoint_phase(
+        "publish checkpoint",
+        publish_checkpoint,
+        device,
+        checkpoint_process_group,
+    )
     return checkpoint_dir
 
 
@@ -482,7 +816,12 @@ def load_fsdp_checkpoint(
     fsdp_config: FSDPTrainingConfig,
     training_geometry: dict[str, Any],
     device: torch.device,
+    checkpoint_process_group: dist.ProcessGroup | None = None,
+    checkpoint_io: FSDPCheckpointIOConfig | None = None,
 ) -> FSDPResumeState:
+    checkpoint_io = checkpoint_io or FSDPCheckpointIOConfig.from_environment()
+    checkpoint_io.validate()
+
     def load_metadata() -> tuple[Path, dict[str, Any]]:
         checkpoint_dir = resolve_latest_fsdp_checkpoint(output_dir)
         metadata_path = checkpoint_dir / _METADATA_FILE
@@ -497,6 +836,7 @@ def load_fsdp_checkpoint(
         "load checkpoint metadata",
         load_metadata,
         device,
+        checkpoint_process_group,
     )
     world_size = dist.get_world_size()
     if metadata.get("world_size") != world_size:
@@ -518,11 +858,42 @@ def load_fsdp_checkpoint(
             f"{saved_training_geometry}, current geometry is {training_geometry}."
         )
 
-    def load_model() -> None:
-        model_state = {
-            "model": get_model_state_dict(model, options=_checkpoint_options())
-        }
-        dcp.load(model_state, checkpoint_id=checkpoint_dir / "model")
+    def materialize_model_state() -> dict[str, Any]:
+        with _checkpoint_heartbeat(
+            "materialize model load state",
+            checkpoint_io.heartbeat_seconds,
+        ):
+            return {
+                "model": get_model_state_dict(model, options=_checkpoint_options())
+            }
+
+    model_state = _run_checkpoint_phase(
+        "materialize model load state",
+        materialize_model_state,
+        device,
+        checkpoint_process_group,
+    )
+
+    def read_model_shards() -> None:
+        with _checkpoint_heartbeat(
+            "read model shards",
+            checkpoint_io.heartbeat_seconds,
+            checkpoint_dir / "model",
+        ):
+            dcp.load(
+                model_state,
+                checkpoint_id=checkpoint_dir / "model",
+                process_group=checkpoint_process_group,
+            )
+
+    _run_checkpoint_phase(
+        "read model shards",
+        read_model_shards,
+        device,
+        checkpoint_process_group,
+    )
+
+    def apply_model_state() -> None:
         set_model_state_dict(
             model,
             model_state["model"],
@@ -531,9 +902,17 @@ def load_fsdp_checkpoint(
         if fsdp_config.replicate_frozen_params:
             _restore_replicated_frozen_parameters(model, model_state["model"])
 
-    _run_checkpoint_phase("load model shards", load_model, device)
+    _run_checkpoint_phase(
+        "apply model state",
+        apply_model_state,
+        device,
+        checkpoint_process_group,
+    )
+    model_state.clear()
+    gc.collect()
 
     rank = dist.get_rank()
+
     def load_optimizer() -> dict[str, Any]:
         local_state_path = checkpoint_dir / f"optimizer_rank_{rank:05d}.pt"
         if not local_state_path.is_file():
@@ -558,6 +937,7 @@ def load_fsdp_checkpoint(
         "load rank-local optimizer state",
         load_optimizer,
         device,
+        checkpoint_process_group,
     )
 
     def load_trainer_state() -> None:
@@ -583,7 +963,12 @@ def load_fsdp_checkpoint(
         if scheduler is not None:
             scheduler.load_state_dict(saved_scheduler)
 
-    _run_checkpoint_phase("load scheduler state", load_trainer_state, device)
+    _run_checkpoint_phase(
+        "load scheduler state",
+        load_trainer_state,
+        device,
+        checkpoint_process_group,
+    )
 
     def restore_rng_state() -> None:
         random.setstate(local_state["python_rng_state"])
@@ -591,7 +976,12 @@ def load_fsdp_checkpoint(
         torch.set_rng_state(local_state["torch_rng_state"])
         torch.cuda.set_rng_state(local_state["cuda_rng_state"], device)
 
-    _run_checkpoint_phase("restore random state", restore_rng_state, device)
+    _run_checkpoint_phase(
+        "restore random state",
+        restore_rng_state,
+        device,
+        checkpoint_process_group,
+    )
     return FSDPResumeState(
         checkpoint_dir=checkpoint_dir,
         micro_step=int(metadata["micro_step"]),

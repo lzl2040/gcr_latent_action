@@ -44,7 +44,8 @@ PEFT/TorchAO/bitsandbytes 调整到约束范围，不需要升级 PyTorch。不�
 
 `train_qwen3vl_mot_fsdp.sh` 在启动 `torchrun` 前会检查版本，并实际执行一次 CPU emulated FP8
 前后向；检测到 H100/B200 时还会执行一次 native CUDA FP8 前后向。同时检查 `_scaled_mm`
-schema、classic FSDP 和 distributed checkpoint API。
+schema、classic FSDP 和 distributed checkpoint API，并校验上传源码同时包含 AdamW8bit
+签名兼容和 mounted-storage checkpoint I/O marker。
 `DRY_RUN=true` 只检查命令拼接，因此跳过依赖检查。
 
 Stage 2 的 distributed process group 默认超时为 60 分钟，而不是 PyTorch 默认的 10 分钟。
@@ -55,9 +56,38 @@ Stage 2 的 distributed process group 默认超时为 60 分钟，而不是 PyTo
 DISTRIBUTED_TIMEOUT_MINUTES=120 bash train_qwen3vl_mot_fsdp.sh
 ```
 
-保存时日志会分别显示 `prepare save directory`、`save model shards`、
-`save rank-local optimizer state`、`save checkpoint metadata` 和 `publish checkpoint` 的开始与
-完成耗时。若再次卡住，最后一条 `phase started` 就是实际慢的阶段。
+训练 tensor collective 继续使用 NCCL；DCP save plan、metadata object collective 和
+checkpoint phase 状态汇总使用独立的 Gloo process group，避免把大量 CPU metadata 经 NCCL
+暂存到 GPU。
+
+默认输出位于 BlobFuse/共享挂载，因此 launcher 默认使用：
+
+```bash
+FSDP_CHECKPOINT_SYNC_FILES=false
+FSDP_CHECKPOINT_THREADS=1
+FSDP_CHECKPOINT_HEARTBEAT_SECONDS=60
+```
+
+`sync_files=false` 只关闭 PyTorch `FileSystemWriter` 在每个大型 `.distcp` 文件结尾执行的
+`fsync()`；文件仍会正常写入并关闭。所有 rank 写完后，rank 0 会读取 DCP metadata，检查其中
+引用的每个 shard 已可见且文件大小完整，然后才原子发布 checkpoint 和更新
+`latest_checkpoint`。这避免 BlobFuse 上长时间卡在 `fsync()`，代价是节点或存储服务在文件
+关闭后立刻故障时，没有 POSIX `fsync` 级别的持久性保证。若输出是可靠的本地 POSIX 文件系统，
+可显式设置：
+
+```bash
+FSDP_CHECKPOINT_SYNC_FILES=true bash train_qwen3vl_mot_fsdp.sh
+```
+
+保存日志会分别显示 `prepare save directory`、`materialize model state`、
+`write model shards`、`verify model checkpoint`、`save rank-local optimizer state`、
+`save checkpoint metadata` 和 `publish checkpoint` 的开始与完成耗时。耗时阶段每 60 秒输出
+一次 heartbeat；写 model shard 时还会报告当前可见的 `.distcp` 文件数和总大小。因此：
+
+- 卡在 `materialize model state`：问题位于 FSDP state-dict/CPU offload；
+- 卡在 `write model shards` 且文件持续增长：问题是挂载盘吞吐；
+- 卡在 `write model shards` 且没有文件：问题位于 DCP planning/control collective；
+- 进入 `verify model checkpoint` 后失败：某些 shard 没有在共享挂载上完整可见。
 
 被 watchdog 终止的保存不是有效 checkpoint，通常会留下：
 
@@ -459,9 +489,14 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `NPROC_PER_NODE` | `8` | 本节点 GPU 进程数 |
 | `MASTER_ADDR` | 单节点为 `127.0.0.1` | 多节点 rank 0 可访问地址 |
 | `MASTER_PORT` | 单节点自动选择 | 多节点共享 rendezvous 端口 |
+| `DISTRIBUTED_TIMEOUT_MINUTES` | `60` | NCCL 和 checkpoint Gloo collective 超时 |
 | `BATCH_SIZE` | `16` | 每卡 micro-batch |
 | `GRADIENT_ACCUMULATION_STEPS` | `1` | 梯度累积 |
 | `STEPS` | `600000` | optimizer step 上限 |
+| `SAVE_FREQ` | `2000` | 每隔多少 optimizer step 保存一次 |
+| `FSDP_CHECKPOINT_SYNC_FILES` | `false` | DCP 是否对每个 shard 强制 `fsync` |
+| `FSDP_CHECKPOINT_THREADS` | `1` | 每个 rank 的 DCP writer 线程数 |
+| `FSDP_CHECKPOINT_HEARTBEAT_SECONDS` | `60` | checkpoint 进度日志间隔；`0` 关闭 |
 | `FP8_ENABLED` | `true` | 是否转换 eligible Linear |
 | `FP8_EMULATE` | `false` | 非 H100 上的功能模拟 |
 | `TORCHRUN_BIN` | `torchrun` | 分布式启动程序 |

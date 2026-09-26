@@ -1021,14 +1021,15 @@ return AdamW8bit(params, **kwargs)
 这说明集群执行的是修复前的 `/scratch/amlt_code`，不是新代码。
 
 `amlt rerun` 默认不重新上传任何内容。代码变化后必须通过 `amlt run` 提交新 job；必要时加
-`--no-md5` 强制覆盖缓存。launcher 现在还会导入本次上传的 optimizer 模块并检查：
+`--no-md5` 强制覆盖缓存。launcher 现在还会导入本次上传的 optimizer 和 FSDP checkpoint
+模块并检查：
 
 ```text
 ADAMW8BIT_SIGNATURE_COMPAT_VERSION = 1
+FSDP_CHECKPOINT_IO_COMPAT_VERSION = 1
 ```
 
-通过后打印实际文件路径；缺少标记则在 `torchrun` 前直接报“uploaded source predates
-AdamW8bit signature compatibility”。
+通过后打印两个模块的实际文件路径；缺少任一标记都会在 `torchrun` 前直接拒绝旧快照。
 
 ### 15.4 大型 FSDP checkpoint 不能使用默认 10 分钟 collective timeout
 
@@ -1060,6 +1061,52 @@ watchdog 强制终止还可能留下 `.checkpoint_XXXXXXXX.tmp`。该目录没�
 原子更新 `latest_checkpoint`，因此不能恢复。launcher 现在启动前显式检测这些隐藏目录并报出
 完整路径；确认旧任务已结束后只能删除对应临时目录或换新的输出目录，不能把它手工发布成正式
 checkpoint。
+
+### 15.5 BlobFuse 上默认 DCP `fsync` 会让完整模型保存长时间无进展
+
+把 timeout 提高到 120 分钟后，完整 8×H100 任务仍停在：
+
+```text
+Distributed checkpoint phase started: save model shards
+```
+
+超过一小时。这说明 10 分钟 watchdog 只是结果，不是根因。旧实现把
+`get_model_state_dict()` 和 `dcp.save()` 放在同一个 phase，并让 DCP 隐式创建默认
+`FileSystemWriter`。该 writer 默认：
+
+```text
+single_file_per_rank=True
+sync_files=True
+thread_count=1
+```
+
+`sync_files=True` 会在每个大型 `.distcp` 文件末尾调用 `fsync()`。对本地 NVMe 这是合理的
+耐故障设置，但 BlobFuse/FUSE 共享挂载可能把该调用变成长时间远端 flush。与此同时，DCP 的
+save-plan 和 write-result 汇总原来走默认 NCCL group，CPU Python metadata 会经过 object
+collective 序列化和设备搬运。
+
+当前实现同时处理这两个问题：
+
+1. 训练 collective 仍走 NCCL，但创建包含所有 rank 的独立 Gloo checkpoint group；
+2. DCP save/load planning、metadata object collective 和 phase 状态汇总都走 Gloo；
+3. 将 `materialize model state` 和 `write model shards` 拆成独立 phase；
+4. 显式创建 `FileSystemWriter(sync_files=false, overwrite=false)`；
+5. 每 60 秒输出 phase heartbeat，写盘阶段同时报告可见 shard 数和 GiB；
+6. DCP 返回后由 rank 0 读取 `.metadata`，逐个检查 metadata 引用的 shard 存在且文件长度
+   覆盖最后一个写入区间，全部通过后才保存 optimizer/trainer state 并发布 checkpoint。
+
+对应开关为：
+
+```bash
+FSDP_CHECKPOINT_SYNC_FILES=false
+FSDP_CHECKPOINT_THREADS=1
+FSDP_CHECKPOINT_HEARTBEAT_SECONDS=60
+```
+
+关闭 `fsync` 不等于跳过写入：Python stream 仍会 flush/close，所有 rank 的 DCP write 都返回
+且可见性检查通过后才发布目录。但它不提供进程返回后立刻掉电时的 POSIX 强持久性保证。若输出
+目录位于本地 ext4/xfs 而不是 BlobFuse，可设置 `FSDP_CHECKPOINT_SYNC_FILES=true`；不要在
+BlobFuse 卡住时继续单纯增大 `DISTRIBUTED_TIMEOUT_MINUTES`。
 
 ---
 
