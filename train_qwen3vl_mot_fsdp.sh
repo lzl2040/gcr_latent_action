@@ -70,6 +70,8 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export DISTRIBUTED_TIMEOUT_MINUTES="${DISTRIBUTED_TIMEOUT_MINUTES:-60}"
+require_positive_int "DISTRIBUTED_TIMEOUT_MINUTES" "$DISTRIBUTED_TIMEOUT_MINUTES"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 TORCHRUN_BIN="${TORCHRUN_BIN:-torchrun}"
@@ -128,6 +130,12 @@ fi
 
 LATEST_CHECKPOINT_POINTER="${OUTPUT_DIR}/latest_checkpoint"
 RESUME_CHECKPOINT=""
+shopt -s nullglob
+_incomplete_checkpoints=("$OUTPUT_DIR"/.checkpoint_*.tmp)
+shopt -u nullglob
+if (( ${#_incomplete_checkpoints[@]} > 0 )); then
+    die "found incomplete FSDP checkpoint directories: ${_incomplete_checkpoints[*]}. After confirming no job is writing to OUTPUT_DIR, remove these exact directories or use a new JOB_NAME/OUTPUT_DIR."
+fi
 if [[ "$WEIGHT_RESUME" == "true" ]]; then
     if [[ ! -e "$LATEST_CHECKPOINT_POINTER" ]]; then
         shopt -s nullglob

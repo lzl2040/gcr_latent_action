@@ -16,6 +16,7 @@ from lerobot.common.utils.fsdp_training import (
     FSDPTrainingConfig,
     convert_policy_to_fp8,
     load_fsdp_checkpoint,
+    make_distributed_timeout,
     save_fsdp_checkpoint,
     wrap_policy_with_fsdp,
 )
@@ -116,7 +117,12 @@ def main() -> None:
 
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group("nccl")
+    dist.init_process_group(
+        "nccl",
+        timeout=make_distributed_timeout(
+            os.environ.get("DISTRIBUTED_TIMEOUT_MINUTES", "60")
+        ),
+    )
     rank = dist.get_rank()
     device = torch.device("cuda", local_rank)
     config = FSDPTrainingConfig(

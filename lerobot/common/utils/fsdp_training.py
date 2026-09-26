@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
+import time
 from dataclasses import asdict, dataclass, replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -34,6 +37,24 @@ _TRAINER_STATE_FILE = "trainer_state.pt"
 _FP8_RECIPES = {"tensorwise", "rowwise", "rowwise_with_gw_hp"}
 _FP8_SCOPES = {"generation", "generation_vlm"}
 _T = TypeVar("_T")
+_DEFAULT_DISTRIBUTED_TIMEOUT_MINUTES = 60
+_LOGGER = logging.getLogger(__name__)
+
+
+def make_distributed_timeout(
+    minutes: str | int = _DEFAULT_DISTRIBUTED_TIMEOUT_MINUTES,
+) -> timedelta:
+    try:
+        parsed_minutes = int(minutes)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"DISTRIBUTED_TIMEOUT_MINUTES must be a positive integer, got {minutes!r}."
+        ) from exc
+    if parsed_minutes <= 0:
+        raise ValueError(
+            f"DISTRIBUTED_TIMEOUT_MINUTES must be a positive integer, got {minutes!r}."
+        )
+    return timedelta(minutes=parsed_minutes)
 
 
 @dataclass
@@ -287,6 +308,11 @@ def _run_checkpoint_phase(
     device: torch.device,
 ) -> _T:
     """Run rank-local I/O and make every rank fail before the next collective."""
+    rank = dist.get_rank()
+    start_time = time.monotonic()
+    if rank == 0:
+        _LOGGER.info("Distributed checkpoint phase started: %s", phase)
+
     result = None
     local_exception = None
     try:
@@ -305,7 +331,7 @@ def _run_checkpoint_phase(
             None
             if local_exception is None
             else {
-                "rank": dist.get_rank(),
+                "rank": rank,
                 "type": type(local_exception).__name__,
                 "message": str(local_exception)[:2_000],
             }
@@ -321,6 +347,12 @@ def _run_checkpoint_phase(
         if local_exception is not None:
             raise RuntimeError(message) from local_exception
         raise RuntimeError(message)
+    if rank == 0:
+        _LOGGER.info(
+            "Distributed checkpoint phase completed: %s (%.1f s)",
+            phase,
+            time.monotonic() - start_time,
+        )
     return result
 
 

@@ -47,6 +47,28 @@ PEFT/TorchAO/bitsandbytes 调整到约束范围，不需要升级 PyTorch。不�
 schema、classic FSDP 和 distributed checkpoint API。
 `DRY_RUN=true` 只检查命令拼接，因此跳过依赖检查。
 
+Stage 2 的 distributed process group 默认超时为 60 分钟，而不是 PyTorch 默认的 10 分钟。
+这是为了允许数十亿参数的 model shards 和每个 rank 的 AdamW8bit state 写入集群挂载盘。
+如果挂载盘更慢，可以显式提高：
+
+```bash
+DISTRIBUTED_TIMEOUT_MINUTES=120 bash train_qwen3vl_mot_fsdp.sh
+```
+
+保存时日志会分别显示 `prepare save directory`、`save model shards`、
+`save rank-local optimizer state`、`save checkpoint metadata` 和 `publish checkpoint` 的开始与
+完成耗时。若再次卡住，最后一条 `phase started` 就是实际慢的阶段。
+
+被 watchdog 终止的保存不是有效 checkpoint，通常会留下：
+
+```text
+${OUTPUT_DIR}/.checkpoint_00002000.tmp
+```
+
+launcher 现在会在训练前检测这类残留并立即退出，避免从头训练 2000 步后才发现目录冲突。
+确认旧任务已经结束后，删除日志中列出的**具体临时目录**，或者改用新的 `JOB_NAME/OUTPUT_DIR`；
+不要把 `.tmp` 目录改名成正式 checkpoint，也不能用它 resume。
+
 不要把 `WANDB_API_KEY` 或其他凭据写入本文、launcher 或 AMLT YAML。集群运行时应通过
 任务系统 secret 或环境变量注入。
 

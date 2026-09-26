@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 import torch
 from torch import nn
@@ -10,6 +12,7 @@ from lerobot.common.utils.fsdp_training import (
     _run_checkpoint_phase,
     convert_policy_to_fp8,
     find_fsdp_wrap_modules,
+    make_distributed_timeout,
     resolve_latest_fsdp_checkpoint,
 )
 
@@ -162,3 +165,39 @@ def test_checkpoint_phase_reports_rank_local_failure(
         ),
     ):
         _run_checkpoint_phase("save optimizer", fail, torch.device("cpu"))
+
+
+def test_checkpoint_phase_logs_start_and_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda tensor, op: None)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    caplog.set_level(
+        logging.INFO,
+        logger="lerobot.common.utils.fsdp_training",
+    )
+
+    result = _run_checkpoint_phase(
+        "save model shards",
+        lambda: "saved",
+        torch.device("cpu"),
+    )
+
+    assert result == "saved"
+    assert "Distributed checkpoint phase started: save model shards" in caplog.text
+    assert "Distributed checkpoint phase completed: save model shards" in caplog.text
+
+
+def test_distributed_timeout_defaults_to_one_hour() -> None:
+    assert make_distributed_timeout().total_seconds() == 3_600
+    assert make_distributed_timeout("90").total_seconds() == 5_400
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "invalid"])
+def test_distributed_timeout_rejects_invalid_values(value: str) -> None:
+    with pytest.raises(
+        ValueError,
+        match="DISTRIBUTED_TIMEOUT_MINUTES must be a positive integer",
+    ):
+        make_distributed_timeout(value)

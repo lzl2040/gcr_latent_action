@@ -1030,6 +1030,37 @@ ADAMW8BIT_SIGNATURE_COMPAT_VERSION = 1
 通过后打印实际文件路径；缺少标记则在 `torchrun` 前直接报“uploaded source predates
 AdamW8bit signature compatibility”。
 
+### 15.4 大型 FSDP checkpoint 不能使用默认 10 分钟 collective timeout
+
+Stage 2 第一次保存发生在 optimizer step 2000。模型 shard 和每个 rank 的 AdamW8bit state
+需要写入共享挂载盘；某些 rank 超过 10 分钟时，已经完成写入的 rank 会进入 checkpoint phase
+末尾的单元素失败汇总 all-reduce，随后被默认 NCCL watchdog 终止：
+
+```text
+WorkNCCL(... OpType=ALLREDUCE, NumelIn=1, Timeout(ms)=600000)
+```
+
+这里的 `NumelIn=1` 不是模型梯度通信，而是 checkpoint 协调通信：可能来自 DCP 的 write
+结果汇总，也可能来自 `_run_checkpoint_phase()` 的跨 rank 状态汇总。它说明部分 rank 已进入
+协调 collective，至少一个 rank 仍停留在前面的 checkpoint I/O；仅凭这一行不能再区分具体
+phase。
+
+旧 FSDP 入口已经显式使用 60 分钟 timeout，但新的 Stage 2 入口遗漏了这一设置。现在
+`fsdp_train_contrast.py` 和 FP8 smoke 都通过 `init_process_group(..., timeout=...)` 使用：
+
+```text
+DISTRIBUTED_TIMEOUT_MINUTES=60
+```
+
+launcher 会校验它是正整数，也允许挂载盘较慢时提高到 120 分钟。checkpoint helper 同时记录
+每个 phase 的开始与总耗时，后续可以区分是 model DCP shard、rank-local optimizer state，
+还是 metadata/publish 阶段变慢，而不是只看到最后的 NCCL timeout。
+
+watchdog 强制终止还可能留下 `.checkpoint_XXXXXXXX.tmp`。该目录没有完成所有 phase，也没有
+原子更新 `latest_checkpoint`，因此不能恢复。launcher 现在启动前显式检测这些隐藏目录并报出
+完整路径；确认旧任务已结束后只能删除对应临时目录或换新的输出目录，不能把它手工发布成正式
+checkpoint。
+
 ---
 
 ## 16. 当前仍未解决或尚未接入的事项

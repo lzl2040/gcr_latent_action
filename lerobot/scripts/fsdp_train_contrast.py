@@ -26,6 +26,7 @@ from lerobot.common.utils.fsdp_training import (
     FSDPTrainingConfig,
     convert_policy_to_fp8,
     load_fsdp_checkpoint,
+    make_distributed_timeout,
     save_fsdp_checkpoint,
     wrap_policy_with_fsdp,
 )
@@ -55,7 +56,10 @@ def _initialize_distributed() -> tuple[int, int, int, torch.device]:
         raise RuntimeError("Stage-two FSDP training requires CUDA.")
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
-    dist.init_process_group("nccl")
+    timeout = make_distributed_timeout(
+        os.environ.get("DISTRIBUTED_TIMEOUT_MINUTES", "60")
+    )
+    dist.init_process_group("nccl", timeout=timeout)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     return rank, local_rank, world_size, torch.device("cuda", local_rank)
@@ -142,6 +146,10 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     os.environ.setdefault("DECORD_LOG_LEVEL", "error")
     rank, local_rank, world_size, device = _initialize_distributed()
     logger = init_logger(cfg, subdir="qwen3vl_mot_fsdp")
+    logger.info(
+        "Distributed collective timeout: %s minutes",
+        os.environ.get("DISTRIBUTED_TIMEOUT_MINUTES", "60"),
+    )
 
     if rank == 0:
         logger.info(pformat(cfg.to_dict()))
