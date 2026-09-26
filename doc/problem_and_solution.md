@@ -1026,7 +1026,7 @@ return AdamW8bit(params, **kwargs)
 
 ```text
 ADAMW8BIT_SIGNATURE_COMPAT_VERSION = 1
-FSDP_CHECKPOINT_IO_COMPAT_VERSION = 1
+FSDP_CHECKPOINT_IO_COMPAT_VERSION = 2
 ```
 
 通过后打印两个模块的实际文件路径；缺少任一标记都会在 `torchrun` 前直接拒绝旧快照。
@@ -1107,6 +1107,29 @@ FSDP_CHECKPOINT_HEARTBEAT_SECONDS=60
 且可见性检查通过后才发布目录。但它不提供进程返回后立刻掉电时的 POSIX 强持久性保证。若输出
 目录位于本地 ext4/xfs 而不是 BlobFuse，可设置 `FSDP_CHECKPOINT_SYNC_FILES=true`；不要在
 BlobFuse 卡住时继续单纯增大 `DISTRIBUTED_TIMEOUT_MINUTES`。
+
+### 15.6 Torch 2.7 ShardedTensor 无法表示某些 rank 的空 local shard
+
+关闭 BlobFuse `fsync` 后，8 卡任务在写盘前报错：
+
+```text
+Distributed checkpoint phase 'materialize model state' failed:
+rank 4: NotImplementedError: Only single local shard is supported.
+...
+rank 7: NotImplementedError: Only single local shard is supported.
+```
+
+根因是 Torch 2.7 classic FSDP 默认生成 legacy `ShardedTensor` state dict。若某个原始参数的
+第 0 维小于 world size，例如首维为 4 而 world size 为 8，rank 0–3 各持有一个 local shard，
+rank 4–7 持有零个。`get_model_state_dict()` 内部检查 `p.is_meta` 时，
+`ShardedTensor.local_tensor()` 却强制要求 local shard 数恰好为 1，因此在后四个 rank
+抛出异常。错误发生在 state-dict materialization，和 DCP writer、BlobFuse 或 Gloo 无关。
+
+按照 PyTorch 官方建议，FSDP 现在基于默认 NCCL process group 构造一维 `DeviceMesh`。训练
+通信拓扑不变，但 SHARDED_STATE_DICT 从 legacy `ShardedTensor` 改为 DTensor；DTensor 能合法
+表示空 local shard，因此小参数也可以在 8 卡保存和恢复。checkpoint 的控制与 metadata
+collective 仍使用独立 Gloo group。4 卡 Torch 2.7/2.9 测试已覆盖“小参数保存并恢复继续
+step”，并验证旧 ShardedTensor DCP checkpoint 可以直接恢复到新的 DTensor state dict。
 
 ---
 

@@ -79,6 +79,11 @@ FSDP_CHECKPOINT_HEARTBEAT_SECONDS=60
 FSDP_CHECKPOINT_SYNC_FILES=true bash train_qwen3vl_mot_fsdp.sh
 ```
 
+FSDP 使用默认 NCCL group 构造一维 DeviceMesh，使 sharded model state 使用 DTensor，而不是
+Torch 2.7 的 legacy ShardedTensor。这样即使参数首维小于 world size、部分 rank 的 local
+shard 为空，也能正常保存；不会再出现 `Only single local shard is supported`。此前已经完整
+发布的 legacy ShardedTensor DCP checkpoint 仍可加载到新的 DTensor state dict。
+
 保存日志会分别显示 `prepare save directory`、`materialize model state`、
 `write model shards`、`verify model checkpoint`、`save rank-local optimizer state`、
 `save checkpoint metadata` 和 `publish checkpoint` 的开始与完成耗时。耗时阶段每 60 秒输出

@@ -104,11 +104,16 @@ def _probe_fsdp_api(torch_module: Any) -> None:
         get_model_state_dict,
         set_model_state_dict,
     )
+    from torch.distributed.device_mesh import DeviceMesh
     from torch.distributed.fsdp import FullyShardedDataParallel
     from torch.distributed.fsdp.wrap import CustomPolicy
 
     fsdp_parameters = inspect.signature(FullyShardedDataParallel).parameters
-    missing_fsdp_parameters = {"ignored_states", "use_orig_params"} - set(fsdp_parameters)
+    missing_fsdp_parameters = {
+        "device_mesh",
+        "ignored_states",
+        "use_orig_params",
+    } - set(fsdp_parameters)
     if missing_fsdp_parameters:
         missing = ", ".join(sorted(missing_fsdp_parameters))
         raise RuntimeError(f"FSDP is missing required parameters: {missing}")
@@ -118,7 +123,15 @@ def _probe_fsdp_api(torch_module: Any) -> None:
     if missing_state_dict_parameters:
         missing = ", ".join(sorted(missing_state_dict_parameters))
         raise RuntimeError(f"StateDictOptions is missing required parameters: {missing}")
-    if not all(callable(item) for item in (get_model_state_dict, set_model_state_dict, CustomPolicy)):
+    if not all(
+        callable(item)
+        for item in (
+            DeviceMesh.from_group,
+            get_model_state_dict,
+            set_model_state_dict,
+            CustomPolicy,
+        )
+    ):
         raise RuntimeError("required distributed checkpoint or FSDP policy APIs are unavailable")
 
     scaled_mm_schema = str(torch_module.ops.aten._scaled_mm.default._schema)
@@ -250,10 +263,10 @@ def probe_stage2_runtime(
         )
         details["fsdp_training_path"] = fsdp_training_module.__file__
         details["checkpoint_io_compat_version"] = checkpoint_compat_version
-        if checkpoint_compat_version != 1:
+        if checkpoint_compat_version != 2:
             errors.append(
                 "the uploaded source predates mounted-storage checkpoint "
-                f"compatibility (marker={checkpoint_compat_version!r}, expected=1)"
+                f"compatibility (marker={checkpoint_compat_version!r}, expected=2)"
             )
     return tuple(errors), details
 

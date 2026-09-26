@@ -11,6 +11,7 @@ from lerobot.common.utils.fsdp_training import (
     FSDP_CHECKPOINT_IO_COMPAT_VERSION,
     FSDPCheckpointIOConfig,
     FSDPTrainingConfig,
+    _create_fsdp_device_mesh,
     _local_model_state_statistics,
     _make_checkpoint_writer,
     _restore_replicated_frozen_parameters,
@@ -268,6 +269,35 @@ def test_checkpoint_process_group_uses_gloo(
     assert observed == {"backend": "gloo", "timeout": timeout}
 
 
+def test_fsdp_device_mesh_reuses_default_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_group = torch.distributed.group.WORLD
+    expected_mesh = object()
+    observed = {}
+
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+
+    def from_group(group, device_type, mesh_dim_names):
+        observed["group"] = group
+        observed["device_type"] = device_type
+        observed["mesh_dim_names"] = mesh_dim_names
+        return expected_mesh
+
+    monkeypatch.setattr(
+        "lerobot.common.utils.fsdp_training.DeviceMesh.from_group",
+        from_group,
+    )
+
+    assert _create_fsdp_device_mesh(torch.device("cuda", 3)) is expected_mesh
+    assert observed == {
+        "group": default_group,
+        "device_type": "cuda",
+        "mesh_dim_names": ("fsdp",),
+    }
+
+
 def test_checkpoint_io_defaults_disable_fsync(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -336,7 +366,7 @@ def test_checkpoint_io_rejects_invalid_environment(
 
 
 def test_distributed_timeout_defaults_to_one_hour() -> None:
-    assert FSDP_CHECKPOINT_IO_COMPAT_VERSION == 1
+    assert FSDP_CHECKPOINT_IO_COMPAT_VERSION == 2
     assert make_distributed_timeout().total_seconds() == 3_600
     assert make_distributed_timeout("90").total_seconds() == 5_400
 

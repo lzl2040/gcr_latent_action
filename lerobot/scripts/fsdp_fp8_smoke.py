@@ -41,12 +41,13 @@ class SmokeGeneration(nn.Module):
         self.blocks = nn.ModuleList(
             [SmokeBlock(hidden_dim) for _ in range(depth)]
         )
+        self.small_bias = nn.Parameter(torch.zeros(4))
         self.output = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for block in self.blocks:
             x = block(x)
-        return self.output(x)
+        return self.output(x) + self.small_bias.mean()
 
 
 class SmokePolicy(nn.Module):

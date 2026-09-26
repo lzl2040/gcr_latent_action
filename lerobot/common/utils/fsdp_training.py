@@ -26,6 +26,7 @@ from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
 )
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import (
     BackwardPrefetch,
     FullyShardedDataParallel,
@@ -46,7 +47,7 @@ _DEFAULT_DISTRIBUTED_TIMEOUT_MINUTES = 60
 _DEFAULT_CHECKPOINT_HEARTBEAT_SECONDS = 60
 _CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS = 60
 _LOGGER = logging.getLogger(__name__)
-FSDP_CHECKPOINT_IO_COMPAT_VERSION = 1
+FSDP_CHECKPOINT_IO_COMPAT_VERSION = 2
 
 
 def make_distributed_timeout(
@@ -279,6 +280,18 @@ def find_fsdp_wrap_modules(
     return tuple(kept)
 
 
+def _create_fsdp_device_mesh(device: torch.device) -> DeviceMesh:
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError("FSDP requires an initialized distributed process group.")
+    if device.type != "cuda":
+        raise ValueError(f"Stage-two FSDP requires a CUDA device, got {device}.")
+    return DeviceMesh.from_group(
+        dist.group.WORLD,
+        device_type=device.type,
+        mesh_dim_names=("fsdp",),
+    )
+
+
 def wrap_policy_with_fsdp(
     policy: nn.Module,
     config: FSDPTrainingConfig,
@@ -317,6 +330,7 @@ def wrap_policy_with_fsdp(
         limit_all_gathers=config.limit_all_gathers,
         use_orig_params=True,
         ignored_states=frozen_parameters if config.replicate_frozen_params else None,
+        device_mesh=_create_fsdp_device_mesh(device),
     )
     summary = FSDPWrapSummary(
         wrapped_module_names=tuple(name for name, _ in wrap_modules),

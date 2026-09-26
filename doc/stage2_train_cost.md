@@ -50,6 +50,8 @@ DTensor 参数，会在 `optimizer_update_8bit_blockwise` 报 mixed Tensor/DTens
 checkpoint 使用组合格式：
 
 - 模型权重由 Distributed Checkpoint 保存，可做模型分片重组；
+- 训练仍是 classic FSDP1 和普通 parameter view；仅 checkpoint state dict 使用 DTensor，
+  以支持参数首维小于 world size 时某些 rank 的空 local shard；
 - bitsandbytes optimizer state 按 rank 保存，因为标准 FSDP optimizer state
   转换不支持同一 state key 同时包含 uint8 大张量和 FP32 小张量；
 - 训练 collective 使用 NCCL，DCP planning/metadata 和 checkpoint phase 状态汇总使用独立
