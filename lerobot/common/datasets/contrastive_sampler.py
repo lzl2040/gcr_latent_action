@@ -23,6 +23,8 @@ from __future__ import annotations
 import numpy as np
 from torch.utils.data import Sampler
 
+from lerobot.common.datasets.contrastive_sample_pool import CompactSamplePool
+
 
 class ContrastiveBatchSampler(Sampler):
     """Distributed batch sampler yielding lists of ``(dataset_idx, frame_idx)`` tuples.
@@ -53,10 +55,19 @@ class ContrastiveBatchSampler(Sampler):
         dataset_has_physical: np.ndarray | list[bool] | None = None,
         min_physical_per_batch: int = 2,
         balance_across_ranks: bool = False,
+        sample_pool: CompactSamplePool | None = None,
     ):
         self.episode_ranges = episode_ranges
         self.batch_size = batch_size
         self.sample_weights = np.asarray(sample_weights, dtype=np.float64)
+        if sample_pool is not None and sample_pool.num_datasets != len(
+            self.sample_weights
+        ):
+            raise ValueError(
+                f"sample_pool has {sample_pool.num_datasets} datasets, expected "
+                f"{len(self.sample_weights)}."
+            )
+        self.sample_pool = sample_pool
         self.sample_weights = self.sample_weights / self.sample_weights.sum()
         if sample_costs is None:
             self.sample_costs = np.ones(len(self.sample_weights), dtype=np.float64)
@@ -149,6 +160,8 @@ class ContrastiveBatchSampler(Sampler):
         )
 
     def _random_frame(self, rng: np.random.Generator, ds_idx: int) -> int:
+        if self.sample_pool is not None:
+            return self.sample_pool.sample_frame(rng, ds_idx)
         usable = self.usable[ds_idx]
         ep = int(rng.integers(0, len(usable)))
         start, end = usable[ep]
@@ -156,6 +169,13 @@ class ContrastiveBatchSampler(Sampler):
 
     def _episode_group(self, rng: np.random.Generator, ds_idx: int, count: int) -> list[int]:
         """Sample up to ``count`` frames of one episode, pairwise ``min_frame_gap`` apart."""
+        if self.sample_pool is not None:
+            return self.sample_pool.sample_episode_group(
+                rng,
+                ds_idx,
+                count,
+                self.min_frame_gap,
+            )
         usable = self.usable[ds_idx]
         ep = int(rng.integers(0, len(usable)))
         start, end = int(usable[ep][0]), int(usable[ep][1])

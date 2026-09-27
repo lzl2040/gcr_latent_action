@@ -10,8 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lerobot.common.datasets.contrastive_dataset import MultiModalContrastiveDataset
 from lerobot.common.datasets import contrastive_eval
+from lerobot.common.datasets.contrastive_dataset import MultiModalContrastiveDataset
 from lerobot.common.datasets.mixtures import OXE_NAMED_MIXTURES
 from lerobot.common.policies.ace import modeling_robo_contrast
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
@@ -246,6 +246,9 @@ def test_contrastive_dataset_keeps_perception_only_sources() -> None:
 
     assert dataset.dataset_names == ["ego10k_part1"]
     assert dataset.has_physical.tolist() == [False]
+    assert dataset.pool_anchor_counts.tolist() == [96]
+    assert dataset.total_pool_anchors == 96
+    assert dataset.num_frames == 96
     assert dataset.dataset_statistics[0]["training"] == "perception-only"
 
 

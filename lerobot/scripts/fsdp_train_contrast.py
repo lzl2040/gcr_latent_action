@@ -215,9 +215,10 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         dataset_has_physical=dataset.has_physical,
         min_physical_per_batch=0,
         balance_across_ranks=True,
+        sample_pool=dataset.sample_pool,
     )
     epoch_schedule = _compute_epoch_schedule(
-        total_source_frames=dataset.total_source_frames,
+        total_source_frames=dataset.total_pool_anchors,
         steps_per_epoch=len(sampler),
         global_samples_per_step=cfg.batch_size * world_size,
     )
@@ -238,6 +239,14 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         "total_micro_steps": epoch_schedule.total_steps,
         "seed": cfg.seed,
     }
+    if dataset.sample_pool is not None:
+        training_geometry.update(
+            {
+                "total_pool_anchors": dataset.total_pool_anchors,
+                "sample_pool_fingerprint": dataset.sample_pool_fingerprint,
+                "dataset_sample_weights": dataset.sample_weights.tolist(),
+            }
+        )
     dataloader = DataLoader(
         dataset=dataset,
         batch_sampler=sampler,
@@ -252,16 +261,18 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     if rank == 0:
         logger.info("Dataset: %s", dataset)
         logger.info(
-            "Epoch schedule: source_frames=%s configured_samples_per_epoch=%s "
+            "Epoch schedule: source_frames=%s pool_anchors=%s configured_samples_per_epoch=%s "
             "actual_samples_per_epoch=%s micro_steps_per_epoch=%s total_epochs=%s "
-            "total_micro_steps=%s optimizer_steps=%s",
+            "total_micro_steps=%s optimizer_steps=%s pool=%s",
             format_big_number(dataset.total_source_frames),
+            format_big_number(dataset.total_pool_anchors),
             format_big_number(cfg.dataset.dataset_size_one_epoch),
             format_big_number(epoch_schedule.samples_per_epoch),
             format_big_number(epoch_schedule.steps_per_epoch),
             format_big_number(epoch_schedule.total_epochs),
             format_big_number(epoch_schedule.total_steps),
             format_big_number(total_update_steps),
+            dataset.sample_pool_fingerprint,
         )
 
     # All ranks construct identical random Generation weights before FSDP shards them.

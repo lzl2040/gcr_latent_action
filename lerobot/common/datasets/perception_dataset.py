@@ -52,6 +52,10 @@ from lerobot.common.datasets.contrastive_dataset import (
     MultiModalContrastiveDataset,
     resolve_pair_horizon,
 )
+from lerobot.common.datasets.contrastive_sample_pool import (
+    build_or_load_sample_pool,
+    resolve_sample_pool_paths,
+)
 from lerobot.common.datasets.dataset_fps import resolve_true_fps
 from lerobot.common.datasets.instruction_text import dataset_task_strings, is_real_instruction
 from lerobot.common.datasets.lerobot_dataset_for_ace import (
@@ -193,9 +197,51 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
         if not self.datasets:
             raise RuntimeError(f"No dataset of mixture '{data_mix}' could be loaded.")
 
-        weights = np.array(kept_weights, dtype=np.float64) * np.array(
-            self.dataset_sizes, dtype=np.float64
+        self.sample_pool = None
+        if bool(getattr(cfg.dataset, "sample_pool_enabled", True)):
+            pool_root, cache_root = resolve_sample_pool_paths(cfg)
+            self.sample_pool = build_or_load_sample_pool(
+                data_mix=f"{data_mix}__perception_{camera_mode}",
+                dataset_names=self.dataset_names,
+                dataset_sizes=self.dataset_sizes,
+                episode_ranges=self.episode_ranges,
+                true_fps=self.true_fps,
+                horizons=self.frame_horizons,
+                keep_all_below_fps=float(
+                    getattr(
+                        cfg.dataset,
+                        "sample_pool_keep_all_below_fps",
+                        10.0,
+                    )
+                ),
+                target_hz=float(
+                    getattr(cfg.dataset, "sample_pool_target_hz", 5.0)
+                ),
+                pool_root=pool_root,
+                local_cache_root=cache_root,
+            )
+            self.pool_anchor_counts = self.sample_pool.dataset_anchor_counts.copy()
+            self.anchor_strides = self.sample_pool.anchor_strides.copy()
+            self.sample_pool_fingerprint = self.sample_pool.fingerprint
+            weight_sizes = self.pool_anchor_counts
+        else:
+            self.pool_anchor_counts = np.asarray(
+                self.dataset_sizes,
+                dtype=np.int64,
+            )
+            self.anchor_strides = np.ones(len(self.datasets), dtype=np.int64)
+            self.sample_pool_fingerprint = "disabled"
+            weight_sizes = np.asarray(self.dataset_sizes, dtype=np.int64)
+
+        self.total_pool_anchors = int(
+            self.pool_anchor_counts.sum(dtype=np.int64)
         )
+        weights = np.array(kept_weights, dtype=np.float64) * weight_sizes
+        if weights.sum() <= 0:
+            raise RuntimeError(
+                "The perception sample pool is empty. Every episode is shorter than its "
+                "required frame horizon."
+            )
         self.sample_weights = weights / weights.sum()
         self.dataset_size_one_epoch = dataset_size_one_epoch
         self.dataset_sample_counts = (self.sample_weights * dataset_size_one_epoch).astype(int)
@@ -214,15 +260,32 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
                     [
                         self.dataset_names[i],
                         self.dataset_sizes[i],
+                        self.pool_anchor_counts[i],
+                        self.anchor_strides[i],
+                        f"{self.true_fps[i] / self.anchor_strides[i]:.2f}",
                         f"{self.sample_weights[i]:.4f}",
                         len(self.episode_ranges[i]),
                         f"{100 * self.text_coverage[i]:.0f}%",
                     ]
                     for i in range(len(self.datasets))
                 ],
-                headers=["Dataset/view", "Frames", "Ratio", "Episodes", "Text"],
+                headers=[
+                    "Dataset/view",
+                    "Frames",
+                    "Anchors",
+                    "Stride",
+                    "Anchor Hz",
+                    "Ratio",
+                    "Episodes",
+                    "Text",
+                ],
                 tablefmt="grid",
             )
+        )
+        logger.info(
+            "Perception sample-start pool: fingerprint=%s anchors=%d",
+            self.sample_pool_fingerprint,
+            self.total_pool_anchors,
         )
         no_text = [n for n, c in zip(self.dataset_names, self.text_coverage, strict=True) if c < 0.5]
         if no_text:
@@ -348,17 +411,21 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
     # sampling
     # ------------------------------------------------------------------
     def _build_sampling_plan(self, seed: int) -> list[tuple[int, int]]:
-        """``(ds_idx, frame_idx)`` pairs, uniform over the *valid* frames of each dataset.
+        """Build the epoch's ``(ds_idx, frame_idx)`` draws.
 
-        Sampling episode-then-offset with the episode drawn proportionally to its trimmed
-        length is uniform over valid frames while never materialising the frame list, which
-        for a multi-million-frame mixture matters.
+        With a persistent pool, draws are uniform over its sparse logical anchors without
+        materialising them. The disabled-pool fallback is uniform over all valid frames by
+        drawing episodes proportionally to their trimmed lengths.
         """
         rng = np.random.default_rng(seed)
         plan: list[tuple[int, int]] = []
         for ds_idx, count in enumerate(self.dataset_sample_counts):
             count = int(count)
             if count <= 0:
+                continue
+            if self.sample_pool is not None:
+                frames = self.sample_pool.sample_frames(rng, ds_idx, count)
+                plan.extend((ds_idx, int(frame)) for frame in frames)
                 continue
             starts, lengths = self._valid_starts[ds_idx]
             probs = lengths / lengths.sum()
@@ -391,9 +458,26 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
         try:
             item = dataset[frame_idx]
         except Exception as exc:  # noqa: BLE001 - never let one broken frame kill training
-            logger.warning("Failed to read %s[%d]: %s", self.dataset_names[ds_idx], frame_idx, exc)
-            item = dataset[0]
-            frame_idx = 0
+            seed = np.random.SeedSequence(
+                [int(self.seed), int(self.epoch), ds_idx, frame_idx]
+            )
+            if self.sample_pool is not None:
+                fallback_idx = self.sample_pool.sample_frame_excluding(
+                    np.random.default_rng(seed),
+                    ds_idx,
+                    frame_idx,
+                )
+            else:
+                fallback_idx = 0
+            logger.warning(
+                "Failed to read %s[%d]: %s; retrying frame %d.",
+                self.dataset_names[ds_idx],
+                frame_idx,
+                exc,
+                fallback_idx,
+            )
+            item = dataset[fallback_idx]
+            frame_idx = fallback_idx
 
         image_t0, image_t1, pair_valid = self._extract_frames(item, self.image_keys[ds_idx])
 
@@ -421,4 +505,4 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
 
     @property
     def num_frames(self) -> int:
-        return self.dataset_len
+        return self.total_pool_anchors if self.sample_pool is not None else self.dataset_len

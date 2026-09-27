@@ -107,6 +107,69 @@ launcher 现在会在训练前检测这类残留并立即退出，避免从头�
 不要把 `WANDB_API_KEY` 或其他凭据写入本文、launcher 或 AMLT YAML。集群运行时应通过
 任务系统 secret 或环境变量注入。
 
+### 固定的稀疏样本起点池
+
+Stage 1/Stage 2 的 contrastive dataset 默认会为每个 mixture 建立一个持久化的样本起点池。
+它只稀疏训练窗口的起点 `t`，不会稀疏窗口内部的 action/state：
+
+```text
+30 fps, anchor stride = 6
+
+sample 0: start=0, action/state=[0, 1, ..., 31]
+sample 1: start=6, action/state=[6, 7, ..., 37]
+sample 2: start=12, action/state=[12, 13, ..., 43]
+```
+
+默认规则为：
+
+```text
+true_fps <= 10: anchor_stride = 1
+true_fps > 10 : anchor_stride = max(2, round(true_fps / 5))
+```
+
+因此 15/20/24/30 fps 对应的起点间隔分别为 3/4/5/6 帧。`window_mode=frames` 下每个
+样本内部仍连续读取 32 帧 action/state；9 帧 world video 仍从同一个 `[t,t+31]` 窗口均匀
+读取。
+
+池不会保存数亿个 frame index，而是每个可用 episode 只保存一行：
+
+```text
+episode_start, anchor_count, cumulative_anchor_count
+```
+
+默认共享路径和节点本地 mmap cache 为：
+
+```text
+SAMPLE_POOL_ROOT=${OUTPUT_ROOT}/_sample_pools
+SAMPLE_POOL_CACHE_DIR=${TMPDIR:-/tmp}/robo_contrast_sample_pools
+```
+
+rank 0 首次构建共享池，后续任务根据 fingerprint 直接复用；每个节点只把紧凑的
+`episodes.npy` 复制到本地 cache，然后由本节点所有 rank mmap。fingerprint 包含 dataset
+顺序、episode 边界、真实 fps、窗口 horizon 和采样规则，任一项变化都会建立新目录而不是
+覆盖旧池。
+
+可用配置：
+
+```bash
+SAMPLE_POOL_ENABLED=true
+SAMPLE_POOL_KEEP_ALL_BELOW_FPS=10
+SAMPLE_POOL_TARGET_HZ=5
+SAMPLE_POOL_ROOT=/mnt/wangxiaofa/qwen3vl_mot_exp/_sample_pools
+SAMPLE_POOL_CACHE_DIR=/tmp/robo_contrast_sample_pools
+```
+
+dataset mixture 权重和 source-equivalent epoch 现在按有效 anchor 数量计算，而不是继续按原始
+帧数计算。FSDP checkpoint 的 training geometry 和 DeepSpeed client state 都记录 pool
+fingerprint；Resume 时池发生变化会直接报错。若要恢复本功能加入之前保存的旧 checkpoint，
+必须保持旧的数据几何：
+
+```bash
+SAMPLE_POOL_ENABLED=false bash train_qwen3vl_mot_fsdp.sh
+```
+
+新实验应保留默认的 `SAMPLE_POOL_ENABLED=true`。
+
 ---
 
 ## 1. 集群默认路径

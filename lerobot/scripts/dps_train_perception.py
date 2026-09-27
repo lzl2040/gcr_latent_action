@@ -24,21 +24,21 @@ run is not producing anything stage 2 can use, however healthy the loss curve lo
 """
 
 import json
-import logging
 import os
 import time
-from datetime import datetime
-from pathlib import Path
 from pprint import pformat
 from typing import Any
 
 import deepspeed
-import torch
 from termcolor import colored
 from torch import distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
 from lerobot.common.datasets.contrastive_dataset import contrastive_collate_fn
+from lerobot.common.datasets.contrastive_sample_pool import (
+    sample_pool_checkpoint_state,
+    validate_sample_pool_resume,
+)
 from lerobot.common.datasets.perception_dataset import PerceptionVideoDataset
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
@@ -55,7 +55,11 @@ from lerobot.common.utils.utils import format_big_number
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.scripts.dps_train_contrast import _worker_init, init_logger, move_batch
+from lerobot.scripts.dps_train_contrast import (
+    _worker_init,
+    init_logger,
+    move_batch,
+)
 
 
 def update_policy(model_engine, batch: Any, step: int):
@@ -189,6 +193,7 @@ def train(cfg: TrainPipelineConfig):
             # Only the fields this script owns: load_checkpoint also returns DeepSpeed's own
             # metadata (e.g. `checkpoint_parallel_dimensions`), and feeding that back into
             # save_checkpoint raises "client_state contains reserved checkpoint key".
+            validate_sample_pool_resume(dataset.sample_pool, loaded_state)
             step = loaded_state.get("step", 0)
             if not optimizer_restored:
                 align_fresh_scheduler_to_step(
@@ -270,6 +275,7 @@ def train(cfg: TrainPipelineConfig):
                         "epoch": epoch,
                         OPTIMIZER_GROUP_SIGNATURE_KEY: optimizer_signature,
                         DATA_PARALLEL_WORLD_SIZE_KEY: world_size,
+                        **sample_pool_checkpoint_state(dataset.sample_pool),
                     },
                 )
 

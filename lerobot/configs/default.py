@@ -58,6 +58,13 @@ class DatasetConfig:
     # Extra roots searched after the two above, for datasets that live on a different mount
     # (an external disk, a blob mirror). Comma-separated so it can be set from the CLI.
     parent_dir_extra: str = ""
+    # Persist a compact pool of valid temporal-window start frames. Only one row per episode is
+    # stored; action/state inside each sampled window remain consecutive at the source frame rate.
+    sample_pool_enabled: bool = True
+    sample_pool_root: str | None = None
+    sample_pool_cache_dir: str | None = None
+    sample_pool_keep_all_below_fps: float = 10.0
+    sample_pool_target_hz: float = 5.0
     calvin_sub_task: int | None = 0
 
 

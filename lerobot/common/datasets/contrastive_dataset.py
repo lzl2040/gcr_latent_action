@@ -28,17 +28,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
-import math
 import os
-from datetime import datetime
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from tabulate import tabulate
 
-from lerobot.common.datasets.dataset_fps import resolve_true_fps
-from lerobot.common.datasets.instruction_text import is_real_instruction
 from lerobot.common.datasets.canonical_space import (
     CANON_DIM,
     MAX_TACTILE_SIGNAL_DIM,
@@ -47,6 +43,12 @@ from lerobot.common.datasets.canonical_space import (
     tactile_image_keys,
     tactile_signal_keys,
 )
+from lerobot.common.datasets.contrastive_sample_pool import (
+    build_or_load_sample_pool,
+    resolve_sample_pool_paths,
+)
+from lerobot.common.datasets.dataset_fps import resolve_true_fps
+from lerobot.common.datasets.instruction_text import is_real_instruction
 from lerobot.common.datasets.lerobot_dataset_for_ace import (
     LeRobotDataset,
     LeRobotDatasetMetadata,
@@ -300,8 +302,68 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             for name, spec in zip(self.dataset_names, self.specs, strict=True)
         ]
 
-        # Balance by dataset size, as in the original pipeline.
-        weights = np.array(kept_weights, dtype=np.float64) * np.array(self.dataset_sizes, dtype=np.float64)
+        self.sample_pool = None
+        sample_pool_enabled = bool(
+            getattr(cfg.dataset, "sample_pool_enabled", True)
+        )
+        if sample_pool_enabled:
+            pool_root, cache_root = resolve_sample_pool_paths(cfg)
+            self.sample_pool = build_or_load_sample_pool(
+                data_mix=data_mix,
+                dataset_names=self.dataset_names,
+                dataset_sizes=self.dataset_sizes,
+                episode_ranges=self.episode_ranges,
+                true_fps=self.true_fps,
+                horizons=self.frame_horizons,
+                keep_all_below_fps=float(
+                    getattr(
+                        cfg.dataset,
+                        "sample_pool_keep_all_below_fps",
+                        10.0,
+                    )
+                ),
+                target_hz=float(
+                    getattr(cfg.dataset, "sample_pool_target_hz", 5.0)
+                ),
+                pool_root=pool_root,
+                local_cache_root=cache_root,
+            )
+            self.pool_anchor_counts = self.sample_pool.dataset_anchor_counts.copy()
+            self.anchor_strides = self.sample_pool.anchor_strides.copy()
+            self.sample_pool_fingerprint = self.sample_pool.fingerprint
+            self.sample_pool_path = self.sample_pool.storage_dir
+        else:
+            self.pool_anchor_counts = np.asarray(
+                self.dataset_sizes,
+                dtype=np.int64,
+            )
+            self.anchor_strides = np.ones(len(self.datasets), dtype=np.int64)
+            self.sample_pool_fingerprint = "disabled"
+            self.sample_pool_path = None
+
+        if not np.any(self.pool_anchor_counts > 0):
+            raise RuntimeError(
+                "The temporal sample pool is empty. Every episode is shorter than its "
+                "required frame horizon."
+            )
+        for name, count in zip(
+            self.dataset_names,
+            self.pool_anchor_counts,
+            strict=True,
+        ):
+            if count == 0:
+                logger.warning(
+                    "%s has no full temporal window and will not be sampled.",
+                    name,
+                )
+
+        # Weight datasets by valid sample starts, not raw frame count. This prevents a 30 fps
+        # source from retaining its old probability after its redundant starts were thinned.
+        weights = np.array(kept_weights, dtype=np.float64) * self.pool_anchor_counts
+        if weights.sum() <= 0:
+            raise RuntimeError(
+                "Every mixture weight resolves to a dataset with zero valid sample anchors."
+            )
         self.sample_weights = weights / weights.sum()
         # Every sample reads one primary video stream. Each tactile view adds another video
         # stream plus four ResNet frames and two decoder endpoints, so view count is a useful
@@ -315,6 +377,20 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.total_source_frames = sum(stat["frames"] for stat in self.dataset_statistics)
         self.total_source_episodes = sum(stat["episodes"] for stat in self.dataset_statistics)
         self.total_source_hours = sum(stat["hours"] for stat in self.dataset_statistics)
+        self.total_pool_anchors = int(
+            self.pool_anchor_counts.sum(dtype=np.int64)
+        )
+        logger.info(
+            "Sample-start pool: fingerprint=%s anchors=%d source_frames=%d table=%s",
+            self.sample_pool_fingerprint,
+            self.total_pool_anchors,
+            self.total_source_frames,
+            (
+                getattr(self.sample_pool.episode_table, "filename", None)
+                if self.sample_pool is not None
+                else "<disabled>"
+            ),
+        )
         self._print_dataset_statistics()
 
         # Flatten integer indexing with one int64 boundary per source dataset. The contrastive
@@ -340,13 +416,24 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         These are source totals, independent of mixture weights and the sampled epoch size.
         """
         statistics = []
-        for name, frames, fps, ratio, episode_ranges, has_physical in zip(
+        for (
+            name,
+            frames,
+            fps,
+            ratio,
+            episode_ranges,
+            has_physical,
+            anchor_count,
+            anchor_stride,
+        ) in zip(
             self.dataset_names,
             self.dataset_sizes,
             self.true_fps,
             self.sample_weights,
             self.episode_ranges,
             self.has_physical,
+            self.pool_anchor_counts,
+            self.anchor_strides,
             strict=True,
         ):
             if fps <= 0:
@@ -360,6 +447,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                     "sample_ratio": float(ratio),
                     "episodes": int(len(episode_ranges)),
                     "training": "contrastive" if has_physical else "perception-only",
+                    "anchor_count": int(anchor_count),
+                    "anchor_stride": int(anchor_stride),
+                    "anchor_hz": float(fps) / int(anchor_stride),
+                    "anchor_ratio": float(anchor_count) / max(1, int(frames)),
                 }
             )
         return statistics
@@ -371,6 +462,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 stat["frames"],
                 f"{stat['fps']:g}",
                 f"{stat['hours']:.2f}",
+                stat["anchor_count"],
+                stat["anchor_stride"],
+                f"{stat['anchor_hz']:.2f}",
+                f"{stat['anchor_ratio']:.3f}",
                 f"{stat['sample_ratio']:.4f}",
                 stat["episodes"],
                 stat["training"],
@@ -383,6 +478,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 self.total_source_frames,
                 "-",
                 f"{self.total_source_hours:.2f}",
+                self.total_pool_anchors,
+                "-",
+                "-",
+                f"{self.total_pool_anchors / max(1, self.total_source_frames):.3f}",
                 f"{sum(self.sample_weights):.4f}",
                 self.total_source_episodes,
                 "-",
@@ -396,6 +495,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                     "Frames",
                     "FPS",
                     "Hours",
+                    "Anchors",
+                    "Stride",
+                    "Anchor Hz",
+                    "Keep",
                     "Ratio",
                     "Episodes",
                     "Training",
@@ -813,7 +916,18 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 requested_frame_idx,
             ]
         )
-        candidate = int(np.random.default_rng(seed).integers(dataset_length - 1))
+        rng = np.random.default_rng(seed)
+        sample_pool = getattr(self, "sample_pool", None)
+        if (
+            sample_pool is not None
+            and sample_pool.dataset_anchor_counts[ds_idx] > 0
+        ):
+            return sample_pool.sample_frame_excluding(
+                rng,
+                ds_idx,
+                requested_frame_idx,
+            )
+        candidate = int(rng.integers(dataset_length - 1))
         return candidate + int(candidate >= requested_frame_idx)
 
     # ------------------------------------------------------------------
@@ -1131,7 +1245,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
     # ------------------------------------------------------------------
     @property
     def num_frames(self) -> int:
-        return self.dataset_len
+        return int(getattr(self, "total_pool_anchors", self.dataset_len))
 
     @property
     def features(self):

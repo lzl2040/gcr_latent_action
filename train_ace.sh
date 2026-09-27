@@ -75,6 +75,9 @@ usage() {
   --chunk_frames_min N --chunk_frames_max N [--frame_horizon N]
   --same_dataset_frac FLOAT --episode_group_frac FLOAT
   --episode_group_size N --min_frame_gap N --false_negative_frame_gap N
+  --sample_pool_enabled true|false --sample_pool_root DIR
+  --sample_pool_cache_dir DIR --sample_pool_keep_all_below_fps FLOAT
+  --sample_pool_target_hz FLOAT
 
 训练：
   --batch_size N                 每卡 micro batch
@@ -133,6 +136,11 @@ WEIGHT_RESUME=true
 RESUME=false
 DEEPSPEED_CONFIG="./ds_zero2_contrast.json"
 VIDEO_BACKEND="torchcodec"
+SAMPLE_POOL_ENABLED="${SAMPLE_POOL_ENABLED:-true}"
+SAMPLE_POOL_ROOT="${SAMPLE_POOL_ROOT:-}"
+SAMPLE_POOL_CACHE_DIR="${SAMPLE_POOL_CACHE_DIR:-${TMPDIR:-/tmp}/robo_contrast_sample_pools}"
+SAMPLE_POOL_KEEP_ALL_BELOW_FPS="${SAMPLE_POOL_KEEP_ALL_BELOW_FPS:-10}"
+SAMPLE_POOL_TARGET_HZ="${SAMPLE_POOL_TARGET_HZ:-5}"
 
 # 时间窗口 / 模型结构
 WINDOW_MODE="duration"
@@ -259,6 +267,12 @@ while [[ $# -gt 0 ]]; do
         --dataset_len) DATASET_SIZE_ONE_EPOCH="$2"; shift 2 ;;
         --sample_ratio) SAMPLE_RATIO="$2"; shift 2 ;;
         --video_backend) VIDEO_BACKEND="$2"; shift 2 ;;
+        --sample_pool_enabled) SAMPLE_POOL_ENABLED="$2"; shift 2 ;;
+        --sample_pool_root) SAMPLE_POOL_ROOT="$2"; shift 2 ;;
+        --sample_pool_cache_dir) SAMPLE_POOL_CACHE_DIR="$2"; shift 2 ;;
+        --sample_pool_keep_all_below_fps)
+            SAMPLE_POOL_KEEP_ALL_BELOW_FPS="$2"; shift 2 ;;
+        --sample_pool_target_hz) SAMPLE_POOL_TARGET_HZ="$2"; shift 2 ;;
         --window_mode) WINDOW_MODE="$2"; shift 2 ;;
         --chunk_size) CHUNK_SIZE="$2"; shift 2 ;;
         --n_action_steps) N_ACTION_STEPS="$2"; shift 2 ;;
@@ -418,6 +432,7 @@ require_bool "weight_resume" "$WEIGHT_RESUME"
 require_bool "resume" "$RESUME"
 require_bool "wandb_enable" "$WANDB_ENABLE"
 require_bool "check_paths" "$CHECK_PATHS"
+require_bool "sample_pool_enabled" "$SAMPLE_POOL_ENABLED"
 
 require_positive_int "nnodes" "$NNODES"
 require_positive_int "nproc_per_node" "$NPROC_PER_NODE"
@@ -850,6 +865,11 @@ CMD=(
     --dataset.video_backend="$VIDEO_BACKEND"
     --dataset.sample_ratio="$SAMPLE_RATIO"
     --dataset.dataset_size_one_epoch="$DATASET_SIZE_ONE_EPOCH"
+    --dataset.sample_pool_enabled="$SAMPLE_POOL_ENABLED"
+    --dataset.sample_pool_root="${SAMPLE_POOL_ROOT:-${OUTPUT_DIR}/_sample_pools}"
+    --dataset.sample_pool_cache_dir="$SAMPLE_POOL_CACHE_DIR"
+    --dataset.sample_pool_keep_all_below_fps="$SAMPLE_POOL_KEEP_ALL_BELOW_FPS"
+    --dataset.sample_pool_target_hz="$SAMPLE_POOL_TARGET_HZ"
     --data_mix="$DATA_MIX"
     --batch_size="$BATCH_SIZE"
     --gradient_accumulation_steps="$GRADIENT_ACCUMULATION_STEPS"

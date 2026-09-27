@@ -30,6 +30,10 @@ from lerobot.common.datasets.contrastive_dataset import (
     contrastive_collate_fn,
 )
 from lerobot.common.datasets.contrastive_eval import build_eval_loaders, evaluate
+from lerobot.common.datasets.contrastive_sample_pool import (
+    sample_pool_checkpoint_state,
+    validate_sample_pool_resume,
+)
 from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
@@ -294,19 +298,21 @@ def train(cfg: TrainPipelineConfig):
         dataset_has_physical=dataset.has_physical,
         min_physical_per_batch=0 if is_stage2 else 2,
         balance_across_ranks=True,
+        sample_pool=dataset.sample_pool,
     )
     epoch_schedule = _compute_epoch_schedule(
-        total_source_frames=dataset.total_source_frames,
+        total_source_frames=dataset.total_pool_anchors,
         steps_per_epoch=len(sampler),
         global_samples_per_step=batch_size * world_size,
     )
     if rank == 0:
         logger.info(
-            "Epoch schedule: source_frames=%s configured_samples_per_epoch=%s "
+            "Epoch schedule: source_frames=%s pool_anchors=%s configured_samples_per_epoch=%s "
             "actual_samples_per_epoch=%s steps_per_epoch=%s "
             "source_equivalent_epochs=%s extra_epochs=%s total_epochs=%s "
-            "source_equivalent_steps=%s total_steps=%s; cfg.steps=%s is ignored",
+            "source_equivalent_steps=%s total_steps=%s pool=%s; cfg.steps=%s is ignored",
             format_big_number(dataset.total_source_frames),
+            format_big_number(dataset.total_pool_anchors),
             format_big_number(cfg.dataset.dataset_size_one_epoch),
             format_big_number(epoch_schedule.samples_per_epoch),
             format_big_number(epoch_schedule.steps_per_epoch),
@@ -315,6 +321,7 @@ def train(cfg: TrainPipelineConfig):
             format_big_number(epoch_schedule.total_epochs),
             format_big_number(epoch_schedule.source_equivalent_steps),
             format_big_number(epoch_schedule.total_steps),
+            dataset.sample_pool_fingerprint,
             format_big_number(cfg.steps),
         )
 
@@ -427,6 +434,7 @@ def train(cfg: TrainPipelineConfig):
             # does not filter out on load. Feeding that dict back into save_checkpoint
             # raises "client_state contains reserved checkpoint key", so only pick out
             # the fields this script actually owns.
+            validate_sample_pool_resume(dataset.sample_pool, loaded_state)
             step = loaded_state.get("step", 0)
             if not optimizer_restored:
                 align_fresh_scheduler_to_step(
@@ -642,15 +650,17 @@ def train(cfg: TrainPipelineConfig):
             if cfg.save_checkpoint and (step % cfg.save_freq == 0 or is_last_batch):
                 logger.info(f"Checkpoint policy after step {step}")
                 os.makedirs(cfg.output_dir, exist_ok=True)
+                client_state = {
+                    "step": step,
+                    "epoch": epoch,
+                    "batch_in_epoch": batch_idx + 1,
+                    OPTIMIZER_GROUP_SIGNATURE_KEY: optimizer_signature,
+                    DATA_PARALLEL_WORLD_SIZE_KEY: world_size,
+                    **sample_pool_checkpoint_state(dataset.sample_pool),
+                }
                 model_engine.save_checkpoint(
                     save_dir=cfg.output_dir,
-                    client_state={
-                        "step": step,
-                        "epoch": epoch,
-                        "batch_in_epoch": batch_idx + 1,
-                        OPTIMIZER_GROUP_SIGNATURE_KEY: optimizer_signature,
-                        DATA_PARALLEL_WORLD_SIZE_KEY: world_size,
-                    },
+                    client_state=client_state,
                 )
 
             should_log = cfg.log_freq > 0 and step % cfg.log_freq == 0

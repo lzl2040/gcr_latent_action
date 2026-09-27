@@ -409,20 +409,25 @@ gradient accumulation = 1
 steps cap = 600000
 ```
 
-按本次实际加载到的 42,629,776 个 source frames 计算：
+训练长度不再直接按原始 `source frames` 计算。默认 sample-start pool 对
+`true_fps <= 10` 的数据保留全部起点，对更高帧率的数据约保留 5 个起点/秒；每个起点内部的
+32 帧 action/state 仍连续读取。因此应使用启动日志里的 `pool_anchors`：
 
 ```text
 steps/sampler epoch = floor(100000 / 128) = 781
 actual samples/sampler epoch = 781 * 128 = 99,968
-source-equivalent epochs = ceil(42,629,776 / 99,968) = 427
+source-equivalent epochs = ceil(pool_anchors / 99,968)
 extra epochs = 100
-planned optimizer steps = (427 + 100) * 781 = 411,587
-planned sample draws = 411,587 * 128 = 52,683,136
+planned optimizer steps = min(
+    (source-equivalent epochs + 100) * 781,
+    600,000
+)
 ```
 
-自然 epoch 计划为 411,587 步，小于 `STEPS=600000`，所以当前默认完整训练会在
-约 411.6k 步结束。`STEPS` 现在是有效的 optimizer-step 上限，可用于更短的
-smoke 或训练预算控制。
+此前用 42,629,776 个原始帧得到的 411,587 步估算已经不再适用。确切预算取决于各数据集的
+真实 FPS、episode 边界和 31 帧 horizon；首次构建池后日志会同时打印 `source_frames`、
+`pool_anchors`、每个数据集的 `Stride/Anchor Hz/Keep` 以及最终 `optimizer_steps`。
+`STEPS=600000` 仍是 optimizer-step 上限。
 
 沿用上文“VLM Transformer 全量 + vision LoRA + Generation 全量”的
 **1.0–1.5 s/step H100 估计**：
@@ -430,11 +435,11 @@ smoke 或训练预算控制。
 | 项目 | 乐观 | 保守 |
 |---|---:|---:|
 | 单步时间 | 1.0 s | 1.5 s |
-| 411,587 步墙钟 | 114.3 h | 171.5 h |
-| 墙钟天数 | 4.76 天 | 7.15 天 |
-| 8 卡 GPU-hours | 915 | 1,372 |
+| 每 100k 步墙钟 | 27.8 h | 41.7 h |
+| 每 100k 步墙钟天数 | 1.16 天 | 1.74 天 |
+| 每 100k 步、8 卡 GPU-hours | 222 | 333 |
 
-若为数据长尾、checkpoint、评估和重启预留 10–20%，建议实际排期按约
-**5.2–8.6 天**准备。这个总成本仍是估算；只有在 8×H100 上使用完整模型、
-原生 FP8、micro-batch 16 和同一数据存储完成稳定多步 benchmark 后，才能替换
+得到首次启动日志中的 `optimizer_steps` 后，可按上表线性换算，并为数据长尾、
+checkpoint、评估和重启额外预留 10–20%。这个总成本仍是估算；只有在 8×H100 上使用
+完整模型、原生 FP8、micro-batch 16 和同一数据存储完成稳定多步 benchmark 后，才能替换
 为实测值。

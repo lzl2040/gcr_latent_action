@@ -12,6 +12,9 @@ WEIGHT_RESUME="${WEIGHT_RESUME:-false}"
 if [[ "${WEIGHT_RESUME}" != "true" ]]; then
     : "${STAGE1_CHECKPOINT:?Set STAGE1_CHECKPOINT for a fresh stage-two run}"
 fi
+OUTPUT_DIR="${OUTPUT_DIR:-qwen3vl_mot}"
+SAMPLE_POOL_ROOT="${SAMPLE_POOL_ROOT:-$(dirname "${OUTPUT_DIR}")/_sample_pools}"
+SAMPLE_POOL_CACHE_DIR="${SAMPLE_POOL_CACHE_DIR:-${TMPDIR:-/tmp}/robo_contrast_sample_pools}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export LEROBOT_VIDEO_DECODER_CACHE_SIZE="${LEROBOT_VIDEO_DECODER_CACHE_SIZE:-256}"
@@ -61,9 +64,14 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --dataset.parent_dir_extra="${DATA_ROOT_EXTRA:-}" \
     --dataset.video_backend="torchcodec" \
     --dataset.dataset_size_one_epoch="${SAMPLES_PER_EPOCH:-100000}" \
+    --dataset.sample_pool_enabled="${SAMPLE_POOL_ENABLED:-true}" \
+    --dataset.sample_pool_root="${SAMPLE_POOL_ROOT}" \
+    --dataset.sample_pool_cache_dir="${SAMPLE_POOL_CACHE_DIR}" \
+    --dataset.sample_pool_keep_all_below_fps="${SAMPLE_POOL_KEEP_ALL_BELOW_FPS:-10}" \
+    --dataset.sample_pool_target_hz="${SAMPLE_POOL_TARGET_HZ:-5}" \
     --data_mix="${DATA_MIX:-debug_research_data}" \
     --num_workers="${NUM_WORKERS:-8}" \
-    --output_dir="${OUTPUT_DIR:-qwen3vl_mot}" \
+    --output_dir="${OUTPUT_DIR}" \
     --job_name="${JOB_NAME:-qwen3vl_mot}" \
     --weight_resume="${WEIGHT_RESUME}" \
     --save_freq="${SAVE_FREQ:-2000}" \
