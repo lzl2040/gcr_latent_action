@@ -110,8 +110,9 @@ def build_cosmos3_vae(model_dir: str | Path, *, encoder_only: bool = True):
 
     Returns ``(vae, z_dim, temporal_compression, latents_mean, latents_std)``.
 
-    The decoder is dropped by default. Stage one only calls ``encode``; stage two passes
-    ``encoder_only=False`` because sampled video latents must remain decodable.
+    The decoder is dropped by default. Stage-one and Stage-two training only call
+    ``encode``; the held-out generation evaluator loads a separate full VAE on rank zero
+    so decoder weights do not enter the FSDP checkpoint.
 
     ``latents_mean``/``latents_std`` are Wan2.2's own per-channel latent statistics. They
     matter for the same reason section 19's tactile statistics did: an unnormalised target

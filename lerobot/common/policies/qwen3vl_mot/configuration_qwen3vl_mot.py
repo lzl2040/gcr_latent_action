@@ -82,6 +82,10 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     action_loss_weight: float = 1.0
     state_loss_weight: float = 1.0
     tactile_loss_weight: float = 0.25
+    # "context_tokens" preserves checkpoints trained against physical-transformer tactile
+    # tokens. "spatial_patches" predicts the ResNet codec's future spatial latent, which the
+    # transferred tactile decoder can turn back into an RGB tactile image.
+    tactile_generation_target: str = "context_tokens"
     inference_steps: int = 20
 
     # Stage two predicts executable action chunks, so these must be consecutive source
@@ -203,6 +207,15 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
             raise ValueError(
                 f"Expected 0 <= sigma_min < sigma_max <= 1, got "
                 f"{self.sigma_min} and {self.sigma_max}."
+            )
+        if self.tactile_generation_target not in (
+            "context_tokens",
+            "spatial_patches",
+        ):
+            raise ValueError(
+                "`tactile_generation_target` must be 'context_tokens' or "
+                "'spatial_patches', got "
+                f"{self.tactile_generation_target!r}."
             )
         resolve_task_specs(self.task_names, self.task_weights)
 

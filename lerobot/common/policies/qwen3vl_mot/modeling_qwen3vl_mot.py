@@ -340,17 +340,36 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             nn.Linear(self.understanding.hidden_dim, config.latent_action_dim),
             nn.LayerNorm(config.latent_action_dim),
         )
+        if config.tactile_generation_target == "spatial_patches":
+            if (
+                self.physical_encoder.use_ftp1_tactile
+                or self.physical_encoder.use_anytouch_tactile
+                or self.physical_encoder.tactile_recon is None
+            ):
+                raise ValueError(
+                    "Decodable tactile generation requires a stage-one checkpoint trained "
+                    "with tactile_backbone='resnet18' and tactile_recon_weight > 0."
+                )
+            for module in (
+                self.physical_encoder.tactile_cnn,
+                self.physical_encoder.tactile_recon,
+            ):
+                for parameter in module.parameters():
+                    parameter.requires_grad_(False)
+            tactile_generation_dim = self.physical_encoder.tactile_feat_dim
+        else:
+            tactile_generation_dim = config.physical_hidden_dim
         input_dims = {
             "video": config.video_latent_dim * config.video_latent_patch_size**2,
             "state": config.physical_hidden_dim,
             "action": config.physical_hidden_dim,
-            "tactile": config.physical_hidden_dim,
+            "tactile": tactile_generation_dim,
         }
         output_dims = {
             "video": config.video_latent_dim * config.video_latent_patch_size**2,
             "state": config.group_size * config.max_state_dim,
             "action": config.group_size * config.max_action_dim,
-            "tactile": config.physical_hidden_dim,
+            "tactile": tactile_generation_dim,
         }
         self.task_specs, self.task_weights = resolve_task_specs(
             config.task_names,
@@ -418,6 +437,9 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         self.video_vae.eval()
         if self.config.physical_tuning_mode == "frozen":
             self.physical_encoder.eval()
+        if self.config.tactile_generation_target == "spatial_patches":
+            self.physical_encoder.tactile_cnn.eval()
+            self.physical_encoder.tactile_recon.eval()
         return self
 
     def reset(self):
@@ -541,28 +563,22 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
         return image
 
-    @torch.no_grad()
-    def sample_canonical_action(self, batch: dict) -> torch.Tensor:
-        """Sample a normalized canonical action chunk.
-
-        This deliberately does not masquerade as `select_action`: mapping the canonical
-        40-dimensional result back to one robot's action order and units belongs to the
-        embodiment adapter that produced `action_mask`.
-        """
+    def _sample_canonical_action(
+        self,
+        batch: dict,
+        understanding,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
         image = self._current_image(batch)
         device = next(self.generation.parameters()).device
-        image = image.to(device)
-        texts = batch.get("task", [""] * image.shape[0])
-        if isinstance(texts, str):
-            texts = [texts] * image.shape[0]
-        understanding = self.understanding(image, texts)
-
         action = torch.randn(
             image.shape[0],
             self.config.chunk_size,
             self.config.max_action_dim,
             device=device,
             dtype=torch.float32,
+            generator=generator,
         )
         action_mask = batch["action_mask"].to(device).unsqueeze(1)
         action = action * action_mask
@@ -618,6 +634,23 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             action = action + (next_sigma - sigma) * velocity
             action = action * action_mask
         return action[:, : self.config.n_action_steps]
+
+    @torch.no_grad()
+    def sample_canonical_action(self, batch: dict) -> torch.Tensor:
+        """Sample a normalized canonical action chunk.
+
+        This deliberately does not masquerade as `select_action`: mapping the canonical
+        40-dimensional result back to one robot's action order and units belongs to the
+        embodiment adapter that produced `action_mask`.
+        """
+        image = self._current_image(batch)
+        device = next(self.generation.parameters()).device
+        image = image.to(device)
+        texts = batch.get("task", [""] * image.shape[0])
+        if isinstance(texts, str):
+            texts = [texts] * image.shape[0]
+        understanding = self.understanding(image, texts)
+        return self._sample_canonical_action(batch, understanding)
 
     def select_action(self, batch):
         raise NotImplementedError(
@@ -675,6 +708,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         has_tactile = (
             batch["tactile_signal_mask"].to(device).reshape(-1) > 0
         ) | (batch["tactile_image_mask"].to(device).sum(dim=-1) > 0)
+        if self.config.tactile_generation_target == "spatial_patches":
+            has_tactile = (
+                batch["tactile_image_mask"].to(device).sum(dim=-1) > 0
+            )
 
         if task.name == "t2v":
             return pair & has_text
@@ -745,8 +782,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
     def _encode_video(self, video: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if video.ndim != 5:
             raise ValueError(f"`video` must have shape (B,T,C,H,W), got {tuple(video.shape)}.")
-        if video.shape[1] < 2:
-            raise ValueError("Stage two needs a current frame and at least one future frame.")
+        if video.shape[1] < 1:
+            raise ValueError("Video encoding needs at least one frame.")
         video = video.to(torch.float32)
         if video.shape[-2:] != (
             self.config.video_image_size,
@@ -790,11 +827,99 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             frames * patch_height * patch_width,
             channels * patch * patch,
         )
-        temporal = torch.arange(frames, device=latent.device)
-        rows = torch.arange(patch_height, device=latent.device)
-        columns = torch.arange(patch_width, device=latent.device)
-        position_ids = torch.cartesian_prod(temporal, rows, columns)
+        position_ids = self._video_position_ids(
+            frames,
+            patch_height,
+            patch_width,
+            latent.device,
+        )
         return tokens, position_ids
+
+    @staticmethod
+    def _video_position_ids(
+        frames: int,
+        patch_height: int,
+        patch_width: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        temporal = torch.arange(frames, device=device)
+        rows = torch.arange(patch_height, device=device)
+        columns = torch.arange(patch_width, device=device)
+        return torch.cartesian_prod(temporal, rows, columns)
+
+    def _video_geometry(self) -> tuple[int, int, int, int]:
+        latent_frames = 1 + (
+            self.config.world_video_frames - 1
+        ) // self.temporal_compression
+        latent_side = self.config.video_image_size // 16
+        patch = self.config.video_latent_patch_size
+        if latent_side % patch:
+            raise ValueError(
+                f"Video latent side {latent_side} is not divisible by patch size {patch}."
+            )
+        patch_side = latent_side // patch
+        return latent_frames, latent_side, patch_side, patch_side * patch_side
+
+    def _video_tokens_to_latents(
+        self,
+        tokens: torch.Tensor,
+        *,
+        denormalize: bool,
+        latent_frames: int | None = None,
+        patch_height: int | None = None,
+        patch_width: int | None = None,
+    ) -> torch.Tensor:
+        if latent_frames is None or patch_height is None or patch_width is None:
+            default_frames, _, default_height, _ = self._video_geometry()
+            latent_frames = (
+                default_frames if latent_frames is None else int(latent_frames)
+            )
+            patch_height = (
+                default_height if patch_height is None else int(patch_height)
+            )
+            patch_width = (
+                default_height if patch_width is None else int(patch_width)
+            )
+        else:
+            latent_frames = int(latent_frames)
+            patch_height = int(patch_height)
+            patch_width = int(patch_width)
+        tokens_per_frame = patch_height * patch_width
+        expected_tokens = latent_frames * tokens_per_frame
+        expected_width = (
+            self.config.video_latent_dim
+            * self.config.video_latent_patch_size**2
+        )
+        if tokens.shape[1:] != (expected_tokens, expected_width):
+            raise ValueError(
+                "Video tokens have incompatible shape: expected "
+                f"(B,{expected_tokens},{expected_width}), got {tuple(tokens.shape)}."
+            )
+        batch = tokens.shape[0]
+        patch = self.config.video_latent_patch_size
+        latent = tokens.view(
+            batch,
+            latent_frames,
+            patch_height,
+            patch_width,
+            patch,
+            patch,
+            self.config.video_latent_dim,
+        )
+        latent = latent.permute(0, 6, 1, 2, 4, 3, 5).reshape(
+            batch,
+            self.config.video_latent_dim,
+            latent_frames,
+            patch_height * patch,
+            patch_width * patch,
+        )
+        if denormalize:
+            latent = (
+                latent.float()
+                * self.video_latent_std.to(device=latent.device)
+                + self.video_latent_mean.to(device=latent.device)
+            )
+        return latent
 
     def _prepare_video_stream(
         self,
@@ -835,6 +960,82 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             keep,
             position_ids=position_ids,
         ), target, loss_mask, sigma
+
+    def _sample_video_latents(
+        self,
+        batch: dict,
+        understanding,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        if "i2v" not in self.generation.task_to_id:
+            raise ValueError("Generation validation requires the enabled task 'i2v'.")
+        current_tokens, current_positions = self._encode_video(
+            batch["video"][:, :1]
+        )
+        first_frame = current_positions[:, 0] == 0
+        current_tokens = current_tokens[:, first_frame]
+        current_positions = current_positions[first_frame]
+        patch_height = int(current_positions[:, 1].max().item()) + 1
+        patch_width = int(current_positions[:, 2].max().item()) + 1
+        tokens_per_frame = patch_height * patch_width
+        latent_frames = 1 + (
+            self.config.world_video_frames - 1
+        ) // self.temporal_compression
+        total_tokens = latent_frames * tokens_per_frame
+        values = torch.randn(
+            current_tokens.shape[0],
+            total_tokens,
+            current_tokens.shape[-1],
+            device=current_tokens.device,
+            dtype=torch.float32,
+            generator=generator,
+        )
+        values[:, :tokens_per_frame] = current_tokens.float()
+        keep = torch.ones(
+            values.shape[:2],
+            device=values.device,
+            dtype=torch.bool,
+        )
+        position_ids = self._video_position_ids(
+            latent_frames,
+            patch_height,
+            patch_width,
+            values.device,
+        )
+        schedule = torch.linspace(
+            1.0,
+            0.0,
+            self.config.inference_steps + 1,
+            device=values.device,
+        )
+        for sigma, next_sigma in zip(schedule[:-1], schedule[1:], strict=True):
+            sigma_batch = sigma.expand(values.shape[0])
+            prediction = self.generation(
+                [
+                    GenerationStream(
+                        "video",
+                        values,
+                        sigma_batch,
+                        keep,
+                        position_ids=position_ids,
+                    )
+                ],
+                understanding.hidden_states,
+                understanding.attention_mask,
+                "i2v",
+                understanding_key_values=understanding.key_values,
+            )["video"].float()
+            prediction[:, :tokens_per_frame] = 0
+            values = values + (next_sigma - sigma) * prediction
+            values[:, :tokens_per_frame] = current_tokens.float()
+        return self._video_tokens_to_latents(
+            values,
+            denormalize=True,
+            latent_frames=latent_frames,
+            patch_height=patch_height,
+            patch_width=patch_width,
+        )
 
     def _prepare_grouped_modality(
         self,
@@ -991,6 +1192,43 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
     ):
         if task.tactile is ModalityRole.ABSENT:
             return None, None, None, None
+        if self.config.tactile_generation_target == "spatial_patches":
+            clean, keep, position_ids, _ = self._tactile_patch_tokens(
+                batch,
+                frame_index=-1,
+                valid_rows=valid_rows,
+            )
+            if task.tactile is ModalityRole.CLEAN:
+                sigma = torch.zeros(clean.shape[0], device=clean.device)
+                return (
+                    GenerationStream(
+                        "tactile",
+                        clean,
+                        sigma,
+                        keep,
+                        position_ids=position_ids,
+                    ),
+                    None,
+                    None,
+                    sigma,
+                )
+            sigma = self._sample_sigma(clean.shape[0], clean.device)
+            noisy, target = self._flow_corrupt(clean, sigma)
+            noisy = torch.where(keep.unsqueeze(-1), noisy, torch.zeros_like(noisy))
+            target = torch.where(keep.unsqueeze(-1), target, torch.zeros_like(target))
+            loss_mask = keep.unsqueeze(-1).expand_as(target)
+            return (
+                GenerationStream(
+                    "tactile",
+                    noisy,
+                    sigma,
+                    keep,
+                    position_ids=position_ids,
+                ),
+                target,
+                loss_mask,
+                sigma,
+            )
         clean_tokens, token_keep, _ = self._physical_context(
             batch,
             include_tactile=True,
@@ -1006,6 +1244,175 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         noisy, target = self._flow_corrupt(clean, sigma)
         loss_mask = keep.unsqueeze(-1).expand_as(target)
         return GenerationStream("tactile", noisy, sigma, keep), target, loss_mask, sigma
+
+    def _tactile_patch_tokens(
+        self,
+        batch: dict,
+        *,
+        frame_index: int,
+        valid_rows: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[int, int, int]]:
+        images = batch["tactile_image"][:, :, frame_index]
+        image_mask = batch["tactile_image_mask"].to(images.device) > 0
+        batch_size, views = images.shape[:2]
+        selected = image_mask.reshape(-1).nonzero(as_tuple=True)[0]
+        grid_height = (images.shape[-2] + 31) // 32
+        grid_width = (images.shape[-1] + 31) // 32
+        feature_dim = int(self.physical_encoder.tactile_feat_dim)
+        if selected.numel():
+            selected_images = images.reshape(
+                batch_size * views,
+                *images.shape[2:],
+            )[selected].unsqueeze(1)
+            with torch.no_grad():
+                selected_patches = self.physical_encoder.encode_tactile_patches(
+                    selected_images
+                )[:, 0]
+            grid_height, grid_width = selected_patches.shape[-2:]
+            patch_maps = torch.zeros(
+                batch_size * views,
+                feature_dim,
+                grid_height,
+                grid_width,
+                device=selected_patches.device,
+                dtype=selected_patches.dtype,
+            )
+            patch_maps = patch_maps.index_put((selected,), selected_patches)
+        else:
+            dtype = self.generation.input_projections["tactile"].weight.dtype
+            patch_maps = torch.zeros(
+                batch_size * views,
+                feature_dim,
+                grid_height,
+                grid_width,
+                device=images.device,
+                dtype=dtype,
+            )
+        patch_maps = patch_maps.view(
+            batch_size,
+            views,
+            feature_dim,
+            grid_height,
+            grid_width,
+        )
+        values = patch_maps.permute(0, 1, 3, 4, 2).reshape(
+            batch_size,
+            views * grid_height * grid_width,
+            feature_dim,
+        )
+        keep = image_mask.repeat_interleave(
+            grid_height * grid_width,
+            dim=1,
+        )
+        keep = keep & valid_rows.to(keep.device).unsqueeze(1)
+        view_ids = torch.arange(views, device=values.device)
+        rows = torch.arange(grid_height, device=values.device)
+        columns = torch.arange(grid_width, device=values.device)
+        position_ids = torch.cartesian_prod(view_ids, rows, columns)
+        return (
+            values.detach(),
+            keep,
+            position_ids,
+            (views, grid_height, grid_width),
+        )
+
+    def _sample_tactile_images(
+        self,
+        batch: dict,
+        understanding,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size = batch["image_t0"].shape[0]
+        image_mask = batch["tactile_image_mask"].to(
+            batch["image_t0"].device
+        ) > 0
+        if self.config.tactile_generation_target != "spatial_patches":
+            return (
+                torch.empty(batch_size, 0, device=image_mask.device),
+                image_mask,
+            )
+        if "tactile_prediction" not in self.generation.task_to_id:
+            raise ValueError(
+                "Generation validation requires the enabled task 'tactile_prediction'."
+            )
+        valid_rows = (
+            self._task_valid_rows(
+                TASK_SPECS["tactile_prediction"],
+                batch,
+                batch["image_t0"].device,
+            )
+        )
+        _, keep, position_ids, geometry = self._tactile_patch_tokens(
+            batch,
+            frame_index=0,
+            valid_rows=valid_rows,
+        )
+        views, grid_height, grid_width = geometry
+        values = torch.randn(
+            batch_size,
+            views * grid_height * grid_width,
+            int(self.physical_encoder.tactile_feat_dim),
+            device=keep.device,
+            dtype=torch.float32,
+            generator=generator,
+        )
+        values = torch.where(
+            keep.unsqueeze(-1),
+            values,
+            torch.zeros_like(values),
+        )
+        task = TASK_SPECS["tactile_prediction"]
+        video_stream, _, _, _ = self._prepare_video_stream(
+            task.video,
+            batch,
+            valid_rows,
+        )
+        physical_streams, _, _ = self._prepare_physical_streams(
+            task,
+            batch,
+            valid_rows,
+        )
+        conditioning_streams = [video_stream, *physical_streams]
+        schedule = torch.linspace(
+            1.0,
+            0.0,
+            self.config.inference_steps + 1,
+            device=values.device,
+        )
+        for sigma, next_sigma in zip(schedule[:-1], schedule[1:], strict=True):
+            sigma_batch = sigma.expand(batch_size)
+            prediction = self.generation(
+                [
+                    *conditioning_streams,
+                    GenerationStream(
+                        "tactile",
+                        values,
+                        sigma_batch,
+                        keep,
+                        position_ids=position_ids,
+                    ),
+                ],
+                understanding.hidden_states,
+                understanding.attention_mask,
+                "tactile_prediction",
+                understanding_key_values=understanding.key_values,
+            )["tactile"].float()
+            values = values + (next_sigma - sigma) * prediction
+            values = torch.where(
+                keep.unsqueeze(-1),
+                values,
+                torch.zeros_like(values),
+            )
+        patches = values.view(
+            batch_size,
+            views,
+            grid_height,
+            grid_width,
+            int(self.physical_encoder.tactile_feat_dim),
+        ).permute(0, 1, 4, 2, 3)
+        decoded = self.physical_encoder.decode_tactile_patches(patches)
+        return decoded.float(), image_mask
 
     def _latent_action_target(self, batch: dict, enabled: bool) -> tuple[torch.Tensor | None, torch.Tensor]:
         device = batch["image_t0"].device
@@ -1055,12 +1462,57 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         global_sum = _all_reduce_detached(local_sum)
         return loss, (global_sum / global_count).item(), global_count.item()
 
+    @staticmethod
+    def _generation_rng(device: torch.device, seed: int) -> torch.Generator:
+        generator = torch.Generator(device=device)
+        generator.manual_seed(int(seed))
+        return generator
+
+    @torch.no_grad()
+    def generate_validation(
+        self,
+        batch: dict,
+        *,
+        seed: int,
+    ) -> dict[str, torch.Tensor]:
+        """Generate fixed-noise action, video, and decodable tactile predictions."""
+        image = self._current_image(batch)
+        device = next(self.generation.parameters()).device
+        image = image.to(device)
+        texts = batch.get("task", [""] * image.shape[0])
+        if isinstance(texts, str):
+            texts = [texts] * image.shape[0]
+        understanding = self.understanding(image, texts)
+        action = self._sample_canonical_action(
+            batch,
+            understanding,
+            generator=self._generation_rng(device, seed),
+        )
+        video_latents = self._sample_video_latents(
+            batch,
+            understanding,
+            generator=self._generation_rng(device, seed + 1),
+        )
+        tactile_decoded_z, tactile_mask = self._sample_tactile_images(
+            batch,
+            understanding,
+            generator=self._generation_rng(device, seed + 2),
+        )
+        return {
+            "action_normalized": action,
+            "video_latents": video_latents,
+            "tactile_decoded_z": tactile_decoded_z,
+            "tactile_mask": tactile_mask,
+        }
+
     def forward(
         self,
         batch: dict,
         task_type: str = "train_stage2",
         step: int = 0,
     ):
+        if task_type == "generate_validation":
+            return self.generate_validation(batch, seed=step)
         del step
         forced_task = task_type if task_type in TASK_SPECS else None
         if task_type not in ("train_stage2", "qwen3vl_mot") and forced_task is None:

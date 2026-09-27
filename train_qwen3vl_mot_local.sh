@@ -47,6 +47,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --policy.chunk_size=32 \
     --policy.n_action_steps=32 \
     --policy.world_video_frames="${WORLD_VIDEO_FRAMES:-9}" \
+    --policy.tactile_generation_target="${TACTILE_GENERATION_TARGET:-spatial_patches}" \
     --policy.generation_gradient_checkpointing=true \
     --policy.understanding_gradient_checkpointing=true \
     --policy.optimizer_lr="${LEARNING_RATE:-1e-4}" \

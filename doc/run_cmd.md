@@ -170,6 +170,61 @@ SAMPLE_POOL_ENABLED=false bash train_qwen3vl_mot_fsdp.sh
 
 新实验应保留默认的 `SAMPLE_POOL_ENABLED=true`。
 
+### 固定 held-out episode 生成验证
+
+Stage 2 FSDP launcher 可以从指定数据集各留出固定数量的**完整 episode**，训练 sample pool
+不会再包含这些 episode 的任何窗口。训练 mixture 之外的数据集会以 validation-only source
+加载，采样权重为 0，不会进入训练 batch。
+
+新实验启用方式：
+
+```bash
+GENERATION_EVAL_ENABLED=true \
+GENERATION_EVAL_FREQ=10000 \
+GENERATION_EVAL_DATASETS=open_neo_arx5,ms_data_xdof_1,interna1_dual_arm_1,ftp_1_sharpa \
+GENERATION_EVAL_EPISODES_PER_DATASET=2 \
+GENERATION_EVAL_BATCH_SIZE=8 \
+TACTILE_GENERATION_TARGET=spatial_patches \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+split 由 seed、数据集名和 episode 边界确定，并写到：
+
+```text
+${OUTPUT_DIR}/generation_eval/split_manifest.json
+```
+
+每次评估写入独立的原子目录：
+
+```text
+${OUTPUT_DIR}/generation_eval/step_00010000/
+├── index.html
+├── metrics.json
+└── <dataset>/episode_<id>_frame_<id>/
+    ├── index.html
+    ├── video_comparison.mp4
+    ├── video_contact_sheet.png
+    ├── action_comparison.png
+    ├── action_summary.html
+    └── tactile_comparison.png
+```
+
+- RGB 视频逐帧并排显示 `Ground truth | Prediction | Absolute difference`。
+- Action 使用当前数据集自己的 mean/std 去归一化，只展示 `action_mask` 中有效的 canonical
+  维度；若 metadata 提供 min/max，预测会裁剪到该数据集的有效物理范围，并在 HTML 中报告
+  clip 比例。
+- 触觉图像预测目标是 Stage 1 ResNet codec 的末帧空间 patch latent，位置编码为
+  `(pad, row, column)`；输出再经冻结的 Stage 1 tactile decoder 解码，并按该 pad 的像素统计
+  反归一化。
+- 没有触觉图像的 episode 仍会输出 RGB 和 action；不会伪造 tactile artifact。
+
+`GENERATION_EVAL_ENABLED` 默认关闭，避免无意中改变已有实验的数据几何。严格 held-out 会改变
+训练 episode ranges、sample-pool fingerprint 和 checkpoint training geometry，因此**不能**
+在已经训练过这些 episode 的旧 Stage 2 checkpoint 上直接开启后继续 resume。要得到严格未见
+验证，必须使用新的 `JOB_NAME/OUTPUT_DIR` 从 Stage 1 启动新训练。旧 Stage 2 checkpoint 的
+`tactile_generation_target=context_tokens` 也无法可靠解码触觉图像；新训练 launcher 默认使用
+`spatial_patches`。
+
 ---
 
 ## 1. 集群默认路径
@@ -562,6 +617,13 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `GRADIENT_ACCUMULATION_STEPS` | `1` | 梯度累积 |
 | `STEPS` | `600000` | optimizer step 上限 |
 | `SAVE_FREQ` | `2000` | 每隔多少 optimizer step 保存一次 |
+| `GENERATION_EVAL_ENABLED` | `false` | 是否启用固定 held-out episode 生成验证 |
+| `GENERATION_EVAL_FREQ` | `10000` | 每隔多少 optimizer step 生成一次 artifact |
+| `GENERATION_EVAL_DATASETS` | 四个固定数据集 | 逗号分隔的验证数据集名 |
+| `GENERATION_EVAL_EPISODES_PER_DATASET` | `2` | 每个数据集完整留出的 episode 数 |
+| `GENERATION_EVAL_BATCH_SIZE` | `8` | 每个 rank 同步执行的生成验证 batch |
+| `GENERATION_EVAL_VIDEO_FPS` | `8` | 导出 MP4 的播放帧率 |
+| `TACTILE_GENERATION_TARGET` | `spatial_patches` | 新训练使用可解码触觉空间 latent |
 | `FSDP_CHECKPOINT_SYNC_FILES` | `false` | DCP 是否对每个 shard 强制 `fsync` |
 | `FSDP_CHECKPOINT_THREADS` | `1` | 每个 rank 的 DCP writer 线程数 |
 | `FSDP_CHECKPOINT_HEARTBEAT_SECONDS` | `60` | checkpoint 进度日志间隔；`0` 关闭 |

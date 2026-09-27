@@ -82,7 +82,11 @@ def test_getitem_marks_worker_read_fallbacks() -> None:
     dataset = _dataset_with_sizes([3])
     dataset.datasets = [BrokenDataset()]
     dataset.dataset_names = ["broken"]
-    dataset._random_fallback_index = lambda ds_idx, requested_frame_idx, dataset_length: 2
+    dataset._random_fallback_index = (
+        lambda ds_idx, requested_frame_idx, dataset_length, **kwargs: 2
+    )
+    dataset.sample_pool = None
+    dataset.episode_ranges = [np.asarray([[0, 3]], dtype=np.int64)]
     dataset._to_canonical = lambda item, ds_idx, frame_idx: {
         "item": item,
         "dataset_id": torch.tensor(ds_idx),

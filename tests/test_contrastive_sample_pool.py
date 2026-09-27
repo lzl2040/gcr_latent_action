@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from lerobot.common.datasets.contrastive_dataset import MultiModalContrastiveDataset
 from lerobot.common.datasets.contrastive_sample_pool import (
     build_or_load_sample_pool,
     sample_anchor_stride,
@@ -163,3 +164,69 @@ def test_pool_episode_groups_respect_frame_gap() -> None:
     assert len(frames) == 5
     assert all(frame % 6 == frames[0] % 6 for frame in frames)
     assert min(abs(left - right) for index, left in enumerate(frames) for right in frames[index + 1 :]) >= 32
+
+
+def test_heldout_episode_split_is_deterministic_and_excluded_from_training() -> None:
+    dataset = MultiModalContrastiveDataset.__new__(
+        MultiModalContrastiveDataset
+    )
+    dataset.dataset_names = ["train_source", "validation_only"]
+    dataset.all_episode_ranges = [
+        np.asarray([[0, 50], [50, 100], [100, 150], [150, 200]], dtype=np.int64),
+        np.asarray([[0, 60], [60, 120], [120, 180]], dtype=np.int64),
+    ]
+    dataset.frame_horizons = [31, 31]
+    dataset.training_sources = [True, False]
+    dataset.true_fps = [30.0, 15.0]
+
+    first = dataset._split_heldout_eval_episodes(
+        ("train_source", "validation_only"),
+        episodes_per_dataset=2,
+        seed=17,
+    )
+    second = dataset._split_heldout_eval_episodes(
+        ("train_source", "validation_only"),
+        episodes_per_dataset=2,
+        seed=17,
+    )
+    train_ranges, heldout_ranges, manifest = first
+
+    for first_ranges, second_ranges in zip(first[0], second[0], strict=True):
+        np.testing.assert_array_equal(first_ranges, second_ranges)
+    for first_ranges, second_ranges in zip(first[1], second[1], strict=True):
+        np.testing.assert_array_equal(first_ranges, second_ranges)
+    assert manifest == second[2]
+    assert len(train_ranges[0]) == 2
+    assert len(heldout_ranges[0]) == 2
+    assert len(train_ranges[1]) == 0
+    assert len(heldout_ranges[1]) == 2
+    assert {
+        tuple(row) for row in train_ranges[0]
+    }.isdisjoint({tuple(row) for row in heldout_ranges[0]})
+
+    dataset.episode_ranges = train_ranges
+    dataset.heldout_episode_ranges = heldout_ranges
+    dataset.heldout_eval_manifest = manifest
+    dataset.heldout_sample_pool = build_or_load_sample_pool(
+        data_mix="heldout_test",
+        dataset_names=dataset.dataset_names,
+        dataset_sizes=[200, 180],
+        episode_ranges=heldout_ranges,
+        true_fps=dataset.true_fps,
+        horizons=dataset.frame_horizons,
+        keep_all_below_fps=10.0,
+        target_hz=5.0,
+        pool_root=None,
+        local_cache_root=None,
+    )
+    dataset.heldout_eval_fingerprint = dataset.heldout_sample_pool.fingerprint
+
+    samples = dataset.heldout_validation_samples()
+
+    assert len(samples) == 4
+    for sample in samples:
+        assert sample["episode_start"] <= sample["frame_index"]
+        assert (
+            sample["frame_index"] + sample["horizon"]
+            < sample["episode_end"]
+        )

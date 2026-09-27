@@ -30,6 +30,12 @@ SAMPLE_POOL_ROOT="${SAMPLE_POOL_ROOT:-${OUTPUT_ROOT}/_sample_pools}"
 SAMPLE_POOL_CACHE_DIR="${SAMPLE_POOL_CACHE_DIR:-${TMPDIR:-/tmp}/robo_contrast_sample_pools}"
 SAMPLE_POOL_KEEP_ALL_BELOW_FPS="${SAMPLE_POOL_KEEP_ALL_BELOW_FPS:-10}"
 SAMPLE_POOL_TARGET_HZ="${SAMPLE_POOL_TARGET_HZ:-5}"
+GENERATION_EVAL_ENABLED="${GENERATION_EVAL_ENABLED:-false}"
+GENERATION_EVAL_FREQ="${GENERATION_EVAL_FREQ:-10000}"
+GENERATION_EVAL_DATASETS="${GENERATION_EVAL_DATASETS:-open_neo_arx5,ms_data_xdof_1,interna1_dual_arm_1,ftp_1_sharpa}"
+GENERATION_EVAL_EPISODES_PER_DATASET="${GENERATION_EVAL_EPISODES_PER_DATASET:-2}"
+GENERATION_EVAL_BATCH_SIZE="${GENERATION_EVAL_BATCH_SIZE:-8}"
+GENERATION_EVAL_VIDEO_FPS="${GENERATION_EVAL_VIDEO_FPS:-8}"
 CHECK_PATHS="${CHECK_PATHS:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 
@@ -68,10 +74,21 @@ require_bool "CHECK_PATHS" "$CHECK_PATHS"
 require_bool "DRY_RUN" "$DRY_RUN"
 require_bool "WEIGHT_RESUME" "$WEIGHT_RESUME"
 require_bool "SAMPLE_POOL_ENABLED" "$SAMPLE_POOL_ENABLED"
+require_bool "GENERATION_EVAL_ENABLED" "$GENERATION_EVAL_ENABLED"
 [[ "$SAMPLE_POOL_KEEP_ALL_BELOW_FPS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
     || die "SAMPLE_POOL_KEEP_ALL_BELOW_FPS must be positive, got $SAMPLE_POOL_KEEP_ALL_BELOW_FPS"
 [[ "$SAMPLE_POOL_TARGET_HZ" =~ ^[0-9]+([.][0-9]+)?$ ]] \
     || die "SAMPLE_POOL_TARGET_HZ must be positive, got $SAMPLE_POOL_TARGET_HZ"
+require_positive_int "GENERATION_EVAL_FREQ" "$GENERATION_EVAL_FREQ"
+require_positive_int \
+    "GENERATION_EVAL_EPISODES_PER_DATASET" \
+    "$GENERATION_EVAL_EPISODES_PER_DATASET"
+require_positive_int "GENERATION_EVAL_BATCH_SIZE" "$GENERATION_EVAL_BATCH_SIZE"
+require_positive_int "GENERATION_EVAL_VIDEO_FPS" "$GENERATION_EVAL_VIDEO_FPS"
+EFFECTIVE_EVAL_FREQ=0
+if [[ "$GENERATION_EVAL_ENABLED" == "true" ]]; then
+    EFFECTIVE_EVAL_FREQ="$GENERATION_EVAL_FREQ"
+fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export LEROBOT_VIDEO_DECODER_CACHE_SIZE="${LEROBOT_VIDEO_DECODER_CACHE_SIZE:-256}"
@@ -246,6 +263,7 @@ echo "  output=${OUTPUT_DIR}"
 echo "  logs=${LOG_DIR}"
 echo "  sample_pool=${SAMPLE_POOL_ENABLED} root=${SAMPLE_POOL_ROOT} cache=${SAMPLE_POOL_CACHE_DIR}"
 echo "  sample_starts: keep_all_at_or_below=${SAMPLE_POOL_KEEP_ALL_BELOW_FPS}fps target=${SAMPLE_POOL_TARGET_HZ}Hz"
+echo "  generation_eval=${GENERATION_EVAL_ENABLED} freq=${GENERATION_EVAL_FREQ} datasets=${GENERATION_EVAL_DATASETS}"
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 echo "checkpoint: control_backend=gloo sync_files=${FSDP_CHECKPOINT_SYNC_FILES} threads=${FSDP_CHECKPOINT_THREADS} heartbeat=${FSDP_CHECKPOINT_HEARTBEAT_SECONDS}s"
@@ -285,6 +303,7 @@ CMD=(
     --policy.chunk_size=32
     --policy.n_action_steps=32
     --policy.world_video_frames="${WORLD_VIDEO_FRAMES:-9}"
+    --policy.tactile_generation_target="${TACTILE_GENERATION_TARGET:-spatial_patches}"
     --policy.generation_gradient_checkpointing=true
     --policy.understanding_gradient_checkpointing=true
     --policy.optimizer_lr="${LEARNING_RATE:-1e-4}"
@@ -326,7 +345,12 @@ CMD=(
     --weight_resume="${WEIGHT_RESUME}"
     --save_freq="${SAVE_FREQ:-2000}"
     --log_freq="${LOG_FREQ:-20}"
-    --eval_freq=0
+    --eval_freq="${EFFECTIVE_EVAL_FREQ}"
+    --generation_eval.enabled="${GENERATION_EVAL_ENABLED}"
+    --generation_eval.datasets="${GENERATION_EVAL_DATASETS}"
+    --generation_eval.episodes_per_dataset="${GENERATION_EVAL_EPISODES_PER_DATASET}"
+    --generation_eval.batch_size="${GENERATION_EVAL_BATCH_SIZE}"
+    --generation_eval.video_fps="${GENERATION_EVAL_VIDEO_FPS}"
     --steps="${STEPS:-600000}"
     --task_type="train_stage2"
     --wandb.enable="${WANDB_ENABLE:-false}"

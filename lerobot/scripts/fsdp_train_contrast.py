@@ -22,6 +22,10 @@ from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.optim.optimizers import AdamW8bitConfig
 from lerobot.common.policies.factory import make_policy
+from lerobot.common.policies.qwen3vl_mot.generation_eval import (
+    GenerationEvalConfig,
+    GenerationEvaluator,
+)
 from lerobot.common.utils.fsdp_training import (
     FSDPCheckpointIOConfig,
     FSDPTrainingConfig,
@@ -51,6 +55,9 @@ from lerobot.scripts.dps_train_contrast import (
 @dataclass
 class FSDPTrainPipelineConfig(TrainPipelineConfig):
     fsdp: FSDPTrainingConfig = field(default_factory=FSDPTrainingConfig)
+    generation_eval: GenerationEvalConfig = field(
+        default_factory=GenerationEvalConfig
+    )
 
 
 def _initialize_distributed() -> tuple[
@@ -141,6 +148,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     cfg.validate()
     _load_stage2_resume_policy_config(cfg)
     cfg.fsdp.validate()
+    cfg.generation_eval.validate(cfg.eval_freq)
     if cfg.policy.type != "qwen3vl_mot":
         raise ValueError(
             "fsdp_train_contrast.py is stage-two-specific and requires "
@@ -197,6 +205,17 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         data_mix=cfg.data_mix,
         seed=cfg.seed,
         dataset_size_one_epoch=cfg.dataset.dataset_size_one_epoch,
+        heldout_eval_dataset_names=(
+            cfg.generation_eval.dataset_names
+            if cfg.generation_eval.enabled
+            else ()
+        ),
+        heldout_eval_episodes_per_dataset=(
+            cfg.generation_eval.episodes_per_dataset
+            if cfg.generation_eval.enabled
+            else 0
+        ),
+        heldout_eval_seed=cfg.generation_eval.seed,
     )
     sampler = ContrastiveBatchSampler(
         episode_ranges=dataset.episode_ranges,
@@ -239,6 +258,10 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         "total_micro_steps": epoch_schedule.total_steps,
         "seed": cfg.seed,
     }
+    if cfg.generation_eval.enabled:
+        training_geometry["heldout_eval_fingerprint"] = (
+            dataset.heldout_eval_fingerprint
+        )
     if dataset.sample_pool is not None:
         training_geometry.update(
             {
@@ -380,6 +403,29 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
             start_batch,
         )
 
+    generation_evaluator = None
+    if cfg.generation_eval.enabled:
+        generation_evaluator = GenerationEvaluator(
+            config=cfg.generation_eval,
+            dataset=dataset,
+            output_dir=output_path,
+            policy_config=cfg.policy,
+            device=device,
+            rank=rank,
+            local_rank=local_rank,
+            process_group=checkpoint_process_group,
+        )
+        if (
+            rank == 0
+            and cfg.policy.tactile_generation_target != "spatial_patches"
+        ):
+            logger.warning(
+                "This checkpoint uses tactile_generation_target=%s, so generation "
+                "validation will export RGB video and action but cannot decode a tactile "
+                "prediction. Start a fresh run with spatial_patches for tactile artifacts.",
+                cfg.policy.tactile_generation_target,
+            )
+
     train_tracker = MetricsTracker(
         cfg.batch_size * world_size * cfg.gradient_accumulation_steps,
         dataset.num_frames,
@@ -512,6 +558,21 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
                     checkpoint_process_group=checkpoint_process_group,
                     checkpoint_io=checkpoint_io,
                 )
+
+            should_evaluate_generation = (
+                should_update
+                and generation_evaluator is not None
+                and (
+                    update_step % cfg.eval_freq == 0
+                    or is_last_batch
+                )
+            )
+            if should_evaluate_generation:
+                logger.info(
+                    "Running held-out generation validation after optimizer step %d",
+                    update_step,
+                )
+                generation_evaluator.run(model, update_step)
 
             should_log = (
                 should_update

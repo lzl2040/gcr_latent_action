@@ -17,7 +17,10 @@ from lerobot.common.policies.qwen3vl_mot.modeling_generation import (
     GenerationExpert,
     GenerationStream,
 )
-from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import _load_stage1_config
+from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import (
+    Qwen3VLMoTPolicy,
+    _load_stage1_config,
+)
 from lerobot.common.policies.qwen3vl_mot.stage1_transfer import TransferReport, transfer_matching_module
 from lerobot.common.policies.qwen3vl_mot.tasks import TASK_SPECS, ModalityRole
 
@@ -524,6 +527,11 @@ class _FakePhysical(nn.Module):
         self.tactile_tokens = tactile_tokens
         self.last_state = None
         self.include_tactile_history = []
+        self.use_ftp1_tactile = False
+        self.use_anytouch_tactile = False
+        self.tactile_feat_dim = 6
+        self.tactile_cnn = nn.Identity()
+        self.tactile_recon = nn.Identity()
 
     def forward(self, batch, **kwargs):
         self.include_tactile_history.append(kwargs["include_tactile"])
@@ -541,6 +549,30 @@ class _FakePhysical(nn.Module):
             batch["tactile_signal_mask"].to(self.anchor.device).reshape(-1, 1) > 0
         )
         return tokens, keep, None
+
+    def encode_tactile_patches(self, images):
+        values = images.float().mean(dim=2) / 255.0
+        values = torch.nn.functional.adaptive_avg_pool2d(
+            values.reshape(-1, 1, *values.shape[-2:]),
+            (2, 2),
+        )
+        values = values.expand(-1, self.tactile_feat_dim, -1, -1)
+        return values.view(
+            images.shape[0],
+            images.shape[1],
+            self.tactile_feat_dim,
+            2,
+            2,
+        )
+
+    def decode_tactile_patches(self, patches):
+        decoded = patches[..., :3, :, :]
+        return torch.nn.functional.interpolate(
+            decoded.reshape(-1, 3, *decoded.shape[-2:]),
+            size=(8, 8),
+            mode="bilinear",
+            align_corners=False,
+        ).view(*patches.shape[:-3], 3, 8, 8)
 
 
 class _FakeUnderstanding(nn.Module):
@@ -606,6 +638,114 @@ class _FakeVAE(nn.Module):
             device=video.device,
         )
         return SimpleNamespace(latent_dist=SimpleNamespace(mean=latent))
+
+
+def test_spatial_tactile_target_and_generation_are_decodable():
+    policy = object.__new__(Qwen3VLMoTPolicy)
+    nn.Module.__init__(policy)
+    policy.config = SimpleNamespace(
+        tactile_generation_target="spatial_patches",
+        chunk_size=4,
+        group_size=2,
+        num_groups=2,
+        n_action_steps=2,
+        max_action_dim=4,
+        max_state_dim=4,
+        max_tactile_signal_dim=3,
+        max_tactile_views=2,
+        tactile_frames=2,
+        tactile_img_size=8,
+        physical_hidden_dim=8,
+        physical_tuning_mode="frozen",
+        use_tactile_conditioning=False,
+        world_video_frames=9,
+        video_image_size=16,
+        video_latent_dim=4,
+        video_latent_patch_size=2,
+        inference_steps=2,
+        sigma_min=1e-3,
+        sigma_max=0.999,
+    )
+    policy.physical_encoder = _FakePhysical(
+        groups=2,
+        hidden=8,
+        tactile_tokens=4,
+    )
+    policy.understanding = _FakeUnderstanding("", num_queries=2)
+    policy.video_vae = _FakeVAE(4)
+    policy.temporal_compression = 4
+    policy.register_buffer(
+        "video_latent_mean",
+        torch.zeros(1, 4, 1, 1, 1),
+        persistent=False,
+    )
+    policy.register_buffer(
+        "video_latent_std",
+        torch.ones(1, 4, 1, 1, 1),
+        persistent=False,
+    )
+    policy.generation = GenerationExpert(
+        understanding_dim=12,
+        hidden_dim=16,
+        depth=1,
+        num_heads=4,
+        num_kv_heads=4,
+        intermediate_dim=32,
+        dropout=0.0,
+        input_dims={
+            "video": 16,
+            "state": 8,
+            "action": 8,
+            "tactile": 6,
+        },
+        output_dims={
+            "video": 16,
+            "state": 8,
+            "action": 8,
+            "tactile": 6,
+        },
+        task_names=("i2v", "action_prediction", "tactile_prediction"),
+        gradient_checkpointing=False,
+    )
+    batch = {
+        "image_t0": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
+        "video": torch.zeros(2, 9, 3, 8, 8, dtype=torch.uint8),
+        "task": ["move", "touch"],
+        "pair_is_valid": torch.ones(2),
+        "observation.state": torch.randn(2, 4, 4),
+        "state_mask": torch.ones(2, 4),
+        "action": torch.randn(2, 4, 4),
+        "action_mask": torch.ones(2, 4),
+        "tactile_signal": torch.zeros(2, 4, 3),
+        "tactile_signal_mask": torch.zeros(2),
+        "tactile_image": torch.randint(
+            0,
+            256,
+            (2, 2, 2, 3, 8, 8),
+            dtype=torch.uint8,
+        ),
+        "tactile_image_mask": torch.tensor([[1.0, 0.0], [1.0, 1.0]]),
+        "sample_rate": torch.full((2,), 10, dtype=torch.long),
+    }
+
+    stream, target, mask, _ = policy._prepare_tactile_stream(
+        TASK_SPECS["tactile_prediction"],
+        batch,
+        torch.ones(2, dtype=torch.bool),
+    )
+    assert stream.values.shape == (2, 8, 6)
+    assert stream.position_ids.shape == (8, 3)
+    assert target.shape == stream.values.shape
+    assert mask.sum().item() == 3 * 2 * 2 * 6
+
+    prediction = policy.generate_validation(batch, seed=123)
+    assert prediction["action_normalized"].shape == (2, 2, 4)
+    assert prediction["video_latents"].shape == (2, 4, 3, 2, 2)
+    assert prediction["tactile_decoded_z"].shape == (2, 2, 3, 8, 8)
+    torch.testing.assert_close(
+        prediction["tactile_mask"],
+        batch["tactile_image_mask"].bool(),
+    )
 
 
 def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeypatch):

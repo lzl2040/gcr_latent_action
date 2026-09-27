@@ -25,6 +25,7 @@ Indexing supports two forms:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import logging
@@ -151,6 +152,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         data_mix: str = "debug_research_data",
         vla2root_json: str = "vla2root.json",
         dataset_size_one_epoch: int = 100_000,
+        heldout_eval_dataset_names: tuple[str, ...] = (),
+        heldout_eval_episodes_per_dataset: int = 0,
+        heldout_eval_seed: int = 20_260_927,
     ):
         super().__init__()
         self.cfg = cfg
@@ -190,6 +194,19 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 continue
             included_datasets.append(d_name)
             sample_weights.append(d_weight)
+        requested_eval_datasets = tuple(
+            dict.fromkeys(name.strip() for name in heldout_eval_dataset_names if name.strip())
+        )
+        self.heldout_eval_dataset_names = requested_eval_datasets
+        self.heldout_eval_episodes_per_dataset = int(
+            heldout_eval_episodes_per_dataset
+        )
+        self.heldout_eval_seed = int(heldout_eval_seed)
+        training_dataset_names = set(included_datasets)
+        for dataset_name in requested_eval_datasets:
+            if dataset_name not in training_dataset_names:
+                included_datasets.append(dataset_name)
+                sample_weights.append(0.0)
 
         with open(vla2root_json) as f:
             vla2data_root = json.load(f)
@@ -202,6 +219,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.tactile_view_counts: list[int] = []
         self.norm_stats: list[dict] = []
         self.episode_ranges: list[np.ndarray] = []
+        self.training_sources: list[bool] = []
         kept_weights: list[float] = []
         meta_features = None
 
@@ -254,6 +272,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             )
             self.norm_stats.append(self._build_norm_stats(dataset, spec))
             self.episode_ranges.append(self._build_episode_ranges(dataset, version))
+            self.training_sources.append(dataset_name in training_dataset_names)
             # The horizon recorded here is the one ``_build_dataset`` actually read with, not a
             # recomputation: the sampler trims episodes by it, so a second derivation from a
             # second fps source could silently disagree with the window the loader used. The
@@ -271,6 +290,27 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         if not self.datasets:
             raise RuntimeError(f"No dataset of mixture '{data_mix}' could be loaded.")
+        missing_eval_datasets = sorted(
+            set(requested_eval_datasets) - set(self.dataset_names)
+        )
+        if missing_eval_datasets:
+            raise RuntimeError(
+                "The requested held-out validation datasets could not be loaded: "
+                f"{missing_eval_datasets}."
+            )
+
+        self.all_episode_ranges = [
+            ranges.copy() for ranges in self.episode_ranges
+        ]
+        (
+            self.episode_ranges,
+            self.heldout_episode_ranges,
+            self.heldout_eval_manifest,
+        ) = self._split_heldout_eval_episodes(
+            requested_eval_datasets,
+            heldout_eval_episodes_per_dataset,
+            heldout_eval_seed,
+        )
 
         # Which datasets carry tactile at all. Tactile is a small slice of most mixtures, so
         # any metric computed over the whole mixture barely sees it; the evaluator uses this
@@ -303,11 +343,12 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         ]
 
         self.sample_pool = None
+        self.heldout_sample_pool = None
         sample_pool_enabled = bool(
             getattr(cfg.dataset, "sample_pool_enabled", True)
         )
+        pool_root, cache_root = resolve_sample_pool_paths(cfg)
         if sample_pool_enabled:
-            pool_root, cache_root = resolve_sample_pool_paths(cfg)
             self.sample_pool = build_or_load_sample_pool(
                 data_mix=data_mix,
                 dataset_names=self.dataset_names,
@@ -333,13 +374,54 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             self.sample_pool_fingerprint = self.sample_pool.fingerprint
             self.sample_pool_path = self.sample_pool.storage_dir
         else:
-            self.pool_anchor_counts = np.asarray(
-                self.dataset_sizes,
-                dtype=np.int64,
+            dense_pool = build_or_load_sample_pool(
+                data_mix=f"{data_mix}__dense_runtime",
+                dataset_names=self.dataset_names,
+                dataset_sizes=self.dataset_sizes,
+                episode_ranges=self.episode_ranges,
+                true_fps=self.true_fps,
+                horizons=self.frame_horizons,
+                keep_all_below_fps=max(self.true_fps) + 1.0,
+                target_hz=1.0,
+                pool_root=None,
+                local_cache_root=None,
             )
-            self.anchor_strides = np.ones(len(self.datasets), dtype=np.int64)
+            self.pool_anchor_counts = dense_pool.dataset_anchor_counts
+            self.anchor_strides = dense_pool.anchor_strides
             self.sample_pool_fingerprint = "disabled"
             self.sample_pool_path = None
+
+        if self.heldout_eval_manifest:
+            self.heldout_sample_pool = build_or_load_sample_pool(
+                data_mix=f"{data_mix}__heldout_generation",
+                dataset_names=self.dataset_names,
+                dataset_sizes=self.dataset_sizes,
+                episode_ranges=self.heldout_episode_ranges,
+                true_fps=self.true_fps,
+                horizons=self.frame_horizons,
+                keep_all_below_fps=float(
+                    getattr(
+                        cfg.dataset,
+                        "sample_pool_keep_all_below_fps",
+                        10.0,
+                    )
+                ),
+                target_hz=float(
+                    getattr(cfg.dataset, "sample_pool_target_hz", 5.0)
+                ),
+                pool_root=pool_root if sample_pool_enabled else None,
+                local_cache_root=cache_root if sample_pool_enabled else None,
+            )
+            self.heldout_eval_fingerprint = self.heldout_sample_pool.fingerprint
+            self.heldout_anchor_counts = (
+                self.heldout_sample_pool.dataset_anchor_counts.copy()
+            )
+        else:
+            self.heldout_eval_fingerprint = "disabled"
+            self.heldout_anchor_counts = np.zeros(
+                len(self.datasets),
+                dtype=np.int64,
+            )
 
         if not np.any(self.pool_anchor_counts > 0):
             raise RuntimeError(
@@ -374,9 +456,21 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         self.dataset_statistics = self._build_dataset_statistics()
         self.dataset_hours = [stat["hours"] for stat in self.dataset_statistics]
-        self.total_source_frames = sum(stat["frames"] for stat in self.dataset_statistics)
-        self.total_source_episodes = sum(stat["episodes"] for stat in self.dataset_statistics)
-        self.total_source_hours = sum(stat["hours"] for stat in self.dataset_statistics)
+        self.total_source_frames = sum(
+            stat["frames"]
+            for stat in self.dataset_statistics
+            if stat["training_source"]
+        )
+        self.total_source_episodes = sum(
+            stat["episodes"]
+            for stat in self.dataset_statistics
+            if stat["training_source"]
+        )
+        self.total_source_hours = sum(
+            stat["hours"]
+            for stat in self.dataset_statistics
+            if stat["training_source"]
+        )
         self.total_pool_anchors = int(
             self.pool_anchor_counts.sum(dtype=np.int64)
         )
@@ -391,6 +485,15 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 else "<disabled>"
             ),
         )
+        if self.heldout_sample_pool is not None:
+            logger.info(
+                "Held-out generation pool: fingerprint=%s anchors=%d datasets=%s",
+                self.heldout_eval_fingerprint,
+                int(self.heldout_anchor_counts.sum(dtype=np.int64)),
+                ", ".join(
+                    entry["dataset"] for entry in self.heldout_eval_manifest
+                ),
+            )
         self._print_dataset_statistics()
 
         # Flatten integer indexing with one int64 boundary per source dataset. The contrastive
@@ -401,13 +504,145 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             dtype=np.int64,
         )
         self.dataset_len = int(self.dataset_frame_ends[-1])
-        self.num_episodes = self.total_source_episodes
+        self.num_episodes = sum(len(ranges) for ranges in self.episode_ranges)
 
         self.meta = self._build_unified_meta(cfg, meta_features)
 
     # ------------------------------------------------------------------
     # construction helpers
     # ------------------------------------------------------------------
+    def _split_heldout_eval_episodes(
+        self,
+        requested_datasets: tuple[str, ...],
+        episodes_per_dataset: int,
+        seed: int,
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[dict]]:
+        if not requested_datasets:
+            empty = [
+                np.empty((0, 2), dtype=np.int64)
+                for _ in self.all_episode_ranges
+            ]
+            return [ranges.copy() for ranges in self.all_episode_ranges], empty, []
+        if episodes_per_dataset <= 0:
+            raise ValueError(
+                "heldout_eval_episodes_per_dataset must be positive when validation "
+                "datasets are configured."
+            )
+
+        requested = set(requested_datasets)
+        train_ranges: list[np.ndarray] = []
+        eval_ranges: list[np.ndarray] = []
+        manifest: list[dict] = []
+        for dataset_idx, (name, ranges, horizon, training_source) in enumerate(
+            zip(
+                self.dataset_names,
+                self.all_episode_ranges,
+                self.frame_horizons,
+                self.training_sources,
+                strict=True,
+            )
+        ):
+            if name not in requested:
+                train_ranges.append(ranges.copy())
+                eval_ranges.append(np.empty((0, 2), dtype=np.int64))
+                continue
+
+            usable = np.flatnonzero(
+                ranges[:, 1] - ranges[:, 0] > int(horizon)
+            )
+            required_usable = int(episodes_per_dataset) + int(training_source)
+            if usable.size < required_usable:
+                raise RuntimeError(
+                    f"{name} has {usable.size} usable episodes for horizon={horizon}; "
+                    f"{required_usable} are required to hold out "
+                    f"{episodes_per_dataset}"
+                    + (" while retaining training data." if training_source else ".")
+                )
+            count = int(episodes_per_dataset)
+
+            digest = hashlib.sha256(f"{seed}:{name}".encode("utf-8")).digest()
+            dataset_seed = int.from_bytes(digest[:8], "little", signed=False)
+            rng = np.random.default_rng(dataset_seed)
+            heldout_indices = np.sort(
+                rng.choice(usable, size=count, replace=False)
+            )
+            heldout = ranges[heldout_indices].copy()
+            if training_source:
+                keep = np.ones(len(ranges), dtype=bool)
+                keep[heldout_indices] = False
+                training = ranges[keep].copy()
+            else:
+                training = np.empty((0, 2), dtype=np.int64)
+
+            train_ranges.append(training)
+            eval_ranges.append(heldout)
+            manifest.append(
+                {
+                    "dataset": name,
+                    "dataset_index": dataset_idx,
+                    "training_source": bool(training_source),
+                    "episode_indices": heldout_indices.tolist(),
+                    "episode_ranges": heldout.tolist(),
+                }
+            )
+        return train_ranges, eval_ranges, manifest
+
+    def heldout_validation_samples(self) -> list[dict[str, int | float | str | bool]]:
+        """Return one deterministic full-window anchor from every held-out episode."""
+        if self.heldout_sample_pool is None:
+            return []
+        samples = []
+        for entry in self.heldout_eval_manifest:
+            dataset_idx = int(entry["dataset_index"])
+            stride = int(self.heldout_sample_pool.anchor_strides[dataset_idx])
+            horizon = int(self.frame_horizons[dataset_idx])
+            for episode_index, (start, end) in zip(
+                entry["episode_indices"],
+                entry["episode_ranges"],
+                strict=True,
+            ):
+                anchor_count = max(
+                    0,
+                    (int(end) - horizon - int(start) + stride - 1) // stride,
+                )
+                if anchor_count <= 0:
+                    continue
+                digest = hashlib.sha256(
+                    (
+                        f"{self.heldout_eval_fingerprint}:{entry['dataset']}:"
+                        f"{episode_index}"
+                    ).encode("utf-8")
+                ).digest()
+                rng = np.random.default_rng(
+                    int.from_bytes(digest[:8], "little", signed=False)
+                )
+                anchor = int(start) + int(rng.integers(anchor_count)) * stride
+                samples.append(
+                    {
+                        "dataset": str(entry["dataset"]),
+                        "dataset_index": dataset_idx,
+                        "training_source": bool(entry["training_source"]),
+                        "episode_index": int(episode_index),
+                        "episode_start": int(start),
+                        "episode_end": int(end),
+                        "frame_index": anchor,
+                        "horizon": horizon,
+                        "fps": float(self.true_fps[dataset_idx]),
+                        "anchor_stride": stride,
+                    }
+                )
+        return samples
+
+    def heldout_validation_manifest(self) -> dict:
+        return {
+            "format_version": 1,
+            "fingerprint": self.heldout_eval_fingerprint,
+            "dataset_names": list(self.heldout_eval_dataset_names),
+            "episodes_per_dataset": self.heldout_eval_episodes_per_dataset,
+            "split_seed": self.heldout_eval_seed,
+            "samples": self.heldout_validation_samples(),
+        }
+
     def _build_dataset_statistics(self) -> list[dict[str, str | int | float]]:
         """Source-data size and wall-clock duration for every loaded dataset.
 
@@ -418,13 +653,15 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         statistics = []
         for (
             name,
-            frames,
+            _frames,
             fps,
             ratio,
             episode_ranges,
             has_physical,
             anchor_count,
             anchor_stride,
+            heldout_count,
+            training_source,
         ) in zip(
             self.dataset_names,
             self.dataset_sizes,
@@ -434,23 +671,36 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             self.has_physical,
             self.pool_anchor_counts,
             self.anchor_strides,
+            self.heldout_anchor_counts,
+            self.training_sources,
             strict=True,
         ):
             if fps <= 0:
                 raise ValueError(f"Dataset {name!r} has non-positive true fps {fps}.")
+            training_frames = int(
+                np.maximum(episode_ranges[:, 1] - episode_ranges[:, 0], 0).sum(
+                    dtype=np.int64
+                )
+            )
             statistics.append(
                 {
                     "dataset": name,
-                    "frames": int(frames),
+                    "frames": training_frames,
                     "fps": float(fps),
-                    "hours": float(frames) / float(fps) / 3600.0,
+                    "hours": float(training_frames) / float(fps) / 3600.0,
                     "sample_ratio": float(ratio),
                     "episodes": int(len(episode_ranges)),
-                    "training": "contrastive" if has_physical else "perception-only",
+                    "heldout_anchors": int(heldout_count),
+                    "training_source": bool(training_source),
+                    "training": (
+                        "validation-only"
+                        if not training_source
+                        else "contrastive" if has_physical else "perception-only"
+                    ),
                     "anchor_count": int(anchor_count),
                     "anchor_stride": int(anchor_stride),
                     "anchor_hz": float(fps) / int(anchor_stride),
-                    "anchor_ratio": float(anchor_count) / max(1, int(frames)),
+                    "anchor_ratio": float(anchor_count) / max(1, training_frames),
                 }
             )
         return statistics
@@ -463,6 +713,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 f"{stat['fps']:g}",
                 f"{stat['hours']:.2f}",
                 stat["anchor_count"],
+                stat["heldout_anchors"],
                 stat["anchor_stride"],
                 f"{stat['anchor_hz']:.2f}",
                 f"{stat['anchor_ratio']:.3f}",
@@ -479,6 +730,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 "-",
                 f"{self.total_source_hours:.2f}",
                 self.total_pool_anchors,
+                int(self.heldout_anchor_counts.sum(dtype=np.int64)),
                 "-",
                 "-",
                 f"{self.total_pool_anchors / max(1, self.total_source_frames):.3f}",
@@ -496,6 +748,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                     "FPS",
                     "Hours",
                     "Anchors",
+                    "Val anchors",
                     "Stride",
                     "Anchor Hz",
                     "Keep",
@@ -762,6 +1015,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         def project(instructions):
             mean = np.zeros(CANON_DIM, dtype=np.float32)
             std = np.ones(CANON_DIM, dtype=np.float32)
+            minimum = np.full(CANON_DIM, -np.inf, dtype=np.float32)
+            maximum = np.full(CANON_DIM, np.inf, dtype=np.float32)
             mask = np.zeros(CANON_DIM, dtype=np.float32)
             for src_key, s0, s1, d0 in instructions:
                 width = s1 - s0
@@ -775,9 +1030,17 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                     continue
                 mean[d0 : d0 + width] = src_mean[s0:s1]
                 std[d0 : d0 + width] = np.maximum(src_std[s0:s1], 1e-3)
+                if "min" in src and "max" in src:
+                    src_min = np.asarray(src["min"], dtype=np.float32).reshape(-1)
+                    src_max = np.asarray(src["max"], dtype=np.float32).reshape(-1)
+                    if src_min.shape[0] >= s1 and src_max.shape[0] >= s1:
+                        minimum[d0 : d0 + width] = src_min[s0:s1]
+                        maximum[d0 : d0 + width] = src_max[s0:s1]
             return {
                 "mean": torch.from_numpy(mean),
                 "std": torch.from_numpy(std),
+                "min": torch.from_numpy(minimum),
+                "max": torch.from_numpy(maximum),
                 "mask": torch.from_numpy(mask),
             }
 
@@ -904,6 +1167,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         ds_idx: int,
         requested_frame_idx: int,
         dataset_length: int,
+        *,
+        sample_pool=None,
+        episode_ranges: list[np.ndarray] | None = None,
     ) -> int:
         """Choose a reproducible random replacement that is not the failed frame."""
         if dataset_length <= 1:
@@ -917,7 +1183,6 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             ]
         )
         rng = np.random.default_rng(seed)
-        sample_pool = getattr(self, "sample_pool", None)
         if (
             sample_pool is not None
             and sample_pool.dataset_anchor_counts[ds_idx] > 0
@@ -927,6 +1192,22 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 ds_idx,
                 requested_frame_idx,
             )
+        if episode_ranges is not None:
+            ranges = episode_ranges[ds_idx]
+            horizon = int(self.frame_horizons[ds_idx])
+            spans = np.maximum(ranges[:, 1] - horizon - ranges[:, 0], 0)
+            total = int(spans.sum(dtype=np.int64))
+            if total > 0:
+                logical = int(rng.integers(total))
+                cumulative = np.cumsum(spans, dtype=np.int64)
+                episode = int(np.searchsorted(cumulative, logical, side="right"))
+                previous = 0 if episode == 0 else int(cumulative[episode - 1])
+                candidate = int(ranges[episode, 0]) + logical - previous
+                if total <= 1 or candidate != requested_frame_idx:
+                    return candidate
+                return int(ranges[episode, 0]) + (
+                    (logical - previous + 1) % int(spans[episode])
+                )
         candidate = int(rng.integers(dataset_length - 1))
         return candidate + int(candidate >= requested_frame_idx)
 
@@ -935,7 +1216,31 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
     # ------------------------------------------------------------------
     def __getitem__(self, index):
         ds_idx, frame_idx = self._resolve_index(index)
+        return self._get_item(
+            ds_idx,
+            frame_idx,
+            fallback_pool=getattr(self, "sample_pool", None),
+            fallback_ranges=getattr(self, "episode_ranges", None),
+        )
 
+    def get_heldout_item(self, dataset_idx: int, frame_idx: int) -> dict:
+        if self.heldout_sample_pool is None:
+            raise RuntimeError("No held-out validation episodes are configured.")
+        return self._get_item(
+            int(dataset_idx),
+            int(frame_idx),
+            fallback_pool=self.heldout_sample_pool,
+            fallback_ranges=self.heldout_episode_ranges,
+        )
+
+    def _get_item(
+        self,
+        ds_idx: int,
+        frame_idx: int,
+        *,
+        fallback_pool,
+        fallback_ranges: list[np.ndarray] | None,
+    ) -> dict:
         dataset = self.datasets[ds_idx]
         frame_idx = int(np.clip(frame_idx, 0, len(dataset) - 1))
         requested_frame_idx = frame_idx
@@ -943,7 +1248,13 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         try:
             item = dataset[frame_idx]
         except Exception as exc:  # noqa: BLE001 - never let one broken frame kill training
-            fallback_idx = self._random_fallback_index(ds_idx, frame_idx, len(dataset))
+            fallback_idx = self._random_fallback_index(
+                ds_idx,
+                frame_idx,
+                len(dataset),
+                sample_pool=fallback_pool,
+                episode_ranges=fallback_ranges,
+            )
             logger.warning(
                 "Failed to read %s[%d]: %s; retrying random frame %d from the same dataset.",
                 self.dataset_names[ds_idx],
