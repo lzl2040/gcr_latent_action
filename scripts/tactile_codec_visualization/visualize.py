@@ -82,8 +82,8 @@ class EvaluationRecord:
     mean_baseline_mse: float
     mse_improvement: float
     output_clip_fraction: float
-    latent_rms_mean: float
-    latent_rms_std: float
+    latent_deviation_mean: float
+    latent_deviation_std: float
     panel: str
 
 
@@ -459,8 +459,8 @@ def _to_rgb_uint8(image: torch.Tensor) -> np.ndarray:
     return image.detach().float().clamp(0, 1).permute(1, 2, 0).mul(255).round().to(torch.uint8).cpu().numpy()
 
 
-def _latent_heatmap(latent_rms: torch.Tensor, size: int) -> np.ndarray:
-    values = latent_rms.detach().float().cpu().numpy()
+def _latent_heatmap(latent_deviation: torch.Tensor, size: int) -> np.ndarray:
+    values = latent_deviation.detach().float().cpu().numpy()
     minimum = float(values.min())
     maximum = float(values.max())
     ratio = (values - minimum) / max(maximum - minimum, 1e-8)
@@ -488,7 +488,7 @@ def save_panel(
     output_path: Path,
     ground_truth: torch.Tensor,
     reconstruction: torch.Tensor,
-    latent_rms: torch.Tensor,
+    latent_deviation: torch.Tensor,
     record: EvaluationRecord,
 ) -> None:
     size = ground_truth.shape[-1]
@@ -500,9 +500,9 @@ def save_panel(
             f"spatial std={record.spatial_std:.4f}",
         ),
         _labeled_image(
-            _latent_heatmap(latent_rms, size),
-            "Encoder latent RMS",
-            f"{latent_rms.min():.3f} .. {latent_rms.max():.3f}",
+            _latent_heatmap(latent_deviation, size),
+            "Encoder feature deviation",
+            f"{latent_deviation.min():.3f} .. {latent_deviation.max():.3f}",
         ),
         _labeled_image(
             _to_rgb_uint8(reconstruction),
@@ -581,7 +581,9 @@ def evaluate_samples(
         clip_fraction = (
             ((reconstruction_unclipped < 0) | (reconstruction_unclipped > 1)).float().mean(dim=(1, 2, 3))
         )
-        latent_rms = patches.float().square().mean(dim=1).sqrt()
+        patch_features = patches.float()
+        spatial_mean = patch_features.mean(dim=(-2, -1), keepdim=True)
+        latent_deviation = (patch_features - spatial_mean).square().mean(dim=1).sqrt()
 
         for local_index, sample in enumerate(batch_samples):
             mse = float(pixel_mse[local_index].item())
@@ -604,15 +606,15 @@ def evaluate_samples(
                 mean_baseline_mse=float(baseline_mse[local_index].item()),
                 mse_improvement=float(improvement[local_index].item()),
                 output_clip_fraction=float(clip_fraction[local_index].item()),
-                latent_rms_mean=float(latent_rms[local_index].mean().item()),
-                latent_rms_std=float(latent_rms[local_index].std().item()),
+                latent_deviation_mean=float(latent_deviation[local_index].mean().item()),
+                latent_deviation_std=float(latent_deviation[local_index].std().item()),
                 panel=panel_relative.as_posix(),
             )
             save_panel(
                 output_root / panel_relative,
                 ground_truth[local_index].cpu(),
                 reconstruction[local_index].cpu(),
-                latent_rms[local_index].cpu(),
+                latent_deviation[local_index].cpu(),
                 record,
             )
             records.append(record)

@@ -11,7 +11,7 @@ physical_encoder.tactile_recon.*
 抽取真实触觉帧，并输出：
 
 - 原始触觉图像；
-- encoder 空间 patch latent 的 RMS 热力图；
+- encoder patch 相对空间平均特征的偏差热力图；
 - decoder 去 z-score 后的 RGB 重建；
 - 放大 4 倍的绝对误差；
 - pixel MAE/MSE、PSNR 和训练目标同定义的 z-score MSE；
