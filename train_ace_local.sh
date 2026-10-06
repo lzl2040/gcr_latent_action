@@ -24,6 +24,7 @@ if [ -z "${CUDA_VISIBLE_DEVICES}" ]; then
     echo "No GPU has less than 5 GB in use; refusing to start. Check nvidia-smi." >&2
     exit 1
 fi
+# CUDA_VISIBLE_DEVICES=0,1,2,3
 export CUDA_VISIBLE_DEVICES
 echo "devices=${CUDA_VISIBLE_DEVICES}"
 # The machine is shared, and a run that is killed can leave dataloader workers holding the
