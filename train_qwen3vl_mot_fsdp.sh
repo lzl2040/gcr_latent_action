@@ -36,6 +36,8 @@ GENERATION_EVAL_DATASETS="${GENERATION_EVAL_DATASETS:-open_neo_arx5,ms_data_xdof
 GENERATION_EVAL_EPISODES_PER_DATASET="${GENERATION_EVAL_EPISODES_PER_DATASET:-2}"
 GENERATION_EVAL_BATCH_SIZE="${GENERATION_EVAL_BATCH_SIZE:-8}"
 GENERATION_EVAL_VIDEO_FPS="${GENERATION_EVAL_VIDEO_FPS:-8}"
+STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
+STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 CHECK_PATHS="${CHECK_PATHS:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 
@@ -85,9 +87,23 @@ require_positive_int \
     "$GENERATION_EVAL_EPISODES_PER_DATASET"
 require_positive_int "GENERATION_EVAL_BATCH_SIZE" "$GENERATION_EVAL_BATCH_SIZE"
 require_positive_int "GENERATION_EVAL_VIDEO_FPS" "$GENERATION_EVAL_VIDEO_FPS"
+if [[ -n "$STAGE2_TASK_NAMES" || -n "$STAGE2_TASK_WEIGHTS" ]]; then
+    [[ -n "$STAGE2_TASK_NAMES" && -n "$STAGE2_TASK_WEIGHTS" ]] \
+        || die "STAGE2_TASK_NAMES and STAGE2_TASK_WEIGHTS must be set together"
+fi
 EFFECTIVE_EVAL_FREQ=0
 if [[ "$GENERATION_EVAL_ENABLED" == "true" ]]; then
     EFFECTIVE_EVAL_FREQ="$GENERATION_EVAL_FREQ"
+fi
+
+STAGE2_TASK_ARGS=()
+if [[ -n "$STAGE2_TASK_NAMES" ]]; then
+    STAGE2_TASK_NAMES_JSON="[\"${STAGE2_TASK_NAMES//,/\",\"}\"]"
+    STAGE2_TASK_WEIGHTS_JSON="[${STAGE2_TASK_WEIGHTS}]"
+    STAGE2_TASK_ARGS+=(
+        --policy.task_names="${STAGE2_TASK_NAMES_JSON}"
+        --policy.task_weights="${STAGE2_TASK_WEIGHTS_JSON}"
+    )
 fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
@@ -264,6 +280,13 @@ echo "  logs=${LOG_DIR}"
 echo "  sample_pool=${SAMPLE_POOL_ENABLED} root=${SAMPLE_POOL_ROOT} cache=${SAMPLE_POOL_CACHE_DIR}"
 echo "  sample_starts: keep_all_at_or_below=${SAMPLE_POOL_KEEP_ALL_BELOW_FPS}fps target=${SAMPLE_POOL_TARGET_HZ}Hz"
 echo "  generation_eval=${GENERATION_EVAL_ENABLED} freq=${GENERATION_EVAL_FREQ} datasets=${GENERATION_EVAL_DATASETS}"
+if (( ${#STAGE2_TASK_ARGS[@]} > 0 )); then
+    echo "  task_mix=${STAGE2_TASK_NAMES} weights=${STAGE2_TASK_WEIGHTS}"
+elif [[ "$WEIGHT_RESUME" == "true" ]]; then
+    echo "  task_mix=<from checkpoint>"
+else
+    echo "  task_mix=<policy defaults>"
+fi
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 echo "checkpoint: control_backend=gloo sync_files=${FSDP_CHECKPOINT_SYNC_FILES} threads=${FSDP_CHECKPOINT_THREADS} heartbeat=${FSDP_CHECKPOINT_HEARTBEAT_SECONDS}s"
@@ -311,6 +334,7 @@ CMD=(
     --policy.scheduler_plateau_steps="${PLATEAU_STEPS:-2000}"
     --policy.scheduler_decay_steps="${DECAY_STEPS:-100000}"
     --policy.scheduler_decay_lr="${DECAY_LR:-1.5e-6}"
+    "${STAGE2_TASK_ARGS[@]}"
     --dataset.repo_id="whatever"
     --dataset.image_transforms.enable=false
     --dataset.image_transforms.img_size=256

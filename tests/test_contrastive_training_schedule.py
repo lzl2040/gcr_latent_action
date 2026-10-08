@@ -159,3 +159,70 @@ def test_stage2_resume_uses_saved_embedded_stage1_config(tmp_path) -> None:
     assert cfg.policy.cosmos3_dir == "/mnt/runtime-cosmos"
     assert cfg.optimizer.lr == 3e-5
     assert cfg.scheduler.num_decay_steps == 77_000
+
+
+def test_stage2_resume_allows_task_weight_curriculum(tmp_path) -> None:
+    checkpoint_root = tmp_path / "run"
+    checkpoint_root.mkdir()
+    task_names = ("i2v", "action_prediction", "tactile_prediction")
+    saved_policy = Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"},
+        initialize_from_stage1=False,
+        task_names=task_names,
+        task_weights=(0.6, 0.2, 0.2),
+    )
+    saved_policy._save_pretrained(checkpoint_root)
+    cfg = SimpleNamespace(
+        weight_resume=True,
+        output_dir=checkpoint_root,
+        policy=Qwen3VLMoTConfig(
+            task_names=task_names,
+            task_weights=(0.7, 0.0, 0.3),
+        ),
+        use_policy_training_preset=False,
+        optimizer=None,
+        scheduler=None,
+    )
+
+    _load_stage2_resume_policy_config(
+        cfg,
+        args=[
+            '--policy.task_names=["i2v","action_prediction","tactile_prediction"]',
+            "--policy.task_weights=[0.7,0.0,0.3]",
+        ],
+    )
+
+    assert cfg.policy.task_names == task_names
+    assert cfg.policy.task_weights == (0.7, 0.0, 0.3)
+
+
+def test_stage2_resume_rejects_task_list_change(tmp_path) -> None:
+    checkpoint_root = tmp_path / "run"
+    checkpoint_root.mkdir()
+    saved_policy = Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"},
+        initialize_from_stage1=False,
+        task_names=("i2v", "tactile_prediction"),
+        task_weights=(0.7, 0.3),
+    )
+    saved_policy._save_pretrained(checkpoint_root)
+    cfg = SimpleNamespace(
+        weight_resume=True,
+        output_dir=checkpoint_root,
+        policy=Qwen3VLMoTConfig(
+            task_names=("i2v",),
+            task_weights=(1.0,),
+        ),
+        use_policy_training_preset=False,
+        optimizer=None,
+        scheduler=None,
+    )
+
+    with pytest.raises(ValueError, match="Cannot change `policy.task_names`"):
+        _load_stage2_resume_policy_config(
+            cfg,
+            args=[
+                '--policy.task_names=["i2v"]',
+                "--policy.task_weights=[1.0]",
+            ],
+        )

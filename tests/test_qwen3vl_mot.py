@@ -22,7 +22,11 @@ from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import (
     _load_stage1_config,
 )
 from lerobot.common.policies.qwen3vl_mot.stage1_transfer import TransferReport, transfer_matching_module
-from lerobot.common.policies.qwen3vl_mot.tasks import TASK_SPECS, ModalityRole
+from lerobot.common.policies.qwen3vl_mot.tasks import (
+    TASK_SPECS,
+    ModalityRole,
+    resolve_task_specs,
+)
 
 
 def test_stage1_config_loader_accepts_saved_policy_config(tmp_path):
@@ -56,6 +60,40 @@ def test_task_family_has_requested_directional_roles():
     assert TASK_SPECS["inverse_dynamics"].action is ModalityRole.NOISY
     assert TASK_SPECS["action_prediction"].state is ModalityRole.CURRENT_ONLY
     assert TASK_SPECS["tactile_prediction"].tactile is ModalityRole.NOISY
+
+
+def test_task_weights_are_normalized():
+    tasks, weights = resolve_task_specs(
+        ("i2v", "tactile_prediction"),
+        (7.0, 3.0),
+    )
+
+    assert tuple(task.name for task in tasks) == ("i2v", "tactile_prediction")
+    assert weights == (0.7, 0.3)
+
+
+def test_task_selection_redistributes_unavailable_tactile_weight():
+    policy = Qwen3VLMoTPolicy.__new__(Qwen3VLMoTPolicy)
+    nn.Module.__init__(policy)
+    policy.config = SimpleNamespace(tactile_generation_target="spatial_patches")
+    policy.task_specs = (
+        TASK_SPECS["i2v"],
+        TASK_SPECS["tactile_prediction"],
+    )
+    policy.task_weights = (0.01, 0.99)
+    batch = {
+        "image_t0": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
+        "pair_is_valid": torch.ones(2),
+        "state_mask": torch.ones(2, 4),
+        "action_mask": torch.ones(2, 4),
+        "tactile_signal_mask": torch.zeros(2),
+        "tactile_image_mask": torch.zeros(2, 2),
+    }
+
+    task, valid_rows = policy._select_task(batch, forced_task=None)
+
+    assert task.name == "i2v"
+    assert valid_rows.tolist() == [True, True]
 
 
 def test_asymmetric_attention_reads_only_unmasked_understanding_kv():

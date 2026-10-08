@@ -344,6 +344,48 @@ WANDB_ENABLE=false
 
 避免任务等待交互式登录。
 
+### 2.2 设置 Stage 2 任务比例
+
+两个 launcher 都支持用逗号分隔的环境变量设置任务列表和相对权重：
+
+```text
+STAGE2_TASK_NAMES
+STAGE2_TASK_WEIGHTS
+```
+
+可用任务名按默认顺序为：
+
+```text
+t2v,i2v,forward_dynamics,inverse_dynamics,action_prediction,state_prediction,tactile_prediction
+```
+
+先只训练当前 RGB 条件的视频生成和触觉图像生成时，推荐**保留完整任务列表**，把暂不训练的
+任务设为 0：
+
+```bash
+STAGE2_TASK_NAMES=t2v,i2v,forward_dynamics,inverse_dynamics,action_prediction,state_prediction,tactile_prediction \
+STAGE2_TASK_WEIGHTS=0,0.7,0,0,0,0,0.3 \
+TACTILE_GENERATION_TARGET=spatial_patches \
+JOB_NAME=qwen3vl_mot_rgb_tactile \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+权重是相对值，`0,7,0,0,0,0,3` 与上面的 `0,0.7,...,0.3` 等价。模型会先屏蔽当前 global
+batch 中没有有效监督的任务，再对剩余权重重新归一化；因此没有触觉图像的 batch 不会误采样
+`tactile_prediction`，其概率会转给当前可训练的 RGB 任务。
+
+若还要训练纯文本生成 RGB，可使用：
+
+```bash
+STAGE2_TASK_WEIGHTS=0.1,0.6,0,0,0,0,0.3
+```
+
+任务列表决定 Generation Expert 的 task embedding 形状。恢复 checkpoint 时可以在保持
+`STAGE2_TASK_NAMES` 完全一致的前提下修改 `STAGE2_TASK_WEIGHTS`；不能增加、删除或重排任务。
+因此多阶段 curriculum 应从第一阶段就保留后续任务并先把其权重设为 0。若确实需要改变任务
+列表，必须使用新的 `OUTPUT_DIR` 从 Stage 1 checkpoint 开始训练。两个变量必须同时设置；
+不设置时，新训练使用 policy 默认七任务比例，恢复训练使用 checkpoint 中保存的比例。
+
 ---
 
 ## 3. 集群单步 smoke
@@ -623,6 +665,8 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `GENERATION_EVAL_EPISODES_PER_DATASET` | `2` | 每个数据集完整留出的 episode 数 |
 | `GENERATION_EVAL_BATCH_SIZE` | `8` | 每个 rank 同步执行的生成验证 batch |
 | `GENERATION_EVAL_VIDEO_FPS` | `8` | 导出 MP4 的播放帧率 |
+| `STAGE2_TASK_NAMES` | 未设置 | 逗号分隔的任务列表；恢复时必须与 checkpoint 完全一致 |
+| `STAGE2_TASK_WEIGHTS` | 未设置 | 与任务列表等长的非负相对权重；global batch 内按可用监督重归一化 |
 | `TACTILE_GENERATION_TARGET` | `spatial_patches` | 新训练使用可解码触觉空间 latent |
 | `FSDP_CHECKPOINT_SYNC_FILES` | `false` | DCP 是否对每个 shard 强制 `fsync` |
 | `FSDP_CHECKPOINT_THREADS` | `1` | 每个 rank 的 DCP writer 线程数 |

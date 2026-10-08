@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from pprint import pformat
-from typing import Any
+from typing import Any, Sequence
 
 import deepspeed
 import torch
@@ -37,6 +37,7 @@ from lerobot.common.datasets.contrastive_sample_pool import (
 from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
+from lerobot.common.policies.qwen3vl_mot.tasks import resolve_task_specs
 from lerobot.common.utils.deepspeed_checkpoint import (
     DATA_PARALLEL_WORLD_SIZE_KEY,
     OPTIMIZER_GROUP_SIGNATURE_KEY,
@@ -195,10 +196,15 @@ def update_policy(model_engine, batch: Any, task_type: str, step: int):
     return loss, output_dict
 
 
-def _load_stage2_resume_policy_config(cfg: TrainPipelineConfig) -> None:
+def _load_stage2_resume_policy_config(
+    cfg: TrainPipelineConfig,
+    args: Sequence[str] | None = None,
+) -> None:
     if not cfg.weight_resume or cfg.policy.type != "qwen3vl_mot":
         return
     runtime_policy = cfg.policy
+    task_names_overridden = parser.parse_arg("policy.task_names", args) is not None
+    task_weights_overridden = parser.parse_arg("policy.task_weights", args) is not None
     checkpoint_root = Path(cfg.output_dir)
     config_path = checkpoint_root / "config.json"
     if not config_path.is_file():
@@ -220,6 +226,17 @@ def _load_stage2_resume_policy_config(cfg: TrainPipelineConfig) -> None:
         runtime_path = getattr(runtime_policy, field_name)
         if runtime_path:
             setattr(saved_policy, field_name, runtime_path)
+    if task_names_overridden and tuple(runtime_policy.task_names) != tuple(saved_policy.task_names):
+        raise ValueError(
+            "Cannot change `policy.task_names` while resuming because it changes the "
+            "Generation Expert task embedding contract. Start a fresh output directory, "
+            "or keep the original task list and set inactive task weights to zero."
+        )
+    if task_weights_overridden:
+        task_names = tuple(saved_policy.task_names)
+        task_weights = tuple(runtime_policy.task_weights)
+        resolve_task_specs(task_names, task_weights)
+        saved_policy.task_weights = task_weights
     saved_policy.initialize_from_stage1 = False
     cfg.policy = saved_policy
     if cfg.use_policy_training_preset:

@@ -15,6 +15,25 @@ fi
 OUTPUT_DIR="${OUTPUT_DIR:-qwen3vl_mot}"
 SAMPLE_POOL_ROOT="${SAMPLE_POOL_ROOT:-$(dirname "${OUTPUT_DIR}")/_sample_pools}"
 SAMPLE_POOL_CACHE_DIR="${SAMPLE_POOL_CACHE_DIR:-${TMPDIR:-/tmp}/robo_contrast_sample_pools}"
+STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
+STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
+
+if [[ -n "$STAGE2_TASK_NAMES" || -n "$STAGE2_TASK_WEIGHTS" ]]; then
+    if [[ -z "$STAGE2_TASK_NAMES" || -z "$STAGE2_TASK_WEIGHTS" ]]; then
+        echo "Error: STAGE2_TASK_NAMES and STAGE2_TASK_WEIGHTS must be set together" >&2
+        exit 1
+    fi
+fi
+
+STAGE2_TASK_ARGS=()
+if [[ -n "$STAGE2_TASK_NAMES" ]]; then
+    STAGE2_TASK_NAMES_JSON="[\"${STAGE2_TASK_NAMES//,/\",\"}\"]"
+    STAGE2_TASK_WEIGHTS_JSON="[${STAGE2_TASK_WEIGHTS}]"
+    STAGE2_TASK_ARGS+=(
+        --policy.task_names="${STAGE2_TASK_NAMES_JSON}"
+        --policy.task_weights="${STAGE2_TASK_WEIGHTS_JSON}"
+    )
+fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export LEROBOT_VIDEO_DECODER_CACHE_SIZE="${LEROBOT_VIDEO_DECODER_CACHE_SIZE:-256}"
@@ -55,6 +74,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --policy.scheduler_plateau_steps=2000 \
     --policy.scheduler_decay_steps=100000 \
     --policy.scheduler_decay_lr=1.5e-6 \
+    "${STAGE2_TASK_ARGS[@]}" \
     --dataset.repo_id="whatever" \
     --dataset.image_transforms.enable=false \
     --dataset.image_transforms.img_size=256 \
