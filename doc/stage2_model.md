@@ -588,6 +588,7 @@ lerobot/common/policies/qwen3vl_mot/tasks.py
 |---|---|---|---|
 | `t2v` | text | 无 | 完整 video |
 | `i2v` | image + available text | video 当前 latent frame | 未来 video |
+| `action_video_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action |
 | `forward_dynamics` | image + available text | action | 未来 video + 未来 state |
 | `inverse_dynamics` | image + available text | video + state | action |
 | `action_prediction` | image + available text | current state | action |
@@ -599,6 +600,7 @@ lerobot/common/policies/qwen3vl_mot/tasks.py
 ```text
 t2v                 0.10
 i2v                 0.20
+action_video_prediction 0.00
 forward_dynamics    0.20
 inverse_dynamics    0.15
 action_prediction   0.15

@@ -55,6 +55,13 @@ TASK_SPECS: dict[str, TaskSpec] = {
         understanding_image=True,
         video=ModalityRole.FUTURE_NOISY,
     ),
+    "action_video_prediction": TaskSpec(
+        name="action_video_prediction",
+        understanding_image=True,
+        video=ModalityRole.FUTURE_NOISY,
+        state=ModalityRole.CURRENT_ONLY,
+        action=ModalityRole.NOISY,
+    ),
     "forward_dynamics": TaskSpec(
         name="forward_dynamics",
         understanding_image=True,
@@ -93,7 +100,7 @@ TASK_SPECS: dict[str, TaskSpec] = {
 }
 
 DEFAULT_TASK_NAMES = tuple(TASK_SPECS)
-DEFAULT_TASK_WEIGHTS = (0.10, 0.20, 0.20, 0.15, 0.15, 0.10, 0.10)
+DEFAULT_TASK_WEIGHTS = (0.10, 0.20, 0.0, 0.20, 0.15, 0.15, 0.10, 0.10)
 
 
 def resolve_task_specs(

@@ -717,7 +717,12 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             return pair & has_text
         if task.name == "i2v":
             return pair
-        if task.name in ("forward_dynamics", "inverse_dynamics", "state_prediction"):
+        if task.name in (
+            "action_video_prediction",
+            "forward_dynamics",
+            "inverse_dynamics",
+            "state_prediction",
+        ):
             return pair & has_state & has_action
         if task.name == "action_prediction":
             return has_state & has_action

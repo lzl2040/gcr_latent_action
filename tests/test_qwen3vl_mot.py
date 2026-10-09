@@ -54,6 +54,9 @@ def test_task_family_has_requested_directional_roles():
     assert not TASK_SPECS["t2v"].understanding_image
     assert TASK_SPECS["i2v"].understanding_image
     assert TASK_SPECS["i2v"].video is ModalityRole.FUTURE_NOISY
+    assert TASK_SPECS["action_video_prediction"].video is ModalityRole.FUTURE_NOISY
+    assert TASK_SPECS["action_video_prediction"].state is ModalityRole.CURRENT_ONLY
+    assert TASK_SPECS["action_video_prediction"].action is ModalityRole.NOISY
     assert TASK_SPECS["forward_dynamics"].action is ModalityRole.CLEAN
     assert TASK_SPECS["forward_dynamics"].state is ModalityRole.FUTURE_NOISY
     assert TASK_SPECS["inverse_dynamics"].video is ModalityRole.CLEAN
@@ -202,7 +205,7 @@ def test_default_generation_expert_is_between_one_and_two_billion_parameters():
         )
     parameters = sum(parameter.numel() for parameter in model.parameters())
     assert 1_000_000_000 <= parameters <= 2_000_000_000
-    assert parameters == 1_429_469_696
+    assert parameters == 1_429_471_744
 
 
 def test_native_kv_checkpointing_matches_non_checkpointed_gradients():
@@ -909,13 +912,17 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
         assert metrics[f"task_{task_name}"] == 1.0
         if task_name == "t2v":
             assert metrics["video_target_elements"] == 96
-        elif task_name in ("i2v", "forward_dynamics"):
+        elif task_name in ("i2v", "action_video_prediction", "forward_dynamics"):
             assert metrics["video_target_elements"] == 64
         if task_name in ("forward_dynamics", "state_prediction"):
             assert metrics["state_target_elements"] == 24
-        if task_name in ("inverse_dynamics", "action_prediction"):
+        if task_name in (
+            "action_video_prediction",
+            "inverse_dynamics",
+            "action_prediction",
+        ):
             assert metrics["action_target_elements"] == 32
-        if task_name == "action_prediction":
+        if task_name in ("action_video_prediction", "action_prediction"):
             torch.testing.assert_close(
                 policy.physical_encoder.last_state,
                 batch["observation.state"][:, :1].expand(-1, 4, -1),
