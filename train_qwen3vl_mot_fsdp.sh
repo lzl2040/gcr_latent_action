@@ -179,6 +179,16 @@ if [[ "$DRY_RUN" != "true" ]]; then
     check_python_dependencies
 fi
 
+LEGACY_OUTPUT_DIR="${OUTPUT_DIR}/${JOB_NAME}"
+if [[
+    "$WEIGHT_RESUME" == "true"
+    && ! -e "${OUTPUT_DIR}/latest_checkpoint"
+    && -f "${LEGACY_OUTPUT_DIR}/latest_checkpoint"
+]]; then
+    echo "resume: using legacy nested output directory ${LEGACY_OUTPUT_DIR}"
+    OUTPUT_DIR="${LEGACY_OUTPUT_DIR}"
+fi
+
 LATEST_CHECKPOINT_POINTER="${OUTPUT_DIR}/latest_checkpoint"
 RESUME_CHECKPOINT=""
 shopt -s nullglob

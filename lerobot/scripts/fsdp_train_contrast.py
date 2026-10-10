@@ -59,6 +59,18 @@ class FSDPTrainPipelineConfig(TrainPipelineConfig):
         default_factory=GenerationEvalConfig
     )
 
+    def validate(self) -> None:
+        # The FSDP launcher already supplies the final run directory.
+        requested_output_dir = (
+            Path(self.output_dir)
+            if self.output_dir is not None
+            else None
+        )
+        self.output_dir = requested_output_dir
+        super().validate()
+        if requested_output_dir is not None:
+            self.output_dir = requested_output_dir
+
 
 def _initialize_distributed() -> tuple[
     int,

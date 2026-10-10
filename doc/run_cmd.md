@@ -449,12 +449,20 @@ WEIGHT_RESUME=true
 这是自动恢复模式：
 
 1. 检查 `${OUTPUT_DIR}/latest_checkpoint`；
-2. pointer 不存在且目录中没有 `checkpoint_*` 时，自动改为 `WEIGHT_RESUME=false`，
+2. 若该位置没有 pointer，但旧版双层目录
+   `${OUTPUT_DIR}/${JOB_NAME}/latest_checkpoint` 存在，则自动切换到旧目录恢复；
+3. pointer 不存在且目录中没有 `checkpoint_*` 时，自动改为 `WEIGHT_RESUME=false`，
    从 Stage 1 开始新训练；
-3. pointer 指向有效的 `checkpoint_XXXXXXXX` 目录时恢复；
-4. pointer 损坏，或已有 `checkpoint_*` 但 pointer 丢失时直接报错，不会静默重新训练。
+4. pointer 指向有效的 `checkpoint_XXXXXXXX` 目录时恢复；
+5. pointer 损坏，或已有 `checkpoint_*` 但 pointer 丢失时直接报错，不会静默重新训练。
 
 因此新 `JOB_NAME/OUTPUT_DIR` 和已有 checkpoint 的任务可以使用同一条启动命令。
+
+2026-10-10 之前的 Stage 2 FSDP 入口把 job name 拼了两次：launcher 先构造
+`${OUTPUT_ROOT}/${JOB_NAME}`，通用 `TrainPipelineConfig.validate()` 又追加一次，因此权重实际
+位于 `${OUTPUT_ROOT}/${JOB_NAME}/${JOB_NAME}`，而 launcher 曾错误地在上一层检查 resume。
+当前 FSDP config 将 `OUTPUT_DIR` 视为最终目录，不再追加第二次，并保留上述旧目录自动探测，
+已有 checkpoint 不需要搬迁。
 
 恢复时必须保持以下训练几何不变：
 
@@ -658,7 +666,7 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `PARENT_DIR_V30` | 集群 v30-0710 挂载 | v3 数据目录 |
 | `PARENT_DIR_EXTRA` | 集群额外数据挂载 | 额外数据目录；允许设为空 |
 | `OUTPUT_ROOT` | `/mnt/wangxiaofa/qwen3vl_mot_exp` | 默认输出根目录 |
-| `OUTPUT_DIR` | `${OUTPUT_ROOT}/${JOB_NAME}` | 当前任务 checkpoint 目录 |
+| `OUTPUT_DIR` | `${OUTPUT_ROOT}/${JOB_NAME}` | 当前任务的最终 checkpoint 目录；旧双层目录会自动探测 |
 | `LOG_DIR` | `/mnt/wangxiaofa/ace_logs` | 文本日志目录 |
 | `NNODES` | `1` | 训练节点数 |
 | `NODE_RANK` | `0` | 当前节点编号，范围 `[0, NNODES)` |

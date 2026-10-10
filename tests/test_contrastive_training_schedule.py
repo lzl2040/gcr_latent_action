@@ -117,6 +117,25 @@ def test_fsdp_cli_decodes_nested_runtime_config() -> None:
     assert cfg.batch_size == 16
 
 
+def test_fsdp_output_dir_is_exact_and_validation_is_idempotent(tmp_path) -> None:
+    output_dir = tmp_path / "stage2_run"
+    cfg = draccus.parse(
+        FSDPTrainPipelineConfig,
+        args=[
+            "--dataset.repo_id=whatever",
+            "--policy.type=qwen3vl_mot",
+            "--job_name=stage2_run",
+            f"--output_dir={output_dir}",
+        ],
+    )
+
+    cfg.validate()
+    assert cfg.output_dir == output_dir
+
+    cfg.validate()
+    assert cfg.output_dir == output_dir
+
+
 def test_fsdp_resume_position_advances_completed_epoch() -> None:
     assert _normalize_resume_position(3, 100, 100) == (4, 0)
     assert _normalize_resume_position(3, 137, 100) == (4, 37)
