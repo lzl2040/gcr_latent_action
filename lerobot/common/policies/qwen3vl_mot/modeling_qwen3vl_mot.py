@@ -389,6 +389,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             task_names=config.task_names,
             gradient_checkpointing=config.generation_gradient_checkpointing,
             rotary_config=qwen_text_config,
+            num_video_views=len(config.rgb_views),
         )
         config.initialize_from_stage1 = False
 
@@ -563,6 +564,25 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
         return image
 
+    @property
+    def rgb_views(self) -> tuple[str, ...]:
+        return tuple(getattr(self.config, "rgb_views", ("primary",)))
+
+    def _understand_batch(self, batch: dict, *, with_image: bool = True):
+        texts = batch.get("task", [""] * self._current_image(batch).shape[0])
+        if isinstance(texts, str):
+            texts = [texts] * self._current_image(batch).shape[0]
+        if not with_image:
+            return self.understanding(None, texts)
+        if len(self.rgb_views) == 1:
+            return self.understanding(self._current_image(batch), texts)
+        return self.understanding(
+            batch["images_t0"],
+            texts,
+            image_mask=batch["image_view_mask"],
+            view_names=self.rgb_views,
+        )
+
     def _sample_canonical_action(
         self,
         batch: dict,
@@ -643,13 +663,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         40-dimensional result back to one robot's action order and units belongs to the
         embodiment adapter that produced `action_mask`.
         """
-        image = self._current_image(batch)
-        device = next(self.generation.parameters()).device
-        image = image.to(device)
-        texts = batch.get("task", [""] * image.shape[0])
-        if isinstance(texts, str):
-            texts = [texts] * image.shape[0]
-        understanding = self.understanding(image, texts)
+        understanding = self._understand_batch(batch)
         return self._sample_canonical_action(batch, understanding)
 
     def select_action(self, batch):
@@ -697,6 +711,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             if pair is None
             else pair.to(device).reshape(-1) > 0.5
         )
+        if len(self.rgb_views) > 1:
+            pair = batch["video_view_mask"].to(device).bool().any(dim=-1)
         has_text = batch.get("has_text")
         has_text = (
             torch.ones(batch_size, device=device, dtype=torch.bool)
@@ -840,6 +856,32 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         )
         return tokens, position_ids
 
+    def _video_stream_tokens(self, batch: dict, *, current_only: bool = False):
+        if len(self.rgb_views) == 1:
+            video = batch["video"][:, :1] if current_only else batch["video"]
+            tokens, positions = self._encode_video(video)
+            return tokens, positions, None, None
+        video = batch["video_views"]
+        view_mask = batch["image_view_mask" if current_only else "video_view_mask"].to(video.device).bool()
+        if video.ndim != 6 or video.shape[1] != len(self.rgb_views):
+            raise ValueError("video_views must have shape (B,V,T,C,H,W) matching rgb_views.")
+        if view_mask.shape != video.shape[:2]:
+            raise ValueError("RGB view mask must have shape (B,V).")
+        if current_only:
+            video = video[:, :, :1]
+        batch_size, views = video.shape[:2]
+        selected = view_mask.flatten().nonzero(as_tuple=True)[0]
+        encoded_indices = selected if selected.numel() else selected.new_zeros(1)
+        encoded, positions = self._encode_video(video.flatten(0, 1)[encoded_indices])
+        tokens_per_view, width = encoded.shape[1:]
+        tokens = encoded.new_zeros(batch_size * views, tokens_per_view, width)
+        if selected.numel():
+            tokens = tokens.index_copy(0, selected, encoded)
+        tokens = tokens.view(batch_size, views * tokens_per_view, width)
+        keep = view_mask.repeat_interleave(tokens_per_view, dim=1)
+        view_ids = torch.arange(views, device=tokens.device).repeat_interleave(tokens_per_view)
+        return tokens, positions.repeat(views, 1), keep, view_ids
+
     @staticmethod
     def _video_position_ids(
         frames: int,
@@ -939,8 +981,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 "The stage-two batch is missing `video`; construct the dataset with a "
                 "Qwen3VLMoTConfig so `world_video_frames` are decoded."
             )
-        clean, position_ids = self._encode_video(batch["video"])
+        clean, position_ids, view_keep, view_ids = self._video_stream_tokens(batch)
         keep = valid_rows.unsqueeze(1).expand(-1, clean.shape[1])
+        if view_keep is not None:
+            keep = keep & view_keep
         if role is ModalityRole.CLEAN:
             sigma = torch.zeros(clean.shape[0], device=clean.device)
             return GenerationStream(
@@ -949,21 +993,24 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 sigma,
                 keep,
                 position_ids=position_ids,
+                view_ids=view_ids,
             ), None, None, sigma
         sigma = self._sample_sigma(clean.shape[0], clean.device)
         noisy, target = self._flow_corrupt(clean, sigma)
         loss_mask = keep.unsqueeze(-1).expand_as(target).clone()
         if role is ModalityRole.FUTURE_NOISY:
-            tokens_per_frame = int((position_ids[:, 0] == 0).sum().item())
-            noisy[:, :tokens_per_frame] = clean[:, :tokens_per_frame]
-            target[:, :tokens_per_frame] = 0
-            loss_mask[:, :tokens_per_frame] = False
+            current = position_ids[:, 0] == 0
+            noisy[:, current] = clean[:, current]
+            target[:, current] = 0
+            loss_mask[:, current] = False
+        noisy = torch.where(keep.unsqueeze(-1), noisy, torch.zeros_like(noisy))
         return GenerationStream(
             "video",
             noisy,
             sigma,
             keep,
             position_ids=position_ids,
+            view_ids=view_ids,
         ), target, loss_mask, sigma
 
     def _sample_video_latents(
@@ -975,19 +1022,23 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
     ) -> torch.Tensor:
         if "i2v" not in self.generation.task_to_id:
             raise ValueError("Generation validation requires the enabled task 'i2v'.")
-        current_tokens, current_positions = self._encode_video(
-            batch["video"][:, :1]
+        current_tokens, current_positions, current_keep, _ = self._video_stream_tokens(
+            batch, current_only=True
         )
         first_frame = current_positions[:, 0] == 0
         current_tokens = current_tokens[:, first_frame]
         current_positions = current_positions[first_frame]
+        if current_keep is not None:
+            current_keep = current_keep[:, first_frame]
         patch_height = int(current_positions[:, 1].max().item()) + 1
         patch_width = int(current_positions[:, 2].max().item()) + 1
         tokens_per_frame = patch_height * patch_width
         latent_frames = 1 + (
             self.config.world_video_frames - 1
         ) // self.temporal_compression
-        total_tokens = latent_frames * tokens_per_frame
+        views = len(self.rgb_views)
+        tokens_per_view = latent_frames * tokens_per_frame
+        total_tokens = views * tokens_per_view
         values = torch.randn(
             current_tokens.shape[0],
             total_tokens,
@@ -996,7 +1047,6 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             dtype=torch.float32,
             generator=generator,
         )
-        values[:, :tokens_per_frame] = current_tokens.float()
         keep = torch.ones(
             values.shape[:2],
             device=values.device,
@@ -1007,7 +1057,18 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             patch_height,
             patch_width,
             values.device,
+        ).repeat(views, 1)
+        view_ids = (
+            torch.arange(views, device=values.device).repeat_interleave(tokens_per_view)
+            if views > 1 else None
         )
+        if current_keep is not None:
+            keep = current_keep.view(values.shape[0], views, tokens_per_frame)[:, :, :1].expand(
+                -1, -1, tokens_per_view
+            ).reshape_as(keep)
+        first_frame = position_ids[:, 0] == 0
+        values[:, first_frame] = current_tokens.float()
+        values = torch.where(keep.unsqueeze(-1), values, torch.zeros_like(values))
         schedule = torch.linspace(
             1.0,
             0.0,
@@ -1024,6 +1085,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                         sigma_batch,
                         keep,
                         position_ids=position_ids,
+                        view_ids=view_ids,
                     )
                 ],
                 understanding.hidden_states,
@@ -1031,16 +1093,18 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 "i2v",
                 understanding_key_values=understanding.key_values,
             )["video"].float()
-            prediction[:, :tokens_per_frame] = 0
+            prediction[:, first_frame] = 0
             values = values + (next_sigma - sigma) * prediction
-            values[:, :tokens_per_frame] = current_tokens.float()
-        return self._video_tokens_to_latents(
-            values,
+            values[:, first_frame] = current_tokens.float()
+            values = torch.where(keep.unsqueeze(-1), values, torch.zeros_like(values))
+        latents = self._video_tokens_to_latents(
+            values.reshape(values.shape[0] * views, tokens_per_view, values.shape[-1]),
             denormalize=True,
             latent_frames=latent_frames,
             patch_height=patch_height,
             patch_width=patch_width,
         )
+        return latents.view(-1, views, *latents.shape[1:]) if views > 1 else latents
 
     def _prepare_grouped_modality(
         self,
@@ -1481,13 +1545,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         seed: int,
     ) -> dict[str, torch.Tensor]:
         """Generate fixed-noise action, video, and decodable tactile predictions."""
-        image = self._current_image(batch)
         device = next(self.generation.parameters()).device
-        image = image.to(device)
-        texts = batch.get("task", [""] * image.shape[0])
-        if isinstance(texts, str):
-            texts = [texts] * image.shape[0]
-        understanding = self.understanding(image, texts)
+        understanding = self._understand_batch(batch)
         action = self._sample_canonical_action(
             batch,
             understanding,
@@ -1503,12 +1562,16 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             understanding,
             generator=self._generation_rng(device, seed + 2),
         )
-        return {
+        output = {
             "action_normalized": action,
-            "video_latents": video_latents,
+            "video_latents": video_latents[:, 0] if len(self.rgb_views) > 1 else video_latents,
             "tactile_decoded_z": tactile_decoded_z,
             "tactile_mask": tactile_mask,
         }
+        if len(self.rgb_views) > 1:
+            output["video_latents_views"] = video_latents
+            output["video_view_mask"] = batch["image_view_mask"].bool()
+        return output
 
     def forward(
         self,
@@ -1526,10 +1589,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 f"specific task from {tuple(TASK_SPECS)}."
             )
         task, valid_rows = self._select_task(batch, forced_task)
-        understanding = self.understanding(
-            batch["image_t0"] if task.understanding_image else None,
-            batch["task"],
-        )
+        understanding = self._understand_batch(batch, with_image=task.understanding_image)
         projection_dtype = next(self.latent_action_projection.parameters()).dtype
         predicted_latent_action = self.latent_action_projection(
             understanding.latent_queries.to(projection_dtype)

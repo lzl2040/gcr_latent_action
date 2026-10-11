@@ -55,7 +55,7 @@ from lerobot.configs.train import TrainPipelineConfig
 
 # Images stay uint8 all the way to the GPU (4x less PCIe traffic than bf16) and are
 # normalised inside the model; index-like tensors must stay integral.
-_KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "video", "tactile_image")
+_KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "images_t0", "video", "video_views", "tactile_image")
 _EXTRA_TRAINING_EPOCHS = 100
 
 
@@ -205,6 +205,7 @@ def _load_stage2_resume_policy_config(
     runtime_policy = cfg.policy
     task_names_overridden = parser.parse_arg("policy.task_names", args) is not None
     task_weights_overridden = parser.parse_arg("policy.task_weights", args) is not None
+    rgb_views_overridden = parser.parse_arg("policy.rgb_views", args) is not None
     checkpoint_root = Path(cfg.output_dir)
     config_path = checkpoint_root / "config.json"
     if not config_path.is_file():
@@ -237,6 +238,11 @@ def _load_stage2_resume_policy_config(
         task_weights = tuple(runtime_policy.task_weights)
         resolve_task_specs(task_names, task_weights)
         saved_policy.task_weights = task_weights
+    if rgb_views_overridden and tuple(runtime_policy.rgb_views) != tuple(saved_policy.rgb_views):
+        raise ValueError(
+            "Cannot change `policy.rgb_views` while resuming: camera embeddings and video "
+            "supervision must keep the same view contract. Start a fresh output directory."
+        )
     saved_policy.initialize_from_stage1 = False
     cfg.policy = saved_policy
     if cfg.use_policy_training_preset:

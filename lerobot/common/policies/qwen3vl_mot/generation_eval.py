@@ -473,6 +473,14 @@ def _write_sample_index(
     sample: dict[str, Any],
     metrics: dict[str, Any],
 ) -> None:
+    video_sections = []
+    for view in metrics.get("video_valid_views", ["primary"]):
+        prefix = "" if view == "primary" else f"{view}/"
+        video_sections.append(
+            f"<h3>{html.escape(view)} camera</h3>"
+            f'<video controls loop muted src="{prefix}video_comparison.mp4"></video>'
+            f'<p><a href="{prefix}video_contact_sheet.png">Open RGB contact sheet</a></p>'
+        )
     action = (
         '<p><a href="action_summary.html">Open denormalized action summary</a></p>'
         '<img src="action_comparison.png">'
@@ -496,8 +504,7 @@ code, pre {{ background: #f4f4f4; padding: 2px 4px; }}
 <p>Episode {sample["episode_index"]}, frame {sample["frame_index"]},
 {sample["fps"]:.3g} FPS.</p>
 <h2>RGB video prediction</h2>
-<video controls loop muted src="video_comparison.mp4"></video>
-<p><a href="video_contact_sheet.png">Open RGB contact sheet</a></p>
+{"".join(video_sections) or "<p>No valid RGB video window.</p>"}
 <h2>Action prediction</h2>
 {action}
 {tactile}
@@ -636,6 +643,41 @@ th, td {{ border: 1px solid #aaa; padding: 5px 9px; }}
 """
         _atomic_write_text(output_dir / "index.html", document)
 
+    def _save_sample_videos(
+        self, sample_dir: Path, batch: dict, prediction: dict, index: int
+    ) -> dict:
+        if "video_latents_views" not in prediction:
+            predicted = self._decode_video(prediction["video_latents"][index : index + 1])[0].cpu()
+            return _save_video_artifacts(
+                sample_dir, batch["video"][index].cpu(), predicted, self.config.video_fps
+            )
+        roles = tuple(self.policy_config.rgb_views)
+        valid = (
+            prediction["video_view_mask"][index].bool()
+            & batch["video_view_mask"][index].bool()
+        )
+        metrics = {"video_valid_views": []}
+        errors = []
+        for view, role in enumerate(roles):
+            if not bool(valid[view]):
+                continue
+            output_dir = sample_dir if role == "primary" else sample_dir / role
+            output_dir.mkdir(parents=True, exist_ok=True)
+            predicted = self._decode_video(
+                prediction["video_latents_views"][index : index + 1, view]
+            )[0].cpu()
+            view_metrics = _save_video_artifacts(
+                output_dir, batch["video_views"][index, view].cpu(),
+                predicted, self.config.video_fps,
+            )
+            metrics["video_valid_views"].append(role)
+            error = view_metrics["video_pixel_mae"]
+            metrics[f"video_{role}_pixel_mae"] = error
+            errors.append(error)
+        if errors:
+            metrics["video_pixel_mae"] = sum(errors) / len(errors)
+        return metrics
+
     def run(self, model, step: int) -> None:
         final_dir = self.root / f"step_{step:08d}"
         directory_error = None
@@ -720,14 +762,8 @@ th, td {{ border: 1px solid #aaa; padding: 5px 9px; }}
                                 )
                             )
                             sample_dir.mkdir(parents=True, exist_ok=False)
-                            predicted_video = self._decode_video(
-                                prediction["video_latents"][local_index : local_index + 1]
-                            )[0].cpu()
-                            metrics = _save_video_artifacts(
-                                sample_dir,
-                                batch["video"][local_index].cpu(),
-                                predicted_video,
-                                self.config.video_fps,
+                            metrics = self._save_sample_videos(
+                                sample_dir, batch, prediction, local_index
                             )
                             dataset_index = int(sample_info["dataset_index"])
                             metrics.update(

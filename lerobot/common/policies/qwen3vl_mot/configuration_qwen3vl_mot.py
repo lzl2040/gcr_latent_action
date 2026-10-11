@@ -59,6 +59,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     video_latent_patch_size: int = 2
     world_video_frames: int = 9
     video_image_size: int = 256
+    rgb_views: tuple[str, ...] = ("primary",)
     load_vae_decoder: bool = False
 
     chunk_size: int = 32
@@ -216,6 +217,16 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
                 "`tactile_generation_target` must be 'context_tokens' or "
                 "'spatial_patches', got "
                 f"{self.tactile_generation_target!r}."
+            )
+        if (
+            not self.rgb_views
+            or self.rgb_views[0] != "primary"
+            or len(set(self.rgb_views)) != len(self.rgb_views)
+            or any(view not in ("primary", "secondary", "wrist") for view in self.rgb_views)
+        ):
+            raise ValueError(
+                "`rgb_views` must start with primary and contain unique roles from "
+                "primary, secondary, wrist."
             )
         resolve_task_specs(self.task_names, self.task_weights)
 

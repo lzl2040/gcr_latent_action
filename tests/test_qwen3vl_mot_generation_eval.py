@@ -71,7 +71,8 @@ def test_generation_manifest_refuses_split_drift(tmp_path):
         )
 
 
-def test_generation_evaluator_publishes_complete_step_directory(tmp_path):
+@pytest.mark.parametrize("multiview", [False, True])
+def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiview):
     class FakeDataset:
         heldout_eval_fingerprint = "split-1"
         norm_stats = [
@@ -111,7 +112,7 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path):
 
         def get_heldout_item(self, dataset_idx, frame_idx):
             assert (dataset_idx, frame_idx) == (0, 4)
-            return {
+            item = {
                 "video": torch.zeros(3, 3, 8, 8, dtype=torch.uint8),
                 "action": torch.zeros(2, 40),
                 "action_mask": torch.cat([torch.ones(2), torch.zeros(38)]),
@@ -128,6 +129,11 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path):
                 "tactile_img_std": torch.ones(1, 3),
                 "task": "move",
             }
+            if multiview:
+                item["video_views"] = item["video"][None].expand(3, -1, -1, -1, -1).clone()
+                item["video_views"][2] = 255
+                item["video_view_mask"] = torch.tensor([1, 0, 1], dtype=torch.bool)
+            return item
 
     class FakeModel(nn.Module):
         def __init__(self):
@@ -139,7 +145,7 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path):
             assert step == 11
             self.calls += 1
             batch_size = batch["action"].shape[0]
-            return {
+            prediction = {
                 "video_latents": torch.zeros(batch_size, 4, 1, 1, 1),
                 "action_normalized": torch.zeros(batch_size, 2, 40),
                 "tactile_decoded_z": torch.zeros(
@@ -155,6 +161,12 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path):
                     dtype=torch.bool,
                 ),
             }
+            if multiview:
+                prediction["video_latents_views"] = prediction["video_latents"][:, None].expand(
+                    -1, 3, -1, -1, -1, -1
+                )
+                prediction["video_view_mask"] = torch.ones(batch_size, 3, dtype=torch.bool)
+            return prediction
 
     model = FakeModel().train()
     evaluator = GenerationEvaluator(
@@ -167,7 +179,9 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path):
         ),
         dataset=FakeDataset(),
         output_dir=tmp_path,
-        policy_config=SimpleNamespace(cosmos3_dir="/unused", n_action_steps=2),
+        policy_config=SimpleNamespace(
+            cosmos3_dir="/unused", n_action_steps=2, rgb_views=("primary", "secondary", "wrist")
+        ),
         device=torch.device("cpu"),
         rank=0,
         local_rank=0,
@@ -188,9 +202,39 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path):
     assert model.calls == 1
     assert (step_dir / "index.html").is_file()
     assert (step_dir / "metrics.json").is_file()
+    if multiview:
+        sample_dir = step_dir / "heldout" / "episode_000003_frame_000000004"
+        assert (sample_dir / "video_comparison.mp4").is_file()
+        assert (sample_dir / "wrist" / "video_comparison.mp4").is_file()
+        assert not (sample_dir / "secondary").exists()
+        document = (sample_dir / "index.html").read_text(encoding="utf-8")
+        assert 'src="wrist/video_comparison.mp4"' in document
+        assert "secondary camera" not in document
+        metrics = json.loads((step_dir / "metrics.json").read_text())["samples"][0]["metrics"]
+        assert metrics["video_valid_views"] == ["primary", "wrist"]
+        assert metrics["video_primary_pixel_mae"] == 0.0
+        assert metrics["video_wrist_pixel_mae"] == 1.0
+        assert metrics["video_pixel_mae"] == 0.5
     assert (tmp_path / "generation_eval" / "latest_generation_eval").read_text(
         encoding="utf-8"
     ).strip() == step_dir.name
 
     evaluator.run(model, step=12)
     assert model.calls == 1
+
+
+def test_multiview_video_export_skips_samples_without_valid_video(tmp_path):
+    evaluator = object.__new__(GenerationEvaluator)
+    evaluator.policy_config = SimpleNamespace(rgb_views=("primary", "secondary", "wrist"))
+    evaluator.config = GenerationEvalConfig()
+    evaluator._decode_video = lambda _: pytest.fail("Missing cameras must not be decoded")
+    batch = {
+        "video_view_mask": torch.zeros(1, 3, dtype=torch.bool),
+        "video_views": torch.zeros(1, 3, 3, 3, 8, 8, dtype=torch.uint8),
+    }
+    prediction = {
+        "video_view_mask": torch.ones(1, 3, dtype=torch.bool),
+        "video_latents_views": torch.zeros(1, 3, 4, 1, 1, 1),
+    }
+    assert evaluator._save_sample_videos(tmp_path, batch, prediction, 0) == {"video_valid_views": []}
+    assert not list(tmp_path.iterdir())

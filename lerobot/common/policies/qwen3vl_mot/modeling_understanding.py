@@ -312,10 +312,94 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         )
         return encoded["input_ids"].to(device), encoded["attention_mask"].to(device)
 
+    def _multiview_prefix(
+        self,
+        images: torch.Tensor,
+        image_mask: torch.Tensor,
+        view_names: tuple[str, ...],
+    ):
+        base = _base_qwen(self.model)
+        embedding = base.language_model.embed_tokens
+        device, dtype = embedding.weight.device, embedding.weight.dtype
+        batch, views = images.shape[:2]
+        if image_mask.shape != (batch, views) or len(view_names) != views:
+            raise ValueError("Multi-view images, mask, and camera names have incompatible shapes.")
+        image_mask = image_mask.to(device=device, dtype=torch.bool)
+        selected = image_mask.flatten().nonzero(as_tuple=True)[0]
+        # Every rank executes the visual tower, including ranks with no valid images.
+        encoded_indices = selected if selected.numel() else selected.new_zeros(1)
+        features, deepstack, grids = self._pack_images(
+            images.to(device).flatten(0, 1)[encoded_indices]
+        )
+        tokens, width = features.shape[1:]
+
+        def scatter(values):
+            packed = values.new_zeros(batch * views, tokens, width)
+            if selected.numel():
+                packed = packed.index_copy(0, selected, values)
+            else:
+                packed = packed + values.sum() * 0.0
+            return packed.view(batch, views, tokens, width).to(dtype)
+
+        features = scatter(features)
+        deepstack = [scatter(values) for values in deepstack]
+        labels = self.tokenizer(
+            [f"{name} camera" for name in view_names],
+            padding=True,
+            truncation=True,
+            max_length=8,
+            return_tensors="pt",
+        )
+        label_ids = labels["input_ids"].to(device)
+        label_keep = labels["attention_mask"].to(device)
+        ids_parts, embedding_parts, keep_parts = [], [], []
+        deepstack_parts = [[] for _ in deepstack]
+        for view in range(views):
+            image_ids = torch.full(
+                (batch, tokens), base.config.image_token_id, device=device, dtype=torch.long
+            )
+            start = torch.full(
+                (batch, 1), base.config.vision_start_token_id, device=device, dtype=torch.long
+            )
+            end = torch.full_like(start, base.config.vision_end_token_id)
+            ids = torch.cat(
+                [label_ids[view : view + 1].expand(batch, -1), start, image_ids, end], dim=1
+            )
+            prefix = embedding(ids)
+            image_start = label_ids.shape[1] + 1
+            prefix = torch.cat(
+                [prefix[:, :image_start], features[:, view], prefix[:, image_start + tokens :]], dim=1
+            )
+            keep = torch.cat(
+                [label_keep[view : view + 1].expand(batch, -1), torch.ones_like(start),
+                 torch.ones_like(image_ids), torch.ones_like(end)],
+                dim=1,
+            ).bool() & image_mask[:, view : view + 1]
+            ids_parts.append(ids)
+            embedding_parts.append(prefix)
+            keep_parts.append(keep)
+            for parts, values in zip(deepstack_parts, deepstack, strict=True):
+                parts.append(torch.cat(
+                    [prefix.new_zeros(batch, image_start, width), values[:, view],
+                     prefix.new_zeros(batch, 1, width)],
+                    dim=1,
+                ))
+        # Qwen consumes grids in batch-major order, skipping masked-out image blocks.
+        return (
+            torch.cat(ids_parts, dim=1),
+            torch.cat(embedding_parts, dim=1),
+            torch.cat(keep_parts, dim=1),
+            grids[:selected.numel()],
+            [torch.cat(parts, dim=1) for parts in deepstack_parts],
+        )
+
     def forward(
         self,
         images: torch.Tensor | None,
         texts: list[str],
+        *,
+        image_mask: torch.Tensor | None = None,
+        view_names: tuple[str, ...] = ("primary",),
     ) -> UnderstandingOutput:
         from transformers.masking_utils import create_causal_mask
 
@@ -339,7 +423,17 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         image_slice = None
         deepstack_features: list[torch.Tensor] = []
         image_grid_thw = None
-        if images is not None:
+        if images is not None and images.ndim == 5:
+            if image_mask is None:
+                raise ValueError("Multi-view understanding requires an image_mask.")
+            prefix_ids, prefix_embeddings, prefix_keep, image_grid_thw, deepstack_features = (
+                self._multiview_prefix(images, image_mask, view_names)
+            )
+            image_slice = slice(0, prefix_ids.shape[1])
+            input_ids = torch.cat([prefix_ids, input_ids, query_ids], dim=1)
+            attention_keep = torch.cat([prefix_keep, text_keep, query_keep], dim=1)
+            hidden_states = torch.cat([prefix_embeddings, text_embeddings, query_embeddings], dim=1)
+        elif images is not None:
             image_features, deepstack_features, image_grid_thw = self._pack_images(images.to(device))
             image_features = image_features.to(dtype)
             num_image_tokens = image_features.shape[1]

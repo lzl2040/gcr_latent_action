@@ -38,6 +38,7 @@ GENERATION_EVAL_BATCH_SIZE="${GENERATION_EVAL_BATCH_SIZE:-8}"
 GENERATION_EVAL_VIDEO_FPS="${GENERATION_EVAL_VIDEO_FPS:-8}"
 STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
 STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
+RGB_VIEWS="${RGB_VIEWS:-}"
 CHECK_PATHS="${CHECK_PATHS:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 
@@ -97,6 +98,11 @@ if [[ "$GENERATION_EVAL_ENABLED" == "true" ]]; then
 fi
 
 STAGE2_TASK_ARGS=()
+RGB_VIEW_ARGS=()
+if [[ -n "$RGB_VIEWS" ]]; then
+    RGB_VIEWS_JSON="[\"${RGB_VIEWS//,/\",\"}\"]"
+    RGB_VIEW_ARGS+=(--policy.rgb_views="${RGB_VIEWS_JSON}")
+fi
 if [[ -n "$STAGE2_TASK_NAMES" ]]; then
     STAGE2_TASK_NAMES_JSON="[\"${STAGE2_TASK_NAMES//,/\",\"}\"]"
     STAGE2_TASK_WEIGHTS_JSON="[${STAGE2_TASK_WEIGHTS}]"
@@ -298,6 +304,7 @@ else
     echo "  task_mix=<policy defaults>"
 fi
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
+echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 echo "checkpoint: control_backend=gloo sync_files=${FSDP_CHECKPOINT_SYNC_FILES} threads=${FSDP_CHECKPOINT_THREADS} heartbeat=${FSDP_CHECKPOINT_HEARTBEAT_SECONDS}s"
 
@@ -336,6 +343,7 @@ CMD=(
     --policy.chunk_size=32
     --policy.n_action_steps=32
     --policy.world_video_frames="${WORLD_VIDEO_FRAMES:-9}"
+    "${RGB_VIEW_ARGS[@]}"
     --policy.tactile_generation_target="${TACTILE_GENERATION_TARGET:-spatial_patches}"
     --policy.generation_gradient_checkpointing=true
     --policy.understanding_gradient_checkpointing=true

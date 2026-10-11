@@ -274,6 +274,12 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         training_geometry["heldout_eval_fingerprint"] = (
             dataset.heldout_eval_fingerprint
         )
+    if len(cfg.policy.rgb_views) > 1:
+        training_geometry["rgb_views"] = list(cfg.policy.rgb_views)
+        training_geometry["rgb_camera_keys"] = [
+            {role: keys.get(role) for role in cfg.policy.rgb_views}
+            for keys in dataset.image_key_maps
+        ]
     if dataset.sample_pool is not None:
         training_geometry.update(
             {

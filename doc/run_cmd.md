@@ -22,6 +22,28 @@ train_qwen3vl_mot_local.sh
 conda activate lerobot_v2
 ```
 
+## 多视角条件与未来视频生成
+
+默认仍为 primary 单视角。新实验可开启：
+
+```bash
+RGB_VIEWS=primary,secondary,wrist \
+  JOB_NAME=qwen3vl_mot_multiview \
+  bash train_qwen3vl_mot_fsdp.sh
+```
+
+本地入口 `train_qwen3vl_mot_local.sh` 使用相同环境变量；只需 primary+wrist 时设置
+`RGB_VIEWS=primary,wrist`。首次训练仍需按下面命令配置 Stage 1 checkpoint 和模型/数据路径。
+相机来源是 `oxe_configs.py` 的有效映射，缺失视角不参与条件注意力和视频 loss。
+预测视频的任务（含 `action_video_prediction`）联合预测有效视角未来视频，
+**latent-action teacher 仍只监督 primary 单视角**。
+
+多视角增加 token、解码和显存成本；先调整 `BATCH_SIZE`，不要假设与单视角吞吐相同。
+resume 不设置 `RGB_VIEWS` 时读取保存的列表，显式设置必须与 checkpoint 完全一致。
+旧单视角 checkpoint 不能通过 resume 直接切换为多视角，需新建实验输出目录。
+held-out 验证保留 primary 原文件名，secondary/wrist 的视频与 contact sheet 位于对应角色
+子目录，HTML 展示各有效视角，metrics 同时包含逐视角与平均视频 MAE。
+
 首次运行或基础镜像更新后，安装 Stage 2 已验证的 FP8/8-bit optimizer 版本：
 
 ```bash

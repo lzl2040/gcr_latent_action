@@ -42,6 +42,7 @@ class GenerationStream:
     sigma: torch.Tensor
     keep: torch.Tensor
     position_ids: torch.Tensor | None = None
+    view_ids: torch.Tensor | None = None
 
     def validate(self, input_dim: int) -> None:
         if self.values.ndim != 3 or self.values.shape[-1] != input_dim:
@@ -67,6 +68,8 @@ class GenerationStream:
                 f"{self.name} position_ids must have shape (N,3) or (B,N,3), got "
                 f"{tuple(self.position_ids.shape)}."
             )
+        if self.view_ids is not None and self.view_ids.shape != (self.values.shape[1],):
+            raise ValueError(f"{self.name} view_ids must have shape (N,).")
 
 
 class TimestepEmbedding(nn.Module):
@@ -286,6 +289,7 @@ class GenerationExpert(nn.Module):
         num_kv_heads: int | None = None,
         intermediate_dim: int | None = None,
         hidden_act: str = "silu",
+        num_video_views: int = 1,
     ):
         super().__init__()
         if set(input_dims) != set(output_dims):
@@ -311,6 +315,9 @@ class GenerationExpert(nn.Module):
 
         self.modality_to_id = {name: index for index, name in enumerate(input_dims)}
         self.modality_embedding = nn.Embedding(len(input_dims), hidden_dim)
+        self.video_view_embedding = (
+            nn.Embedding(num_video_views, hidden_dim) if num_video_views > 1 else None
+        )
         self.task_to_id = {name: index for index, name in enumerate(task_names)}
         self.task_embedding = nn.Embedding(len(task_names), hidden_dim)
         self.timestep_embedding = TimestepEmbedding(hidden_dim)
@@ -348,6 +355,10 @@ class GenerationExpert(nn.Module):
         stream.validate(input_dim)
         values = stream.values.to(self.input_projections[stream.name].weight.dtype)
         hidden = self.input_projections[stream.name](values)
+        if stream.view_ids is not None:
+            if stream.name != "video" or self.video_view_embedding is None:
+                raise ValueError("Camera view_ids require a multi-view video Generation Expert.")
+            hidden = hidden + self.video_view_embedding(stream.view_ids.to(hidden.device)).to(hidden.dtype)
         if stream.position_ids is None:
             position_ids = torch.arange(
                 hidden.shape[1],

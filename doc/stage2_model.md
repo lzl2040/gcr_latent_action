@@ -12,7 +12,7 @@
 > - action/video 推理接口；
 > - FSDP、FP8 或 optimizer 对模型训练语义的影响。
 >
-> 当前内容的模型实现基线对应分支 `qwen3vl_mot_stage2`、提交 `f99e22a`。
+> 当前说明覆盖 `qwen3vl_mot_stage2` 分支的可选多视角条件与联合视频生成实现。
 
 ---
 
@@ -45,7 +45,7 @@ Transformer，信息只从 Understanding 单向流向 Generation。
 ## 2. 总体结构
 
 ```text
-current primary image + language
+current RGB images (primary / optional secondary / wrist) + language
                  │
                  ▼
        Qwen3-VL Understanding Expert
@@ -59,7 +59,7 @@ current primary image + language
                  │
                  └── native K/V from 8 Qwen decoder layers ─────────────┐
                                                                         │
-9-frame primary video ──> frozen Wan VAE ──> video latent tokens        │
+9-frame video per camera ──> frozen Wan VAE ──> joint video tokens     │
 state/action/tactile ──> Stage 1 Physical Encoder ──> physical tokens    │
                                                                         ▼
                                                     1.429B Generation Expert
@@ -116,17 +116,31 @@ world_video_frames = 9
 - 视频在同一个 `[t, t+31]` 窗口内均匀读取 9 帧；
 - 物理轨迹与视频终点严格一致。
 
-### 3.2 当前视角状态
+### 3.2 可选多视角条件与联合视频生成
 
-虽然 `oxe_configs.py` 定义了 `primary / secondary / wrist` 三个槽位，但当前模型接口仍然是：
+`rgb_views` 默认 `("primary",)`，保持旧单视角接口和 checkpoint 参数形状。
+设置 `RGB_VIEWS=primary,secondary,wrist` 后，按 `oxe_configs.py` 的有效
+`image_obs_keys` 映射读取三路相机；也可只选 `primary,wrist`。相机使用同一组时间戳，
+不会自动启用配置中为 `None` 或仅写在注释里的相机。
 
-```text
-image_t0: (B,C,H,W)
-video:    (B,T,C,H,W)
-```
+多视角模式额外提供：
 
-目前实际只使用 primary 相机。`secondary` 和 `wrist` 尚未作为独立视角进入
-Understanding 或 Generation，`use_wrist_image` 默认也为 `False`。
+| 字段 | 形状 | 含义 |
+|---|---|---|
+| `images_t0` | `(B,V,3,H,W)` | 按 `rgb_views` 顺序排列的当前图像 |
+| `image_view_mask` | `(B,V)` | 当前图像存在且未 padding |
+| `video_views` | `(B,V,9,3,H,W)` | 各相机同一窗口的视频 |
+| `video_view_mask` | `(B,V)` | 整个视频窗口完整、没有 padding |
+
+缺失相机和重复映射到同一源 key 的后续槽位被 mask，不参与 Qwen 条件注意力和视频 loss。
+Qwen 读取有效视角当前图像与相机角色文本；VAE 分别编码各相机，Generation 联合注意各路
+video tokens，并使用独立可训练 camera embedding 区分视角，时间轴仍为每路自身的
+`(temporal,row,column)`，**不是把相机拼成连续视频帧**。
+
+`image_t0`、`image_t1`、`video` 仍保留 primary 含义。
+**冻结的 Stage 1 latent-action teacher 始终只读取 primary 起止帧**，不读取另外两路。
+旧 checkpoint 未保存 `rgb_views` 时默认单视角；resume 自动使用保存的视角列表，显式修改
+列表或顺序会报错，避免静默改变参数和监督契约。
 
 ---
 
@@ -281,6 +295,12 @@ Understanding 序列为：
 ```
 
 当任务为 `t2v` 时没有输入图像，序列只包含 text 和 latent queries。
+
+多视角时每个槽位为 `[最多8个 camera role 文本 token | vision_start | 64 image tokens |
+vision_end]`，然后拼接指令与 latent queries；三视角最大约 302 tokens。
+缺失槽位整体被 mask，其 image grid 不传给 Qwen RoPE，DeepStack 也只注入对应图像。
+各 rank 都执行视觉塔；无有效图像的 rank 使用零贡献 dummy forward，保持 FSDP collective
+和反向调用一致。
 
 ### 5.3 16 个 latent queries
 
@@ -469,7 +489,9 @@ VAE 输出：
 (temporal, row, column)
 ```
 
-VAE 只在训练视频任务时使用。当前 action-only 推理不需要运行 VAE。
+多视角保持上述单路几何，按视角拼接为 `(B,V×192,192)`。
+VAE 只编码有效相机的视频，不在时间压缩时混合相机。
+当前 action-only 推理不需要运行 VAE。
 
 ---
 
@@ -492,7 +514,7 @@ lerobot/common/policies/qwen3vl_mot/modeling_generation.py
 | head dim | 128 |
 | intermediate size | 9216 |
 | activation | ReLU² |
-| 参数量 | 1,429,469,696 |
+| 参数量（默认单视角、8 tasks） | 1,429,471,744 |
 
 Generation 的 KV 几何必须和 Qwen 原生 K/V 一致：
 
@@ -651,7 +673,7 @@ video、state、action 和 tactile 分别调用 `_sample_sigma()`，因此不同
 
 视频：
 
-- 第一个 VAE temporal latent frame 保持干净；
+- 每个有效视角的第一个 VAE temporal latent frame 保持干净；
 - 该帧不计算 video loss；
 - 其余 latent frames 加噪并预测。
 
@@ -742,7 +764,18 @@ $$
 - embodiment-specific controller 接口；
 - action chunk 执行和重规划策略。
 
-当前也没有完整的多步 video sampler 和 VAE pixel decoder 推理接口。
+### 11.2 生成验证接口
+
+`generate_validation(batch, seed=...)` 使用固定 seed 分别生成 action、i2v 视频和可解码触觉。
+视频从当前 RGB 独立 VAE 编码和未来 Gaussian noise 开始做 Euler 更新，
+每一路的首 temporal latent 始终固定，不读取未来图像作为推理条件。
+
+单视角 `video_latents` 为 `(B,C,T_latent,H_latent,W_latent)`。
+多视角额外返回 `video_latents_views`，形状
+`(B,V,C,T_latent,H_latent,W_latent)`，以及 `video_view_mask`；
+原 `video_latents` 仍返回 primary。验证 exporter 用冻结 VAE decoder 逐路解码，
+primary 保留原文件名，secondary/wrist 写入角色子目录，仅导出有效完整视频窗口，
+HTML 和 metrics 包含逐视角结果及有效视角 MAE 均值。
 
 ---
 
@@ -753,7 +786,8 @@ $$
 | 参数集合 | 参数量 |
 |---|---:|
 | Qwen3-VL-4B base | 4,437,815,808 |
-| Generation Expert | 1,429,469,696 |
+| Generation Expert（单视角） | 1,429,471,744 |
+| 三视角额外 camera embedding | 6,144 |
 | Vision LoRA | 393,216 |
 | Latent queries | 40,960 |
 | Latent-action projection | 2,629,632 |
@@ -842,29 +876,19 @@ FSDP wrapped blocks = 64
 
 ## 14. 当前限制与后续方向
 
-### 14.1 三视角尚未接入
+### 14.1 多视角成本和跨数据集相机语义
 
-需要将输入扩展为：
+多视角已同时接入条件和未来视频生成。三视角配置分配三组 Generation video tokens，
+即使某些相机缺失，dense attention 仍有固定槽位的开销；缺失槽位只屏蔽注意力和 loss。
+视频解码、视觉塔和 VAE 编码只处理存在的相机（全缺失时使用 dummy 保持模型调用契约）。
+实际吞吐和显存需重新测量，不能沿用单视角 batch size。
 
-```text
-images_t0:   (B,3,C,H,W)
-camera_mask: (B,3)
-```
+camera embedding 和角色文本区分 primary/secondary/wrist，但没有显式相机外参；
+`secondary` 在不同数据集中仍可能对应不同物理位置。
 
-三个槽位应对应 `primary / secondary / wrist`，但还需要额外相机语义，因为 `secondary`
-在不同数据集中可能是第二外部相机，也可能是左腕相机。
+### 14.2 Video inference 限制
 
-第一版计划只把三路当前图像作为 Understanding 条件，不立即为所有视角增加未来 Qwen
-feature loss。未来视频仍优先生成 primary。
-
-### 14.2 Video inference 尚未完成
-
-训练具备 video flow objective，但没有：
-
-- video ODE/Euler sampler；
-- latent unpatchify；
-- VAE decoder 输出视频；
-- classifier-free guidance。
+已实现 Euler sampler、latent unpatchify 和验证 VAE decoder；尚无 classifier-free guidance。
 
 ### 14.3 Tactile 是 feature prediction
 

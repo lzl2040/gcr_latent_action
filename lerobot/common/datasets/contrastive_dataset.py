@@ -186,6 +186,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             raise ValueError("`world_video_frames` must be at least 2 when enabled.")
         self._video_backend = self._resolve_video_backend(cfg.dataset.video_backend)
         self.use_wrist_image = getattr(policy_cfg, "use_wrist_image", False)
+        self.rgb_views = tuple(getattr(policy_cfg, "rgb_views", ("primary",)))
 
         mixture_spec = OXE_NAMED_MIXTURES[data_mix]
         included_datasets, sample_weights = [], []
@@ -447,10 +448,16 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 "Every mixture weight resolves to a dataset with zero valid sample anchors."
             )
         self.sample_weights = weights / weights.sum()
-        # Every sample reads one primary video stream. Each tactile view adds another video
-        # stream plus four ResNet frames and two decoder endpoints, so view count is a useful
+        # Count each distinct RGB camera and tactile stream. Each tactile view also adds
+        # four ResNet frames and two decoder endpoints, so view count is a useful
         # rank-balancing proxy even though dead-pad masking can reduce the actual GPU work.
-        self.sample_costs = 1.0 + np.asarray(self.tactile_view_counts, dtype=np.float64)
+        rgb_view_counts = [
+            max(1, len({keys[role] for role in self.rgb_views if keys.get(role)}))
+            for keys in self.image_key_maps
+        ]
+        self.sample_costs = np.asarray(rgb_view_counts, dtype=np.float64) + np.asarray(
+            self.tactile_view_counts, dtype=np.float64
+        )
         # This controls the custom batch sampler's epoch length, not the source dataset length.
         self.dataset_size_one_epoch = dataset_size_one_epoch
 
@@ -884,8 +891,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         true_fps = resolve_true_fps(dataset_name, index_fps)
 
         img_keys = self._resolve_image_keys(dataset_name, None, ds_meta=ds_meta)
-        rgb_keys = [img_keys["primary"]] if img_keys["primary"] else []
-        if self.use_wrist_image and img_keys.get("wrist"):
+        rgb_keys = list(
+            dict.fromkeys(img_keys[role] for role in self.rgb_views if img_keys.get(role))
+        )
+        if self.use_wrist_image and img_keys.get("wrist") and img_keys["wrist"] not in rgb_keys:
             rgb_keys.append(img_keys["wrist"])
         tac_img_keys = [k for k in tactile_image_keys(spec) if k in ds_meta.video_keys][
             : self.max_tactile_views
@@ -932,7 +941,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         # costs 0.94-1.12x rather than the assumed 2x, because decode time is dominated by
         # seeking to a keyframe and decoding across the span -- the interior frames are already
         # being decoded and discarded. Tactile therefore reads ``tactile_frames`` evenly spaced
-        # samples; RGB stays at the pair.
+        # samples; RGB uses the endpoint pair or the configured world-video grid.
         if self.world_video_frames is None:
             rgb_stamps = [0.0, horizon / index_fps]
         else:
@@ -942,7 +951,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 index_fps,
             )
         for key in rgb_keys:
-            if key in ds_meta.video_keys:
+            if key in ds_meta.features:
                 delta_timestamps[key] = rgb_stamps
         n_tac = self.tactile_frames
         tac_stamps = _evenly_spaced_frame_timestamps(horizon, n_tac, index_fps)
@@ -991,7 +1000,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             resolved[role] = None
             if raw is None:
                 continue
-            for prefix in ("observation.images.", "observations.images.", "images.rgb."):
+            for prefix in ("", "observation.images.", "observations.images.", "images.rgb."):
                 candidate = f"{prefix}{raw}"
                 if candidate in available:
                     resolved[role] = candidate
@@ -1361,6 +1370,36 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             ).clamp(0, 255).to(torch.uint8)
         return frames
 
+    def _extract_rgb_views(self, item: dict, image_keys: dict) -> dict:
+        images, videos, image_mask, video_mask = [], [], [], []
+        seen_keys = set()
+        for role in self.rgb_views:
+            key = image_keys.get(role)
+            # A camera configured under two roles must not become two training targets.
+            if key in seen_keys:
+                key = None
+            if key is not None:
+                seen_keys.add(key)
+            image, _, _ = self._extract_frames(item, key)
+            frames = item.get(key) if key else None
+            padding = item.get(f"{key}_is_pad") if key else None
+            current_valid = frames is not None and (
+                padding is None or not bool(padding[0])
+            )
+            window_valid = current_valid and frames.ndim == 4 and (
+                frames.shape[0] == self.world_video_frames
+            ) and (padding is None or not bool(padding.any()))
+            images.append(image)
+            videos.append(self._extract_video(item, key))
+            image_mask.append(current_valid)
+            video_mask.append(window_valid)
+        return {
+            "images_t0": torch.stack(images),
+            "image_view_mask": torch.tensor(image_mask, dtype=torch.bool),
+            "video_views": torch.stack(videos),
+            "video_view_mask": torch.tensor(video_mask, dtype=torch.bool),
+        }
+
     def _build_canonical_vector(self, item, instructions, norm, is_chunk: bool):
         width = CANON_DIM
         chunk = self.chunk_size if is_chunk else 1
@@ -1551,6 +1590,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         }
         if self.world_video_frames is not None:
             result["video"] = self._extract_video(item, primary_key)
+            if len(getattr(self, "rgb_views", ("primary",))) > 1:
+                result.update(self._extract_rgb_views(item, self.image_key_maps[ds_idx]))
         return result
 
     # ------------------------------------------------------------------

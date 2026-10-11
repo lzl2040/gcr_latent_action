@@ -245,3 +245,22 @@ def test_stage2_resume_rejects_task_list_change(tmp_path) -> None:
                 "--policy.task_weights=[1.0]",
             ],
         )
+
+
+@pytest.mark.parametrize("saved_views", [("primary",), ("primary", "secondary", "wrist")])
+def test_stage2_resume_preserves_rgb_views_and_rejects_changes(tmp_path, saved_views):
+    saved = Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"},
+        initialize_from_stage1=False, rgb_views=saved_views,
+    )
+    saved._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path, policy=Qwen3VLMoTConfig(),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.rgb_views == saved_views
+    other = ("primary", "wrist") if len(saved_views) == 1 else ("primary",)
+    cfg.policy = Qwen3VLMoTConfig(rgb_views=other)
+    with pytest.raises(ValueError, match="Cannot change `policy.rgb_views`"):
+        _load_stage2_resume_policy_config(cfg, args=['--policy.rgb_views=["primary","wrist"]'])
