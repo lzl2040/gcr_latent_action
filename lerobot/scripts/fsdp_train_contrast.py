@@ -316,7 +316,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
             dataset.sample_pool_fingerprint,
         )
 
-    # All ranks construct identical random Generation weights before FSDP shards them.
+    # All ranks load the same backbone and initialize identical adapters before sharding.
     model_seed = cfg.seed if cfg.seed is not None else 0
     set_seed(model_seed)
     logger.info("Creating stage-two policy...")

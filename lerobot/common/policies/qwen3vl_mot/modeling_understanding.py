@@ -16,6 +16,8 @@ class UnderstandingOutput:
     key_values: list[tuple[torch.Tensor, torch.Tensor]]
     attention_mask: torch.Tensor
     latent_queries: torch.Tensor
+    rotary_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None
+    position_ids: torch.Tensor | None = None
 
 
 def _base_qwen(model: nn.Module) -> nn.Module:
@@ -571,4 +573,6 @@ class Qwen3VLUnderstandingExpert(nn.Module):
             key_values=selected_key_values,
             attention_mask=attention_keep.to(torch.bool),
             latent_queries=hidden_states[:, -self.num_queries :],
+            rotary_embeddings=position_embeddings,
+            position_ids=position_ids,
         )

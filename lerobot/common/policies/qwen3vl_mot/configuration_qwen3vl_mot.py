@@ -56,6 +56,11 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     generation_hidden_act: str = "relu2"
     generation_dropout: float = 0.0
     generation_gradient_checkpointing: bool = True
+    # Absent fields preserve the architecture of older stage-two checkpoints.
+    generation_backbone: str = "random"
+    generation_pretrained_dir: str = ""
+    generation_tuning_mode: str = "full"
+    generation_video_fps: float = 24.0
     video_latent_dim: int = 48
     video_latent_patch_size: int = 2
     world_video_frames: int = 9
@@ -121,6 +126,31 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.generation_backbone not in ("random", "edge", "nano"):
+            raise ValueError("`generation_backbone` must be random, edge, or nano.")
+        if self.generation_tuning_mode not in ("full", "frozen"):
+            raise ValueError("`generation_tuning_mode` must be full or frozen.")
+        if self.generation_backbone == "random" and self.generation_tuning_mode != "full":
+            raise ValueError("A randomly initialized generation backbone cannot be frozen.")
+        if not math.isfinite(self.generation_video_fps) or self.generation_video_fps <= 0:
+            raise ValueError("`generation_video_fps` must be finite and positive.")
+        if self.generation_backbone != "random":
+            from .cosmos3_pretrained import COSMOS_GENERATION_CONFIGS
+
+            native = COSMOS_GENERATION_CONFIGS[self.generation_backbone]
+            for name, source in {
+                "generation_hidden_dim": "hidden_size",
+                "generation_depth": "num_hidden_layers",
+                "generation_num_heads": "num_attention_heads",
+                "generation_num_kv_heads": "num_key_value_heads",
+                "generation_intermediate_dim": "intermediate_size",
+                "generation_hidden_act": "hidden_act",
+                "video_latent_dim": "latent_channel",
+                "video_latent_patch_size": "latent_patch_size",
+            }.items():
+                setattr(self, name, native[source])
+            if self.generation_dropout != 0:
+                raise ValueError("Native pretrained Cosmos generation requires generation_dropout=0.")
         if self.understanding_tuning_mode not in ("frozen", "lora", "full"):
             raise ValueError(
                 "`understanding_tuning_mode` must be 'frozen', 'lora', or 'full', got "

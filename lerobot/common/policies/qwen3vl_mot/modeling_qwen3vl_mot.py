@@ -388,23 +388,57 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             config.task_names,
             config.task_weights,
         )
-        self.generation = GenerationExpert(
-            understanding_dim=self.understanding.hidden_dim,
-            hidden_dim=config.generation_hidden_dim,
-            depth=config.generation_depth,
-            num_heads=config.generation_num_heads,
-            num_kv_heads=config.generation_num_kv_heads,
-            intermediate_dim=config.generation_intermediate_dim,
-            hidden_act=config.generation_hidden_act,
-            dropout=config.generation_dropout,
-            input_dims=input_dims,
-            output_dims=output_dims,
-            task_names=config.task_names,
-            gradient_checkpointing=config.generation_gradient_checkpointing,
-            rotary_config=qwen_text_config,
-            num_video_views=len(config.rgb_views),
-        )
+        generation_args = {
+            "understanding_dim": self.understanding.hidden_dim,
+            "hidden_dim": config.generation_hidden_dim,
+            "depth": config.generation_depth,
+            "num_heads": config.generation_num_heads,
+            "num_kv_heads": config.generation_num_kv_heads,
+            "intermediate_dim": config.generation_intermediate_dim,
+            "hidden_act": config.generation_hidden_act,
+            "dropout": config.generation_dropout,
+            "input_dims": input_dims,
+            "output_dims": output_dims,
+            "task_names": config.task_names,
+            "gradient_checkpointing": config.generation_gradient_checkpointing,
+            "rotary_config": qwen_text_config,
+            "num_video_views": len(config.rgb_views),
+        }
+        if config.generation_backbone == "random":
+            self.generation = GenerationExpert(**generation_args)
+        else:
+            from .cosmos3_pretrained import (
+                COSMOS_GENERATION_CONFIGS,
+                load_generation_checkpoint,
+                validate_generation_vae,
+            )
+
+            with torch.device("meta"):
+                self.generation = GenerationExpert(
+                    **generation_args,
+                    cosmos_config=COSMOS_GENERATION_CONFIGS[config.generation_backbone],
+                    video_fps=config.generation_video_fps,
+                )
+            self.generation.to(dtype=torch.bfloat16).to_empty(device="cpu")
+            self.generation.initialize_cosmos_adapters()
+            if not restoring_embedded:
+                source_dir = config.generation_pretrained_dir or str(
+                    Path(config.cosmos3_dir).parent / (
+                        "Cosmos3-Edge" if config.generation_backbone == "edge" else "Cosmos3-Nano"
+                    )
+                )
+                validate_generation_vae(source_dir, config.cosmos3_dir)
+                self.generation_load_report = load_generation_checkpoint(self.generation, source_dir)
+                config.generation_pretrained_dir = source_dir
+            self.generation.configure_cosmos_tuning(config.generation_tuning_mode)
         config.initialize_from_stage1 = False
+
+    @classmethod
+    def _load_as_safetensor(cls, model, model_file, map_location, strict):
+        return super()._load_as_safetensor(
+            model, model_file, map_location,
+            strict=strict or model.config.generation_backbone != "random",
+        )
 
     def _validate_stage1_contract(self, stage1_config) -> None:
         if getattr(stage1_config, "vision_backbone", None) != "qwen3vl":
@@ -668,6 +702,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 understanding.attention_mask,
                 "action_prediction",
                 understanding_key_values=understanding.key_values,
+                understanding_rotary=getattr(understanding, "rotary_embeddings", None),
+                understanding_position_ids=getattr(understanding, "position_ids", None),
             )
             velocity = predictions["action"].reshape_as(action).float()
             action = action + (next_sigma - sigma) * velocity
@@ -707,6 +743,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 understanding.attention_mask,
                 "action_prediction",
                 understanding_key_values=understanding.key_values,
+                understanding_rotary=getattr(understanding, "rotary_embeddings", None),
+                understanding_position_ids=getattr(understanding, "position_ids", None),
             )
             action = action + (next_sigma - sigma) * predictions["action"].float()
             action = torch.where(action_keep.unsqueeze(-1), action, torch.zeros_like(action))
@@ -1027,6 +1065,18 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
         return latent
 
+    def _generation_video_fps(self, batch: dict) -> torch.Tensor | None:
+        if getattr(self.config, "generation_backbone", "random") == "random":
+            return None
+        if "sample_rate" not in batch:
+            return None
+        fps = batch["sample_rate"].float() * (
+            (self.config.world_video_frames - 1) / (self.config.chunk_size - 1)
+        )
+        if not torch.isfinite(fps).all() or (fps <= 0).any():
+            raise ValueError("Video conditioning sample_rate must be finite and positive.")
+        return fps
+
     def _prepare_video_stream(
         self,
         role: ModalityRole,
@@ -1053,6 +1103,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 keep,
                 position_ids=position_ids,
                 view_ids=view_ids,
+                    noise_mask=torch.zeros_like(keep),
+                    fps=self._generation_video_fps(batch),
             ), None, None, sigma
         sigma = self._sample_sigma(clean.shape[0], clean.device)
         noisy, target = self._flow_corrupt(clean, sigma)
@@ -1070,6 +1122,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             keep,
             position_ids=position_ids,
             view_ids=view_ids,
+            noise_mask=loss_mask.any(dim=-1),
+            fps=self._generation_video_fps(batch),
         ), target, loss_mask, sigma
 
     def _sample_video_latents(
@@ -1126,6 +1180,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 -1, -1, tokens_per_view
             ).reshape_as(keep)
         first_frame = position_ids[:, 0] == 0
+        video_fps = self._generation_video_fps(batch)
         values[:, first_frame] = current_tokens.float()
         values = torch.where(keep.unsqueeze(-1), values, torch.zeros_like(values))
         schedule = torch.linspace(
@@ -1145,12 +1200,16 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                         keep,
                         position_ids=position_ids,
                         view_ids=view_ids,
+                        noise_mask=keep & ~first_frame[None],
+                        fps=video_fps,
                     )
                 ],
                 understanding.hidden_states,
                 understanding.attention_mask,
                 "i2v",
                 understanding_key_values=understanding.key_values,
+                understanding_rotary=getattr(understanding, "rotary_embeddings", None),
+                understanding_position_ids=getattr(understanding, "position_ids", None),
             )["video"].float()
             prediction[:, first_frame] = 0
             values = values + (next_sigma - sigma) * prediction
@@ -1320,7 +1379,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             else:
                 values = clean
                 sigma = torch.zeros(clean.shape[0], device=clean.device)
-            streams.append(GenerationStream(name, values, sigma, keep))
+            noise_mask = loss_mask.any(dim=-1) if role.is_target else torch.zeros_like(keep)
+            streams.append(GenerationStream(name, values, sigma, keep, noise_mask=noise_mask))
             sigmas[name] = sigma
         return streams, targets, sigmas, reconstructions
 
@@ -1605,6 +1665,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 understanding.attention_mask,
                 "tactile_prediction",
                 understanding_key_values=understanding.key_values,
+                understanding_rotary=getattr(understanding, "rotary_embeddings", None),
+                understanding_position_ids=getattr(understanding, "position_ids", None),
             )["tactile"].float()
             values = values + (next_sigma - sigma) * prediction
             values = torch.where(
@@ -1778,6 +1840,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             understanding.attention_mask,
             task.name,
             understanding_key_values=understanding.key_values,
+            understanding_rotary=getattr(understanding, "rotary_embeddings", None),
+            understanding_position_ids=getattr(understanding, "position_ids", None),
         )
         weights = {
             "video": self.config.video_loss_weight,

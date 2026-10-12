@@ -19,6 +19,37 @@ STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
 STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
 PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
+GENERATION_BACKBONE="${GENERATION_BACKBONE:-}"
+GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-}"
+GENERATION_TUNING_MODE="${GENERATION_TUNING_MODE:-}"
+GENERATION_ARGS=()
+if [[ "$WEIGHT_RESUME" != "true" ]]; then
+    GENERATION_BACKBONE="${GENERATION_BACKBONE:-edge}"
+fi
+if [[ -n "$GENERATION_BACKBONE" ]]; then
+    case "$GENERATION_BACKBONE" in
+        random|edge|nano) ;;
+        *) echo "Error: GENERATION_BACKBONE must be random, edge or nano" >&2; exit 1 ;;
+    esac
+    GENERATION_ARGS+=(--policy.generation_backbone="${GENERATION_BACKBONE}")
+    if [[ "$WEIGHT_RESUME" != "true" && "$GENERATION_BACKBONE" != "random" ]]; then
+        _cosmos_name=Cosmos3-Edge
+        if [[ "$GENERATION_BACKBONE" == "nano" ]]; then
+            _cosmos_name=Cosmos3-Nano
+        fi
+        GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-/Data/lzl/huggingface/${_cosmos_name}}"
+    fi
+fi
+if [[ -n "$GENERATION_PRETRAINED_DIR" ]]; then
+    GENERATION_ARGS+=(--policy.generation_pretrained_dir="${GENERATION_PRETRAINED_DIR}")
+fi
+if [[ -n "$GENERATION_TUNING_MODE" ]]; then
+    if [[ "$GENERATION_TUNING_MODE" != "full" && "$GENERATION_TUNING_MODE" != "frozen" ]]; then
+        echo "Error: GENERATION_TUNING_MODE must be full or frozen" >&2
+        exit 1
+    fi
+    GENERATION_ARGS+=(--policy.generation_tuning_mode="${GENERATION_TUNING_MODE}")
+fi
 PHYSICAL_FLOW_ARGS=()
 if [[ "$WEIGHT_RESUME" != "true" ]]; then
     PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-embedding}"
@@ -73,6 +104,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --policy.type="qwen3vl_mot" \
     --policy.qwen3vl_dir="${QWEN3VL_DIR:-/Data/lzl/huggingface/Qwen3-VL-4B-Instruct}" \
     --policy.cosmos3_dir="${COSMOS3_DIR:-/Data/lzl/huggingface/Cosmos3-Edge}" \
+    "${GENERATION_ARGS[@]}" \
     --policy.understanding_tuning_mode="${UNDERSTANDING_TUNING_MODE:-lora}" \
     --policy.understanding_lora_rank="${UNDERSTANDING_LORA_RANK:-16}" \
     --policy.understanding_lora_alpha="${UNDERSTANDING_LORA_ALPHA:-16}" \

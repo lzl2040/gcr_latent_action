@@ -337,3 +337,64 @@ def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedd
         assert "physical_flow_space=<from checkpoint>" in result.stdout
     else:
         assert f"--policy.physical_flow_space={expected_mode}" in result.stdout
+
+
+@pytest.mark.parametrize("kind", ["random", "edge", "nano"])
+def test_stage2_resume_preserves_generation_backbone_and_rejects_switches(tmp_path, kind):
+    Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False,
+        generation_backbone=kind, generation_pretrained_dir="/not/needed/on/resume",
+    )._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path, policy=Qwen3VLMoTConfig(generation_backbone="edge"),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.generation_backbone == kind
+    assert cfg.policy.generation_pretrained_dir == "/not/needed/on/resume"
+    cfg.policy = Qwen3VLMoTConfig(generation_backbone="nano" if kind != "nano" else "edge")
+    with pytest.raises(ValueError, match="Cannot change `policy.generation_backbone`"):
+        _load_stage2_resume_policy_config(cfg, args=["--policy.generation_backbone=nano"])
+
+
+def test_stage2_resume_rejects_generation_tuning_mode_switch(tmp_path):
+    Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False,
+        generation_backbone="edge", generation_tuning_mode="frozen",
+    )._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path, policy=Qwen3VLMoTConfig(generation_backbone="edge"),
+        use_policy_training_preset=False,
+    )
+    with pytest.raises(ValueError, match="Cannot change `policy.generation_tuning_mode`"):
+        _load_stage2_resume_policy_config(cfg, args=["--policy.generation_tuning_mode=full"])
+
+
+@pytest.mark.parametrize("kind", ["random", "edge", "nano"])
+@pytest.mark.parametrize("resume", [False, True])
+def test_fsdp_launcher_selects_pretrained_generator_only_on_fresh_runs(tmp_path, kind, resume):
+    run_dir = tmp_path / "run"
+    if resume:
+        checkpoint = run_dir / "checkpoint_00000001"
+        checkpoint.mkdir(parents=True)
+        (run_dir / "latest_checkpoint").write_text(checkpoint.name)
+    env = {
+        **os.environ, "CHECK_PATHS": "false", "DRY_RUN": "true", "WEIGHT_RESUME": "true",
+        "OUTPUT_DIR": str(run_dir), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
+        "GENERATION_BACKBONE": "" if resume else kind, "GENERATION_PRETRAINED_DIR": "",
+        "GENERATION_TUNING_MODE": "", "PYTHON_BIN": sys.executable,
+        "NPROC_PER_NODE": "1", "NNODES": "1", "MASTER_PORT": "29599",
+    }
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["bash", str(root / "train_qwen3vl_mot_fsdp.sh")],
+        cwd=root, env=env, capture_output=True, text=True, check=True, timeout=30,
+    )
+    if resume:
+        assert "--policy.generation_backbone=" not in result.stdout
+        assert "--policy.generation_pretrained_dir=" not in result.stdout
+    else:
+        assert f"--policy.generation_backbone={kind}" in result.stdout
+        if kind != "random":
+            name = "Cosmos3-Edge" if kind == "edge" else "Cosmos3-Nano"
+            assert f"--policy.generation_pretrained_dir=/mnt/wangxiaofa/pt_weights/{name}" in result.stdout

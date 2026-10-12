@@ -207,6 +207,8 @@ def _load_stage2_resume_policy_config(
     task_weights_overridden = parser.parse_arg("policy.task_weights", args) is not None
     rgb_views_overridden = parser.parse_arg("policy.rgb_views", args) is not None
     physical_flow_overridden = parser.parse_arg("policy.physical_flow_space", args) is not None
+    generation_backbone_overridden = parser.parse_arg("policy.generation_backbone", args) is not None
+    generation_tuning_overridden = parser.parse_arg("policy.generation_tuning_mode", args) is not None
     checkpoint_root = Path(cfg.output_dir)
     config_path = checkpoint_root / "config.json"
     if not config_path.is_file():
@@ -228,6 +230,17 @@ def _load_stage2_resume_policy_config(
         runtime_path = getattr(runtime_policy, field_name)
         if runtime_path:
             setattr(saved_policy, field_name, runtime_path)
+    if parser.parse_arg("policy.generation_pretrained_dir", args) is not None:
+        saved_policy.generation_pretrained_dir = runtime_policy.generation_pretrained_dir
+    for name, overridden in (
+        ("generation_backbone", generation_backbone_overridden),
+        ("generation_tuning_mode", generation_tuning_overridden),
+    ):
+        if overridden and getattr(runtime_policy, name) != getattr(saved_policy, name):
+            raise ValueError(
+                f"Cannot change `policy.{name}` while resuming: generation weights, "
+                "adapters and optimizer states have a different contract. Start a fresh output directory."
+            )
     if task_names_overridden and tuple(runtime_policy.task_names) != tuple(saved_policy.task_names):
         raise ValueError(
             "Cannot change `policy.task_names` while resuming because it changes the "

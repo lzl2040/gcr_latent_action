@@ -40,6 +40,9 @@ STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
 STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
 PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
+GENERATION_BACKBONE="${GENERATION_BACKBONE:-}"
+GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-}"
+GENERATION_TUNING_MODE="${GENERATION_TUNING_MODE:-}"
 CHECK_PATHS="${CHECK_PATHS:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 
@@ -239,6 +242,30 @@ if [[ -n "$PHYSICAL_FLOW_SPACE" ]]; then
         || die "PHYSICAL_FLOW_SPACE must be raw or embedding"
     PHYSICAL_FLOW_ARGS+=(--policy.physical_flow_space="${PHYSICAL_FLOW_SPACE}")
 fi
+GENERATION_ARGS=()
+if [[ "$WEIGHT_RESUME" != "true" ]]; then
+    GENERATION_BACKBONE="${GENERATION_BACKBONE:-edge}"
+fi
+if [[ -n "$GENERATION_BACKBONE" ]]; then
+    [[ "$GENERATION_BACKBONE" == "random" || "$GENERATION_BACKBONE" == "edge" || "$GENERATION_BACKBONE" == "nano" ]] \
+        || die "GENERATION_BACKBONE must be random, edge or nano"
+    GENERATION_ARGS+=(--policy.generation_backbone="${GENERATION_BACKBONE}")
+    if [[ "$WEIGHT_RESUME" != "true" && "$GENERATION_BACKBONE" != "random" ]]; then
+        _cosmos_name=Cosmos3-Edge
+        if [[ "$GENERATION_BACKBONE" == "nano" ]]; then
+            _cosmos_name=Cosmos3-Nano
+        fi
+        GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-${WEIGHTS_ROOT}/${_cosmos_name}}"
+    fi
+fi
+if [[ -n "$GENERATION_PRETRAINED_DIR" ]]; then
+    GENERATION_ARGS+=(--policy.generation_pretrained_dir="${GENERATION_PRETRAINED_DIR}")
+fi
+if [[ -n "$GENERATION_TUNING_MODE" ]]; then
+    [[ "$GENERATION_TUNING_MODE" == "full" || "$GENERATION_TUNING_MODE" == "frozen" ]] \
+        || die "GENERATION_TUNING_MODE must be full or frozen"
+    GENERATION_ARGS+=(--policy.generation_tuning_mode="${GENERATION_TUNING_MODE}")
+fi
 
 # PyTorch wheels may ship a newer CUDA runtime than /usr/local/cuda. NVRTC loads its
 # builtins dynamically, so put the matching wheel library first when it is available.
@@ -268,7 +295,7 @@ if [[ "$CHECK_PATHS" == "true" ]]; then
     (( ${#_qwen_shards[@]} > 0 )) \
         || die "Qwen3-VL directory has no *.safetensors: $QWEN3VL_DIR"
 
-    require_dir "Cosmos3-Edge model" "$COSMOS3_DIR"
+    require_dir "Cosmos3 VAE model" "$COSMOS3_DIR"
     require_file "Cosmos3 VAE config" "$COSMOS3_DIR/vae/config.json"
     require_dir "dataset parent_dir_v21" "$PARENT_DIR_V21"
     require_dir "dataset parent_dir_v30" "$PARENT_DIR_V30"
@@ -276,6 +303,14 @@ if [[ "$CHECK_PATHS" == "true" ]]; then
         require_dir "dataset parent_dir_extra" "$PARENT_DIR_EXTRA"
     fi
     if [[ "$WEIGHT_RESUME" != "true" ]]; then
+        if [[ "$GENERATION_BACKBONE" != "random" ]]; then
+            require_file "pretrained generation config" "$GENERATION_PRETRAINED_DIR/transformer/config.json"
+            shopt -s nullglob
+            _generation_shards=("$GENERATION_PRETRAINED_DIR"/transformer/*.safetensors)
+            shopt -u nullglob
+            (( ${#_generation_shards[@]} > 0 )) \
+                || die "pretrained generation directory contains no *.safetensors: $GENERATION_PRETRAINED_DIR/transformer"
+        fi
         require_path "Stage 1 checkpoint" "$STAGE1_CHECKPOINT"
         if [[ -n "$STAGE1_CONFIG" ]]; then
             require_file "Stage 1 config" "$STAGE1_CONFIG"
@@ -316,6 +351,8 @@ fi
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
+echo "  generation_backbone=${GENERATION_BACKBONE:-<from checkpoint>} pretrained=${GENERATION_PRETRAINED_DIR:-<not required on resume>}"
+echo "  generation_tuning=${GENERATION_TUNING_MODE:-saved config on resume; full on fresh run}"
 echo "distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 echo "checkpoint: control_backend=gloo sync_files=${FSDP_CHECKPOINT_SYNC_FILES} threads=${FSDP_CHECKPOINT_THREADS} heartbeat=${FSDP_CHECKPOINT_HEARTBEAT_SECONDS}s"
 
@@ -343,6 +380,7 @@ CMD=(
     --policy.type="qwen3vl_mot"
     --policy.qwen3vl_dir="${QWEN3VL_DIR}"
     --policy.cosmos3_dir="${COSMOS3_DIR}"
+    "${GENERATION_ARGS[@]}"
     --policy.understanding_tuning_mode="${UNDERSTANDING_TUNING_MODE:-full}"
     --policy.understanding_lora_rank="${UNDERSTANDING_LORA_RANK:-16}"
     --policy.understanding_lora_alpha="${UNDERSTANDING_LORA_ALPHA:-16}"

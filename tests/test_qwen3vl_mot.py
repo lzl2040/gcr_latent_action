@@ -832,9 +832,46 @@ def test_spatial_tactile_target_and_generation_are_decodable():
 
 @pytest.mark.parametrize("multiview", [False, True])
 @pytest.mark.parametrize("flow_space", ["raw", "embedding"])
-def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeypatch, multiview, flow_space):
+@pytest.mark.parametrize("generation_variant", ["random", "edge", "nano", "edge_frozen"])
+def test_policy_runs_all_task_routes_with_lightweight_backends(
+    tmp_path, monkeypatch, multiview, flow_space, generation_variant
+):
     import lerobot.common.policies.ace.cosmos3_encoders as cosmos3_encoders
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
+    from lerobot.common.policies.qwen3vl_mot.cosmos3_pretrained import (
+        COSMOS_GENERATION_CONFIGS,
+        generation_checkpoint_mapping,
+    )
+
+    generation_kind = generation_variant.split("_")[0]
+    generator_dir = tmp_path / "cosmos"
+    if generation_kind != "random":
+        native = {
+            **COSMOS_GENERATION_CONFIGS[generation_kind],
+            "hidden_size": 16, "num_hidden_layers": 1, "num_attention_heads": 4,
+            "num_key_value_heads": 4, "head_dim": 4, "intermediate_size": 32,
+            "rope_axes_dim": [1, 1, 0], "latent_channel": 4, "patch_latent_dim": 16,
+        }
+        monkeypatch.setitem(COSMOS_GENERATION_CONFIGS, generation_kind, native)
+        (generator_dir / "transformer").mkdir(parents=True)
+        (generator_dir / "vae").mkdir()
+        import json
+
+        (generator_dir / "transformer/config.json").write_text(json.dumps(native))
+        (generator_dir / "vae/config.json").write_text(json.dumps({"z_dim": 4}))
+        source = GenerationExpert(
+            understanding_dim=8, hidden_dim=16, depth=1, num_heads=4, num_kv_heads=4,
+            intermediate_dim=32, hidden_act=native["hidden_act"], dropout=0,
+            input_dims={"video": 16}, output_dims={"video": 16}, task_names=("i2v",),
+            gradient_checkpointing=False, cosmos_config=native,
+        )
+        with torch.no_grad():
+            source.output_heads["video"].weight.normal_(std=0.02)
+        source_parameters = dict(source.named_parameters())
+        save_file({
+            original: source_parameters[target].detach().contiguous()
+            for target, original in generation_checkpoint_mapping(source).items()
+        }, generator_dir / "transformer/diffusion_pytorch_model.safetensors")
 
     stage1_dir = tmp_path / "stage1"
     stage1_dir.mkdir()
@@ -901,7 +938,10 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
     config = Qwen3VLMoTConfig(
         stage1_checkpoint=str(stage1_dir),
         qwen3vl_dir="/mnt/runtime-qwen",
-        cosmos3_dir="/mnt/runtime-cosmos",
+        cosmos3_dir=str(generator_dir) if generation_kind != "random" else "/mnt/runtime-cosmos",
+        generation_backbone=generation_kind,
+        generation_pretrained_dir=str(generator_dir),
+        generation_tuning_mode="frozen" if generation_variant.endswith("_frozen") else "full",
         understanding_tuning_mode="frozen",
         num_latent_queries=2,
         latent_action_dim=8,
@@ -931,6 +971,9 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
         physical_flow_space=flow_space,
     )
     policy = stage2.Qwen3VLMoTPolicy(config)
+    if generation_kind != "random":
+        assert policy.generation_load_report.copied_tensors > 0
+        assert policy.generation.output_heads["video"].weight.count_nonzero() > 0
     assert teacher.config.qwen3vl_dir == config.qwen3vl_dir
     assert teacher.config.cosmos3_dir == config.cosmos3_dir
     batch = {
@@ -1028,6 +1071,9 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
     (stage1_dir / "model.safetensors").unlink()
     (stage1_dir / "config.json").unlink()
     stage1_dir.rmdir()
+    if generation_kind != "random":
+        (generator_dir / "transformer/diffusion_pytorch_model.safetensors").unlink()
+        (generator_dir / "transformer/config.json").unlink()
 
     restored_stage1_configs = []
 
@@ -1046,6 +1092,11 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
     assert restored_stage1_configs[0].cosmos3_dir == config.cosmos3_dir
     assert restored.config.rgb_views == config.rgb_views
     assert restored.config.physical_flow_space == flow_space
+    assert restored.config.generation_backbone == generation_kind
+    if generation_kind != "random":
+        assert not hasattr(restored, "generation_load_report")
+        for name, parameter in policy.generation.named_parameters():
+            torch.testing.assert_close(parameter, dict(restored.generation.named_parameters())[name])
     if flow_space == "embedding":
         for name, parameter in policy.physical_decoders.named_parameters():
             torch.testing.assert_close(parameter, dict(restored.physical_decoders.named_parameters())[name])

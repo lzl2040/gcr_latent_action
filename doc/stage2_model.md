@@ -2,7 +2,7 @@
 
 > **维护约定**
 >
-> 本文是 `qwen3vl_mot_stage2` 分支的模型结构权威说明。凡是修改以下任一内容，
+> 本文是 `qwen3vl_mot_pretrained_generation` 分支的模型结构权威说明。凡是修改以下任一内容，
 > 必须在同一个提交中同步更新本文：
 >
 > - 模型模块、维度、参数量或冻结范围；
@@ -12,7 +12,7 @@
 > - action/video 推理接口；
 > - FSDP、FP8 或 optimizer 对模型训练语义的影响。
 >
-> 当前说明覆盖 `qwen3vl_mot_stage2` 分支的多视角生成与 physical embedding-space flow。
+> 当前说明覆盖 Edge/Nano 预训练生成、多视角生成与 physical embedding-space flow。
 
 ---
 
@@ -32,7 +32,7 @@ Stage 2 在 Stage 1 已学到的“视觉变化—物理变化”对齐基础上
 当前实现采用 **单向 Mixture-of-Transformers（MoT）**：
 
 - Qwen3-VL-4B 作为 Understanding Expert；
-- 新实验采用 1.433B Generation Expert 负责多模态 flow matching；
+- 新实验默认采用 Cosmos3-Edge 预训练 Generation Expert，也可选择 Cosmos3-Nano；
 - Stage 1 Physical Encoder 负责将 state、action 和 tactile 转成物理 token；
 - 冻结的 Wan VAE 将视频压缩到 latent；
 - 冻结的 Stage 1 perception branch 提供 latent-action 蒸馏目标。
@@ -77,7 +77,7 @@ state/action/tactile ──> Stage 1 Physical Encoder ──> physical tokens   
 
 1. Qwen 使用 causal attention，末尾 latent queries 可以读取图像和文本。
 2. Generation 使用非 causal attention，所有 generation modality tokens 可以相互读取。
-3. Generation query 同时读取 Qwen 原生 K/V 和 Generation 自身 K/V。
+3. Generation query 读取经可训练 adapter 适配的 Qwen K/V，以及 Generation 自身 K/V。
 4. Qwen 永远不会读取 Generation tokens，因此不存在 Generation 信息泄漏回 Understanding。
 
 ---
@@ -537,7 +537,10 @@ VAE 只编码有效相机的视频，不在时间压缩时混合相机。
 lerobot/common/policies/qwen3vl_mot/modeling_generation.py
 ```
 
-### 8.1 参数配置
+### 8.1 旧随机生成配置
+
+`generation_backbone=random` 保留以下旧结构和参数顺序，兼容已保存的权重与 optimizer。
+缺少新字段的旧 config 仍默认 random；两个 launcher 的 fresh run 默认 edge。
 
 | 项目 | 数值 |
 |---|---:|
@@ -568,7 +571,7 @@ Generation 可以使用 16 个 query heads，因为 GQA 要求的只是 query he
 | action | 1024 | 1024 embedding velocity |
 | tactile | 1024 | 1024 |
 
-每个 stream 都会加入：
+旧 random 模式的每个 stream 都会加入：
 
 - modality embedding；
 - task embedding；
@@ -601,17 +604,19 @@ Qwen        <-/ Generation
 Generation attention 不使用 causal mask，所以 video、state、action 和 tactile token
 可以双向交互。
 
-28 个 Generation blocks 会按深度映射到 8 组 Qwen K/V：
+Generation blocks 按深度映射到 8 组 Qwen K/V（Edge 为 28 层，Nano 为 36 层）：
 
 ```text
-context_index = floor(block_index × 8 / 28)
+context_index = floor(block_index × 8 / generation_depth)
 ```
 
 因此 Generation 不只是读取 Qwen 最后一层，而是逐深度读取从浅层到深层的多级语义。
 
 ### 8.4 输出头
 
-每个 modality 有独立 output head，初始化为全 0：
+每个 modality 有独立 output head。旧 random 模式全部零初始化；预训练模式的
+video head 必须加载原生 `proj_out`，不能被重新零初始化。新增 state/action/tactile head
+仍然零初始化：
 
 ```text
 video head
@@ -621,6 +626,68 @@ tactile head
 ```
 
 零初始化使模型开始训练时预测接近零速度，避免随机大输出破坏 flow objective。
+
+### 8.5 Edge/Nano 预训练生成与 Qwen 条件适配
+
+理解塔保持 Qwen3-VL-4B 和原有训练范围，不替换为 Cosmos 的配套理解塔。
+只选择加载生成专家、视频输入/输出和时间条件，不加载原始理解专家、64D domain action
+head 或 Nano audio head。新的 physical embedding 和触觉接口仍使用我们的输入/输出头。
+
+| 项目 | Edge | Nano |
+|---|---:|---:|
+| hidden size / depth | 2048 / 28 | 4096 / 36 |
+| Q heads / KV heads / head dim | 16 / 8 / 128 | 32 / 8 / 128 |
+| FFN intermediate / activation | 9216 / ReLU² | 12288 / SwiGLU |
+| 原生 RMSNorm epsilon | 1e-5 | 1e-6 |
+| 原生 RoPE theta | 100,000,000 | 5,000,000 |
+| 严格加载的 tensor 数 | 317 | 441 |
+| 复用的预训练参数 | 1,414,924,992 | 6,965,491,392 |
+| 新 K/V adapter 参数 | 58,720,256 | 75,497,472 |
+| Generation 总参数（8 tasks、单视角、1024D tactile、embedding flow） | 1,486,261,952 | 7,066,219,200 |
+
+每个 block 保留原生 generation RMSNorm、Q/K per-head normalization、注意力投影、
+FFN 和 residual 路径。Edge 使用 Nemotron 的 FP32 normalization/weight multiplication，
+Nano 使用 Diffusers RMSNorm 的 dtype 语义。生成侧采用原生 interleaved 3D mRoPE，
+没有旧模式附加的 sinusoidal position embedding。
+
+条件链路：
+
+```text
+Qwen native K (已施加 Qwen RoPE) -> 逆旋转 -> trainable K adapter
+    -> Cosmos 原生 condition K normalization -> Cosmos RoPE
+Qwen native V -> trainable V adapter
+Generation Q -> concat(adapted Qwen K/V, native Generation K/V)
+```
+
+每层 K/V adapter 都是 1024→1024、无 bias 的 Linear，初始为 identity；
+adapter 和 condition-key norm 在该 Generation block 的 forward 内运行，兼容 FSDP sharding。
+新增 task/modality/camera embeddings 初始为零，避免初始化时直接扰动预训练 RGB 输入。
+原生时间 embedding 的输入是 sigma：scheduler 的 `1000*sigma` 经 `timestep_scale=.001`
+后就是 sigma，而不是旧模式的 `sigma*1000`。
+时间 embedding 只加到 noisy tokens；i2v 每路当前 latent frame、干净 physical 条件，以及
+future-state 末尾新增的独立 current token 都不加时间 embedding。
+
+视频 patch 顺序与官方一致：`[patch_row, patch_column, channel]`。
+视频时间 RoPE 由 batch 的 `sample_rate` 与稀疏窗口推算实际视频 FPS：
+`sample_rate * (world_video_frames - 1) / (chunk_size - 1)`；空间坐标从零开始，
+时间坐标采用原生 context-end + 15000 modality margin。
+外部推理 batch 未提供 `sample_rate` 时，使用保存的 `generation_video_fps`（默认 24）。
+
+加载前严格检查 native config、每个必需 tensor 的存在与 shape，以及任何未映射的
+generation tensor；仅逐 tensor 读取需要的权重，不实例化整个 Cosmos 理解塔。
+通过 meta→BF16 allocation 避免 Nano 的大规模 FP32 随机初始化及额外内存副本。
+VAE config 的结构与 latent normalization 必须一致；官方 Edge/Nano VAE 权重相同。
+本实现不要求安装新版 Diffusers Cosmos pipeline，只复现其生成数学契约，沿用已有 Wan VAE。
+
+`generation_tuning_mode=full` 为默认；`frozen` 只冻结复用的参数，
+K/V adapters、新模态输入/输出和 task/camera embeddings 仍训练。Qwen 的训练范围不受它影响。
+预训练权重只在 fresh initialization 时读取。resume 使用保存的 Stage 2 权重，
+不需要原 Cosmos transformer shards，也不会重新覆盖已训练的 generator。
+random、edge、nano 或 full/frozen 之间不能直接 resume 切换，需要新的实验目录。
+
+这是预训练生成迁移，不是原生 Cosmos pipeline 的零样本等价替换。
+Qwen 条件分布、物理/触觉接口、多视角与机器人任务仍需适配训练；
+采样保持现有 Euler flow 积分，不切换为官方 UniPC/CFG 推理流程。
 
 ---
 
@@ -843,15 +910,19 @@ HTML 和 metrics 包含逐视角结果及有效视角 MAE 均值。
 | 参数集合 | 参数量 |
 |---|---:|
 | Qwen3-VL-4B base | 4,437,815,808 |
-| Generation Expert（embedding flow、单视角） | 1,433,012,416 |
+| Generation Expert（Edge 预训练、embedding flow、单视角） | 1,486,261,952 |
+| Generation Expert（Nano 预训练、embedding flow、单视角） | 7,066,219,200 |
+| 旧 random Generation Expert（embedding flow、单视角） | 1,433,012,416 |
 | State/action decoder | 2,431,296 |
-| 三视角额外 camera embedding | 6,144 |
+| 三视角额外 camera embedding（Edge / Nano） | 6,144 / 12,288 |
 | Vision LoRA | 393,216 |
 | Latent queries | 40,960 |
 | Latent-action projection | 2,629,632 |
 
 这里只统计核心 Qwen 和 Generation。运行时还会加载冻结的 Physical Encoder、
 Stage 1 perception teacher 和 Wan VAE。
+Generation 表格按 1024D context tactile 统计；spatial-patch tactile 宽度来自 Stage 1 codec，
+参数量会相应变化。Edge 核心约 5.93B，Nano 约 11.51B。
 
 ### 12.2 正式 launcher 的训练范围
 
@@ -864,7 +935,7 @@ Stage 1 perception teacher 和 Wan VAE。
 | Qwen final norm | 冻结 |
 | Vision base | 冻结 |
 | Vision 最后 4 层 attention | rank-16 LoRA |
-| Generation Expert | 全量训练 |
+| Generation Expert | 默认 full；可设 frozen，仅训练新 adapters/heads |
 | State/action decoder（embedding flow） | 全量训练 |
 | Latent queries/projection | 全量训练 |
 | Physical Encoder | 冻结 |
@@ -874,7 +945,8 @@ Stage 1 perception teacher 和 Wan VAE。
 总可训练参数：
 
 ```text
-约 5.072B（embedding flow、单视角；三视角另加 6,144 参数）
+Edge 约 5.13B / Nano 约 10.71B（full、embedding flow、单视角、1024D tactile）
+旧 random 模式约 5.072B；frozen 模式不计入复用的生成参数
 ```
 
 optimizer parameter groups：

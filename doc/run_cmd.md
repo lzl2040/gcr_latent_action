@@ -1,6 +1,6 @@
 # Qwen3-VL MoT Stage 2 运行命令
 
-本文记录 `qwen3vl_mot_stage2` 分支当前可用的集群和本地启动命令。
+本文记录 `qwen3vl_mot_pretrained_generation` 分支当前可用的集群和本地启动命令。
 
 正式 H100 训练入口：
 
@@ -21,6 +21,64 @@ train_qwen3vl_mot_local.sh
 ```bash
 conda activate lerobot_v2
 ```
+
+## 预训练生成：Edge / Nano
+
+两个 launcher 的新实验默认 `GENERATION_BACKBONE=edge`。理解侧仍是 Qwen3-VL-4B，
+不加载或替换为 Cosmos 理解专家。生成侧严格加载原生生成 block、video input/output、
+时间 embedding 和 normalization，再训练 Qwen K/V 条件 adapter 与新的物理/触觉接口。
+
+本地权重：
+
+```text
+/Data/lzl/huggingface/Cosmos3-Edge
+/Data/lzl/huggingface/Cosmos3-Nano
+```
+
+Nano 已下载完整 snapshot；生成 checkpoint 的 7 个 shards 合计约 30.35 GB，
+其中也包含不会加载的原始理解侧参数。
+
+本地新训练：
+
+```bash
+GENERATION_BACKBONE=edge \
+  STAGE1_CHECKPOINT=/path/to/exported_robo_contrast \
+  OUTPUT_DIR=qwen3vl_mot_pretrained_edge \
+  JOB_NAME=qwen3vl_mot_pretrained_edge \
+  bash train_qwen3vl_mot_local.sh
+```
+
+选择 Nano 只需将 `GENERATION_BACKBONE=nano` 并使用新的输出目录。
+集群生成权重默认取 `${WEIGHTS_ROOT}/Cosmos3-Edge` 或 `${WEIGHTS_ROOT}/Cosmos3-Nano`；
+可以用 `GENERATION_PRETRAINED_DIR` 指定其他根目录（必须包含 `transformer/` 与 `vae/`，
+不是直接传 transformer 子目录）。
+
+```bash
+GENERATION_BACKBONE=nano \
+  WEIGHT_RESUME=false \
+  JOB_NAME=qwen3vl_mot_pretrained_nano \
+  bash train_qwen3vl_mot_fsdp.sh
+```
+
+`COSMOS3_DIR` 仍控制 VAE 路径。官方 Edge/Nano VAE 权重相同，因此可以沿用 Edge VAE；
+若自定义 VAE，初始化会检查结构与 latent statistics，不能静默换成不兼容 codec。
+新生成模块无需安装新版 Diffusers，也不会改动当前 PyTorch/CUDA wheel。
+
+`GENERATION_TUNING_MODE=full` 为默认；时间或 optimizer 显存紧张时可设置 `frozen`，
+冻结复用的生成参数，只训练其条件 adapters、task/camera embeddings 与新的物理/触觉头。
+理解侧的 full/LoRA/frozen 仍由原 `UNDERSTANDING_TUNING_MODE` 控制，默认不变。
+冻结能减少 optimizer/梯度成本，不会省去生成骨干 forward，也不能保证收敛时间。
+Edge 生成侧约 1.49B，Nano 约 7.07B（含新 adapters、1024D tactile、单视角）。
+
+resume 时不设置 `GENERATION_BACKBONE`/`GENERATION_TUNING_MODE`，读取保存的模式。
+原始 Cosmos transformer 权重只在 fresh run 加载，resume 不再读取、不覆盖已训练权重。
+不能从旧 random checkpoint 直接 resume 成 Edge/Nano，也不能 Edge↔Nano 或 full↔frozen
+直接续训；需新建 `JOB_NAME/OUTPUT_DIR`。复现旧结构的新实验可显式设
+`GENERATION_BACKBONE=random`。旧 config 未保存新字段时仍恢复 random 架构。
+
+预训练只提供生成先验，Qwen 条件和机器人新模态仍需适配训练，不保证零样本保持原生
+Cosmos pipeline 的视频质量。现有 Euler sampler 与 task/multi-view/teacher 契约保留。
+官方只测试 BF16；初次迁移建议 `FP8=false`，确认表现后再开启仓库的 FP8 路径。
 
 ## 多视角条件与未来视频生成
 
