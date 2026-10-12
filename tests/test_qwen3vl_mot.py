@@ -178,8 +178,9 @@ def test_generation_expert_preserves_stream_shapes():
 
 
 @pytest.mark.parametrize("roles", [("primary",), ("primary", "secondary", "wrist")])
-def test_default_generation_expert_is_between_one_and_two_billion_parameters(roles):
-    config = Qwen3VLMoTConfig(rgb_views=roles)
+@pytest.mark.parametrize("flow_space", ["raw", "embedding"])
+def test_default_generation_expert_is_between_one_and_two_billion_parameters(roles, flow_space):
+    config = Qwen3VLMoTConfig(rgb_views=roles, physical_flow_space=flow_space)
     with torch.device("meta"):
         model = GenerationExpert(
             understanding_dim=2560,
@@ -198,8 +199,8 @@ def test_default_generation_expert_is_between_one_and_two_billion_parameters(rol
             },
             output_dims={
                 "video": config.video_latent_dim * config.video_latent_patch_size**2,
-                "state": config.group_size * config.max_state_dim,
-                "action": config.group_size * config.max_action_dim,
+                "state": config.physical_hidden_dim if flow_space == "embedding" else config.group_size * config.max_state_dim,
+                "action": config.physical_hidden_dim if flow_space == "embedding" else config.group_size * config.max_action_dim,
                 "tactile": config.physical_hidden_dim,
             },
             task_names=config.task_names,
@@ -208,7 +209,9 @@ def test_default_generation_expert_is_between_one_and_two_billion_parameters(rol
         )
     parameters = sum(parameter.numel() for parameter in model.parameters())
     assert 1_000_000_000 <= parameters <= 2_000_000_000
-    assert parameters == 1_429_471_744 + (6144 if len(roles) > 1 else 0)
+    assert parameters == 1_429_471_744 + (6144 if len(roles) > 1 else 0) + (
+        2 * 864 * 2049 if flow_space == "embedding" else 0
+    )
     assert (model.video_view_embedding is None) == (len(roles) == 1)
 
 
@@ -600,6 +603,7 @@ class _FakePhysical(nn.Module):
         self.tactile_tokens = tactile_tokens
         self.last_state = None
         self.include_tactile_history = []
+        self.input_history = []
         self.use_ftp1_tactile = False
         self.use_anytouch_tactile = False
         self.tactile_feat_dim = 6
@@ -609,6 +613,10 @@ class _FakePhysical(nn.Module):
     def forward(self, batch, **kwargs):
         self.include_tactile_history.append(kwargs["include_tactile"])
         self.last_state = batch["observation.state"].detach().clone()
+        self.input_history.append({
+            key: batch[key].detach().clone()
+            for key in ("observation.state", "state_mask", "action", "action_mask")
+        })
         batch_size = batch["action"].shape[0]
         length = 1 + 2 * self.groups + self.tactile_tokens
         tokens = self.anchor + torch.zeros(
@@ -823,7 +831,8 @@ def test_spatial_tactile_target_and_generation_are_decodable():
 
 
 @pytest.mark.parametrize("multiview", [False, True])
-def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeypatch, multiview):
+@pytest.mark.parametrize("flow_space", ["raw", "embedding"])
+def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeypatch, multiview, flow_space):
     import lerobot.common.policies.ace.cosmos3_encoders as cosmos3_encoders
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
 
@@ -919,6 +928,7 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
         use_tactile_conditioning=True,
         generation_gradient_checkpointing=False,
         rgb_views=("primary", "secondary", "wrist") if multiview else ("primary",),
+        physical_flow_space=flow_space,
     )
     policy = stage2.Qwen3VLMoTPolicy(config)
     assert teacher.config.qwen3vl_dir == config.qwen3vl_dir
@@ -965,7 +975,7 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
         elif task_name in ("i2v", "action_video_prediction", "forward_dynamics"):
             assert metrics["video_target_elements"] == (96 if multiview else 64)
         if task_name in ("forward_dynamics", "state_prediction"):
-            assert metrics["state_target_elements"] == 24
+            assert metrics["state_target_elements"] == (32 if flow_space == "embedding" else 24)
         if task_name in (
             "action_video_prediction",
             "inverse_dynamics",
@@ -974,14 +984,26 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
             assert metrics["action_target_elements"] == 32
         if task_name in ("action_video_prediction", "action_prediction"):
             torch.testing.assert_close(
-                policy.physical_encoder.last_state,
+                policy.physical_encoder.input_history[-2]["observation.state"]
+                if flow_space == "embedding" else policy.physical_encoder.last_state,
                 batch["observation.state"][:, :1].expand(-1, 4, -1),
             )
         if task_name == "tactile_prediction":
             assert metrics["tactile_target_elements"] == 64
-            assert policy.physical_encoder.include_tactile_history == [False, True]
-        if multiview and task_name == "action_video_prediction":
+            assert policy.physical_encoder.include_tactile_history == (
+                [False, False, True] if flow_space == "embedding" else [False, True]
+            )
+        if flow_space == "embedding" and task_name == "action_video_prediction":
+            policy.zero_grad(set_to_none=True)
             loss.backward()
+            assert policy.physical_decoders["action"][-1].weight.grad is not None
+            assert policy.physical_decoders["state"][-1].weight.grad is not None
+            assert policy.generation.output_heads["action"].weight.grad is not None
+            assert policy.physical_encoder.anchor.grad is None
+            assert not policy.physical_encoder.training
+        if multiview and task_name == "action_video_prediction":
+            if flow_space == "raw":
+                loss.backward()
             assert policy.generation.video_view_embedding.weight.grad is not None
             assert policy.teacher_perception.anchor.grad is None
             torch.testing.assert_close(policy.teacher_perception.last_images[0], batch["image_t0"])
@@ -1023,6 +1045,16 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(tmp_path, monkeyp
     assert restored_stage1_configs[0].qwen3vl_dir == config.qwen3vl_dir
     assert restored_stage1_configs[0].cosmos3_dir == config.cosmos3_dir
     assert restored.config.rgb_views == config.rgb_views
+    assert restored.config.physical_flow_space == flow_space
+    if flow_space == "embedding":
+        for name, parameter in policy.physical_decoders.named_parameters():
+            torch.testing.assert_close(parameter, dict(restored.physical_decoders.named_parameters())[name])
+        torch.manual_seed(31)
+        expected_action = policy.sample_canonical_action(batch)
+        torch.manual_seed(31)
+        torch.testing.assert_close(restored.sample_canonical_action(batch), expected_action)
+    else:
+        assert not hasattr(restored, "physical_decoders")
 
 
 def test_multiview_dataset_resolves_roles_and_masks_missing_duplicate_and_padded_views(monkeypatch):
@@ -1182,3 +1214,244 @@ def test_multiview_video_stream_and_sampling_keep_each_current_frame_without_fut
 def test_rgb_views_reject_invalid_camera_contracts(roles):
     with pytest.raises(ValueError, match="rgb_views"):
         Qwen3VLMoTConfig(rgb_views=roles)
+
+
+def _embedding_physical_policy():
+    class CoupledPhysical(_FakePhysical):
+        def forward(self, batch, **kwargs):
+            tokens, keep, loss = super().forward(batch, **kwargs)
+            state = batch["observation.state"].reshape(-1, self.groups, self.hidden)
+            action = batch["action"].reshape_as(state)
+            context = (state.mean(dim=(1, 2)) + action.mean(dim=(1, 2)))[:, None, None]
+            tokens[:, 1 : 1 + self.groups] = state + context
+            tokens[:, 1 + self.groups : 1 + 2 * self.groups] = action + context
+            return tokens, keep, loss
+
+    policy = object.__new__(Qwen3VLMoTPolicy)
+    nn.Module.__init__(policy)
+    policy.config = Qwen3VLMoTConfig(
+        physical_flow_space="embedding", chunk_size=4, group_size=2, n_action_steps=4,
+        physical_hidden_dim=8, max_action_dim=4, max_state_dim=4,
+        inference_steps=3, num_latent_queries=2, latent_action_dim=8,
+    )
+    policy.physical_encoder = CoupledPhysical(groups=2, hidden=8, tactile_tokens=4).eval()
+    policy.physical_encoder.requires_grad_(False)
+    policy.physical_decoders = nn.ModuleDict({
+        name: nn.Sequential(nn.LayerNorm(8), nn.Linear(8, 8), nn.GELU(), nn.Linear(8, 8))
+        for name in ("state", "action")
+    })
+    policy.generation = GenerationExpert(
+        understanding_dim=12, hidden_dim=16, depth=1, num_heads=4, dropout=0.0,
+        input_dims={"state": 8, "action": 8}, output_dims={"state": 8, "action": 8},
+        task_names=("action_prediction",), gradient_checkpointing=False,
+    )
+    batch = {
+        "image_t0": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
+        "observation.state": torch.arange(32).reshape(2, 4, 4).float() / 32,
+        "state_mask": torch.tensor([[1, 1, 0, 1], [1, 1, 1, 1]]).float(),
+        "action": torch.arange(32).flip(0).reshape(2, 4, 4).float() / 32,
+        "action_mask": torch.tensor([[1, 0, 1, 1], [1, 1, 1, 1]]).float(),
+        "tactile_signal_mask": torch.zeros(2),
+    }
+    return policy, batch
+
+
+def test_physical_flow_corrupts_clean_isolated_embeddings_not_encoder_inputs():
+    policy, batch = _embedding_physical_policy()
+    valid = torch.tensor([1, 0], dtype=torch.bool)
+    policy._sample_sigma = lambda batch_size, device: torch.full((batch_size,), 0.25, device=device)
+    clean, raw, keep, raw_mask = policy._clean_physical_embedding(batch, "action", valid)
+    torch.manual_seed(17)
+    expected_noise = torch.randn_like(clean)
+    torch.manual_seed(17)
+    streams, targets, _, reconstructions = policy._prepare_physical_streams(
+        TASK_SPECS["action_prediction"], batch, valid
+    )
+    action = next(stream for stream in streams if stream.name == "action")
+    expected_values = 0.75 * clean + 0.25 * expected_noise
+    expected_values[~keep] = 0
+    torch.testing.assert_close(action.values, expected_values)
+    torch.testing.assert_close(targets["action"][0][keep], (expected_noise - clean)[keep])
+    assert targets["action"][1].sum() == 16
+    assert raw_mask.sum() == 12
+    torch.testing.assert_close(reconstructions["action"][0], clean)
+    torch.testing.assert_close(reconstructions["action"][1], raw)
+    assert not action.values[1].any()
+    assert not action.keep[1].any()
+    for recorded in policy.physical_encoder.input_history:
+        assert not (recorded["state_mask"].any() and recorded["action_mask"].any())
+        for name, key in (("state", "observation.state"), ("action", "action")):
+            if not recorded[f"{name}_mask"].any():
+                assert not recorded[key].any()
+                continue
+            source = batch[key]
+            if name == "state":
+                source = source[:, :1].expand_as(source)
+            expected = torch.where(recorded[f"{name}_mask"].bool()[:, None],
+                                   source, torch.zeros_like(source))
+            torch.testing.assert_close(recorded[key], expected)
+    decoded = policy._decode_physical_embedding("action", clean)
+    loss, _, count = policy._distributed_mse(decoded, raw, raw_mask)
+    assert count == 12
+    loss.backward()
+    assert policy.physical_decoders["action"][-1].weight.grad is not None
+    assert policy.physical_encoder.anchor.grad is None
+
+
+@pytest.mark.parametrize("task_name", [
+    "action_prediction", "action_video_prediction", "inverse_dynamics",
+    "forward_dynamics", "state_prediction",
+])
+def test_clean_physical_conditions_do_not_leak_target_trajectories(task_name):
+    policy, batch = _embedding_physical_policy()
+    task = TASK_SPECS[task_name]
+    valid = torch.ones(2, dtype=torch.bool)
+
+    def prepare(values):
+        torch.manual_seed(19)
+        streams, targets, _, _ = policy._prepare_physical_streams(task, values, valid)
+        return {stream.name: stream for stream in streams}, targets
+
+    before, targets = prepare(batch)
+    changed = {key: value.clone() for key, value in batch.items()}
+    if task.action.is_target:
+        changed["action"] += 100
+        if task.state is ModalityRole.CURRENT_ONLY:
+            changed["observation.state"][:, 1:] += 100
+        after, _ = prepare(changed)
+        torch.testing.assert_close(before["state"].values, after["state"].values)
+        assert not torch.equal(before["action"].values, after["action"].values)
+    else:
+        changed["observation.state"][:, 1:] += 100
+        after, _ = prepare(changed)
+        torch.testing.assert_close(before["action"].values, after["action"].values)
+        # All contextual state embeddings are noised, plus one clean current-only token.
+        assert before["state"].values.shape == (2, 3, 8)
+        torch.testing.assert_close(before["state"].values[:, -1], after["state"].values[:, -1])
+        assert not torch.equal(before["state"].values[:, :2], after["state"].values[:, :2])
+        assert targets["state"][1][:, :2].all()
+        assert not targets["state"][1][:, -1].any()
+        assert targets["state"][1].sum() == 32
+
+
+def test_embedding_action_sampling_never_encodes_noisy_actions_or_future_state():
+    policy, batch = _embedding_physical_policy()
+    understanding = _FakeUnderstanding("", num_queries=2)(None, ["move"] * 2)
+
+    def sample(values):
+        policy.physical_encoder.input_history.clear()
+        prediction = policy._sample_canonical_action(
+            values, understanding, generator=torch.Generator().manual_seed(23)
+        )
+        assert len(policy.physical_encoder.input_history) == 1
+        encoded = policy.physical_encoder.input_history[0]
+        assert not encoded["action"].any()
+        assert not encoded["action_mask"].any()
+        expected_state = values["observation.state"][:, :1].expand(-1, 4, -1)
+        torch.testing.assert_close(
+            encoded["observation.state"],
+            expected_state * values["state_mask"][:, None],
+        )
+        return prediction
+
+    prediction = sample(batch)
+    assert prediction.shape == (2, 4, 4)
+    assert not prediction[0, :, 1].any()
+    changed = {**batch, "action": torch.full_like(batch["action"], 999),
+               "observation.state": batch["observation.state"].clone()}
+    changed["observation.state"][:, 1:] = -999
+    torch.testing.assert_close(sample(changed), prediction)
+    missing = {**batch, "action_mask": torch.zeros_like(batch["action_mask"])}
+    assert not sample(missing).any()
+
+
+def test_embedding_euler_updates_latents_and_decodes_only_after_integration():
+    class ConstantVelocity(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = nn.Parameter(torch.zeros(1))
+            self.inputs = []
+
+        def forward(self, streams, *args, **kwargs):
+            self.inputs.append({stream.name: stream.values.clone() for stream in streams})
+            return {"action": torch.full_like(streams[1].values, 2.0)}
+
+    policy, batch = _embedding_physical_policy()
+    policy.generation = ConstantVelocity()
+    policy.physical_decoders["action"] = nn.Sequential(nn.Identity(), nn.Linear(8, 8, bias=False))
+    with torch.no_grad():
+        policy.physical_decoders["action"][1].weight.copy_(torch.eye(8))
+    understanding = _FakeUnderstanding("", num_queries=2)(None, ["move"] * 2)
+    initial = torch.randn(2, 2, 8, generator=torch.Generator().manual_seed(29))
+    prediction = policy._sample_canonical_action(
+        batch, understanding, generator=torch.Generator().manual_seed(29)
+    )
+    expected = (initial - 2).reshape(2, 4, 4) * batch["action_mask"][:, None]
+    torch.testing.assert_close(prediction, expected)
+    assert len(policy.generation.inputs) == policy.config.inference_steps
+    assert len(policy.physical_encoder.input_history) == 1
+    torch.testing.assert_close(policy.generation.inputs[0]["action"], initial)
+    for recorded in policy.generation.inputs[1:]:
+        torch.testing.assert_close(recorded["state"], policy.generation.inputs[0]["state"])
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_embedding_physical_path_with_real_stage1_transformer(dtype):
+    from lerobot.common.policies.ace.modeling_robo_contrast import PhysicalEncoder
+
+    policy, batch = _embedding_physical_policy()
+    stage1_config = RoboContrastConfig(
+        chunk_size=4, group_size=2, n_action_steps=4, hidden_dim=8, projection_dim=8,
+        num_attention_heads=2, num_physical_layers=1, max_action_dim=4, max_state_dim=4,
+        max_tactile_signal_dim=3, max_tactile_views=1, tactile_tokens_per_pad=1,
+        tactile_frames=2, tactile_img_size=32, tactile_feat_dim=8, tactile_pretrained=False,
+    )
+    policy.physical_encoder = PhysicalEncoder(stage1_config).to(dtype).eval().requires_grad_(False)
+    batch.update({
+        "tactile_signal": torch.zeros(2, 4, 3),
+        "tactile_image": torch.zeros(2, 1, 2, 3, 32, 32, dtype=torch.uint8),
+        "tactile_image_mask": torch.zeros(2, 1),
+        "sample_rate": torch.full((2,), 10, dtype=torch.long),
+    })
+    valid = torch.ones(2, dtype=torch.bool)
+    before, _, _, _ = policy._clean_physical_embedding(batch, "state", valid, current_only=True)
+    changed = {**batch, "action": torch.full_like(batch["action"], 100),
+               "observation.state": batch["observation.state"].clone()}
+    changed["observation.state"][:, 1:] = -100
+    after, _, _, _ = policy._clean_physical_embedding(changed, "state", valid, current_only=True)
+    torch.testing.assert_close(before, after)
+    assert not before.requires_grad
+    streams, targets, _, reconstructions = policy._prepare_physical_streams(
+        TASK_SPECS["forward_dynamics"], batch, valid
+    )
+    assert streams[0].values.shape == (2, 3, 8)
+    assert targets["state"][1].sum() == 32
+    clean, raw, mask = reconstructions["state"]
+    loss, _, _ = policy._distributed_mse(policy._decode_physical_embedding("state", clean), raw, mask)
+    loss.backward()
+    assert policy.physical_decoders["state"][-1].weight.grad is not None
+    assert all(parameter.grad is None for parameter in policy.physical_encoder.parameters())
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"physical_flow_space": "unknown"},
+    {"physical_flow_space": "embedding", "physical_tuning_mode": "full"},
+    {"physical_flow_space": "embedding", "physical_reconstruction_loss_weight": 0},
+    {"physical_flow_space": "embedding", "physical_reconstruction_loss_weight": float("nan")},
+])
+def test_embedding_flow_rejects_invalid_codec_contracts(kwargs):
+    with pytest.raises(ValueError):
+        Qwen3VLMoTConfig(**kwargs)
+
+
+def test_physical_decoder_outputs_eight_groups_of_160_then_32_by_40():
+    policy, _ = _embedding_physical_policy()
+    policy.config = Qwen3VLMoTConfig(physical_flow_space="embedding")
+    for name in ("state", "action"):
+        policy.physical_decoders[name] = nn.Sequential(
+            nn.LayerNorm(1024), nn.Linear(1024, 1024), nn.GELU(), nn.Linear(1024, 160)
+        )
+        decoded = policy._decode_physical_embedding(name, torch.randn(2, 8, 1024))
+        assert decoded.shape == (2, 8, 160)
+        assert decoded.reshape(2, 32, 40).shape == (2, 32, 40)
+    assert sum(p.numel() for p in policy.physical_decoders.parameters()) == 2_431_296

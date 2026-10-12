@@ -1,4 +1,9 @@
+import json
 import math
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import draccus
@@ -264,3 +269,71 @@ def test_stage2_resume_preserves_rgb_views_and_rejects_changes(tmp_path, saved_v
     cfg.policy = Qwen3VLMoTConfig(rgb_views=other)
     with pytest.raises(ValueError, match="Cannot change `policy.rgb_views`"):
         _load_stage2_resume_policy_config(cfg, args=['--policy.rgb_views=["primary","wrist"]'])
+
+
+@pytest.mark.parametrize("space", ["raw", "embedding"])
+def test_stage2_resume_preserves_physical_flow_space_and_rejects_changes(tmp_path, space):
+    saved = Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"},
+        initialize_from_stage1=False, physical_flow_space=space,
+    )
+    saved._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path, policy=Qwen3VLMoTConfig(),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.physical_flow_space == space
+    other = "embedding" if space == "raw" else "raw"
+    cfg.policy = Qwen3VLMoTConfig(physical_flow_space=other)
+    with pytest.raises(ValueError, match="Cannot change `policy.physical_flow_space`"):
+        _load_stage2_resume_policy_config(cfg, args=[f"--policy.physical_flow_space={other}"])
+
+
+def test_old_stage2_config_without_physical_flow_field_restores_raw_contract(tmp_path):
+    Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False
+    )._save_pretrained(tmp_path)
+    config_path = tmp_path / "config.json"
+    payload = json.loads(config_path.read_text())
+    del payload["physical_flow_space"]
+    del payload["physical_reconstruction_loss_weight"]
+    config_path.write_text(json.dumps(payload))
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path,
+        policy=Qwen3VLMoTConfig(physical_flow_space="embedding"),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.physical_flow_space == "raw"
+
+
+@pytest.mark.parametrize("checkpoint_present,explicit_mode,expected_mode", [
+    (False, "", "embedding"), (False, "raw", "raw"),
+    (True, "", None), (True, "embedding", "embedding"),
+])
+def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedding(
+    tmp_path, checkpoint_present, explicit_mode, expected_mode
+):
+    run_dir = tmp_path / "run"
+    if checkpoint_present:
+        checkpoint = run_dir / "checkpoint_00000001"
+        checkpoint.mkdir(parents=True)
+        (run_dir / "latest_checkpoint").write_text(checkpoint.name)
+    env = {
+        **os.environ,
+        "CHECK_PATHS": "false", "DRY_RUN": "true", "WEIGHT_RESUME": "true",
+        "OUTPUT_DIR": str(run_dir), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
+        "PHYSICAL_FLOW_SPACE": explicit_mode, "PYTHON_BIN": sys.executable,
+        "NPROC_PER_NODE": "1", "NNODES": "1", "MASTER_PORT": "29599",
+    }
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["bash", str(root / "train_qwen3vl_mot_fsdp.sh")],
+        cwd=root, env=env, capture_output=True, text=True, check=True, timeout=30,
+    )
+    if expected_mode is None:
+        assert "--policy.physical_flow_space=" not in result.stdout
+        assert "physical_flow_space=<from checkpoint>" in result.stdout
+    else:
+        assert f"--policy.physical_flow_space={expected_mode}" in result.stdout

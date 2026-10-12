@@ -18,6 +18,18 @@ SAMPLE_POOL_CACHE_DIR="${SAMPLE_POOL_CACHE_DIR:-${TMPDIR:-/tmp}/robo_contrast_sa
 STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
 STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
+PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
+PHYSICAL_FLOW_ARGS=()
+if [[ "$WEIGHT_RESUME" != "true" ]]; then
+    PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-embedding}"
+fi
+if [[ -n "$PHYSICAL_FLOW_SPACE" ]]; then
+    if [[ "$PHYSICAL_FLOW_SPACE" != "raw" && "$PHYSICAL_FLOW_SPACE" != "embedding" ]]; then
+        echo "Error: PHYSICAL_FLOW_SPACE must be raw or embedding" >&2
+        exit 1
+    fi
+    PHYSICAL_FLOW_ARGS+=(--policy.physical_flow_space="${PHYSICAL_FLOW_SPACE}")
+fi
 
 if [[ -n "$STAGE2_TASK_NAMES" || -n "$STAGE2_TASK_WEIGHTS" ]]; then
     if [[ -z "$STAGE2_TASK_NAMES" || -z "$STAGE2_TASK_WEIGHTS" ]]; then
@@ -68,6 +80,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --policy.understanding_vision_lora_layers="${UNDERSTANDING_VISION_LORA_LAYERS:-4}" \
     --policy.understanding_lr_scale="${UNDERSTANDING_LR_SCALE:-0.1}" \
     --policy.physical_tuning_mode="${PHYSICAL_TUNING_MODE:-frozen}" \
+    "${PHYSICAL_FLOW_ARGS[@]}" \
     --policy.window_mode="frames" \
     --policy.chunk_size=32 \
     --policy.n_action_steps=32 \

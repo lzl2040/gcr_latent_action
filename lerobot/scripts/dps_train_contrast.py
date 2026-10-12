@@ -206,6 +206,7 @@ def _load_stage2_resume_policy_config(
     task_names_overridden = parser.parse_arg("policy.task_names", args) is not None
     task_weights_overridden = parser.parse_arg("policy.task_weights", args) is not None
     rgb_views_overridden = parser.parse_arg("policy.rgb_views", args) is not None
+    physical_flow_overridden = parser.parse_arg("policy.physical_flow_space", args) is not None
     checkpoint_root = Path(cfg.output_dir)
     config_path = checkpoint_root / "config.json"
     if not config_path.is_file():
@@ -242,6 +243,11 @@ def _load_stage2_resume_policy_config(
         raise ValueError(
             "Cannot change `policy.rgb_views` while resuming: camera embeddings and video "
             "supervision must keep the same view contract. Start a fresh output directory."
+        )
+    if physical_flow_overridden and runtime_policy.physical_flow_space != saved_policy.physical_flow_space:
+        raise ValueError(
+            "Cannot change `policy.physical_flow_space` while resuming: flow heads, decoders, "
+            "and optimizer states have different contracts. Start a fresh output directory."
         )
     saved_policy.initialize_from_stage1 = False
     cfg.policy = saved_policy

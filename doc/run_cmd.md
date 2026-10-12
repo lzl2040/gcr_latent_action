@@ -44,6 +44,30 @@ resume 不设置 `RGB_VIEWS` 时读取保存的列表，显式设置必须与 ch
 held-out 验证保留 primary 原文件名，secondary/wrist 的视频与 contact sheet 位于对应角色
 子目录，HTML 展示各有效视角，metrics 同时包含逐视角与平均视频 MAE。
 
+## Physical embedding-space flow
+
+两个 Stage 2 launcher 的新实验默认 `PHYSICAL_FLOW_SPACE=embedding`：
+
+```bash
+PHYSICAL_FLOW_SPACE=embedding \
+  JOB_NAME=qwen3vl_mot_embedding_flow \
+  bash train_qwen3vl_mot_fsdp.sh
+```
+
+保留冻结的 Physical Transformer，但只向它输入干净 state/action；分别编码各模态，
+在输出的 `(B,8,1024)` embedding 上加噪和计算 flow loss。
+Generation 预测 embedding velocity，新增 state/action decoder 经干净 embedding 重建损失
+训练，最终输出 `(B,8,160)`，reshape 为 `(B,32,40)`。
+action 推理先编码当前 state 一次，然后直接在 action embedding 空间做 Euler 更新，
+不会每一步把带噪 action 重新送入 Physical Transformer。
+
+新模式要求 `PHYSICAL_TUNING_MODE=frozen`，以保持 codec 和 flow target 空间固定。
+`physical_reconstruction_loss_weight` 默认 1.0，必须为正。
+旧 checkpoint/config 未保存模式时默认为 `raw`；resume 不设置 `PHYSICAL_FLOW_SPACE`
+就读取保存的模式，不能显式改模式续训，因为输出头、decoder 和 optimizer state 不兼容。
+需要复现旧的原始空间 flow 时，新实验可显式设置 `PHYSICAL_FLOW_SPACE=raw`。
+多视角、RGB flow、触觉 codec 和 primary-only teacher 的契约均保持不变。
+
 首次运行或基础镜像更新后，安装 Stage 2 已验证的 FP8/8-bit optimizer 版本：
 
 ```bash

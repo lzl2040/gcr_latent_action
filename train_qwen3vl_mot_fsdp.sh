@@ -39,6 +39,7 @@ GENERATION_EVAL_VIDEO_FPS="${GENERATION_EVAL_VIDEO_FPS:-8}"
 STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
 STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
+PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 CHECK_PATHS="${CHECK_PATHS:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 
@@ -229,6 +230,15 @@ fi
 if [[ "$WEIGHT_RESUME" != "true" && -z "$STAGE1_CHECKPOINT" ]]; then
     die "STAGE1_CHECKPOINT is required for a fresh stage-two run"
 fi
+PHYSICAL_FLOW_ARGS=()
+if [[ "$WEIGHT_RESUME" != "true" ]]; then
+    PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-embedding}"
+fi
+if [[ -n "$PHYSICAL_FLOW_SPACE" ]]; then
+    [[ "$PHYSICAL_FLOW_SPACE" == "raw" || "$PHYSICAL_FLOW_SPACE" == "embedding" ]] \
+        || die "PHYSICAL_FLOW_SPACE must be raw or embedding"
+    PHYSICAL_FLOW_ARGS+=(--policy.physical_flow_space="${PHYSICAL_FLOW_SPACE}")
+fi
 
 # PyTorch wheels may ship a newer CUDA runtime than /usr/local/cuda. NVRTC loads its
 # builtins dynamically, so put the matching wheel library first when it is available.
@@ -305,6 +315,7 @@ else
 fi
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
+echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
 echo "distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 echo "checkpoint: control_backend=gloo sync_files=${FSDP_CHECKPOINT_SYNC_FILES} threads=${FSDP_CHECKPOINT_THREADS} heartbeat=${FSDP_CHECKPOINT_HEARTBEAT_SECONDS}s"
 
@@ -339,6 +350,7 @@ CMD=(
     --policy.understanding_vision_lora_layers="${UNDERSTANDING_VISION_LORA_LAYERS:-4}"
     --policy.understanding_lr_scale="${UNDERSTANDING_LR_SCALE:-0.05}"
     --policy.physical_tuning_mode="${PHYSICAL_TUNING_MODE:-frozen}"
+    "${PHYSICAL_FLOW_ARGS[@]}"
     --policy.window_mode="frames"
     --policy.chunk_size=32
     --policy.n_action_steps=32

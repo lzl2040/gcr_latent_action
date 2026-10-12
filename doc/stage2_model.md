@@ -12,7 +12,7 @@
 > - action/video 推理接口；
 > - FSDP、FP8 或 optimizer 对模型训练语义的影响。
 >
-> 当前说明覆盖 `qwen3vl_mot_stage2` 分支的可选多视角条件与联合视频生成实现。
+> 当前说明覆盖 `qwen3vl_mot_stage2` 分支的多视角生成与 physical embedding-space flow。
 
 ---
 
@@ -32,7 +32,7 @@ Stage 2 在 Stage 1 已学到的“视觉变化—物理变化”对齐基础上
 当前实现采用 **单向 Mixture-of-Transformers（MoT）**：
 
 - Qwen3-VL-4B 作为 Understanding Expert；
-- 1.429B Generation Expert 负责多模态 flow matching；
+- 新实验采用 1.433B Generation Expert 负责多模态 flow matching；
 - Stage 1 Physical Encoder 负责将 state、action 和 tactile 转成物理 token；
 - 冻结的 Wan VAE 将视频压缩到 latent；
 - 冻结的 Stage 1 perception branch 提供 latent-action 蒸馏目标。
@@ -62,11 +62,15 @@ current RGB images (primary / optional secondary / wrist) + language
 9-frame video per camera ──> frozen Wan VAE ──> joint video tokens     │
 state/action/tactile ──> Stage 1 Physical Encoder ──> physical tokens    │
                                                                         ▼
-                                                    1.429B Generation Expert
+                                                    Generation Expert
                                                                         │
                                    ┌────────────────┬───────────────────┼──────────────┐
                                    ▼                ▼                   ▼              ▼
                               video velocity   state velocity      action velocity  tactile velocity
+                                                    │                   │
+                                           embedding integration + state/action decoder
+                                                    │                   │
+                                              (B,32,40)           (B,32,40)
 ```
 
 关键约束：
@@ -451,6 +455,36 @@ tactile_image_gate
 physical_tuning_mode = frozen
 ```
 
+### 6.4 先编码干净数据，再给 embedding 加噪
+
+新实验的两个 launcher 默认 `physical_flow_space=embedding`，保留冻结、eval-mode 的
+Physical Transformer。state 和 action **独立编码**：编码 state 时将 action 的值和 mask
+置零，编码 action 时将 state 的值和 mask 置零，并关闭触觉输入。
+这是因为继承的 Physical Transformer 是联合、非因果注意力；若直接用完整干净轨迹
+一起编码，条件 embedding 会读到待预测的未来目标。
+
+每个模态取对应的 8 个 contextual group tokens，形状 `(B,8,1024)`；
+只在这些 embedding 上做加噪和 flow matching，Physical Transformer 不接收噪声。
+冻结 encoder 保证 latent target 空间在训练中固定，不能启用 `physical_tuning_mode=full`。
+
+新增两个可训练 decoder：
+
+```text
+state/action embedding (B,8,1024)
+  -> LayerNorm -> Linear(1024,1024) -> GELU -> Linear(1024,160)
+  -> grouped values (B,8,160)
+  -> reshape (B,32,40)
+```
+
+它们由干净 embedding 的 canonical 重建 MSE 训练，缺失 canonical 维度和无效样本不计算
+重建 loss。总输出是 **8 组 × 每组 160 维**，不是整段只有 `4×40`。
+两个 decoder 共增加 2,431,296 参数。Stage 1 没有 state/action decoder，因此这些层从
+Stage 2 开始训练，不假设已有可靠的逆映射。
+
+旧 config/checkpoint 未包含模式时保留 `physical_flow_space=raw`：
+原始 state/action 加噪后进入 Physical Transformer，Generation 直接输出 canonical
+velocity。新旧模式的 head/decoder/optimizer 契约不同，不能切换模式 resume。
+
 ---
 
 ## 7. 视频 VAE 与 video tokens
@@ -514,7 +548,8 @@ lerobot/common/policies/qwen3vl_mot/modeling_generation.py
 | head dim | 128 |
 | intermediate size | 9216 |
 | activation | ReLU² |
-| 参数量（默认单视角、8 tasks） | 1,429,471,744 |
+| 参数量（embedding flow、单视角、8 tasks） | 1,433,012,416 |
+| 参数量（旧 raw flow、单视角、8 tasks） | 1,429,471,744 |
 
 Generation 的 KV 几何必须和 Qwen 原生 K/V 一致：
 
@@ -529,8 +564,8 @@ Generation 可以使用 16 个 query heads，因为 GQA 要求的只是 query he
 | stream | 输入 token 宽度 | 输出宽度 |
 |---|---:|---:|
 | video | 192 | 192 |
-| state | 1024 | `4×40=160` |
-| action | 1024 | `4×40=160` |
+| state | 1024 | 1024 embedding velocity |
+| action | 1024 | 1024 embedding velocity |
 | tactile | 1024 | 1024 |
 
 每个 stream 都会加入：
@@ -541,6 +576,9 @@ Generation 可以使用 16 个 query heads，因为 GQA 要求的只是 query he
 - 一维或三维位置编码。
 
 所有存在的 stream 随后沿 token 维拼接。
+
+state/action 的 canonical 160D 输出由独立 decoder 产生，不再作为 embedding flow 的
+Generation velocity head。旧 `physical_flow_space=raw` 保留每 token 160D velocity head。
 
 ### 8.3 非对称注意力
 
@@ -599,7 +637,7 @@ lerobot/common/policies/qwen3vl_mot/tasks.py
 | role | 含义 |
 |---|---|
 | `ABSENT` | 不进入 Generation sequence |
-| `CLEAN` | 作为干净条件，sigma=0，不计算该模态 loss |
+| `CLEAN` | 作为干净条件，sigma=0，不计算该模态 flow loss |
 | `NOISY` | 整个模态加噪并预测 |
 | `FUTURE_NOISY` | 当前部分保持干净，只预测未来部分 |
 | `CURRENT_ONLY` | 只保留当前 state，并重复到整个 chunk |
@@ -664,6 +702,11 @@ $$
 
 然后在有效 mask 上计算 MSE。
 
+embedding-space 模式中，state/action 的 `x` 指冻结 Physical Transformer 独立编码后的
+干净 embedding，不是原始 40D trajectory；有效 group 的所有 1024 个 latent 元素参与
+flow loss。canonical 维度 mask 用于 encoder 输入和 decoder 重建，不把 40D mask
+错误地直接广播到 latent 维度。
+
 ### 10.1 Sigma 解耦
 
 video、state、action 和 tactile 分别调用 `_sample_sigma()`，因此不同模态的 sigma
@@ -677,10 +720,15 @@ video、state、action 和 tactile 分别调用 `_sample_sigma()`，因此不同
 - 该帧不计算 video loss；
 - 其余 latent frames 加噪并预测。
 
-state：
+state（embedding-space 模式）：
 
-- `t=0` state 保持干净；
-- 其余 31 个 state timestep 加噪并预测。
+- 8 个完整轨迹 group embeddings 全部加噪；非因果 Physical Transformer 的任何一组都
+  可能混入未来信息，不能把第一个 group 当作纯当前帧而保持干净；
+- 当前 state 重复到 chunk 后独立编码，取第一个 group token 作为额外干净条件；
+- Generation state stream 因而是 8 个 target tokens + 1 个 current-condition token，
+  后者不参与 flow loss，也不计入最终 8 组 decoder 输出。
+
+旧 raw-space 模式仍保留原始 `t=0` state，预测其余 31 步。
 
 ### 10.3 总损失
 
@@ -719,9 +767,14 @@ $$
 
 $$
 L=L_\mathrm{flow}+\lambda_\mathrm{latent}L_\mathrm{latent}
+  +\lambda_\mathrm{physical\ recon}L_\mathrm{physical\ recon}
 $$
 
 其中 `latent_action_loss_weight` 默认是 `1.0`。
+embedding-space 模式对任务中每个存在的 state/action 模态计算
+`MSE(decoder(clean_embedding), clean_canonical_groups)`，只覆盖有效 canonical 元素；
+`physical_reconstruction_loss_weight` 默认 `1.0`。
+该损失训练 decoder，不更新冻结 encoder；没有物理输入的 i2v/t2v 不计算此项。
 
 ---
 
@@ -735,14 +788,15 @@ sample_canonical_action(batch)
 
 流程：
 
-1. 从高斯噪声初始化 `(B,32,40)` canonical action；
-2. 用 `action_mask` 清零不存在的维度；
-3. 将当前 state 重复到 32 个 timestep；
-4. 通过 frozen Physical Encoder 得到 state/action tokens；
+1. 从高斯噪声初始化 `(B,8,1024)` action embeddings；
+2. 用 `action_mask` 判断是否存在有效 action，屏蔽整个缺失的 group；
+3. 将当前 state 重复到 32 个 timestep，屏蔽未来 state 和所有 action；
+4. 只运行一次 frozen Physical Encoder，得到干净的 state 条件 tokens；
 5. 使用 `action_prediction` task；
 6. 从 `sigma=1` 到 `0` 做默认 20 次 Euler 更新；
-7. 每次更新后重新应用 action mask；
-8. 返回前 `n_action_steps`，当前为 32。
+7. 每次更新后重新屏蔽缺失 action groups，不把 noisy action 重新编码；
+8. 最终 embeddings 经 action decoder 得到 `(B,8,160)`，reshape 为 `(B,32,40)`，
+   应用 canonical `action_mask`，返回前 `n_action_steps`，当前为 32。
 
 更新公式：
 
@@ -754,6 +808,9 @@ x_\sigma
 (\sigma_{next}-\sigma)
 \hat v_\theta
 $$
+
+这里的 `x` 是 action embedding。旧 raw-space checkpoint 仍在 `(B,32,40)` 原始空间
+更新，每次重新经过 Physical Encoder；新旧采样器按保存的模式选择。
 
 ### 11.1 尚未实现的部署层
 
@@ -786,7 +843,8 @@ HTML 和 metrics 包含逐视角结果及有效视角 MAE 均值。
 | 参数集合 | 参数量 |
 |---|---:|
 | Qwen3-VL-4B base | 4,437,815,808 |
-| Generation Expert（单视角） | 1,429,471,744 |
+| Generation Expert（embedding flow、单视角） | 1,433,012,416 |
+| State/action decoder | 2,431,296 |
 | 三视角额外 camera embedding | 6,144 |
 | Vision LoRA | 393,216 |
 | Latent queries | 40,960 |
@@ -807,6 +865,7 @@ Stage 1 perception teacher 和 Wan VAE。
 | Vision base | 冻结 |
 | Vision 最后 4 层 attention | rank-16 LoRA |
 | Generation Expert | 全量训练 |
+| State/action decoder（embedding flow） | 全量训练 |
 | Latent queries/projection | 全量训练 |
 | Physical Encoder | 冻结 |
 | Stage 1 teacher | 冻结 |
@@ -815,7 +874,7 @@ Stage 1 perception teacher 和 Wan VAE。
 总可训练参数：
 
 ```text
-5,066,042,880
+约 5.072B（embedding flow、单视角；三视角另加 6,144 参数）
 ```
 
 optimizer parameter groups：
@@ -823,7 +882,7 @@ optimizer parameter groups：
 ```text
 main          lr = 1e-4
 understanding lr = 1e-4 × 0.05 = 5e-6
-physical      lr = 1e-4 × 0.3（仅 physical full tuning 时存在）
+physical      lr = 1e-4 × 0.3（仅旧 raw-space 模式的 physical full tuning 时存在）
 ```
 
 ---

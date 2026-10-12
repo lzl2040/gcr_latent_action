@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -70,6 +71,9 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     max_tactile_signal_dim: int = 32
     physical_hidden_dim: int = 1024
     physical_tuning_mode: str = "frozen"
+    # Saved configs without this field retain the original raw-space flow contract.
+    physical_flow_space: str = "raw"
+    physical_reconstruction_loss_weight: float = 1.0
     physical_lr_scale: float = 0.3
     max_tactile_views: int = 6
     tactile_tokens_per_pad: int = 2
@@ -153,6 +157,16 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
                 "`physical_tuning_mode` must be 'frozen' or 'full', got "
                 f"{self.physical_tuning_mode!r}."
             )
+        if self.physical_flow_space not in ("raw", "embedding"):
+            raise ValueError("`physical_flow_space` must be 'raw' or 'embedding'.")
+        if self.physical_flow_space == "embedding":
+            if self.physical_tuning_mode != "frozen":
+                raise ValueError("Embedding-space physical flow requires a frozen Physical Encoder.")
+            if not (
+                math.isfinite(self.physical_reconstruction_loss_weight)
+                and self.physical_reconstruction_loss_weight > 0
+            ):
+                raise ValueError("Embedding-space flow requires a positive physical reconstruction weight.")
         if self.chunk_size <= 0 or self.group_size <= 0 or self.chunk_size % self.group_size:
             raise ValueError(
                 f"`chunk_size` ({self.chunk_size}) must be divisible by positive "

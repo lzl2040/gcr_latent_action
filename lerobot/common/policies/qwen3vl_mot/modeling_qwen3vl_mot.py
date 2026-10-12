@@ -299,6 +299,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         teacher.physical_encoder = None
         for parameter in self.physical_encoder.parameters():
             parameter.requires_grad_(config.physical_tuning_mode == "full")
+        if self.physical_embedding_flow:
+            self.physical_encoder.eval()
 
         self.teacher_perception = teacher.perception_encoder
         self.teacher_perception.predictor = None
@@ -371,6 +373,17 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             "action": config.group_size * config.max_action_dim,
             "tactile": tactile_generation_dim,
         }
+        if self.physical_embedding_flow:
+            output_dims.update(state=config.physical_hidden_dim, action=config.physical_hidden_dim)
+            self.physical_decoders = nn.ModuleDict({
+                name: nn.Sequential(
+                    nn.LayerNorm(config.physical_hidden_dim),
+                    nn.Linear(config.physical_hidden_dim, config.physical_hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(config.physical_hidden_dim, config.group_size * width),
+                )
+                for name, width in (("state", config.max_state_dim), ("action", config.max_action_dim))
+            })
         self.task_specs, self.task_weights = resolve_task_specs(
             config.task_names,
             config.task_weights,
@@ -568,6 +581,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
     def rgb_views(self) -> tuple[str, ...]:
         return tuple(getattr(self.config, "rgb_views", ("primary",)))
 
+    @property
+    def physical_embedding_flow(self) -> bool:
+        return getattr(self.config, "physical_flow_space", "raw") == "embedding"
+
     def _understand_batch(self, batch: dict, *, with_image: bool = True):
         texts = batch.get("task", [""] * self._current_image(batch).shape[0])
         if isinstance(texts, str):
@@ -590,6 +607,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         *,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
+        if self.physical_embedding_flow:
+            return self._sample_embedding_action(batch, understanding, generator=generator)
         image = self._current_image(batch)
         device = next(self.generation.parameters()).device
         action = torch.randn(
@@ -654,6 +673,46 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             action = action + (next_sigma - sigma) * velocity
             action = action * action_mask
         return action[:, : self.config.n_action_steps]
+
+    def _sample_embedding_action(
+        self, batch: dict, understanding, *, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
+        device = next(self.generation.parameters()).device
+        batch_size = self._current_image(batch).shape[0]
+        placeholder = torch.zeros(
+            batch_size, self.config.chunk_size, self.config.max_action_dim, device=device
+        )
+        physical_batch = self._inference_physical_batch(batch, placeholder)
+        valid = torch.ones(batch_size, device=device, dtype=torch.bool)
+        state_tokens, _, state_keep, _ = self._clean_physical_embedding(
+            physical_batch, "state", valid, current_only=True
+        )
+        action_keep = physical_batch["action_mask"].bool().any(dim=-1, keepdim=True).expand(
+            -1, self.config.num_groups
+        )
+        action = torch.randn(
+            batch_size, self.config.num_groups, self.config.physical_hidden_dim,
+            device=device, dtype=torch.float32, generator=generator,
+        )
+        action = torch.where(action_keep.unsqueeze(-1), action, torch.zeros_like(action))
+        schedule = torch.linspace(1.0, 0.0, self.config.inference_steps + 1, device=device)
+        for sigma, next_sigma in zip(schedule[:-1], schedule[1:], strict=True):
+            sigma_batch = sigma.expand(batch_size)
+            predictions = self.generation(
+                [
+                    GenerationStream("state", state_tokens, torch.zeros_like(sigma_batch), state_keep),
+                    GenerationStream("action", action, sigma_batch, action_keep),
+                ],
+                understanding.hidden_states,
+                understanding.attention_mask,
+                "action_prediction",
+                understanding_key_values=understanding.key_values,
+            )
+            action = action + (next_sigma - sigma) * predictions["action"].float()
+            action = torch.where(action_keep.unsqueeze(-1), action, torch.zeros_like(action))
+        decoded = self._decode_physical_embedding("action", action).reshape_as(placeholder)
+        decoded = decoded * physical_batch["action_mask"].unsqueeze(1)
+        return decoded[:, : self.config.n_action_steps]
 
     @torch.no_grad()
     def sample_canonical_action(self, batch: dict) -> torch.Tensor:
@@ -1187,17 +1246,97 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 compute_reconstruction=False,
             )
 
+    def _clean_physical_embedding(
+        self, batch: dict, name: str, valid_rows: torch.Tensor, *, current_only: bool = False
+    ):
+        isolated = dict(batch)
+        for modality, key in (("state", "observation.state"), ("action", "action")):
+            values = batch[key]
+            if values.shape[1:] != (self.config.chunk_size, getattr(self.config, f"max_{modality}_dim")):
+                raise ValueError(f"{modality} must be a complete canonical chunk.")
+            if modality != name:
+                isolated[key] = torch.zeros_like(values)
+                isolated[f"{modality}_mask"] = torch.zeros_like(batch[f"{modality}_mask"])
+                continue
+            if current_only:
+                values = values[:, :1].expand_as(values)
+            mask = (
+                batch[f"{modality}_mask"].to(values.device).bool()
+                & valid_rows.to(values.device).bool()[:, None]
+            )
+            isolated[key] = torch.where(mask[:, None], values, torch.zeros_like(values))
+            isolated[f"{modality}_mask"] = mask.float()
+        # Encode each clean modality independently: condition tokens cannot see targets.
+        contextual, _, _ = self._physical_context(
+            isolated, include_tactile=False, force_no_grad=True
+        )
+        offset = self.physical_encoder.num_cls_tokens + (
+            self.config.num_groups if name == "action" else 0
+        )
+        clean = contextual[:, offset : offset + self.config.num_groups].detach()
+        key = "action" if name == "action" else "observation.state"
+        raw = isolated[key].reshape(clean.shape[0], self.config.num_groups, -1).float()
+        mask = isolated[f"{name}_mask"].bool()[:, None, None].expand(
+            -1, self.config.num_groups, self.config.group_size, -1
+        ).reshape_as(raw)
+        keep = mask.any(dim=-1)
+        clean = torch.where(keep.unsqueeze(-1), clean, torch.zeros_like(clean))
+        return clean, raw, keep, mask
+
+    def _decode_physical_embedding(self, name: str, tokens: torch.Tensor) -> torch.Tensor:
+        decoder = self.physical_decoders[name]
+        return decoder(tokens.to(decoder[1].weight.dtype)).float()
+
+    def _prepare_embedding_physical_streams(
+        self, task: TaskSpec, batch: dict, valid_rows: torch.Tensor
+    ):
+        streams, targets, sigmas, reconstructions = [], {}, {}, {}
+        for name in ("state", "action"):
+            role = task.role(name)
+            if not role.is_present:
+                continue
+            clean, raw, keep, raw_mask = self._clean_physical_embedding(
+                batch, name, valid_rows, current_only=role is ModalityRole.CURRENT_ONLY
+            )
+            reconstructions[name] = (clean, raw, raw_mask)
+            if role.is_target:
+                sigma = self._sample_sigma(clean.shape[0], clean.device)
+                values, target = self._flow_corrupt(clean.float(), sigma)
+                loss_mask = keep.unsqueeze(-1).expand_as(target)
+                values = torch.where(keep.unsqueeze(-1), values, torch.zeros_like(values))
+                if role is ModalityRole.FUTURE_NOISY:
+                    # Noncausal physical tokens mix future timesteps, so none can be clamped
+                    # as a current-state token. Append a separately encoded clean condition.
+                    current, _, current_keep, _ = self._clean_physical_embedding(
+                        batch, name, valid_rows, current_only=True
+                    )
+                    values = torch.cat([values, current[:, :1]], dim=1)
+                    target = torch.cat([target, torch.zeros_like(current[:, :1])], dim=1)
+                    loss_mask = torch.cat(
+                        [loss_mask, torch.zeros_like(current[:, :1], dtype=torch.bool)], dim=1
+                    )
+                    keep = torch.cat([keep, current_keep[:, :1]], dim=1)
+                targets[name] = (target, loss_mask)
+            else:
+                values = clean
+                sigma = torch.zeros(clean.shape[0], device=clean.device)
+            streams.append(GenerationStream(name, values, sigma, keep))
+            sigmas[name] = sigma
+        return streams, targets, sigmas, reconstructions
+
     def _prepare_physical_streams(
         self,
         task: TaskSpec,
         batch: dict,
         valid_rows: torch.Tensor,
     ):
+        if self.physical_embedding_flow:
+            return self._prepare_embedding_physical_streams(task, batch, valid_rows)
         streams: list[GenerationStream] = []
         targets: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         sigmas: dict[str, torch.Tensor] = {}
         if task.state is ModalityRole.ABSENT and task.action is ModalityRole.ABSENT:
-            return streams, targets, sigmas
+            return streams, targets, sigmas, {}
 
         state = batch["observation.state"]
         action = batch["action"]
@@ -1251,7 +1390,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             sigmas["action"] = action_sigma
             if action_target is not None:
                 targets["action"] = (action_target, action_loss_mask)
-        return streams, targets, sigmas
+        return streams, targets, sigmas, {}
 
     def _prepare_tactile_stream(
         self,
@@ -1437,7 +1576,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             batch,
             valid_rows,
         )
-        physical_streams, _, _ = self._prepare_physical_streams(
+        physical_streams, _, _, _ = self._prepare_physical_streams(
             task,
             batch,
             valid_rows,
@@ -1613,10 +1752,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             if video_target is not None:
                 targets["video"] = (video_target, video_mask)
 
-        physical_streams, physical_targets, physical_sigmas = self._prepare_physical_streams(
-            task,
-            batch,
-            valid_rows,
+        (
+            physical_streams, physical_targets, physical_sigmas, physical_reconstructions
+        ) = self._prepare_physical_streams(
+            task, batch, valid_rows
         )
         streams.extend(physical_streams)
         targets.update(physical_targets)
@@ -1658,6 +1797,13 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             loss_dict[f"{name}_flow_loss"] = metric
             loss_dict[f"{name}_target_elements"] = count
             loss_dict[f"{name}_sigma"] = sigmas[name].float().mean().item()
+
+        for name, (clean, raw, mask) in physical_reconstructions.items():
+            reconstruction = self._decode_physical_embedding(name, clean)
+            reconstruction_loss, metric, count = self._distributed_mse(reconstruction, raw, mask)
+            loss = loss + self.config.physical_reconstruction_loss_weight * reconstruction_loss
+            loss_dict[f"{name}_reconstruction_loss"] = metric
+            loss_dict[f"{name}_reconstruction_elements"] = count
 
         if task.understanding_image:
             latent_loss, metric, count = self._distributed_mse(
