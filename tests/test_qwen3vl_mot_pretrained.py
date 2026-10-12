@@ -21,6 +21,7 @@ from lerobot.common.policies.qwen3vl_mot.cosmos3_pretrained import (
     validate_generation_vae,
 )
 from lerobot.common.policies.qwen3vl_mot.modeling_generation import (
+    GenerationBlock,
     GenerationExpert,
     GenerationStream,
     TimestepEmbedding,
@@ -166,7 +167,8 @@ def test_native_rope_matches_interleaved_reference_at_large_fractional_positions
     torch.testing.assert_close(cos_autocast, cos, rtol=0, atol=0)
     torch.testing.assert_close(sin_autocast, sin, rtol=0, atol=0)
     module.to(dtype=torch.bfloat16)
-    assert module.inv_freq.dtype == torch.float32
+    assert module._frequencies().dtype == torch.float32
+    assert not tuple(module.buffers())
     cos_after_cast, sin_after_cast = module(values, positions)
     torch.testing.assert_close(cos_after_cast, cos, rtol=0, atol=0)
     torch.testing.assert_close(sin_after_cast, sin, rtol=0, atol=0)
@@ -338,3 +340,52 @@ def test_native_timestep_stays_fp32_under_autocast_and_fp8_filter():
     assert actual.dtype == torch.float32
     torch.testing.assert_close(actual, reference(sigma), rtol=0, atol=0)
     assert not _is_fp8_linear(module.mlp[0], "generation.timestep_embedding.mlp.0", FSDPTrainingConfig())
+
+
+def test_legacy_block_preserves_optimizer_parameter_order():
+    block = GenerationBlock(16, 4, 2, 32, "relu2", 0)
+    assert list(dict(block.named_parameters())) == [
+        "generation_norm.weight", "generation_norm.bias",
+        "understanding_norm.weight", "understanding_norm.bias",
+        "attention.q_proj.weight", "attention.k_proj.weight", "attention.v_proj.weight",
+        "attention.out_proj.weight", "mlp_norm.weight", "mlp_norm.bias",
+        "mlp.up.weight", "mlp.down.weight",
+    ]
+
+
+@pytest.mark.parametrize("kind", ["edge", "nano"])
+@pytest.mark.parametrize("mode", ["full", "frozen"])
+def test_native_fp8_emulation_supports_trainable_conditioning(kind, mode):
+    from lerobot.common.utils.fsdp_training import FSDPTrainingConfig, convert_policy_to_fp8
+
+    native = {
+        **COSMOS_GENERATION_CONFIGS[kind],
+        "hidden_size": 128, "num_hidden_layers": 1, "num_attention_heads": 1,
+        "num_key_value_heads": 1, "intermediate_size": 256,
+    }
+    policy = nn.Module()
+    policy.generation = GenerationExpert(
+        understanding_dim=128, hidden_dim=128, depth=1, num_heads=1, num_kv_heads=1,
+        intermediate_dim=256, hidden_act=native["hidden_act"], dropout=0,
+        input_dims={"video": 192}, output_dims={"video": 192}, task_names=("i2v",),
+        gradient_checkpointing=True, cosmos_config=native,
+    ).bfloat16()
+    policy.generation.initialize_cosmos_adapters()
+    with torch.no_grad():
+        policy.generation.output_heads["video"].weight.normal_(std=0.02)
+    policy.generation.configure_cosmos_tuning(mode)
+    converted = convert_policy_to_fp8(
+        policy, FSDPTrainingConfig(fp8_emulate=True, fp8_scope="generation"), torch.device("cpu")
+    )
+    assert converted and not any("timestep_embedding" in name for name in converted)
+    stream = GenerationStream(
+        "video", torch.randn(2, 3, 192), torch.rand(2), torch.ones(2, 3, dtype=torch.bool)
+    )
+    output = policy.generation(
+        [stream], [], torch.ones(2, 4, dtype=torch.bool), "i2v",
+        [(torch.randn(2, 1, 4, 128), torch.randn(2, 1, 4, 128))],
+    )["video"]
+    output.float().square().mean().backward()
+    assert torch.isfinite(output).all()
+    gradient = policy.generation.blocks[0].attention.key_adapter.weight.grad
+    assert gradient is not None and torch.isfinite(gradient).all()

@@ -91,26 +91,18 @@ class CosmosRotaryEmbedding(nn.Module):
         self.axes = tuple(axes)
         if head_dim % 2 or len(axes) != 3 or sum(axes) != head_dim // 2:
             raise ValueError("Cosmos mRoPE requires three axis sections summing to head_dim / 2.")
-        self.register_buffer("inv_freq", self._frequencies(), persistent=False)
 
     def _frequencies(self, device=None) -> torch.Tensor:
         return 1.0 / (self.theta ** (
             torch.arange(0, self.head_dim, 2, device=device).float() / self.head_dim
         ))
 
-    def reset_parameters(self) -> None:
-        self.inv_freq = self._frequencies(self.inv_freq.device)
-
-    def _apply(self, fn, recurse=True):
-        super()._apply(fn, recurse=recurse)
-        self.reset_parameters()
-        return self
-
     def forward(self, values: torch.Tensor, positions: torch.Tensor):
         if positions.ndim != 3 or positions.shape[:2] != (3, values.shape[0]):
             raise ValueError("Cosmos position_ids must have shape (3,B,N).")
         with torch.autocast(device_type=values.device.type, enabled=False):
-            phases = positions.float().unsqueeze(-1) * self.inv_freq.float()
+            # FSDP casts buffers to BF16 without invoking Module._apply.
+            phases = positions.float().unsqueeze(-1) * self._frequencies(values.device)
             combined = phases[0].clone()
             for axis in (1, 2):
                 section = slice(axis, self.axes[axis] * 3, 3)

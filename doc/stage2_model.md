@@ -648,7 +648,9 @@ head 或 Nano audio head。新的 physical embedding 和触觉接口仍使用我
 每个 block 保留原生 generation RMSNorm、Q/K per-head normalization、注意力投影、
 FFN 和 residual 路径。Edge 使用 Nemotron 的 FP32 normalization/weight multiplication，
 Nano 使用 Diffusers RMSNorm 的 dtype 语义。生成侧采用原生 interleaved 3D mRoPE，
-没有旧模式附加的 sinusoidal position embedding。
+没有旧模式附加的 sinusoidal position embedding。RoPE 频率从配置以 FP32 重建，
+不依赖会被 FSDP `buffer_dtype=BF16` 量化的 buffer；时间 embedding 的 GEMM 同样保持 FP32，
+不会被 FP8 Linear 转换器替换。
 
 条件链路：
 

@@ -90,7 +90,8 @@ class CosmosTimestepLinear(nn.Linear):
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         with torch.autocast(device_type=values.device.type, enabled=False):
-            return F.linear(values.float(), self.weight.float(), self.bias.float())
+            bias = None if self.bias is None else self.bias.float()
+            return F.linear(values.float(), self.weight.float(), bias)
 
 
 class TimestepEmbedding(nn.Module):
@@ -457,7 +458,6 @@ class GenerationExpert(nn.Module):
             for block in self.blocks:
                 nn.init.eye_(block.attention.key_adapter.weight)
                 nn.init.eye_(block.attention.value_adapter.weight)
-            self.rotary_embedding.reset_parameters()
 
     def configure_cosmos_tuning(self, mode: str) -> None:
         if mode not in ("full", "frozen"):
