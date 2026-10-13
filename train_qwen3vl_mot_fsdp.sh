@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Single- or multi-node H100 launcher for stage-two Qwen3-VL + Generation Expert training.
+# Single- or multi-node A100/H100 launcher for stage-two Qwen3-VL + Generation Expert training.
 # FP8 accelerates eligible Linear GEMMs; trainable master parameters stay BF16 and
 # bitsandbytes stores AdamW moments in 8-bit blocks.
 #
@@ -26,6 +26,8 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/wangxiaofa/qwen3vl_mot_exp}"
 OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${JOB_NAME}}"
 LOG_DIR="${LOG_DIR:-/mnt/wangxiaofa/ace_logs}"
 TRAINING_STAGE="${TRAINING_STAGE:-auto}"
+FP8_ENABLED="${FP8_ENABLED:-auto}"
+FP8_EMULATE="${FP8_EMULATE:-false}"
 SAMPLE_POOL_ENABLED="${SAMPLE_POOL_ENABLED:-true}"
 SAMPLE_POOL_ROOT="${SAMPLE_POOL_ROOT:-${OUTPUT_ROOT}/_sample_pools}"
 SAMPLE_POOL_CACHE_DIR="${SAMPLE_POOL_CACHE_DIR:-${TMPDIR:-/tmp}/robo_contrast_sample_pools}"
@@ -86,6 +88,9 @@ require_bool "WEIGHT_RESUME" "$WEIGHT_RESUME"
 require_bool "MODEL_AUTO_DOWNLOAD" "$MODEL_AUTO_DOWNLOAD"
 require_bool "SAMPLE_POOL_ENABLED" "$SAMPLE_POOL_ENABLED"
 require_bool "GENERATION_EVAL_ENABLED" "$GENERATION_EVAL_ENABLED"
+require_bool "FP8_EMULATE" "$FP8_EMULATE"
+[[ "$FP8_ENABLED" == "auto" || "$FP8_ENABLED" == "true" || "$FP8_ENABLED" == "false" ]] \
+    || die "FP8_ENABLED must be auto, true or false"
 [[ "$TRAINING_STAGE" == "auto" || "$TRAINING_STAGE" == "pretrain" || "$TRAINING_STAGE" == "finetune" ]] \
     || die "TRAINING_STAGE must be auto, pretrain or finetune"
 [[ "$SAMPLE_POOL_KEEP_ALL_BELOW_FPS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
@@ -380,6 +385,7 @@ echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
 echo "  generation_backbone=${GENERATION_BACKBONE:-<from checkpoint>} pretrained=${GENERATION_PRETRAINED_DIR:-<not required on resume>}"
 echo "  generation_tuning=${GENERATION_TUNING_MODE:-saved config on resume; full on fresh run}"
 echo "  training_stage=${TRAINING_STAGE} (auto: LIBERO=finetune, other mixtures=pretrain)"
+echo "  fp8=${FP8_ENABLED} emulate=${FP8_EMULATE} (auto: A100=BF16, H100-class=native FP8)"
 echo "  model_auto_download=${MODEL_AUTO_DOWNLOAD} node_cache=${MODEL_LOCAL_CACHE} dry_run=${DRY_RUN}"
 echo "distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 echo "checkpoint: control_backend=gloo sync_files=${FSDP_CHECKPOINT_SYNC_FILES} threads=${FSDP_CHECKPOINT_THREADS} heartbeat=${FSDP_CHECKPOINT_HEARTBEAT_SECONDS}s"
@@ -452,10 +458,10 @@ CMD=(
     --num_workers="${NUM_WORKERS:-8}"
     --batch_size="${BATCH_SIZE:-16}"
     --gradient_accumulation_steps="${GRADIENT_ACCUMULATION_STEPS:-1}"
-    --fsdp.fp8="${FP8_ENABLED:-true}"
+    --fsdp.fp8="${FP8_ENABLED}"
     --fsdp.fp8_recipe="${FP8_RECIPE:-rowwise_with_gw_hp}"
     --fsdp.fp8_scope="${FP8_SCOPE:-generation_vlm}"
-    --fsdp.fp8_emulate="${FP8_EMULATE:-false}"
+    --fsdp.fp8_emulate="${FP8_EMULATE}"
     --fsdp.fp8_min_features="${FP8_MIN_FEATURES:-128}"
     --fsdp.min_wrap_params="${FSDP_MIN_WRAP_PARAMS:-1000000}"
     --fsdp.forward_prefetch="${FSDP_FORWARD_PREFETCH:-false}"

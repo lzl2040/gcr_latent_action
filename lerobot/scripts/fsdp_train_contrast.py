@@ -33,6 +33,7 @@ from lerobot.common.utils.fsdp_training import (
     create_checkpoint_process_group,
     load_fsdp_checkpoint,
     make_distributed_timeout,
+    resolve_fp8_mode,
     save_fsdp_checkpoint,
     wrap_policy_with_fsdp,
 )
@@ -189,6 +190,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         _initialize_distributed()
     )
     logger = init_logger(cfg, subdir="qwen3vl_mot_fsdp")
+    cfg.fsdp.fp8 = resolve_fp8_mode(cfg.fsdp, device)
     logger.info(
         "Distributed collective timeout: %s minutes",
         os.environ.get("DISTRIBUTED_TIMEOUT_MINUTES", "60"),

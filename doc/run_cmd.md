@@ -2,7 +2,7 @@
 
 本文记录 `qwen3vl_mot_pretrained_generation` 分支当前可用的集群和本地启动命令。
 
-正式 H100 训练入口：
+正式 A100/H100 训练入口：
 
 ```text
 train_qwen3vl_mot_fsdp.sh
@@ -79,6 +79,20 @@ resume 时不设置 `GENERATION_BACKBONE`/`GENERATION_TUNING_MODE`，读取保�
 预训练只提供生成先验，Qwen 条件和机器人新模态仍需适配训练，不保证零样本保持原生
 Cosmos pipeline 的视频质量。现有 Euler sampler 与 task/multi-view/teacher 契约保留。
 官方只测试 BF16；初次迁移建议 `FP8_ENABLED=false`，确认表现后再开启仓库的 FP8 路径。
+
+FSDP 入口默认 `FP8_ENABLED=auto`：只有全部训练 rank 的 GPU compute capability
+均不低于 9.0 才启用原生 FP8；A100（8.0）、A6000 等自动使用 BF16，并记录明确日志。
+多卡统一选择，避免部分 rank 用 FP8、部分 rank 用 BF16。显式 `FP8_ENABLED=true`
+仍要求原生 FP8 支持，在 A100 上会明确报错，不会静默切换或自动启用模拟。
+
+A100 正式训练可以直接使用默认 `auto`，也可以显式设置：
+
+```bash
+FP8_ENABLED=false bash train_qwen3vl_mot_fsdp.sh
+```
+
+`FP8_EMULATE=true` 只用于功能正确性 smoke test，不是 A100 的高效 FP8 训练方案。
+关闭 FP8 不改变 BF16 master weights、模型结构、task 或数据采样模式。
 
 ### Blob 缺少权重时自动下载到节点本地
 
@@ -870,8 +884,8 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `FSDP_CHECKPOINT_SYNC_FILES` | `false` | DCP 是否对每个 shard 强制 `fsync` |
 | `FSDP_CHECKPOINT_THREADS` | `1` | 每个 rank 的 DCP writer 线程数 |
 | `FSDP_CHECKPOINT_HEARTBEAT_SECONDS` | `60` | checkpoint 进度日志间隔；`0` 关闭 |
-| `FP8_ENABLED` | `true` | 是否转换 eligible Linear |
-| `FP8_EMULATE` | `false` | 非 H100 上的功能模拟 |
+| `FP8_ENABLED` | `auto` | 全部 rank 支持原生 FP8 才启用；`true` 强制原生，`false` 使用 BF16 |
+| `FP8_EMULATE` | `false` | 仅正确性 smoke test 的功能模拟，不用于正式训练 |
 | `TORCHRUN_BIN` | `torchrun` | 分布式启动程序 |
 | `WEIGHT_RESUME` | `true` | 自动检测并恢复 `OUTPUT_DIR` 最新 checkpoint；不存在则新训练 |
 | `CHECK_PATHS` | `true` | 启动前检查权重和数据路径 |

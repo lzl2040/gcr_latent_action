@@ -998,6 +998,11 @@ generation checkpointing = true
 
 FP8 的实际语义：
 
+默认 `FP8_ENABLED=auto` / `fsdp.fp8=auto`，在构造模型前统一检查全部 rank：
+compute capability 均不低于 9.0 时启用原生 FP8，否则使用 BF16 并明确记录日志。
+A100 的 capability 为 8.0，默认不转换 FP8 Linear。显式 `true` 在不支持的硬件上报错，
+显式 `false` 总是关闭转换；不会自动开启 `fp8_emulate`，它只适用于正确性 smoke test。
+
 - trainable master parameter 保持 BF16；
 - eligible Linear GEMM 动态使用 FP8；
 - optimizer-facing gradient 保持 BF16；

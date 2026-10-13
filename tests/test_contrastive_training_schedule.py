@@ -420,3 +420,35 @@ def test_fsdp_launcher_wires_stage_and_auto_training_validation(tmp_path, stage)
     assert "--generation_eval.datasets=auto" in result.stdout
     assert "--generation_eval.enabled=true" in result.stdout
     assert not (tmp_path / "run").exists()
+
+
+@pytest.mark.parametrize("mode,expected", [("auto", "auto"), ("true", True), ("false", False)])
+def test_fsdp_config_parses_auto_and_explicit_fp8_modes(mode, expected):
+    cfg = draccus.parse(
+        FSDPTrainPipelineConfig,
+        args=["--dataset.repo_id=whatever", "--policy.type=qwen3vl_mot", f"--fsdp.fp8={mode}"],
+    )
+    cfg.fsdp.validate()
+    assert cfg.fsdp.fp8 == expected
+
+
+@pytest.mark.parametrize("mode", [None, "auto", "true", "false"])
+def test_fsdp_launcher_preserves_requested_fp8_mode_in_dry_run(tmp_path, mode):
+    root = Path(__file__).resolve().parents[1]
+    env = {
+        **os.environ,
+        "CHECK_PATHS": "false", "DRY_RUN": "true", "WEIGHT_RESUME": "false",
+        "OUTPUT_DIR": str(tmp_path / "run"), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
+        "PYTHON_BIN": sys.executable, "NNODES": "1", "NPROC_PER_NODE": "1",
+        "FP8_EMULATE": "false", "MASTER_PORT": "29599",
+    }
+    if mode is None:
+        env.pop("FP8_ENABLED", None)
+    else:
+        env["FP8_ENABLED"] = mode
+    result = subprocess.run(
+        ["bash", str(root / "train_qwen3vl_mot_fsdp.sh")],
+        cwd=root, env=env, capture_output=True, text=True, check=True, timeout=30,
+    )
+    assert f"--fsdp.fp8={mode or 'auto'}" in result.stdout
+    assert "--fsdp.fp8_emulate=false" in result.stdout

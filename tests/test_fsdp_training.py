@@ -21,6 +21,7 @@ from lerobot.common.utils.fsdp_training import (
     create_checkpoint_process_group,
     find_fsdp_wrap_modules,
     make_distributed_timeout,
+    resolve_fp8_mode,
     resolve_latest_fsdp_checkpoint,
 )
 
@@ -122,6 +123,68 @@ def test_fp8_conversion_can_include_vlm_transformer() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "capability,expected",
+    [((8, 0), False), ((8, 6), False), ((9, 0), True), ((10, 0), True)],
+)
+def test_auto_fp8_selects_only_supported_native_hardware(monkeypatch, capability, expected, caplog):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _: capability)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    config = FSDPTrainingConfig()
+    assert resolve_fp8_mode(config, torch.device("cuda", 0)) is expected
+    assert config.fp8_emulate is False
+    if not expected:
+        assert "BF16" in caplog.text
+
+
+def test_a100_auto_keeps_bf16_linears_and_backward_without_emulation(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _: (8, 0))
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    policy = _Policy().to(dtype=torch.bfloat16)
+    inputs = torch.ones(2, 128, dtype=torch.bfloat16)
+    expected = policy.generation.eligible(inputs).detach()
+    config = FSDPTrainingConfig()
+    assert convert_policy_to_fp8(policy, config, torch.device("cuda", 0)) == ()
+    assert type(policy.generation.eligible) is nn.Linear
+    actual = policy.generation.eligible(inputs)
+    torch.testing.assert_close(actual, expected)
+    actual.float().square().mean().backward()
+    assert torch.isfinite(policy.generation.eligible.weight.grad).all()
+    assert policy.generation.eligible.weight.dtype == torch.bfloat16
+    assert config.fp8_emulate is False
+
+
+def test_explicit_native_fp8_on_a100_fails_with_bf16_guidance(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _: (8, 0))
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _: "NVIDIA A100-SXM4-80GB")
+    with pytest.raises(RuntimeError, match="FP8_ENABLED=false"):
+        resolve_fp8_mode(FSDPTrainingConfig(fp8=True), torch.device("cuda", 0))
+
+
+def test_explicit_fp8_disabled_does_not_probe_cuda(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _: pytest.fail("CUDA must not be probed"))
+    assert resolve_fp8_mode(FSDPTrainingConfig(fp8=False), torch.device("cpu")) is False
+
+
+def test_auto_fp8_uses_same_bf16_mode_when_another_rank_lacks_support(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _: (9, 0))
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    original_tensor = torch.tensor
+
+    def cpu_support_flag(value, *, dtype, device):
+        assert device == torch.device("cuda", 0)
+        return original_tensor(value, dtype=dtype)
+
+    def other_rank_is_a100(flag, *, op):
+        assert op == torch.distributed.ReduceOp.MIN
+        assert flag.item() == 1
+        flag.zero_()
+
+    monkeypatch.setattr(torch, "tensor", cpu_support_flag)
+    monkeypatch.setattr(torch.distributed, "all_reduce", other_rank_is_a100)
+    assert resolve_fp8_mode(FSDPTrainingConfig(), torch.device("cuda", 0)) is False
+
+
 def test_find_fsdp_wrap_modules_selects_repeated_trainable_blocks() -> None:
     model = nn.Module()
     model.blocks = nn.ModuleList(
@@ -140,6 +203,8 @@ def test_find_fsdp_wrap_modules_selects_repeated_trainable_blocks() -> None:
 
 
 def test_fsdp_training_config_rejects_invalid_settings() -> None:
+    with pytest.raises(ValueError, match="fp8 must be"):
+        FSDPTrainingConfig(fp8="invalid").validate()
     with pytest.raises(ValueError, match="Unsupported FP8 recipe"):
         FSDPTrainingConfig(fp8_recipe="invalid").validate()
     with pytest.raises(ValueError, match="Unsupported FP8 scope"):

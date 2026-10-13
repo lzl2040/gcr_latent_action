@@ -129,7 +129,7 @@ class FSDPCheckpointIOConfig:
 
 @dataclass
 class FSDPTrainingConfig:
-    fp8: bool = True
+    fp8: bool | str = "auto"
     fp8_recipe: str = "rowwise_with_gw_hp"
     fp8_scope: str = "generation_vlm"
     fp8_emulate: bool = False
@@ -140,6 +140,8 @@ class FSDPTrainingConfig:
     replicate_frozen_params: bool = True
 
     def validate(self) -> None:
+        if not isinstance(self.fp8, bool) and self.fp8 != "auto":
+            raise ValueError("fp8 must be true, false or auto.")
         if self.fp8_recipe not in _FP8_RECIPES:
             raise ValueError(
                 f"Unsupported FP8 recipe {self.fp8_recipe!r}; choose from "
@@ -181,8 +183,35 @@ def _require_native_fp8_device(device: torch.device) -> None:
         raise RuntimeError(
             "Native TorchAO FP8 training requires compute capability 9.0 or newer "
             f"(H100-class); got {name} with capability {capability[0]}.{capability[1]}. "
+            "Use FP8_ENABLED=false (launcher) or --fsdp.fp8=false for BF16 training. "
             "Set fsdp.fp8_emulate=true only for correctness smoke tests."
         )
+
+
+def resolve_fp8_mode(config: FSDPTrainingConfig, device: torch.device) -> bool:
+    """Choose one compute mode for all ranks without implicitly enabling emulation."""
+    config.validate()
+    if isinstance(config.fp8, bool):
+        if config.fp8 and not config.fp8_emulate:
+            _require_native_fp8_device(device)
+        return config.fp8
+    if config.fp8_emulate:
+        _LOGGER.warning("FP8 emulation is enabled for correctness smoke tests, not production training.")
+        return True
+
+    supported = device.type == "cuda" and torch.cuda.get_device_capability(device)[0] >= 9
+    if dist.is_available() and dist.is_initialized():
+        support_flag = torch.tensor(int(supported), dtype=torch.int32, device=device)
+        dist.all_reduce(support_flag, op=dist.ReduceOp.MIN)
+        supported = bool(support_flag.item())
+    if supported:
+        _LOGGER.info("FP8 auto selected native FP8 on all participating ranks.")
+    else:
+        _LOGGER.warning(
+            "FP8 auto selected BF16: at least one participating device does not support "
+            "native TorchAO FP8 (compute capability >=9.0 required). FP8 emulation remains disabled."
+        )
+    return supported
 
 
 def _is_fp8_linear(
@@ -213,11 +242,8 @@ def convert_policy_to_fp8(
     device: torch.device,
 ) -> tuple[str, ...]:
     """Replace eligible Linear layers while retaining BF16 master parameters."""
-    config.validate()
-    if not config.fp8:
+    if not resolve_fp8_mode(config, device):
         return ()
-    if not config.fp8_emulate:
-        _require_native_fp8_device(device)
 
     try:
         from torchao.float8 import Float8LinearConfig, convert_to_float8_training
