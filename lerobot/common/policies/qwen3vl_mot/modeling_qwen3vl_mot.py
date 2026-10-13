@@ -10,17 +10,19 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
 from torch import distributed as dist
 
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.ace.modeling_robo_contrast import RoboContrast
 from lerobot.common.policies.pretrained import PreTrainedPolicy
+from lerobot.configs.policies import PreTrainedConfig
 
 from .configuration_qwen3vl_mot import Qwen3VLMoTConfig
 from .modeling_generation import GenerationExpert, GenerationStream
 from .modeling_understanding import Qwen3VLUnderstandingExpert, _base_qwen
 from .stage1_transfer import merge_peft_module, transfer_stage1_perception
-from .tasks import TASK_SPECS, ModalityRole, TaskSpec, resolve_task_specs
+from .tasks import TASK_SPECS, ModalityRole, TaskSpec, resolve_task_specs, validate_saved_task_contract
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +155,38 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
 
     config_class = Qwen3VLMoTConfig
     name = "qwen3vl_mot"
+
+    @classmethod
+    def from_pretrained(
+        cls, pretrained_name_or_path: str | Path, *, config: PreTrainedConfig | None = None, **kwargs
+    ) -> Qwen3VLMoTPolicy:
+        model_path = Path(pretrained_name_or_path)
+        if model_path.is_dir():
+            config_path = model_path / "config.json"
+        else:
+            hub_options = {
+                name: kwargs[name]
+                for name in (
+                    "force_download", "resume_download", "proxies", "token",
+                    "cache_dir", "local_files_only", "revision",
+                )
+                if name in kwargs
+            }
+            config_path = Path(hf_hub_download(
+                repo_id=str(pretrained_name_or_path), filename="config.json", **hub_options
+            ))
+        with config_path.open(encoding="utf-8") as handle:
+            saved_config = json.load(handle)
+        validate_saved_task_contract(saved_config)
+        if config is None:
+            config = PreTrainedConfig.from_pretrained(config_path.parent, **kwargs)
+        if not isinstance(config, Qwen3VLMoTConfig):
+            raise ValueError("Expected a qwen3vl_mot policy config when restoring the model.")
+        if tuple(config.task_names) != tuple(saved_config.get("task_names", TASK_SPECS)):
+            raise ValueError(
+                "Cannot change `policy.task_names` when loading a checkpoint: task embedding order must match."
+            )
+        return super().from_pretrained(pretrained_name_or_path, config=config, **kwargs)
 
     def __init__(self, config: Qwen3VLMoTConfig, dataset_stats=None):
         super().__init__(config)
@@ -641,6 +675,16 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         *,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
+        action_task_id = self.generation.task_to_id.get("action_prediction")
+        if action_task_id is None or self.config.task_weights[action_task_id] <= 0:
+            if (
+                "joint_prediction" in self.generation.task_to_id
+                and self.config.task_weights[self.generation.task_to_id["joint_prediction"]] > 0
+            ):
+                return self._sample_joint_prediction(
+                    batch, understanding, generator=generator
+                )["action_normalized"]
+            raise ValueError("Action sampling requires an enabled action_prediction or joint_prediction task.")
         if self.physical_embedding_flow:
             return self._sample_embedding_action(batch, understanding, generator=generator)
         image = self._current_image(batch)
@@ -830,10 +874,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             return pair & has_text
         if task.name == "i2v":
             return pair
+        if task.name in ("forward_dynamics", "inverse_dynamics"):
+            return pair & has_action
         if task.name in (
-            "action_video_prediction",
-            "forward_dynamics",
-            "inverse_dynamics",
+            "joint_prediction",
             "state_prediction",
         ):
             return pair & has_state & has_action
@@ -1126,15 +1170,13 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             fps=self._generation_video_fps(batch),
         ), target, loss_mask, sigma
 
-    def _sample_video_latents(
-        self,
-        batch: dict,
-        understanding,
-        *,
-        generator: torch.Generator | None = None,
-    ) -> torch.Tensor:
-        if "i2v" not in self.generation.task_to_id:
-            raise ValueError("Generation validation requires the enabled task 'i2v'.")
+    def _initial_video_sampling_stream(
+        self, batch: dict, generator: torch.Generator | None
+    ) -> tuple[GenerationStream, tuple[int, int, int]]:
+        if len(self.rgb_views) == 1 and "video" not in batch:
+            batch = {**batch, "video": self._current_image(batch)[:, None]}
+        elif len(self.rgb_views) > 1 and "video_views" not in batch:
+            batch = {**batch, "video_views": batch["images_t0"][:, :, None]}
         current_tokens, current_positions, current_keep, _ = self._video_stream_tokens(
             batch, current_only=True
         )
@@ -1183,27 +1225,43 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         video_fps = self._generation_video_fps(batch)
         values[:, first_frame] = current_tokens.float()
         values = torch.where(keep.unsqueeze(-1), values, torch.zeros_like(values))
+        return GenerationStream(
+            "video", values, torch.ones(values.shape[0], device=values.device), keep,
+            position_ids=position_ids, view_ids=view_ids,
+            noise_mask=keep & ~first_frame[None], fps=video_fps,
+        ), (latent_frames, patch_height, patch_width)
+
+    def _sampled_video_latents(
+        self, stream: GenerationStream, geometry: tuple[int, int, int]
+    ) -> torch.Tensor:
+        latent_frames, patch_height, patch_width = geometry
+        views = len(self.rgb_views)
+        values = stream.values
+        tokens_per_view = latent_frames * patch_height * patch_width
+        latents = self._video_tokens_to_latents(
+            values.reshape(values.shape[0] * views, tokens_per_view, values.shape[-1]),
+            denormalize=True, latent_frames=latent_frames,
+            patch_height=patch_height, patch_width=patch_width,
+        )
+        return latents.view(-1, views, *latents.shape[1:]) if views > 1 else latents
+
+    def _sample_video_latents(
+        self, batch: dict, understanding, *, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
+        if "i2v" not in self.generation.task_to_id:
+            raise ValueError("Generation validation requires the enabled task 'i2v' or joint_prediction.")
+        stream, geometry = self._initial_video_sampling_stream(batch, generator)
+        assert stream.noise_mask is not None
         schedule = torch.linspace(
             1.0,
             0.0,
             self.config.inference_steps + 1,
-            device=values.device,
+            device=stream.values.device,
         )
         for sigma, next_sigma in zip(schedule[:-1], schedule[1:], strict=True):
-            sigma_batch = sigma.expand(values.shape[0])
+            stream.sigma = sigma.expand(stream.values.shape[0])
             prediction = self.generation(
-                [
-                    GenerationStream(
-                        "video",
-                        values,
-                        sigma_batch,
-                        keep,
-                        position_ids=position_ids,
-                        view_ids=view_ids,
-                        noise_mask=keep & ~first_frame[None],
-                        fps=video_fps,
-                    )
-                ],
+                [stream],
                 understanding.hidden_states,
                 understanding.attention_mask,
                 "i2v",
@@ -1211,18 +1269,107 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 understanding_rotary=getattr(understanding, "rotary_embeddings", None),
                 understanding_position_ids=getattr(understanding, "position_ids", None),
             )["video"].float()
-            prediction[:, first_frame] = 0
-            values = values + (next_sigma - sigma) * prediction
-            values[:, first_frame] = current_tokens.float()
-            values = torch.where(keep.unsqueeze(-1), values, torch.zeros_like(values))
-        latents = self._video_tokens_to_latents(
-            values.reshape(values.shape[0] * views, tokens_per_view, values.shape[-1]),
-            denormalize=True,
-            latent_frames=latent_frames,
-            patch_height=patch_height,
-            patch_width=patch_width,
+            velocity = torch.where(stream.noise_mask.unsqueeze(-1), prediction, 0.0)
+            stream.values = stream.values + (next_sigma - sigma) * velocity
+        return self._sampled_video_latents(stream, geometry)
+
+    def _sample_joint_prediction(
+        self, batch: dict, understanding, *, generator: torch.Generator | None = None
+    ) -> dict[str, torch.Tensor]:
+        if "joint_prediction" not in self.generation.task_to_id:
+            raise ValueError("Joint sampling requires the enabled joint_prediction task.")
+        device = next(self.generation.parameters()).device
+        batch_size = self._current_image(batch).shape[0]
+        placeholder = torch.zeros(
+            batch_size, self.config.chunk_size, self.config.max_action_dim, device=device, dtype=torch.float32
         )
-        return latents.view(-1, views, *latents.shape[1:]) if views > 1 else latents
+        physical_batch = self._inference_physical_batch(batch, placeholder)
+        valid = physical_batch["state_mask"].bool().any(-1) & physical_batch["action_mask"].bool().any(-1)
+        if not valid.all():
+            raise ValueError("Joint sampling requires valid current state and action dimension masks for every row.")
+        video, geometry = self._initial_video_sampling_stream(batch, generator)
+        assert video.noise_mask is not None
+        masks: dict[str, torch.Tensor] = {}
+        values: dict[str, torch.Tensor] = {}
+        if self.physical_embedding_flow:
+            current, _, current_keep, _ = self._clean_physical_embedding(
+                physical_batch, "state", valid, current_only=True
+            )
+            for name in ("state", "action"):
+                masks[name] = physical_batch[f"{name}_mask"].bool().any(-1, keepdim=True).expand(
+                    -1, self.config.num_groups
+                )
+                values[name] = torch.randn(
+                    batch_size, self.config.num_groups, self.config.physical_hidden_dim,
+                    device=device, dtype=torch.float32, generator=generator,
+                )
+        else:
+            for name in ("state", "action"):
+                width = getattr(self.config, f"max_{name}_dim")
+                masks[name] = physical_batch[f"{name}_mask"].bool()[:, None].expand(
+                    -1, self.config.chunk_size, -1
+                )
+                values[name] = torch.randn(
+                    batch_size, self.config.chunk_size, width, device=device, dtype=torch.float32, generator=generator
+                ) * masks[name]
+            values["state"][:, 0] = physical_batch["observation.state"][:, 0] * masks["state"][:, 0]
+        schedule = torch.linspace(1.0, 0.0, self.config.inference_steps + 1, device=device)
+        for sigma, next_sigma in zip(schedule[:-1], schedule[1:], strict=True):
+            sigma_batch = sigma.expand(batch_size)
+            video.sigma = sigma_batch
+            if self.physical_embedding_flow:
+                state_keep = torch.cat([masks["state"], current_keep[:, :1]], dim=1)
+                state_noise = torch.cat([masks["state"], torch.zeros_like(current_keep[:, :1])], dim=1)
+                streams = [
+                    GenerationStream(
+                        "state", torch.cat([values["state"], current[:, :1]], dim=1),
+                        sigma_batch, state_keep, noise_mask=state_noise,
+                    ),
+                    GenerationStream("action", values["action"], sigma_batch, masks["action"]),
+                ]
+            else:
+                noisy_batch = {
+                    **physical_batch, "observation.state": values["state"], "action": values["action"],
+                }
+                contextual, _, _ = self._physical_context(
+                    noisy_batch, include_tactile=False, force_no_grad=True
+                )
+                start = self.physical_encoder.num_cls_tokens
+                streams = [
+                    GenerationStream(
+                        name, contextual[:, start + index * self.config.num_groups:
+                                         start + (index + 1) * self.config.num_groups],
+                        sigma_batch, masks[name].reshape(batch_size, self.config.num_groups, -1).any(-1),
+                    )
+                    for index, name in enumerate(("state", "action"))
+                ]
+            predictions = self.generation(
+                [video, *streams], understanding.hidden_states, understanding.attention_mask, "joint_prediction",
+                understanding_key_values=understanding.key_values,
+                understanding_rotary=getattr(understanding, "rotary_embeddings", None),
+                understanding_position_ids=getattr(understanding, "position_ids", None),
+            )
+            velocity = torch.where(video.noise_mask.unsqueeze(-1), predictions["video"].float(), 0.0)
+            video.values = video.values + (next_sigma - sigma) * velocity
+            for name in ("state", "action"):
+                velocity = predictions[name][:, :self.config.num_groups].float().reshape_as(values[name])
+                values[name] = values[name] + (next_sigma - sigma) * velocity
+                values[name] = values[name] * (
+                    masks[name].unsqueeze(-1) if self.physical_embedding_flow else masks[name]
+                )
+            if not self.physical_embedding_flow:
+                values["state"][:, 0] = physical_batch["observation.state"][:, 0] * masks["state"][:, 0]
+        if self.physical_embedding_flow:
+            for name in ("state", "action"):
+                values[name] = self._decode_physical_embedding(name, values[name]).reshape(
+                    batch_size, self.config.chunk_size, -1
+                ) * physical_batch[f"{name}_mask"][:, None]
+        values["state"][:, 0] = physical_batch["observation.state"][:, 0] * physical_batch["state_mask"]
+        return {
+            "action_normalized": values["action"][:, :self.config.n_action_steps],
+            "state_normalized": values["state"],
+            "video_latents": self._sampled_video_latents(video, geometry),
+        }
 
     def _prepare_grouped_modality(
         self,
@@ -1592,6 +1739,13 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         generator: torch.Generator | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size = batch["image_t0"].shape[0]
+        tactile_task_id = self.generation.task_to_id.get("tactile_prediction")
+        if tactile_task_id is None or self.config.task_weights[tactile_task_id] <= 0:
+            device = batch["image_t0"].device
+            return (
+                torch.empty(batch_size, 0, device=device),
+                torch.zeros(batch_size, self.config.max_tactile_views, device=device, dtype=torch.bool),
+            )
         image_mask = batch["tactile_image_mask"].to(
             batch["image_t0"].device
         ) > 0
@@ -1600,9 +1754,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 torch.empty(batch_size, 0, device=image_mask.device),
                 image_mask,
             )
-        if "tactile_prediction" not in self.generation.task_to_id:
-            raise ValueError(
-                "Generation validation requires the enabled task 'tactile_prediction'."
+        if not image_mask.any():
+            return (
+                torch.empty(batch_size, 0, device=image_mask.device),
+                torch.zeros_like(image_mask),
             )
         valid_rows = (
             self._task_valid_rows(
@@ -1748,16 +1903,23 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         """Generate fixed-noise action, video, and decodable tactile predictions."""
         device = next(self.generation.parameters()).device
         understanding = self._understand_batch(batch)
-        action = self._sample_canonical_action(
-            batch,
-            understanding,
-            generator=self._generation_rng(device, seed),
-        )
-        video_latents = self._sample_video_latents(
-            batch,
-            understanding,
-            generator=self._generation_rng(device, seed + 1),
-        )
+        joint_output: dict[str, torch.Tensor] = {}
+        if (
+            "joint_prediction" in self.generation.task_to_id
+            and self.config.task_weights[self.generation.task_to_id["joint_prediction"]] > 0
+        ):
+            joint_output = self._sample_joint_prediction(
+                batch, understanding, generator=self._generation_rng(device, seed)
+            )
+            action = joint_output["action_normalized"]
+            video_latents = joint_output["video_latents"]
+        else:
+            action = self._sample_canonical_action(
+                batch, understanding, generator=self._generation_rng(device, seed)
+            )
+            video_latents = self._sample_video_latents(
+                batch, understanding, generator=self._generation_rng(device, seed + 1)
+            )
         tactile_decoded_z, tactile_mask = self._sample_tactile_images(
             batch,
             understanding,
@@ -1769,6 +1931,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             "tactile_decoded_z": tactile_decoded_z,
             "tactile_mask": tactile_mask,
         }
+        if "state_normalized" in joint_output:
+            output["state_normalized"] = joint_output["state_normalized"]
         if len(self.rgb_views) > 1:
             output["video_latents_views"] = video_latents
             output["video_view_mask"] = batch["image_view_mask"].bool()

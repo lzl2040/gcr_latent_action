@@ -41,7 +41,7 @@ def _tiny_native(kind="edge", *, checkpointing=False, dtype=torch.float32):
         intermediate_dim=32, hidden_act=native["hidden_act"], dropout=0,
         input_dims={"video": 4, "state": 8, "action": 8, "tactile": 8},
         output_dims={"video": 4, "state": 8, "action": 8, "tactile": 8},
-        task_names=("i2v", "action_video_prediction"), gradient_checkpointing=checkpointing,
+        task_names=("i2v", "joint_prediction"), gradient_checkpointing=checkpointing,
         cosmos_config=native, num_video_views=3,
     ).to(dtype=dtype)
     model.initialize_cosmos_adapters()

@@ -299,16 +299,20 @@ def _action_heatmap_panel(
     return image
 
 
-def _save_action_artifacts(
+def _save_physical_artifacts(
     output_dir: Path,
     ground_truth_normalized: torch.Tensor,
     prediction_normalized: torch.Tensor,
     stats: dict,
     valid_mask: torch.Tensor,
+    *,
+    modality: str,
 ) -> dict[str, Any]:
+    if modality not in ("action", "state"):
+        raise ValueError("Physical artifact modality must be action or state.")
     valid_indices = valid_mask.nonzero(as_tuple=True)[0].tolist()
     if not valid_indices:
-        return {"action_valid_dimensions": 0}
+        return {f"{modality}_valid_dimensions": 0}
     ground_truth, _ = _denormalize_action(
         ground_truth_normalized,
         stats,
@@ -322,7 +326,7 @@ def _save_action_artifacts(
     ground_truth = ground_truth[:, valid_indices]
     prediction = prediction[:, valid_indices]
     if not torch.isfinite(prediction).all():
-        raise RuntimeError("Generated action contains non-finite values.")
+        raise RuntimeError(f"Generated {modality} contains non-finite values.")
     difference = (ground_truth - prediction).abs()
     names = [_ACTION_DIM_NAMES[index] for index in valid_indices]
     signed_scale = float(
@@ -333,14 +337,14 @@ def _save_action_artifacts(
         _action_heatmap_panel(
             ground_truth.numpy(),
             names,
-            "Ground truth action",
+            f"Ground truth {modality}",
             signed_scale,
             difference=False,
         ),
         _action_heatmap_panel(
             prediction.numpy(),
             names,
-            "Predicted action",
+            f"Predicted {modality}",
             signed_scale,
             difference=False,
         ),
@@ -361,7 +365,7 @@ def _save_action_artifacts(
     for panel in panels:
         canvas.paste(panel, (x, 0))
         x += panel.width
-    canvas.save(output_dir / "action_comparison.png")
+    canvas.save(output_dir / f"{modality}_comparison.png")
 
     per_dimension = difference.mean(dim=0)
     valid_set = set(valid_indices)
@@ -384,9 +388,9 @@ def _save_action_artifacts(
     groups = "\n".join(
         f"<li><code>{html.escape(name)}</code>: {value:.6g}</li>" for name, value in group_mae.items()
     )
-    action_html = f"""<!doctype html>
+    physical_html = f"""<!doctype html>
 <meta charset="utf-8">
-<title>Action comparison</title>
+<title>{modality.capitalize()} comparison</title>
 <style>
 body {{ font-family: sans-serif; margin: 24px; }}
 table {{ border-collapse: collapse; }}
@@ -394,10 +398,10 @@ th, td {{ border: 1px solid #aaa; padding: 4px 8px; text-align: right; }}
 th:first-child, td:first-child {{ text-align: left; }}
 img {{ max-width: 100%; }}
 </style>
-<h1>Denormalized valid action dimensions</h1>
+<h1>Denormalized valid {modality} dimensions</h1>
 <p>Overall MAE: <strong>{float(difference.mean()):.6g}</strong>;
 prediction clip fraction: <strong>{clip_fraction:.2%}</strong>.</p>
-<img src="action_comparison.png" alt="Action heatmaps">
+<img src="{modality}_comparison.png" alt="{modality.capitalize()} heatmaps">
 <h2>Semantic group MAE</h2><ul>{groups}</ul>
 <h2>Per-dimension summary</h2>
 <table>
@@ -406,13 +410,25 @@ prediction clip fraction: <strong>{clip_fraction:.2%}</strong>.</p>
 {rows}
 </table>
 """
-    _atomic_write_text(output_dir / "action_summary.html", action_html)
+    _atomic_write_text(output_dir / f"{modality}_summary.html", physical_html)
     return {
-        "action_mae": float(difference.mean().item()),
-        "action_clip_fraction": clip_fraction,
-        "action_valid_dimensions": len(valid_indices),
-        "action_group_mae": group_mae,
+        f"{modality}_mae": float(difference.mean().item()),
+        f"{modality}_clip_fraction": clip_fraction,
+        f"{modality}_valid_dimensions": len(valid_indices),
+        f"{modality}_group_mae": group_mae,
     }
+
+
+def _save_action_artifacts(
+    output_dir: Path,
+    ground_truth_normalized: torch.Tensor,
+    prediction_normalized: torch.Tensor,
+    stats: dict,
+    valid_mask: torch.Tensor,
+) -> dict[str, Any]:
+    return _save_physical_artifacts(
+        output_dir, ground_truth_normalized, prediction_normalized, stats, valid_mask, modality="action"
+    )
 
 
 def _save_tactile_artifacts(
@@ -499,6 +515,13 @@ def _write_sample_index(
         if (output_dir / "tactile_comparison.png").is_file()
         else "<h2>Tactile image prediction</h2><p>No valid tactile image pad.</p>"
     )
+    state = (
+        '<h2>Future state prediction</h2>'
+        '<p><a href="state_summary.html">Open denormalized future state summary</a></p>'
+        '<img src="state_comparison.png">'
+        if (output_dir / "state_comparison.png").is_file()
+        else ""
+    )
     document = f"""<!doctype html>
 <meta charset="utf-8">
 <title>{html.escape(str(sample["dataset"]))} generation validation</title>
@@ -515,6 +538,7 @@ code, pre {{ background: #f4f4f4; padding: 2px 4px; }}
 {"".join(video_sections) or "<p>No valid RGB video window.</p>"}
 <h2>Action prediction</h2>
 {action}
+{state}
 {tactile}
 <h2>Metrics</h2><pre>{html.escape(json.dumps(metrics, indent=2, sort_keys=True))}</pre>
 """
@@ -630,6 +654,7 @@ class GenerationEvaluator:
             f'<td><a href="{html.escape(entry["relative_path"])}/index.html">open</a></td>'
             f"<td>{entry['metrics'].get('video_pixel_mae', float('nan')):.6g}</td>"
             f"<td>{entry['metrics'].get('action_mae', float('nan')):.6g}</td>"
+            f"<td>{entry['metrics'].get('state_mae', float('nan')):.6g}</td>"
             f"<td>{entry['metrics'].get('tactile_pixel_mae', float('nan')):.6g}</td>"
             "</tr>"
             for entry in entries
@@ -646,7 +671,7 @@ th, td {{ border: 1px solid #aaa; padding: 5px 9px; }}
 {"<p>Training-set diagnostics, not held-out generalization.</p>" if getattr(self.dataset, "validation_split", "heldout") == "training" else ""}
 <table>
 <tr><th>Dataset</th><th>Episode</th><th>Frame</th><th>Artifacts</th>
-<th>Video MAE</th><th>Action MAE</th><th>Tactile MAE</th></tr>
+<th>Video MAE</th><th>Action MAE</th><th>Future state MAE</th><th>Tactile MAE</th></tr>
 {rows}
 </table>
 """
@@ -787,6 +812,17 @@ th, td {{ border: 1px solid #aaa; padding: 5px 9px; }}
                                     batch["action_mask"][local_index].cpu(),
                                 )
                             )
+                            if "state_normalized" in prediction:
+                                metrics.update(
+                                    _save_physical_artifacts(
+                                        sample_dir,
+                                        batch["observation.state"][local_index, 1:].cpu(),
+                                        prediction["state_normalized"][local_index, 1:].cpu(),
+                                        self.dataset.norm_stats[dataset_index]["state"],
+                                        batch["state_mask"][local_index].cpu(),
+                                        modality="state",
+                                    )
+                                )
                             metrics.update(
                                 _save_tactile_artifacts(
                                     sample_dir,

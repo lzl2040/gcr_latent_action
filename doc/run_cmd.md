@@ -183,7 +183,7 @@ RGB_VIEWS=primary,secondary,wrist \
 本地入口 `train_qwen3vl_mot_local.sh` 使用相同环境变量；只需 primary+wrist 时设置
 `RGB_VIEWS=primary,wrist`。首次训练仍需按下面命令配置 Stage 1 checkpoint 和模型/数据路径。
 相机来源是 `oxe_configs.py` 的有效映射，缺失视角不参与条件注意力和视频 loss。
-预测视频的任务（含 `action_video_prediction`）联合预测有效视角未来视频，
+预测视频的任务（含 `joint_prediction`）联合预测有效视角未来视频，
 **latent-action teacher 仍只监督 primary 单视角**。
 
 多视角增加 token、解码和显存成本；先调整 `BATCH_SIZE`，不要假设与单视角吞吐相同。
@@ -550,14 +550,14 @@ STAGE2_TASK_WEIGHTS
 可用任务名按默认顺序为：
 
 ```text
-t2v,i2v,action_video_prediction,forward_dynamics,inverse_dynamics,action_prediction,state_prediction,tactile_prediction
+t2v,i2v,joint_prediction,forward_dynamics,inverse_dynamics,action_prediction,state_prediction,tactile_prediction
 ```
 
 先只训练当前 RGB 条件的视频生成和触觉图像生成时，推荐**保留完整任务列表**，把暂不训练的
 任务设为 0：
 
 ```bash
-STAGE2_TASK_NAMES=t2v,i2v,action_video_prediction,forward_dynamics,inverse_dynamics,action_prediction,state_prediction,tactile_prediction \
+STAGE2_TASK_NAMES=t2v,i2v,joint_prediction,forward_dynamics,inverse_dynamics,action_prediction,state_prediction,tactile_prediction \
 STAGE2_TASK_WEIGHTS=0,0.7,0,0,0,0,0,0.3 \
 TACTILE_GENERATION_TARGET=spatial_patches \
 JOB_NAME=qwen3vl_mot_rgb_tactile \
@@ -574,9 +574,9 @@ batch 中没有有效监督的任务，再对剩余权重重新归一化；因�
 STAGE2_TASK_WEIGHTS=0.1,0.6,0,0,0,0,0,0.3
 ```
 
-`action_video_prediction` 是独立的联合生成任务：当前 RGB 和 available text 进入
-Understanding，当前 state 作为干净 Generation 条件，未来 RGB 与完整 action chunk 同时
-加噪并在同一次 Generation forward 中预测。例如将 40% step 分配给该任务：
+`joint_prediction` 替代原来的 `action_video_prediction`：当前 RGB 和 available text 进入
+Understanding，当前 RGB latent 和 current state 作为干净条件，未来 RGB、完整 action chunk
+和未来 state 同时加噪并在同一次 Generation forward 中预测。例如将 40% step 分配给该任务：
 
 ```bash
 STAGE2_TASK_WEIGHTS=0,0.3,0.4,0,0,0,0,0.3
@@ -588,8 +588,33 @@ STAGE2_TASK_WEIGHTS=0,0.3,0.4,0,0,0,0,0.3
 列表，必须使用新的 `OUTPUT_DIR` 从 Stage 1 checkpoint 开始训练。两个变量必须同时设置；
 不设置时，新训练使用 policy 默认配比（联合任务权重为 0），恢复训练使用 checkpoint 中保存
 的比例。
-在 `action_video_prediction` 加入前创建的七任务 checkpoint 没有该 task embedding，不能通过
-resume 直接启用新任务；它仍可按原七任务列表继续恢复训练。
+当前任务语义保存为 `task_contract_version=2`。旧 checkpoint 的 forward/inverse 使用了 state，
+旧联合任务也不预测 state，因此涉及这些任务的旧 checkpoint 会被训练恢复入口拒绝，
+不能只替换任务名继续恢复。应从 Stage 1 初始化一个新实验。
+
+只训练以下三个任务、例如在 LIBERO 上下游微调时：
+
+```bash
+STAGE2_TASK_NAMES=forward_dynamics,inverse_dynamics,joint_prediction \
+STAGE2_TASK_WEIGHTS=0.3,0.3,0.4 \
+DATA_MIX=libero \
+TRAINING_STAGE=finetune \
+WEIGHT_RESUME=false \
+JOB_NAME=qwen3vl_mot_libero_joint_v2 \
+OUTPUT_DIR=/path/to/new/libero_joint_v2 \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+沿用自己的 Stage 1、Qwen、Cosmos 权重路径，并使用新的输出目录；上述比例仅为示例。
+`forward_dynamics` 是当前 RGB + action → 未来 RGB；`inverse_dynamics` 是完整窗口 video →
+该窗口的 action。两者既不以 state 为条件，也没有 state flow/decoder 重建 loss，
+不要求有效 state 维度。`joint_prediction` 才要求 current state，联合监督 action、未来
+video 和 state。可用文本仍作为辅助条件，不改变以上物理模态定义。
+
+只启用这三个任务也支持生成验证：joint 在同一轮 Euler 采样中输出 action、video 和 state，
+不再要求额外启用 `action_prediction`、`i2v` 或 `tactile_prediction`。
+无触觉图像时跳过触觉生成；预测 state 的未来部分另存 `state_comparison.png`、
+`state_summary.html` 和反归一化 `state_mae`，不把给定的 current state 计入未来误差。
 
 ---
 

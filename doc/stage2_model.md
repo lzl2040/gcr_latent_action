@@ -220,6 +220,9 @@ Stage 1 -> Qwen text   = 0%
 
 text 迁移为 0% 是预期行为：Stage 1 text branch 是 SigLIP2，而 Stage 2 使用 Qwen
 language model。因此 Stage 2 文本侧保留 Qwen pretrained initialization。
+这不是随机初始化或加载失败，但意味着 Stage 1 文本侧对比学习得到的参数不能直接迁移到
+Qwen。冻结的 Stage 1 teacher 仍使用其原文本网络生成 latent-action 蒸馏目标；
+Stage 2 通过自身训练/LoRA 和蒸馏进行适配，实际质量影响需要实验判断，不能保证完全无影响。
 
 ### 4.3 直接复用 Physical Encoder
 
@@ -728,9 +731,9 @@ lerobot/common/policies/qwen3vl_mot/tasks.py
 |---|---|---|---|
 | `t2v` | text | 无 | 完整 video |
 | `i2v` | image + available text | video 当前 latent frame | 未来 video |
-| `action_video_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action |
-| `forward_dynamics` | image + available text | action | 未来 video + 未来 state |
-| `inverse_dynamics` | image + available text | video + state | action |
+| `joint_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action + 未来 state |
+| `forward_dynamics` | image + available text | video 当前 latent frame + action | 未来 video |
+| `inverse_dynamics` | image + available text | 完整窗口 video | 该窗口的 action |
 | `action_prediction` | image + available text | current state | action |
 | `state_prediction` | image + available text | video + action | 未来 state |
 | `tactile_prediction` | image + available text | video + state + action | tactile feature |
@@ -740,13 +743,26 @@ lerobot/common/policies/qwen3vl_mot/tasks.py
 ```text
 t2v                 0.10
 i2v                 0.20
-action_video_prediction 0.00
+joint_prediction    0.00
 forward_dynamics    0.20
 inverse_dynamics    0.15
 action_prediction   0.15
 state_prediction    0.10
 tactile_prediction  0.10
 ```
+
+forward/inverse 的 state role 为 `ABSENT`：不输入 Generation，也不参与 Physical Encoder
+的 action 编码，既没有 `state_flow_loss`，也没有 `state_reconstruction_loss`。
+没有有效 state 的 video/action 样本仍能训练这两个任务。只启用 forward、inverse、joint
+时，state loss 只来自 joint；固定日志列出现 0 不代表该 step 增加了 state 监督。
+
+joint 在 embedding-space flow 中给全部 contextual state tokens 加噪，并另外附加一个
+只编码 current state 的干净 token；不能把看过未来的第一个 contextual token 当作条件。
+raw-space flow 则固定 state 的第 0 帧、只监督后续帧。
+
+任务配置保存 `task_contract_version=2`。训练恢复及直接 `from_pretrained` 加载都拒绝包含旧 forward/inverse 或
+`action_video_prediction` 的旧语义 checkpoint，需新建实验；同版本恢复仍允许调整权重，
+但不能增加、删除或重排 task names。默认配比不自动缩减为三任务，需显式设置任务列表和比例。
 
 ### 9.3 分布式任务选择
 
@@ -866,7 +882,7 @@ embedding-space 模式对任务中每个存在的 state/action 模态计算
 sample_canonical_action(batch)
 ```
 
-流程：
+启用独立 `action_prediction` 时的流程：
 
 1. 从高斯噪声初始化 `(B,8,1024)` action embeddings；
 2. 用 `action_mask` 判断是否存在有效 action，屏蔽整个缺失的 group；
@@ -891,6 +907,8 @@ $$
 
 这里的 `x` 是 action embedding。旧 raw-space checkpoint 仍在 `(B,32,40)` 原始空间
 更新，每次重新经过 Physical Encoder；新旧采样器按保存的模式选择。
+若没有启用 `action_prediction` 或其权重为 0，而 joint 的权重为正，则执行 joint 联合
+采样并返回其中的 action，避免使用未训练的 action task embedding。
 
 ### 11.1 尚未实现的部署层
 
@@ -903,7 +921,16 @@ $$
 
 ### 11.2 生成验证接口
 
-`generate_validation(batch, seed=...)` 使用固定 seed 分别生成 action、i2v 视频和可解码触觉。
+`generate_validation(batch, seed=...)` 在 joint 权重为正时，使用同一次 Generation forward
+和同一轮 Euler 积分联合生成 action、未来 video 和未来 state。只编码 current state，
+不读取 ground-truth action、未来 state 或未来 video 作为条件；current RGB latent、
+embedding 模式的额外 current-state token（raw 模式的第 0 帧）在积分期间固定。
+返回 `action_normalized` 和 `state_normalized`（`B,chunk_size,max_state_dim`），其中 state
+第 0 帧保留输入 current state，其余帧为预测。可只提供当前 RGB/current state 及 canonical
+维度 masks，不必提供 future video/state/action 或触觉。
+
+joint 未启用时沿用固定 seed 的 action、i2v 分别采样路径；可解码触觉单独采样，
+未配置 tactile task 或没有有效触觉图像时跳过。
 视频从当前 RGB 独立 VAE 编码和未来 Gaussian noise 开始做 Euler 更新，
 每一路的首 temporal latent 始终固定，不读取未来图像作为推理条件。
 
@@ -913,6 +940,9 @@ $$
 原 `video_latents` 仍返回 primary。验证 exporter 用冻结 VAE decoder 逐路解码，
 primary 保留原文件名，secondary/wrist 写入角色子目录，仅导出有效完整视频窗口，
 HTML 和 metrics 包含逐视角结果及有效视角 MAE 均值。
+joint 的未来 state 复用 canonical physical exporter，生成反归一化的
+`state_comparison.png`、`state_summary.html`、`state_mae` 和语义分组 MAE；
+只比较第 1 帧到 chunk 结束，不把作为条件给定的第 0 帧计入未来误差。
 
 ---
 

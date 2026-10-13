@@ -43,6 +43,8 @@ class TaskSpec:
             raise KeyError(f"Unknown stage-two modality {modality!r}.") from exc
 
 
+TASK_CONTRACT_VERSION = 2
+
 TASK_SPECS: dict[str, TaskSpec] = {
     "t2v": TaskSpec(
         name="t2v",
@@ -55,25 +57,23 @@ TASK_SPECS: dict[str, TaskSpec] = {
         understanding_image=True,
         video=ModalityRole.FUTURE_NOISY,
     ),
-    "action_video_prediction": TaskSpec(
-        name="action_video_prediction",
+    "joint_prediction": TaskSpec(
+        name="joint_prediction",
         understanding_image=True,
         video=ModalityRole.FUTURE_NOISY,
-        state=ModalityRole.CURRENT_ONLY,
+        state=ModalityRole.FUTURE_NOISY,
         action=ModalityRole.NOISY,
     ),
     "forward_dynamics": TaskSpec(
         name="forward_dynamics",
         understanding_image=True,
         video=ModalityRole.FUTURE_NOISY,
-        state=ModalityRole.FUTURE_NOISY,
         action=ModalityRole.CLEAN,
     ),
     "inverse_dynamics": TaskSpec(
         name="inverse_dynamics",
         understanding_image=True,
         video=ModalityRole.CLEAN,
-        state=ModalityRole.CLEAN,
         action=ModalityRole.NOISY,
     ),
     "action_prediction": TaskSpec(
@@ -103,6 +103,20 @@ DEFAULT_TASK_NAMES = tuple(TASK_SPECS)
 DEFAULT_TASK_WEIGHTS = (0.10, 0.20, 0.0, 0.20, 0.15, 0.15, 0.10, 0.10)
 
 
+def validate_saved_task_contract(config: dict) -> None:
+    changed_tasks = {"action_video_prediction", "joint_prediction", "forward_dynamics", "inverse_dynamics"}
+    names = config.get("task_names", DEFAULT_TASK_NAMES)
+    if "action_video_prediction" in names or (
+        config.get("task_contract_version", 1) != TASK_CONTRACT_VERSION
+        and changed_tasks.intersection(names)
+    ):
+        raise ValueError(
+            "This checkpoint uses the previous task contract: forward/inverse dynamics included state "
+            "and action_video_prediction did not predict future state. Start a fresh experiment "
+            "with joint_prediction; do not resume old optimizer/task state under changed supervision."
+        )
+
+
 def resolve_task_specs(
     names: tuple[str, ...],
     weights: tuple[float, ...],
@@ -119,6 +133,12 @@ def resolve_task_specs(
 
     unknown = [name for name in names if name not in TASK_SPECS]
     if unknown:
+        if "action_video_prediction" in unknown:
+            raise ValueError(
+                "`action_video_prediction` was replaced by `joint_prediction`, which also predicts "
+                "future state. Use the new task name and a fresh experiment; old task checkpoints "
+                "must not be silently resumed with changed supervision."
+            )
         raise ValueError(
             f"Unknown stage-two tasks {unknown}; available tasks are {tuple(TASK_SPECS)}."
         )

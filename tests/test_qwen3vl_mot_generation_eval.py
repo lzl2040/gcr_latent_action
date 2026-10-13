@@ -73,7 +73,8 @@ def test_generation_manifest_refuses_split_drift(tmp_path):
 
 @pytest.mark.parametrize("multiview", [False, True])
 @pytest.mark.parametrize("validation_split", ["heldout", "training"])
-def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiview, validation_split):
+@pytest.mark.parametrize("joint", [False, True])
+def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiview, validation_split, joint):
     class FakeDataset:
         heldout_eval_fingerprint = "split-1"
         norm_stats = [
@@ -103,6 +104,13 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
                     "anchor_stride": 6,
                 }
             ]
+
+        def __init__(self):
+            if joint:
+                self.norm_stats = [{"action": self.norm_stats[0]["action"], "state": {
+                    **self.norm_stats[0]["action"], "mean": torch.full((40,), 10.0),
+                    "min": torch.full((40,), -torch.inf), "max": torch.full((40,), torch.inf),
+                }}]
 
         def heldout_validation_manifest(self):
             return {
@@ -134,6 +142,10 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
                 item["video_views"] = item["video"][None].expand(3, -1, -1, -1, -1).clone()
                 item["video_views"][2] = 255
                 item["video_view_mask"] = torch.tensor([1, 0, 1], dtype=torch.bool)
+            if joint:
+                item["observation.state"] = torch.ones(4, 40)
+                item["observation.state"][0] = 1000
+                item["state_mask"] = torch.cat([torch.ones(2), torch.zeros(38)])
             return item
 
     class FakeModel(nn.Module):
@@ -167,6 +179,8 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
                     -1, 3, -1, -1, -1, -1
                 )
                 prediction["video_view_mask"] = torch.ones(batch_size, 3, dtype=torch.bool)
+            if joint:
+                prediction["state_normalized"] = torch.zeros(batch_size, 4, 40)
             return prediction
 
     dataset = FakeDataset()
@@ -206,6 +220,13 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
     assert (step_dir / "index.html").is_file()
     assert (step_dir / "metrics.json").is_file()
     payload = json.loads((step_dir / "metrics.json").read_text())
+    if joint:
+        sample_dir = step_dir / "heldout" / "episode_000003_frame_000000004"
+        assert (sample_dir / "state_comparison.png").is_file()
+        assert (sample_dir / "state_summary.html").is_file()
+        assert "Future state prediction" in (sample_dir / "index.html").read_text()
+        assert payload["samples"][0]["metrics"]["state_mae"] == 1.0
+        assert payload["samples"][0]["metrics"]["state_valid_dimensions"] == 2
     assert payload["validation_split"] == validation_split
     assert ("not held-out generalization" in (step_dir / "index.html").read_text()) == (
         validation_split == "training"

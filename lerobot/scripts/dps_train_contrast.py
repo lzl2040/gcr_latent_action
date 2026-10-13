@@ -268,6 +268,11 @@ def _load_stage2_resume_policy_config(
             f"Cannot resume qwen3vl_mot: {config_path} is missing. Start a fresh run with "
             "`weight_resume=false` and a valid stage-one checkpoint."
         )
+    with config_path.open(encoding="utf-8") as handle:
+        saved_task_config = json.load(handle)
+    from lerobot.common.policies.qwen3vl_mot.tasks import validate_saved_task_contract
+
+    validate_saved_task_contract(saved_task_config)
     saved_policy = PreTrainedConfig.from_pretrained(checkpoint_root)
     if saved_policy.type != "qwen3vl_mot":
         raise ValueError(

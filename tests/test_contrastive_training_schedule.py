@@ -252,6 +252,50 @@ def test_stage2_resume_rejects_task_list_change(tmp_path) -> None:
         )
 
 
+@pytest.mark.parametrize("saved_version", [None, 1])
+@pytest.mark.parametrize("old_name", ["forward_dynamics", "inverse_dynamics", "action_video_prediction"])
+def test_stage2_resume_rejects_previous_dynamics_contract(tmp_path, saved_version, old_name):
+    Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False,
+        task_names=("joint_prediction",), task_weights=(1.0,),
+    )._save_pretrained(tmp_path)
+    config_path = tmp_path / "config.json"
+    payload = json.loads(config_path.read_text())
+    payload["task_names"] = [old_name]
+    if saved_version is None:
+        del payload["task_contract_version"]
+    else:
+        payload["task_contract_version"] = saved_version
+    config_path.write_text(json.dumps(payload))
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path, policy=Qwen3VLMoTConfig(),
+        use_policy_training_preset=False,
+    )
+    with pytest.raises(ValueError, match="previous task contract"):
+        _load_stage2_resume_policy_config(cfg, args=[])
+
+
+def test_stage2_resume_preserves_new_three_task_contract_and_rejects_reordering(tmp_path):
+    task_names = ("forward_dynamics", "inverse_dynamics", "joint_prediction")
+    Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False,
+        task_names=task_names, task_weights=(0.3, 0.3, 0.4),
+    )._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path, policy=Qwen3VLMoTConfig(),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.task_contract_version == 2
+    assert cfg.policy.task_names == task_names
+    assert cfg.policy.task_weights == (0.3, 0.3, 0.4)
+    cfg.policy = Qwen3VLMoTConfig(task_names=tuple(reversed(task_names)), task_weights=(1, 1, 1))
+    with pytest.raises(ValueError, match="Cannot change `policy.task_names`"):
+        _load_stage2_resume_policy_config(cfg, args=[
+            '--policy.task_names=["joint_prediction","inverse_dynamics","forward_dynamics"]',
+        ])
+
+
 @pytest.mark.parametrize("saved_views", [("primary",), ("primary", "secondary", "wrist")])
 def test_stage2_resume_preserves_rgb_views_and_rejects_changes(tmp_path, saved_views):
     saved = Qwen3VLMoTConfig(

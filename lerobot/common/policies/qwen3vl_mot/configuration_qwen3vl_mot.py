@@ -10,7 +10,7 @@ from lerobot.common.optim.optimizers import AdamW8bitConfig
 from lerobot.common.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 from lerobot.configs.policies import PreTrainedConfig
 
-from .tasks import DEFAULT_TASK_NAMES, DEFAULT_TASK_WEIGHTS, resolve_task_specs
+from .tasks import DEFAULT_TASK_NAMES, DEFAULT_TASK_WEIGHTS, TASK_CONTRACT_VERSION, resolve_task_specs
 
 
 @PreTrainedConfig.register_subclass("qwen3vl_mot")
@@ -86,6 +86,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
 
     task_names: tuple[str, ...] = DEFAULT_TASK_NAMES
     task_weights: tuple[float, ...] = DEFAULT_TASK_WEIGHTS
+    task_contract_version: int = TASK_CONTRACT_VERSION
     sigma_min: float = 1e-3
     sigma_max: float = 0.999
     video_loss_weight: float = 1.0
@@ -126,6 +127,10 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.task_contract_version != TASK_CONTRACT_VERSION:
+            raise ValueError(
+                "Unsupported task contract version. Use a fresh experiment with the current task definitions."
+            )
         if self.generation_backbone not in ("random", "edge", "nano"):
             raise ValueError("`generation_backbone` must be random, edge, or nano.")
         if self.generation_tuning_mode not in ("full", "frozen"):
