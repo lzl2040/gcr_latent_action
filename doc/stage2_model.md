@@ -102,6 +102,17 @@ state/action/tactile ──> Stage 1 Physical Encoder ──> physical tokens   
 | `tactile_image_mask` | `(B,V)` | 有效触觉图像视角 |
 | `sample_rate` | `(B,)` | 数据真实采样率 |
 
+Stage 2 训练入口默认 `TRAINING_STAGE=auto`：纯 LIBERO mixture 使用下游 `finetune`，
+其他 mixture 使用原 `pretrain`。下游模式禁用持久化/降采样 sample pools，每个 epoch
+遍历全部有效完整窗口起点；保留所有 episode，仅最终 global batch 可能重复补齐。
+该模式忽略人为的 `SAMPLES_PER_EPOCH` 截断与 mixture 相对采样比例，零权重源除外。
+Stage 1 对比学习采样不变。
+
+下游生成验证固定抽取训练内窗口，不剔除训练 episode，输出明确标为
+`validation_split=training`。这不是 held-out 泛化评测，更不是 LIBERO 环境成功率。
+验证源支持 mixture 名展开；预训练仍使用原隔离 episode 的 held-out 验证。
+模型、loss、task embeddings 和 canonical 空间均不因该采样模式改变。
+
 ### 3.1 时间窗口
 
 正式配置为：

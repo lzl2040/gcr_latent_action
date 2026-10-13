@@ -5,7 +5,30 @@ Defines a registry of dataset mixtures and weights for the Open-X Embodiment Dat
 a float "sampling weight"
 """
 
+from collections.abc import Iterable
 from typing import Dict, List, Tuple
+
+
+def expand_dataset_names(names: Iterable[str]) -> tuple[str, ...]:
+    """Accept individual dataset names or named mixtures without duplicating members."""
+    expanded = []
+    for name in names:
+        name = name.strip()
+        if not name:
+            continue
+        members = OXE_NAMED_MIXTURES.get(name, [(name, 1.0)])
+        expanded.extend(dataset for dataset, weight in members if weight > 0)
+    return tuple(dict.fromkeys(expanded))
+
+
+def resolve_stage2_training_stage(stage: str, data_mix: str) -> str:
+    if stage not in ("auto", "pretrain", "finetune"):
+        raise ValueError("Stage 2 stage must be auto, pretrain or finetune.")
+    if stage != "auto":
+        return stage
+    members = expand_dataset_names((data_mix,))
+    return "finetune" if members and all(name.startswith("libero_") for name in members) else "pretrain"
+
 
 # fmt: off
 OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {

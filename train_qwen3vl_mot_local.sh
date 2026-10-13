@@ -13,6 +13,11 @@ if [[ "${WEIGHT_RESUME}" != "true" ]]; then
     : "${STAGE1_CHECKPOINT:?Set STAGE1_CHECKPOINT for a fresh stage-two run}"
 fi
 OUTPUT_DIR="${OUTPUT_DIR:-qwen3vl_mot}"
+TRAINING_STAGE="${TRAINING_STAGE:-auto}"
+if [[ "$TRAINING_STAGE" != "auto" && "$TRAINING_STAGE" != "pretrain" && "$TRAINING_STAGE" != "finetune" ]]; then
+    echo "Error: TRAINING_STAGE must be auto, pretrain or finetune" >&2
+    exit 1
+fi
 PYTHON_BIN="${PYTHON_BIN:-python}"
 QWEN3VL_DIR="${QWEN3VL_DIR:-/Data/lzl/huggingface/Qwen3-VL-4B-Instruct}"
 COSMOS3_DIR="${COSMOS3_DIR:-/Data/lzl/huggingface/Cosmos3-Edge}"
@@ -126,6 +131,7 @@ fi
 deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --deepspeed="${DEEPSPEED_CONFIG:-./ds_zero2_qwen3vl_mot.json}" \
     --policy.type="qwen3vl_mot" \
+    --stage="${TRAINING_STAGE}" \
     --policy.qwen3vl_dir="${QWEN3VL_DIR}" \
     --policy.cosmos3_dir="${COSMOS3_DIR}" \
     "${GENERATION_ARGS[@]}" \

@@ -116,6 +116,46 @@ resume 只补齐当前构造流程需要的 Qwen 和 VAE，不下载原始生成
 不覆盖训练 checkpoint。FSDP `DRY_RUN=true` 不联网、不创建模型缓存。
 设置 `MODEL_AUTO_DOWNLOAD=false` 可禁用自动下载，让缺失模型明确报错。
 
+## LIBERO 下游微调：全部数据与训练内验证
+
+两个入口默认 `TRAINING_STAGE=auto`：LIBERO mixture（包括四个子集或纯 LIBERO
+自定义 mixture）自动使用 `finetune`，其他 mixture 保留原 `pretrain` 行为。
+其他下游数据可显式指定 `TRAINING_STAGE=finetune`。
+
+`finetune` 强制禁用持久化 sample pools，即使设置 `SAMPLE_POOL_ENABLED=true` 也不会
+读取、创建或写入这些缓存。每个 epoch 打乱并遍历所有参与训练数据源的**每个有效完整
+窗口起点**，不降 Hz、不按 mixture 相对权重重复抽样，也不受 `SAMPLES_PER_EPOCH`
+限制。权重为零的数据源不参与训练。保留所有训练 episode；不足完整窗口的 episode
+或末尾不足 32 帧的位置不作为起点。多卡按同一个全局顺序分片，仅最后一个 global
+batch 为保持固定 batch size 可能重复开头的样本补齐。
+
+FSDP 开启生成验证时，`GENERATION_EVAL_DATASETS=auto` 默认从训练 mixture 抽固定窗口；
+也可指定 `libero`、`libero_object` 或逗号分隔的具体 dataset 名。mixture 名会展开为
+实际子数据集，缺失子集仍会明确报错，而不是跳过。验证不会移除训练 episode：
+manifest、metrics JSON 和 HTML 标为 **training / Training-set diagnostics**，
+只能用于训练拟合诊断，不能当作独立 held-out 泛化结果或 LIBERO 环境成功率。
+
+新实验示例（按前文配置 Stage 1 和模型/数据路径）：
+
+```bash
+DATA_MIX=libero \
+TRAINING_STAGE=finetune \
+GENERATION_EVAL_ENABLED=true \
+GENERATION_EVAL_DATASETS=auto \
+GENERATION_EVAL_FREQ=1000 \
+WEIGHT_RESUME=false \
+JOB_NAME=libero_finetune \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+本地 DeepSpeed 入口使用同样的 `DATA_MIX` / `TRAINING_STAGE` 完整遍历设置；上述生成
+验证开关属于 FSDP 入口。没有触觉的数据继续使用缺失模态 mask，无需改变模型结构。
+显式 `TRAINING_STAGE=pretrain` 则保留原 sample pools 和隔离 held-out episode 的行为。
+
+从旧 sample-pool 模式切换到完整遍历会改变 epoch 和采样游标，不能直接 resume 原
+checkpoint；需要新的实验输出目录。新模式保存后的 checkpoint 可以在数据、batch、
+world size 和 seed 不变时正常续训。这次改动不增加通用 Stage 2 weights-only 迁移入口。
+
 ## 多视角条件与未来视频生成
 
 默认仍为 primary 单视角。新实验可开启：

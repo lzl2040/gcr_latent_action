@@ -55,7 +55,11 @@ from lerobot.common.datasets.lerobot_dataset_for_ace import (
     LeRobotDatasetMetadata,
     resolve_delta_timestamps,
 )
-from lerobot.common.datasets.mixtures import OXE_NAMED_MIXTURES
+from lerobot.common.datasets.mixtures import (
+    OXE_NAMED_MIXTURES,
+    expand_dataset_names,
+    resolve_stage2_training_stage,
+)
 from lerobot.common.datasets.oxe_configs import OXE_DATASET_CONFIGS
 from lerobot.common.datasets_v30.dataset_metadata import (
     LeRobotDatasetMetadata as LeRobotDatasetMetadataV30,
@@ -163,6 +167,15 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.image_transforms = image_transforms
 
         policy_cfg = cfg.policy
+        self.full_training_coverage = False
+        if getattr(policy_cfg, "type", None) == "qwen3vl_mot":
+            cfg.stage = resolve_stage2_training_stage(getattr(cfg, "stage", "auto"), data_mix)
+            self.full_training_coverage = cfg.stage == "finetune"
+        self.validation_split = "training" if self.full_training_coverage else "heldout"
+        if self.full_training_coverage:
+            if getattr(cfg.dataset, "sample_pool_enabled", True):
+                logger.info("Downstream finetuning disables sample pools and uses every valid training window.")
+            cfg.dataset.sample_pool_enabled = False
         self.chunk_size = policy_cfg.chunk_size
         # "duration" resolves the window from ``chunk_seconds`` per dataset; "frames" uses the
         # consecutive frames 0..chunk_size-1, which is what downstream VLA training wants.
@@ -191,19 +204,26 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         mixture_spec = OXE_NAMED_MIXTURES[data_mix]
         included_datasets, sample_weights = [], []
         for d_name, d_weight in mixture_spec:
+            if self.full_training_coverage and d_weight == 0:
+                continue
             if d_name in included_datasets:
                 continue
             included_datasets.append(d_name)
             sample_weights.append(d_weight)
-        requested_eval_datasets = tuple(
-            dict.fromkeys(name.strip() for name in heldout_eval_dataset_names if name.strip())
-        )
+        requested_eval_datasets = expand_dataset_names(heldout_eval_dataset_names)
         self.heldout_eval_dataset_names = requested_eval_datasets
         self.heldout_eval_episodes_per_dataset = int(
             heldout_eval_episodes_per_dataset
         )
         self.heldout_eval_seed = int(heldout_eval_seed)
         training_dataset_names = set(included_datasets)
+        if self.full_training_coverage:
+            validation_only = set(requested_eval_datasets) - training_dataset_names
+            if validation_only:
+                raise ValueError(
+                    "Downstream finetuning validates on training samples; validation datasets "
+                    f"must belong to the training mixture {data_mix!r}: {sorted(validation_only)}."
+                )
         for dataset_name in requested_eval_datasets:
             if dataset_name not in training_dataset_names:
                 included_datasets.append(dataset_name)
@@ -295,10 +315,18 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             set(requested_eval_datasets) - set(self.dataset_names)
         )
         if missing_eval_datasets:
+            split_label = "training-sample" if self.full_training_coverage else "held-out"
             raise RuntimeError(
-                "The requested held-out validation datasets could not be loaded: "
+                f"The requested {split_label} validation datasets could not be loaded: "
                 f"{missing_eval_datasets}."
             )
+        if self.full_training_coverage:
+            missing_training_datasets = sorted(training_dataset_names - set(self.dataset_names))
+            if missing_training_datasets:
+                raise RuntimeError(
+                    "Finetuning requires every requested training dataset, but these could not be loaded: "
+                    f"{missing_training_datasets}. Refusing to train on a partial mixture."
+                )
 
         self.all_episode_ranges = [
             ranges.copy() for ranges in self.episode_ranges
@@ -348,7 +376,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         sample_pool_enabled = bool(
             getattr(cfg.dataset, "sample_pool_enabled", True)
         )
-        pool_root, cache_root = resolve_sample_pool_paths(cfg)
+        pool_root, cache_root = resolve_sample_pool_paths(cfg) if sample_pool_enabled else (None, None)
         if sample_pool_enabled:
             self.sample_pool = build_or_load_sample_pool(
                 data_mix=data_mix,
@@ -394,13 +422,13 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         if self.heldout_eval_manifest:
             self.heldout_sample_pool = build_or_load_sample_pool(
-                data_mix=f"{data_mix}__heldout_generation",
+                data_mix=f"{data_mix}__{self.validation_split}_generation",
                 dataset_names=self.dataset_names,
                 dataset_sizes=self.dataset_sizes,
                 episode_ranges=self.heldout_episode_ranges,
                 true_fps=self.true_fps,
                 horizons=self.frame_horizons,
-                keep_all_below_fps=float(
+                keep_all_below_fps=max(self.true_fps) + 1.0 if self.full_training_coverage else float(
                     getattr(
                         cfg.dataset,
                         "sample_pool_keep_all_below_fps",
@@ -459,6 +487,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             self.tactile_view_counts, dtype=np.float64
         )
         # This controls the custom batch sampler's epoch length, not the source dataset length.
+        if self.full_training_coverage:
+            dataset_size_one_epoch = int(self.pool_anchor_counts.sum(dtype=np.int64))
+            cfg.dataset.dataset_size_one_epoch = dataset_size_one_epoch
         self.dataset_size_one_epoch = dataset_size_one_epoch
 
         self.dataset_statistics = self._build_dataset_statistics()
@@ -481,6 +512,12 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.total_pool_anchors = int(
             self.pool_anchor_counts.sum(dtype=np.int64)
         )
+        if self.full_training_coverage:
+            logger.info(
+                "Full-coverage finetuning: %d valid windows, %d episodes; validation_split=training. "
+                "Validation episodes remain in training; metrics are not held-out generalization.",
+                self.total_pool_anchors, self.total_source_episodes,
+            )
         logger.info(
             "Sample-start pool: fingerprint=%s anchors=%d source_frames=%d table=%s",
             self.sample_pool_fingerprint,
@@ -494,7 +531,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         )
         if self.heldout_sample_pool is not None:
             logger.info(
-                "Held-out generation pool: fingerprint=%s anchors=%d datasets=%s",
+                "%s generation validation: fingerprint=%s anchors=%d datasets=%s",
+                "Training-sample" if self.full_training_coverage else "Held-out",
                 self.heldout_eval_fingerprint,
                 int(self.heldout_anchor_counts.sum(dtype=np.int64)),
                 ", ".join(
@@ -557,15 +595,26 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             usable = np.flatnonzero(
                 ranges[:, 1] - ranges[:, 0] > int(horizon)
             )
-            required_usable = int(episodes_per_dataset) + int(training_source)
+            training_validation = getattr(self, "full_training_coverage", False)
+            required_usable = 1 if training_validation else int(episodes_per_dataset) + int(training_source)
             if usable.size < required_usable:
+                if training_validation:
+                    raise RuntimeError(
+                        f"{name} has no usable full-length episode for horizon={horizon}; "
+                        "training-sample validation requires at least one."
+                    )
                 raise RuntimeError(
                     f"{name} has {usable.size} usable episodes for horizon={horizon}; "
                     f"{required_usable} are required to hold out "
                     f"{episodes_per_dataset}"
                     + (" while retaining training data." if training_source else ".")
                 )
-            count = int(episodes_per_dataset)
+            count = min(int(episodes_per_dataset), int(usable.size)) if training_validation else int(episodes_per_dataset)
+            if count < episodes_per_dataset:
+                logger.warning(
+                    "%s has only %d usable episodes; training-sample validation uses all of them "
+                    "instead of the requested %d.", name, count, episodes_per_dataset,
+                )
 
             digest = hashlib.sha256(f"{seed}:{name}".encode("utf-8")).digest()
             dataset_seed = int.from_bytes(digest[:8], "little", signed=False)
@@ -574,7 +623,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 rng.choice(usable, size=count, replace=False)
             )
             heldout = ranges[heldout_indices].copy()
-            if training_source:
+            if training_validation and training_source:
+                training = ranges.copy()
+            elif training_source:
                 keep = np.ones(len(ranges), dtype=bool)
                 keep[heldout_indices] = False
                 training = ranges[keep].copy()
@@ -595,7 +646,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         return train_ranges, eval_ranges, manifest
 
     def heldout_validation_samples(self) -> list[dict[str, int | float | str | bool]]:
-        """Return one deterministic full-window anchor from every held-out episode."""
+        """Return one fixed full-window anchor per validation episode, including training diagnostics."""
         if self.heldout_sample_pool is None:
             return []
         samples = []
@@ -624,24 +675,25 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                     int.from_bytes(digest[:8], "little", signed=False)
                 )
                 anchor = int(start) + int(rng.integers(anchor_count)) * stride
-                samples.append(
-                    {
-                        "dataset": str(entry["dataset"]),
-                        "dataset_index": dataset_idx,
-                        "training_source": bool(entry["training_source"]),
-                        "episode_index": int(episode_index),
-                        "episode_start": int(start),
-                        "episode_end": int(end),
-                        "frame_index": anchor,
-                        "horizon": horizon,
-                        "fps": float(self.true_fps[dataset_idx]),
-                        "anchor_stride": stride,
-                    }
-                )
+                sample = {
+                    "dataset": str(entry["dataset"]),
+                    "dataset_index": dataset_idx,
+                    "training_source": bool(entry["training_source"]),
+                    "episode_index": int(episode_index),
+                    "episode_start": int(start),
+                    "episode_end": int(end),
+                    "frame_index": anchor,
+                    "horizon": horizon,
+                    "fps": float(self.true_fps[dataset_idx]),
+                    "anchor_stride": stride,
+                }
+                if getattr(self, "full_training_coverage", False):
+                    sample["validation_split"] = "training"
+                samples.append(sample)
         return samples
 
     def heldout_validation_manifest(self) -> dict:
-        return {
+        manifest = {
             "format_version": 1,
             "fingerprint": self.heldout_eval_fingerprint,
             "dataset_names": list(self.heldout_eval_dataset_names),
@@ -649,6 +701,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "split_seed": self.heldout_eval_seed,
             "samples": self.heldout_validation_samples(),
         }
+        if getattr(self, "full_training_coverage", False):
+            manifest["validation_split"] = "training"
+        return manifest
 
     def _build_dataset_statistics(self) -> list[dict[str, str | int | float]]:
         """Source-data size and wall-clock duration for every loaded dataset.
@@ -702,6 +757,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                     "training": (
                         "validation-only"
                         if not training_source
+                        else "finetune" if getattr(self, "full_training_coverage", False)
                         else "contrastive" if has_physical else "perception-only"
                     ),
                     "anchor_count": int(anchor_count),

@@ -20,6 +20,10 @@ so that both the future perception frame and the full action chunk exist without
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+
 import numpy as np
 from torch.utils.data import Sampler
 
@@ -346,3 +350,80 @@ class ContrastiveBatchSampler(Sampler):
                 continue
             global_batch = self._global_batch(local_batch_id)
             yield self._balanced_rank_batches(global_batch)[self.rank]
+
+
+class FullCoverageBatchSampler(Sampler):
+    """Shuffle every full-window anchor once per epoch, padding only the final global batch."""
+
+    def __init__(
+        self, episode_ranges: list[np.ndarray], batch_size: int, *,
+        horizon: list[int], sample_weights: np.ndarray,
+        num_replicas: int = 1, rank: int = 0, seed: int | None = 0,
+        dataset_names: list[str] | None = None,
+    ):
+        if batch_size <= 0 or num_replicas <= 0 or not 0 <= rank < num_replicas:
+            raise ValueError("Full-coverage sampling requires a positive batch/world size and a valid rank.")
+        if len(horizon) != len(episode_ranges) or len(sample_weights) != len(episode_ranges):
+            raise ValueError("Episode ranges, horizons and sample weights must describe the same datasets.")
+        weights = np.asarray(sample_weights, dtype=np.float64)
+        if not np.isfinite(weights).all() or (weights < 0).any():
+            raise ValueError("Sample weights must be finite and non-negative.")
+        spans = []
+        for dataset_idx, (ranges, frames, weight) in enumerate(zip(episode_ranges, horizon, weights, strict=True)):
+            ranges = np.asarray(ranges, dtype=np.int64)
+            if ranges.ndim != 2 or ranges.shape[1] != 2 or (ranges < 0).any():
+                raise ValueError("Episode ranges must have shape (N,2) and non-negative indices.")
+            if frames < 0 or (ranges[:, 1] < ranges[:, 0]).any():
+                raise ValueError("Invalid temporal horizon or episode bounds.")
+            if weight <= 0:
+                continue
+            for start, end in ranges:
+                count = int(end) - int(start) - int(frames)
+                if count > 0:
+                    spans.append((dataset_idx, int(start), count))
+        if not spans:
+            raise ValueError("Full-coverage finetuning has no valid full-length training windows.")
+        self.spans = np.asarray(spans, dtype=np.int64)
+        self.anchor_ends = np.cumsum(self.spans[:, 2], dtype=np.int64)
+        self.total_anchors = int(self.anchor_ends[-1])
+        self.batch_size = batch_size
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.seed = 0 if seed is None else seed
+        self.num_batches = math.ceil(self.total_anchors / (batch_size * num_replicas))
+        self.epoch = 0
+        self.start_batch = 0
+        digest = hashlib.sha256(json.dumps({
+            "format_version": 1,
+            "datasets": dataset_names, "horizons": [int(value) for value in horizon],
+            "batch_size": batch_size, "world_size": num_replicas, "seed": self.seed,
+        }, sort_keys=True).encode())
+        digest.update(self.spans.tobytes())
+        self.fingerprint = digest.hexdigest()
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+        self.start_batch = 0
+
+    def set_start_batch(self, start_batch: int) -> None:
+        if not 0 <= start_batch <= self.num_batches:
+            raise ValueError(f"start_batch must be in [0, {self.num_batches}].")
+        self.start_batch = start_batch
+
+    def __len__(self) -> int:
+        return self.num_batches - self.start_batch
+
+    def __iter__(self):
+        order = np.random.default_rng([self.seed, self.epoch]).permutation(self.total_anchors)
+        for batch in range(self.start_batch, self.num_batches):
+            positions = (
+                batch * self.batch_size * self.num_replicas
+                + self.rank * self.batch_size + np.arange(self.batch_size)
+            ) % self.total_anchors
+            anchors = order[positions]
+            rows = np.searchsorted(self.anchor_ends, anchors, side="right")
+            previous = np.where(rows > 0, self.anchor_ends[np.maximum(rows - 1, 0)], 0)
+            yield [
+                (int(self.spans[row, 0]), int(self.spans[row, 1] + anchor - offset))
+                for row, anchor, offset in zip(rows, anchors, previous, strict=True)
+            ]

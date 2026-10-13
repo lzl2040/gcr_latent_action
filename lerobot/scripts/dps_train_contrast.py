@@ -3,9 +3,8 @@
 
 This is the counterpart of ``dps_train_ace.py`` for the ``robo_contrast`` policy. It is a
 separate script because the data path is fundamentally different: batches are built by a
-``ContrastiveBatchSampler`` (which decides *which* negatives share a batch) instead of a
-plain ``DistributedSampler``, and the batch carries images, language, canonical
-state/action and tactile all at once.
+``ContrastiveBatchSampler`` for pretraining or a ``FullCoverageBatchSampler`` for downstream
+finetuning. The batch carries images, language, canonical state/action and tactile all at once.
 """
 
 import json
@@ -34,7 +33,8 @@ from lerobot.common.datasets.contrastive_sample_pool import (
     sample_pool_checkpoint_state,
     validate_sample_pool_resume,
 )
-from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler
+from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler, FullCoverageBatchSampler
+from lerobot.common.datasets.mixtures import resolve_stage2_training_stage
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.policies.qwen3vl_mot.tasks import resolve_task_specs
@@ -57,6 +57,58 @@ from lerobot.configs.train import TrainPipelineConfig
 # normalised inside the model; index-like tensors must stay integral.
 _KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "images_t0", "video", "video_views", "tactile_image")
 _EXTRA_TRAINING_EPOCHS = 100
+
+
+@dataclass
+class ContrastiveTrainPipelineConfig(TrainPipelineConfig):
+    stage: str = "auto"
+
+
+def _make_training_sampler(
+    cfg: TrainPipelineConfig,
+    dataset: MultiModalContrastiveDataset,
+    batch_size: int,
+    world_size: int,
+    rank: int,
+) -> ContrastiveBatchSampler | FullCoverageBatchSampler:
+    if getattr(dataset, "full_training_coverage", False):
+        return FullCoverageBatchSampler(
+            episode_ranges=dataset.episode_ranges, sample_weights=dataset.sample_weights,
+            batch_size=batch_size, num_replicas=world_size, rank=rank, seed=cfg.seed,
+            horizon=dataset.frame_horizons, dataset_names=dataset.dataset_names,
+        )
+    return ContrastiveBatchSampler(
+        episode_ranges=dataset.episode_ranges, sample_weights=dataset.sample_weights,
+        batch_size=batch_size, num_replicas=world_size, rank=rank, seed=cfg.seed,
+        samples_per_epoch=cfg.dataset.dataset_size_one_epoch,
+        horizon=dataset.frame_horizons, same_dataset_frac=cfg.policy.same_dataset_frac,
+        episode_group_frac=cfg.policy.episode_group_frac, episode_group_size=cfg.policy.episode_group_size,
+        min_frame_gap=cfg.policy.min_frame_gap, sample_costs=dataset.sample_costs,
+        dataset_has_physical=dataset.has_physical,
+        min_physical_per_batch=0 if cfg.policy.type == "qwen3vl_mot" else 2,
+        balance_across_ranks=True, sample_pool=dataset.sample_pool,
+    )
+
+
+def _training_sampler_checkpoint_state(
+    sampler: ContrastiveBatchSampler | FullCoverageBatchSampler,
+) -> dict[str, str]:
+    if isinstance(sampler, FullCoverageBatchSampler):
+        return {"full_training_sampler_fingerprint": sampler.fingerprint}
+    return {}
+
+
+def _validate_training_sampler_resume(
+    sampler: ContrastiveBatchSampler | FullCoverageBatchSampler,
+    state: dict[str, Any],
+) -> None:
+    expected = _training_sampler_checkpoint_state(sampler).get("full_training_sampler_fingerprint")
+    saved = state.get("full_training_sampler_fingerprint")
+    if saved != expected:
+        raise ValueError(
+            "The full-coverage training sampler changed across resume. Keep the sampling mode, "
+            "datasets, batch size, world size and seed unchanged, or start a new output directory."
+        )
 
 
 @dataclass(frozen=True)
@@ -270,9 +322,11 @@ def _load_stage2_resume_policy_config(
 
 
 @parser.wrap()
-def train(cfg: TrainPipelineConfig):
+def train(cfg: ContrastiveTrainPipelineConfig):
     cfg.validate()
     _load_stage2_resume_policy_config(cfg)
+    if cfg.policy.type == "qwen3vl_mot":
+        cfg.stage = resolve_stage2_training_stage(cfg.stage, cfg.data_mix)
 
     os.environ.setdefault("DECORD_LOG_LEVEL", "error")
     deepspeed.init_distributed()
@@ -323,25 +377,7 @@ def train(cfg: TrainPipelineConfig):
             "reconstruction objective."
         )
 
-    sampler = ContrastiveBatchSampler(
-        episode_ranges=dataset.episode_ranges,
-        sample_weights=dataset.sample_weights,
-        batch_size=batch_size,
-        num_replicas=world_size,
-        rank=rank,
-        seed=cfg.seed,
-        samples_per_epoch=cfg.dataset.dataset_size_one_epoch,
-        horizon=dataset.frame_horizons,
-        same_dataset_frac=cfg.policy.same_dataset_frac,
-        episode_group_frac=cfg.policy.episode_group_frac,
-        episode_group_size=cfg.policy.episode_group_size,
-        min_frame_gap=cfg.policy.min_frame_gap,
-        sample_costs=dataset.sample_costs,
-        dataset_has_physical=dataset.has_physical,
-        min_physical_per_batch=0 if is_stage2 else 2,
-        balance_across_ranks=True,
-        sample_pool=dataset.sample_pool,
-    )
+    sampler = _make_training_sampler(cfg, dataset, batch_size, world_size, rank)
     epoch_schedule = _compute_epoch_schedule(
         total_source_frames=dataset.total_pool_anchors,
         steps_per_epoch=len(sampler),
@@ -477,6 +513,7 @@ def train(cfg: TrainPipelineConfig):
             # raises "client_state contains reserved checkpoint key", so only pick out
             # the fields this script actually owns.
             validate_sample_pool_resume(dataset.sample_pool, loaded_state)
+            _validate_training_sampler_resume(sampler, loaded_state)
             step = loaded_state.get("step", 0)
             if not optimizer_restored:
                 align_fresh_scheduler_to_step(
@@ -699,6 +736,7 @@ def train(cfg: TrainPipelineConfig):
                     OPTIMIZER_GROUP_SIGNATURE_KEY: optimizer_signature,
                     DATA_PARALLEL_WORLD_SIZE_KEY: world_size,
                     **sample_pool_checkpoint_state(dataset.sample_pool),
+                    **_training_sampler_checkpoint_state(sampler),
                 }
                 model_engine.save_checkpoint(
                     save_dir=cfg.output_dir,

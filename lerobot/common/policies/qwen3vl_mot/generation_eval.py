@@ -1,4 +1,4 @@
-"""Fixed held-out generation validation and human-readable artifact export."""
+"""Fixed generation validation and human-readable artifact export."""
 
 from __future__ import annotations
 
@@ -21,14 +21,16 @@ from PIL import Image, ImageDraw
 from torch import distributed as dist
 
 from lerobot.common.datasets.contrastive_dataset import contrastive_collate_fn
+from lerobot.common.datasets.mixtures import expand_dataset_names
 
 logger = logging.getLogger(__name__)
+_PRETRAIN_VALIDATION_DATASETS = "open_neo_arx5,ms_data_xdof_1,interna1_dual_arm_1,ftp_1_sharpa"
 
 
 @dataclass
 class GenerationEvalConfig:
     enabled: bool = False
-    datasets: str = "open_neo_arx5,ms_data_xdof_1,interna1_dual_arm_1,ftp_1_sharpa"
+    datasets: str = "auto"
     episodes_per_dataset: int = 2
     seed: int = 20_260_927
     output_subdir: str = "generation_eval"
@@ -37,7 +39,12 @@ class GenerationEvalConfig:
 
     @property
     def dataset_names(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(name.strip() for name in self.datasets.split(",") if name.strip()))
+        names = _PRETRAIN_VALIDATION_DATASETS if self.datasets == "auto" else self.datasets
+        return expand_dataset_names(names.split(","))
+
+    def resolve_datasets(self, data_mix: str, stage: str) -> None:
+        if self.datasets == "auto":
+            self.datasets = data_mix if stage == "finetune" else _PRETRAIN_VALIDATION_DATASETS
 
     def validate(self, eval_freq: int) -> None:
         if not self.enabled:
@@ -126,7 +133,7 @@ def persist_generation_manifest(output_root: Path, manifest: dict) -> Path:
         existing = path.read_text(encoding="utf-8")
         if existing != encoded:
             raise RuntimeError(
-                f"Held-out validation split changed relative to {path}. Use a new "
+                f"Generation validation split changed relative to {path}. Use a new "
                 "output directory rather than mixing evaluation populations."
             )
         return path
@@ -501,6 +508,7 @@ img, video {{ max-width: 100%; height: auto; }}
 code, pre {{ background: #f4f4f4; padding: 2px 4px; }}
 </style>
 <h1>{html.escape(str(sample["dataset"]))}</h1>
+{"<p>Training-set diagnostic; this sample also participates in training.</p>" if sample.get("validation_split") == "training" else ""}
 <p>Episode {sample["episode_index"]}, frame {sample["frame_index"]},
 {sample["fps"]:.3g} FPS.</p>
 <h2>RGB video prediction</h2>
@@ -538,7 +546,7 @@ class GenerationEvaluator:
         self.process_group = process_group
         self.samples = dataset.heldout_validation_samples()
         if not self.samples:
-            raise RuntimeError("Generation validation is enabled but no held-out windows were built.")
+            raise RuntimeError("Generation validation is enabled but no valid validation windows were built.")
         self.video_decoder = None
         manifest_error = None
         if rank == 0:
@@ -635,6 +643,7 @@ table {{ border-collapse: collapse; }}
 th, td {{ border: 1px solid #aaa; padding: 5px 9px; }}
 </style>
 <h1>Generation validation</h1>
+{"<p>Training-set diagnostics, not held-out generalization.</p>" if getattr(self.dataset, "validation_split", "heldout") == "training" else ""}
 <table>
 <tr><th>Dataset</th><th>Episode</th><th>Frame</th><th>Artifacts</th>
 <th>Video MAE</th><th>Action MAE</th><th>Tactile MAE</th></tr>
@@ -810,6 +819,7 @@ th, td {{ border: 1px solid #aaa; padding: 5px 9px; }}
                     payload = {
                         "step": step,
                         "split_fingerprint": self.dataset.heldout_eval_fingerprint,
+                        "validation_split": getattr(self.dataset, "validation_split", "heldout"),
                         "samples": entries,
                     }
                     _atomic_write_text(

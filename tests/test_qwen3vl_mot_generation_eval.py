@@ -72,7 +72,8 @@ def test_generation_manifest_refuses_split_drift(tmp_path):
 
 
 @pytest.mark.parametrize("multiview", [False, True])
-def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiview):
+@pytest.mark.parametrize("validation_split", ["heldout", "training"])
+def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiview, validation_split):
     class FakeDataset:
         heldout_eval_fingerprint = "split-1"
         norm_stats = [
@@ -168,6 +169,8 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
                 prediction["video_view_mask"] = torch.ones(batch_size, 3, dtype=torch.bool)
             return prediction
 
+    dataset = FakeDataset()
+    dataset.validation_split = validation_split
     model = FakeModel().train()
     evaluator = GenerationEvaluator(
         config=GenerationEvalConfig(
@@ -177,7 +180,7 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
             seed=11,
             batch_size=1,
         ),
-        dataset=FakeDataset(),
+        dataset=dataset,
         output_dir=tmp_path,
         policy_config=SimpleNamespace(
             cosmos3_dir="/unused", n_action_steps=2, rgb_views=("primary", "secondary", "wrist")
@@ -202,6 +205,11 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
     assert model.calls == 1
     assert (step_dir / "index.html").is_file()
     assert (step_dir / "metrics.json").is_file()
+    payload = json.loads((step_dir / "metrics.json").read_text())
+    assert payload["validation_split"] == validation_split
+    assert ("not held-out generalization" in (step_dir / "index.html").read_text()) == (
+        validation_split == "training"
+    )
     if multiview:
         sample_dir = step_dir / "heldout" / "episode_000003_frame_000000004"
         assert (sample_dir / "video_comparison.mp4").is_file()

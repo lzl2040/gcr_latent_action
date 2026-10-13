@@ -346,6 +346,7 @@ def test_launchers_resolve_models_before_workers_and_skip_generator_on_resume(tm
         "GENERATION_PRETRAINED_DIR": "", "GENERATION_TUNING_MODE": "",
         "QWEN3VL_DIR": "/mounted/qwen", "COSMOS3_DIR": "/mounted/cosmos",
         "MASTER_PORT": "29599", "NNODES": "1", "NPROC_PER_NODE": "1",
+        "TRAINING_STAGE": "finetune",
     }
     result = subprocess.run(
         ["bash", str(root / f"train_qwen3vl_mot_{launcher}.sh")],
@@ -356,6 +357,7 @@ def test_launchers_resolve_models_before_workers_and_skip_generator_on_resume(tm
     assert f"--cache-dir={tmp_path / 'cache'}" in args
     assert "--policy.qwen3vl_dir=/node/qwen" in result.stdout
     assert "--policy.cosmos3_dir=/node/vae" in result.stdout
+    assert "--stage=finetune" in result.stdout
     if resume:
         assert "--policy.generation_pretrained_dir=" not in result.stdout
         assert "--policy.generation_backbone=" not in result.stdout

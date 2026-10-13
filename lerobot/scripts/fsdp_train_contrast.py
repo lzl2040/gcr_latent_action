@@ -18,7 +18,7 @@ from lerobot.common.datasets.contrastive_dataset import (
     MultiModalContrastiveDataset,
     contrastive_collate_fn,
 )
-from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler
+from lerobot.common.datasets.mixtures import resolve_stage2_training_stage
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.optim.optimizers import AdamW8bitConfig
 from lerobot.common.policies.factory import make_policy
@@ -46,6 +46,8 @@ from lerobot.scripts.dps_train_contrast import (
     _compute_epoch_schedule,
     _data_read_batch_counts,
     _load_stage2_resume_policy_config,
+    _make_training_sampler,
+    _training_sampler_checkpoint_state,
     _worker_init,
     init_logger,
     move_batch,
@@ -54,6 +56,7 @@ from lerobot.scripts.dps_train_contrast import (
 
 @dataclass
 class FSDPTrainPipelineConfig(TrainPipelineConfig):
+    stage: str = "auto"
     fsdp: FSDPTrainingConfig = field(default_factory=FSDPTrainingConfig)
     generation_eval: GenerationEvalConfig = field(
         default_factory=GenerationEvalConfig
@@ -160,6 +163,8 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     cfg.validate()
     _load_stage2_resume_policy_config(cfg)
     cfg.fsdp.validate()
+    cfg.stage = resolve_stage2_training_stage(cfg.stage, cfg.data_mix)
+    cfg.generation_eval.resolve_datasets(cfg.data_mix, cfg.stage)
     cfg.generation_eval.validate(cfg.eval_freq)
     if cfg.policy.type != "qwen3vl_mot":
         raise ValueError(
@@ -229,25 +234,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         ),
         heldout_eval_seed=cfg.generation_eval.seed,
     )
-    sampler = ContrastiveBatchSampler(
-        episode_ranges=dataset.episode_ranges,
-        sample_weights=dataset.sample_weights,
-        batch_size=cfg.batch_size,
-        num_replicas=world_size,
-        rank=rank,
-        seed=cfg.seed,
-        samples_per_epoch=cfg.dataset.dataset_size_one_epoch,
-        horizon=dataset.frame_horizons,
-        same_dataset_frac=cfg.policy.same_dataset_frac,
-        episode_group_frac=cfg.policy.episode_group_frac,
-        episode_group_size=cfg.policy.episode_group_size,
-        min_frame_gap=cfg.policy.min_frame_gap,
-        sample_costs=dataset.sample_costs,
-        dataset_has_physical=dataset.has_physical,
-        min_physical_per_batch=0,
-        balance_across_ranks=True,
-        sample_pool=dataset.sample_pool,
-    )
+    sampler = _make_training_sampler(cfg, dataset, cfg.batch_size, world_size, rank)
     epoch_schedule = _compute_epoch_schedule(
         total_source_frames=dataset.total_pool_anchors,
         steps_per_epoch=len(sampler),
@@ -269,6 +256,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         "total_epochs": epoch_schedule.total_epochs,
         "total_micro_steps": epoch_schedule.total_steps,
         "seed": cfg.seed,
+        **_training_sampler_checkpoint_state(sampler),
     }
     if cfg.generation_eval.enabled:
         training_geometry["heldout_eval_fingerprint"] = (
@@ -587,8 +575,8 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
             )
             if should_evaluate_generation:
                 logger.info(
-                    "Running held-out generation validation after optimizer step %d",
-                    update_step,
+                    "Running %s generation validation after optimizer step %d",
+                    dataset.validation_split, update_step,
                 )
                 generation_evaluator.run(model, update_step)
 
