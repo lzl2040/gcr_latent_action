@@ -43,6 +43,8 @@ PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 GENERATION_BACKBONE="${GENERATION_BACKBONE:-}"
 GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-}"
 GENERATION_TUNING_MODE="${GENERATION_TUNING_MODE:-}"
+MODEL_AUTO_DOWNLOAD="${MODEL_AUTO_DOWNLOAD:-true}"
+MODEL_LOCAL_CACHE="${MODEL_LOCAL_CACHE:-${TMPDIR:-/tmp}/qwen3vl_mot_models}"
 CHECK_PATHS="${CHECK_PATHS:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 
@@ -80,6 +82,7 @@ require_path() {
 require_bool "CHECK_PATHS" "$CHECK_PATHS"
 require_bool "DRY_RUN" "$DRY_RUN"
 require_bool "WEIGHT_RESUME" "$WEIGHT_RESUME"
+require_bool "MODEL_AUTO_DOWNLOAD" "$MODEL_AUTO_DOWNLOAD"
 require_bool "SAMPLE_POOL_ENABLED" "$SAMPLE_POOL_ENABLED"
 require_bool "GENERATION_EVAL_ENABLED" "$GENERATION_EVAL_ENABLED"
 [[ "$SAMPLE_POOL_KEEP_ALL_BELOW_FPS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
@@ -258,13 +261,42 @@ if [[ -n "$GENERATION_BACKBONE" ]]; then
         GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-${WEIGHTS_ROOT}/${_cosmos_name}}"
     fi
 fi
-if [[ -n "$GENERATION_PRETRAINED_DIR" ]]; then
-    GENERATION_ARGS+=(--policy.generation_pretrained_dir="${GENERATION_PRETRAINED_DIR}")
-fi
 if [[ -n "$GENERATION_TUNING_MODE" ]]; then
     [[ "$GENERATION_TUNING_MODE" == "full" || "$GENERATION_TUNING_MODE" == "frozen" ]] \
         || die "GENERATION_TUNING_MODE must be full or frozen"
     GENERATION_ARGS+=(--policy.generation_tuning_mode="${GENERATION_TUNING_MODE}")
+fi
+if [[ "$CHECK_PATHS" == "true" ]]; then
+    require_dir "dataset parent_dir_v21" "$PARENT_DIR_V21"
+    require_dir "dataset parent_dir_v30" "$PARENT_DIR_V30"
+    if [[ -n "$PARENT_DIR_EXTRA" ]]; then
+        require_dir "dataset parent_dir_extra" "$PARENT_DIR_EXTRA"
+    fi
+    if [[ "$WEIGHT_RESUME" != "true" ]]; then
+        require_path "Stage 1 checkpoint" "$STAGE1_CHECKPOINT"
+        if [[ -n "$STAGE1_CONFIG" ]]; then
+            require_file "Stage 1 config" "$STAGE1_CONFIG"
+        fi
+    fi
+fi
+if [[ "$DRY_RUN" != "true" && ( "$MODEL_AUTO_DOWNLOAD" == "true" || "$CHECK_PATHS" == "true" ) ]]; then
+    MODEL_CACHE_ARGS=()
+    if [[ "$WEIGHT_RESUME" != "true" ]]; then
+        MODEL_CACHE_ARGS+=(--need-generation)
+    fi
+    RESOLVED_MODEL_PATHS="$("${PYTHON_BIN}" -m lerobot.common.utils.stage2_model_cache \
+        --qwen-dir="$QWEN3VL_DIR" --cosmos-dir="$COSMOS3_DIR" \
+        --generation-dir="$GENERATION_PRETRAINED_DIR" \
+        --generation-backbone="$GENERATION_BACKBONE" \
+        --cache-dir="$MODEL_LOCAL_CACHE" --auto-download="$MODEL_AUTO_DOWNLOAD" \
+        "${MODEL_CACHE_ARGS[@]}")"
+    mapfile -t _model_paths <<< "$RESOLVED_MODEL_PATHS"
+    QWEN3VL_DIR="${_model_paths[0]}"
+    COSMOS3_DIR="${_model_paths[1]}"
+    GENERATION_PRETRAINED_DIR="${_model_paths[2]:-}"
+fi
+if [[ -n "$GENERATION_PRETRAINED_DIR" ]]; then
+    GENERATION_ARGS+=(--policy.generation_pretrained_dir="${GENERATION_PRETRAINED_DIR}")
 fi
 
 # PyTorch wheels may ship a newer CUDA runtime than /usr/local/cuda. NVRTC loads its
@@ -297,11 +329,6 @@ if [[ "$CHECK_PATHS" == "true" ]]; then
 
     require_dir "Cosmos3 VAE model" "$COSMOS3_DIR"
     require_file "Cosmos3 VAE config" "$COSMOS3_DIR/vae/config.json"
-    require_dir "dataset parent_dir_v21" "$PARENT_DIR_V21"
-    require_dir "dataset parent_dir_v30" "$PARENT_DIR_V30"
-    if [[ -n "$PARENT_DIR_EXTRA" ]]; then
-        require_dir "dataset parent_dir_extra" "$PARENT_DIR_EXTRA"
-    fi
     if [[ "$WEIGHT_RESUME" != "true" ]]; then
         if [[ "$GENERATION_BACKBONE" != "random" ]]; then
             require_file "pretrained generation config" "$GENERATION_PRETRAINED_DIR/transformer/config.json"
@@ -310,10 +337,6 @@ if [[ "$CHECK_PATHS" == "true" ]]; then
             shopt -u nullglob
             (( ${#_generation_shards[@]} > 0 )) \
                 || die "pretrained generation directory contains no *.safetensors: $GENERATION_PRETRAINED_DIR/transformer"
-        fi
-        require_path "Stage 1 checkpoint" "$STAGE1_CHECKPOINT"
-        if [[ -n "$STAGE1_CONFIG" ]]; then
-            require_file "Stage 1 config" "$STAGE1_CONFIG"
         fi
     fi
 fi
@@ -353,6 +376,7 @@ echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
 echo "  generation_backbone=${GENERATION_BACKBONE:-<from checkpoint>} pretrained=${GENERATION_PRETRAINED_DIR:-<not required on resume>}"
 echo "  generation_tuning=${GENERATION_TUNING_MODE:-saved config on resume; full on fresh run}"
+echo "  model_auto_download=${MODEL_AUTO_DOWNLOAD} node_cache=${MODEL_LOCAL_CACHE} dry_run=${DRY_RUN}"
 echo "distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
 echo "checkpoint: control_backend=gloo sync_files=${FSDP_CHECKPOINT_SYNC_FILES} threads=${FSDP_CHECKPOINT_THREADS} heartbeat=${FSDP_CHECKPOINT_HEARTBEAT_SECONDS}s"
 
@@ -368,6 +392,7 @@ else
         --nnodes="${NNODES}"
         --nproc_per_node="${NPROC_PER_NODE}"
         --node_rank="${NODE_RANK}"
+        --rdzv_conf="timeout=$((DISTRIBUTED_TIMEOUT_MINUTES * 60))"
         --master_addr="${MASTER_ADDR}"
         --master_port="${MASTER_PORT}"
     )

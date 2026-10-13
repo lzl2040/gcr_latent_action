@@ -78,7 +78,43 @@ resume 时不设置 `GENERATION_BACKBONE`/`GENERATION_TUNING_MODE`，读取保�
 
 预训练只提供生成先验，Qwen 条件和机器人新模态仍需适配训练，不保证零样本保持原生
 Cosmos pipeline 的视频质量。现有 Euler sampler 与 task/multi-view/teacher 契约保留。
-官方只测试 BF16；初次迁移建议 `FP8=false`，确认表现后再开启仓库的 FP8 路径。
+官方只测试 BF16；初次迁移建议 `FP8_ENABLED=false`，确认表现后再开启仓库的 FP8 路径。
+
+### Blob 缺少权重时自动下载到节点本地
+
+两个 launcher 默认 `MODEL_AUTO_DOWNLOAD=true`。优先读取指定的模型目录，包括 Blob
+挂载中的现有权重；配置、必要的 processor/tokenizer、index 所需 shards 不完整或
+safetensors 文件被截断时，改为下载官方模型到**节点本地磁盘**，不修改原来的挂载目录。
+
+默认缓存为 `${TMPDIR:-/tmp}/qwen3vl_mot_models`，可以指定本地 SSD/scratch：
+
+```bash
+MODEL_LOCAL_CACHE=/path/to/node-local-ssd/qwen3vl_mot_models \
+GENERATION_BACKBONE=nano \
+JOB_NAME=qwen3vl_mot_pretrained_nano \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+`MODEL_LOCAL_CACHE` 不要设为 Blob、NFS 等共享挂载或 tmpfs；启动器会检查实际
+filesystem（包括目录 symlink 指向的挂载），不允许下载到这些位置。每节点在启动
+`torchrun`/DeepSpeed 前完成下载，用文件锁避免并发重复下载，该节点的全部 GPU 共用
+同一份缓存。多节点分别缓存，不要求各节点通过共享目录等待下载完成。
+多节点 rendezvous 的等待时间使用 `DISTRIBUTED_TIMEOUT_MINUTES`（默认 60 分钟），
+避免已有缓存的节点过早超时；下载特别慢时可增大该值。
+
+只下载训练实际需要的文件：Qwen 权重与 processor/tokenizer；Cosmos VAE；fresh
+Edge/Nano 的 transformer shards 与配套 VAE 配置，不下载 Cosmos 原生视觉塔、音频等
+无关组件。官方仓库 revision 固定以便复现。Hub 和 Xet 下载缓存也在本地目录，不受
+指向 Blob 的 `HF_HOME` 影响。HF 登录信息照常读取；需要认证时将 `HF_TOKEN` 通过
+集群 secret/环境变量注入，不要写到脚本或 YAML。
+
+已有完整本地缓存可直接复用，无需联网；下载失败、磁盘空间不足或下载后检查失败
+会终止启动，不会退回随机权重。Nano transformer 约 30.35 GB，另需预留 Qwen、VAE
+和下载缓存的磁盘空间。自动处理不包括 Stage 1 私有 checkpoint，仍需提供它。
+
+resume 只补齐当前构造流程需要的 Qwen 和 VAE，不下载原始生成 transformer、
+不覆盖训练 checkpoint。FSDP `DRY_RUN=true` 不联网、不创建模型缓存。
+设置 `MODEL_AUTO_DOWNLOAD=false` 可禁用自动下载，让缺失模型明确报错。
 
 ## 多视角条件与未来视频生成
 

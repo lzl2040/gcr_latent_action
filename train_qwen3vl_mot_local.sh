@@ -13,6 +13,15 @@ if [[ "${WEIGHT_RESUME}" != "true" ]]; then
     : "${STAGE1_CHECKPOINT:?Set STAGE1_CHECKPOINT for a fresh stage-two run}"
 fi
 OUTPUT_DIR="${OUTPUT_DIR:-qwen3vl_mot}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+QWEN3VL_DIR="${QWEN3VL_DIR:-/Data/lzl/huggingface/Qwen3-VL-4B-Instruct}"
+COSMOS3_DIR="${COSMOS3_DIR:-/Data/lzl/huggingface/Cosmos3-Edge}"
+MODEL_AUTO_DOWNLOAD="${MODEL_AUTO_DOWNLOAD:-true}"
+MODEL_LOCAL_CACHE="${MODEL_LOCAL_CACHE:-${TMPDIR:-/tmp}/qwen3vl_mot_models}"
+if [[ "$MODEL_AUTO_DOWNLOAD" != "true" && "$MODEL_AUTO_DOWNLOAD" != "false" ]]; then
+    echo "Error: MODEL_AUTO_DOWNLOAD must be true or false" >&2
+    exit 1
+fi
 SAMPLE_POOL_ROOT="${SAMPLE_POOL_ROOT:-$(dirname "${OUTPUT_DIR}")/_sample_pools}"
 SAMPLE_POOL_CACHE_DIR="${SAMPLE_POOL_CACHE_DIR:-${TMPDIR:-/tmp}/robo_contrast_sample_pools}"
 STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
@@ -39,9 +48,6 @@ if [[ -n "$GENERATION_BACKBONE" ]]; then
         fi
         GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-/Data/lzl/huggingface/${_cosmos_name}}"
     fi
-fi
-if [[ -n "$GENERATION_PRETRAINED_DIR" ]]; then
-    GENERATION_ARGS+=(--policy.generation_pretrained_dir="${GENERATION_PRETRAINED_DIR}")
 fi
 if [[ -n "$GENERATION_TUNING_MODE" ]]; then
     if [[ "$GENERATION_TUNING_MODE" != "full" && "$GENERATION_TUNING_MODE" != "frozen" ]]; then
@@ -89,6 +95,24 @@ export LEROBOT_VIDEO_DECODER_CACHE_SIZE="${LEROBOT_VIDEO_DECODER_CACHE_SIZE:-256
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
+MODEL_CACHE_ARGS=()
+if [[ "$WEIGHT_RESUME" != "true" ]]; then
+    MODEL_CACHE_ARGS+=(--need-generation)
+fi
+RESOLVED_MODEL_PATHS="$("${PYTHON_BIN}" -m lerobot.common.utils.stage2_model_cache \
+    --qwen-dir="$QWEN3VL_DIR" --cosmos-dir="$COSMOS3_DIR" \
+    --generation-dir="$GENERATION_PRETRAINED_DIR" \
+    --generation-backbone="$GENERATION_BACKBONE" \
+    --cache-dir="$MODEL_LOCAL_CACHE" --auto-download="$MODEL_AUTO_DOWNLOAD" \
+    "${MODEL_CACHE_ARGS[@]}")"
+mapfile -t _model_paths <<< "$RESOLVED_MODEL_PATHS"
+QWEN3VL_DIR="${_model_paths[0]}"
+COSMOS3_DIR="${_model_paths[1]}"
+GENERATION_PRETRAINED_DIR="${_model_paths[2]:-}"
+if [[ -n "$GENERATION_PRETRAINED_DIR" ]]; then
+    GENERATION_ARGS+=(--policy.generation_pretrained_dir="${GENERATION_PRETRAINED_DIR}")
+fi
+
 MASTER_PORT="${MASTER_PORT:-$(python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")}"
 STAGE1_CONFIG_ARGS=()
 STAGE1_CHECKPOINT_ARGS=()
@@ -102,8 +126,8 @@ fi
 deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --deepspeed="${DEEPSPEED_CONFIG:-./ds_zero2_qwen3vl_mot.json}" \
     --policy.type="qwen3vl_mot" \
-    --policy.qwen3vl_dir="${QWEN3VL_DIR:-/Data/lzl/huggingface/Qwen3-VL-4B-Instruct}" \
-    --policy.cosmos3_dir="${COSMOS3_DIR:-/Data/lzl/huggingface/Cosmos3-Edge}" \
+    --policy.qwen3vl_dir="${QWEN3VL_DIR}" \
+    --policy.cosmos3_dir="${COSMOS3_DIR}" \
     "${GENERATION_ARGS[@]}" \
     --policy.understanding_tuning_mode="${UNDERSTANDING_TUNING_MODE:-lora}" \
     --policy.understanding_lora_rank="${UNDERSTANDING_LORA_RANK:-16}" \
