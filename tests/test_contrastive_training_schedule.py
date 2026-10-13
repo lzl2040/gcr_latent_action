@@ -21,6 +21,7 @@ from lerobot.scripts.fsdp_train_contrast import (
     FSDPTrainPipelineConfig,
     _normalize_resume_position,
     _planned_update_steps,
+    _stage2_metrics,
 )
 
 
@@ -352,6 +353,51 @@ def test_old_stage2_config_without_physical_flow_field_restores_raw_contract(tmp
     assert cfg.policy.physical_flow_space == "raw"
 
 
+@pytest.mark.parametrize("saved_weight", [None, 0.0, 0.2])
+@pytest.mark.parametrize("override_weight", [0.0, 0.1])
+def test_stage2_resume_preserves_or_explicitly_overrides_prediction_reconstruction(
+    tmp_path, saved_weight, override_weight
+):
+    Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False,
+        physical_flow_space="embedding",
+        action_prediction_reconstruction_loss_weight=saved_weight or 0.0,
+    )._save_pretrained(tmp_path)
+    path = tmp_path / "config.json"
+    if saved_weight is None:
+        payload = json.loads(path.read_text())
+        del payload["action_prediction_reconstruction_loss_weight"]
+        path.write_text(json.dumps(payload))
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path,
+        policy=Qwen3VLMoTConfig(action_prediction_reconstruction_loss_weight=0.1),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.action_prediction_reconstruction_loss_weight == (saved_weight or 0.0)
+    cfg.policy.action_prediction_reconstruction_loss_weight = override_weight
+    _load_stage2_resume_policy_config(
+        cfg, args=[f"--policy.action_prediction_reconstruction_loss_weight={override_weight}"]
+    )
+    assert cfg.policy.action_prediction_reconstruction_loss_weight == override_weight
+    assert "action_prediction_reconstruction_loss" in _stage2_metrics(cfg)
+
+
+def test_stage2_resume_rejects_prediction_reconstruction_for_raw_space(tmp_path):
+    Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False,
+    )._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path,
+        policy=Qwen3VLMoTConfig(action_prediction_reconstruction_loss_weight=0.1),
+        use_policy_training_preset=False,
+    )
+    with pytest.raises(ValueError, match="requires embedding-space"):
+        _load_stage2_resume_policy_config(
+            cfg, args=["--policy.action_prediction_reconstruction_loss_weight=0.1"]
+        )
+
+
 @pytest.mark.parametrize("checkpoint_present,explicit_mode,expected_mode", [
     (False, "", "embedding"), (False, "raw", "raw"),
     (True, "", None), (True, "embedding", "embedding"),
@@ -369,6 +415,7 @@ def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedd
         "CHECK_PATHS": "false", "DRY_RUN": "true", "WEIGHT_RESUME": "true",
         "OUTPUT_DIR": str(run_dir), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
         "PHYSICAL_FLOW_SPACE": explicit_mode, "PYTHON_BIN": sys.executable,
+        "ACTION_PRED_RECON_WEIGHT": "",
         "NPROC_PER_NODE": "1", "NNODES": "1", "MASTER_PORT": "29599",
     }
     root = Path(__file__).resolve().parents[1]
@@ -381,6 +428,66 @@ def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedd
         assert "physical_flow_space=<from checkpoint>" in result.stdout
     else:
         assert f"--policy.physical_flow_space={expected_mode}" in result.stdout
+    if not checkpoint_present and expected_mode == "embedding":
+        assert "--policy.action_prediction_reconstruction_loss_weight=0.1" in result.stdout
+    else:
+        assert "--policy.action_prediction_reconstruction_loss_weight=" not in result.stdout
+
+
+@pytest.mark.parametrize("resume,weight", [(False, "0"), (False, "0.2"), (True, "0.1")])
+def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path, resume, weight):
+    run_dir = tmp_path / "run"
+    if resume:
+        checkpoint = run_dir / "checkpoint_00000001"
+        checkpoint.mkdir(parents=True)
+        (run_dir / "latest_checkpoint").write_text(checkpoint.name)
+    env = {
+        **os.environ,
+        "CHECK_PATHS": "false", "DRY_RUN": "true", "WEIGHT_RESUME": "true",
+        "OUTPUT_DIR": str(run_dir), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
+        "PHYSICAL_FLOW_SPACE": "", "ACTION_PRED_RECON_WEIGHT": weight,
+        "PYTHON_BIN": sys.executable, "NPROC_PER_NODE": "1", "NNODES": "1",
+        "MASTER_PORT": "29599",
+    }
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["bash", str(root / "train_qwen3vl_mot_fsdp.sh")], cwd=root,
+        env=env, capture_output=True, text=True, check=True, timeout=30,
+    )
+    assert f"--policy.action_prediction_reconstruction_loss_weight={weight}" in result.stdout
+
+
+@pytest.mark.parametrize("resume,mode,weight,expected", [
+    (False, "", "", "0.1"), (False, "raw", "", None),
+    (True, "", "", None), (True, "embedding", "", None),
+    (False, "", "0", "0"), (True, "", "0", "0"), (True, "", "0.2", "0.2"),
+])
+def test_local_launcher_wires_prediction_reconstruction_weight(tmp_path, resume, mode, weight, expected):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python_stub = bin_dir / "model-cache-stub"
+    python_stub.write_text("#!/usr/bin/env bash\nprintf '%s\\n' /mock/qwen /mock/cosmos /mock/generation\n")
+    python_stub.chmod(0o755)
+    deepspeed_stub = bin_dir / "deepspeed"
+    deepspeed_stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n')
+    deepspeed_stub.chmod(0o755)
+    root = Path(__file__).resolve().parents[1]
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHON_BIN": str(python_stub),
+        "WEIGHT_RESUME": str(resume).lower(), "PHYSICAL_FLOW_SPACE": mode,
+        "ACTION_PRED_RECON_WEIGHT": weight, "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
+        "OUTPUT_DIR": str(tmp_path / "run"), "MASTER_PORT": "29599",
+        "STAGE2_TASK_NAMES": "", "STAGE2_TASK_WEIGHTS": "",
+    }
+    result = subprocess.run(
+        ["bash", str(root / "train_qwen3vl_mot_local.sh")], cwd=root,
+        env=env, capture_output=True, text=True, check=True, timeout=30,
+    )
+    if expected is None:
+        assert "--policy.action_prediction_reconstruction_loss_weight=" not in result.stdout
+    else:
+        assert f"--policy.action_prediction_reconstruction_loss_weight={expected}" in result.stdout
 
 
 @pytest.mark.parametrize("kind", ["random", "edge", "nano"])

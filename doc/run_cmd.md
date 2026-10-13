@@ -216,6 +216,23 @@ action 推理先编码当前 state 一次，然后直接在 action embedding 空
 需要复现旧的原始空间 flow 时，新实验可显式设置 `PHYSICAL_FLOW_SPACE=raw`。
 多视角、RGB flow、触觉 codec 和 primary-only teacher 的契约均保持不变。
 
+新建 embedding 实验还默认启用预测 action 重建，初始权重为 `0.1`：
+先计算 `z0_hat = z_sigma - sigma * v_pred`，再通过 action decoder，与真实归一化
+canonical action 计算 masked MSE。该损失不 detach 预测 embedding，因此会更新生成网络，
+而原 `action_reconstruction_loss` 仍使用干净真实 embedding、只训练 decoder。
+新日志名为 `action_prediction_reconstruction_loss`（控制台缩写 `action_pred`）。
+
+```bash
+ACTION_PRED_RECON_WEIGHT=0.1 \
+  bash train_qwen3vl_mot_fsdp.sh
+```
+
+设置 `0` 关闭；该参数只适用于 embedding 模式。fresh raw 实验默认关闭。
+resume 默认使用 checkpoint 保存的权重，旧 checkpoint 缺字段时保持 `0`；
+若要给已有 embedding 实验增加该监督，显式设置 `ACTION_PRED_RECON_WEIGHT=0.1`。
+inverse/joint/action_prediction 的 action 目标启用该项，forward 不增加；
+state 任务语义、原 codec 重建、flow loss、噪声分布和多步采样器不变。
+
 首次运行或基础镜像更新后，安装 Stage 2 已验证的 FP8/8-bit optimizer 版本：
 
 ```bash
@@ -905,6 +922,7 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `GENERATION_EVAL_VIDEO_FPS` | `8` | 导出 MP4 的播放帧率 |
 | `STAGE2_TASK_NAMES` | 未设置 | 逗号分隔的任务列表；恢复时必须与 checkpoint 完全一致 |
 | `STAGE2_TASK_WEIGHTS` | 未设置 | 与任务列表等长的非负相对权重；global batch 内按可用监督重归一化 |
+| `ACTION_PRED_RECON_WEIGHT` | fresh embedding `0.1`；resume 使用保存值，旧配置 `0` | 预测 embedding 解码 action 的 masked MSE 权重；`0` 关闭，仅支持 embedding |
 | `TACTILE_GENERATION_TARGET` | `spatial_patches` | 新训练使用可解码触觉空间 latent |
 | `FSDP_CHECKPOINT_SYNC_FILES` | `false` | DCP 是否对每个 shard 强制 `fsync` |
 | `FSDP_CHECKPOINT_THREADS` | `1` | 每个 rank 的 DCP writer 线程数 |

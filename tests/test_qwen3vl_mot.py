@@ -1064,6 +1064,7 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         generation_gradient_checkpointing=False,
         rgb_views=("primary", "secondary", "wrist") if multiview else ("primary",),
         physical_flow_space=flow_space,
+        action_prediction_reconstruction_loss_weight=0.1 if flow_space == "embedding" else 0.0,
         inference_steps=3,
     )
     policy = stage2.Qwen3VLMoTPolicy(config)
@@ -1098,8 +1099,31 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         })
         batch["images_t0"][:, 1:] = 125
         batch["video_views"][:, 1:] = 125
+    generation_inputs = {}
+    generation_outputs = {}
+    decoder_inputs = []
+
+    def record_generation_inputs(module, args):
+        generation_inputs.clear()
+        generation_inputs.update({
+            stream.name: (stream.values.detach().clone(), stream.sigma.detach().clone())
+            for stream in args[0]
+        })
+
+    def record_generation_outputs(module, args, output):
+        generation_outputs.clear()
+        generation_outputs.update({name: value.detach().clone() for name, value in output.items()})
+
+    policy.generation.register_forward_pre_hook(record_generation_inputs)
+    policy.generation.register_forward_hook(record_generation_outputs)
+    if flow_space == "embedding":
+        policy.physical_decoders["action"].register_forward_pre_hook(
+            lambda module, args: decoder_inputs.append(args[0].detach().clone())
+        )
+
     for task_name in TASK_SPECS:
         policy.physical_encoder.include_tactile_history.clear()
+        decoder_inputs.clear()
         rng = torch.get_rng_state()
         loss, metrics = policy(batch, task_type=task_name)
         assert torch.isfinite(loss)
@@ -1122,6 +1146,20 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
             "action_prediction",
         ):
             assert metrics["action_target_elements"] == 32
+        if flow_space == "embedding" and TASK_SPECS[task_name].action.is_target:
+            assert len(decoder_inputs) == 2
+            noisy, sigma = generation_inputs["action"]
+            expected = noisy.float() - sigma.float()[:, None, None] * generation_outputs["action"].float()
+            torch.testing.assert_close(decoder_inputs[1], expected)
+            assert not torch.equal(decoder_inputs[0], decoder_inputs[1])
+            with torch.no_grad():
+                predicted = policy._decode_physical_embedding("action", expected)
+                expected_loss = (predicted - batch["action"].reshape(2, 2, 8)).square().mean()
+            assert metrics["action_prediction_reconstruction_loss"] == pytest.approx(expected_loss.item())
+            assert metrics["action_prediction_reconstruction_elements"] == 32
+        else:
+            assert metrics["action_prediction_reconstruction_loss"] == 0
+            assert metrics["action_prediction_reconstruction_elements"] == 0
         if task_name in ("forward_dynamics", "inverse_dynamics"):
             assert "state_flow_loss" not in metrics
             assert "state_reconstruction_loss" not in metrics
@@ -1167,6 +1205,59 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
             assert policy.teacher_perception.anchor.grad is None
             torch.testing.assert_close(policy.teacher_perception.last_images[0], batch["image_t0"])
             torch.testing.assert_close(policy.teacher_perception.last_images[1], batch["image_t1"])
+    if flow_space == "embedding":
+        old_action_weight = policy.config.action_loss_weight
+        old_latent_weight = policy.config.latent_action_loss_weight
+        policy.config.action_loss_weight = 0.0
+        policy.config.latent_action_loss_weight = 0.0
+        masked = copy.deepcopy(batch)
+        masked["action_mask"][0, 1] = 0
+        masked["pair_is_valid"][1] = 0
+        if multiview:
+            masked["video_view_mask"][1] = False
+        torch.manual_seed(83)
+        active_loss, active_metrics = policy(masked, task_type="inverse_dynamics")
+        assert active_metrics["action_prediction_reconstruction_elements"] == 12
+        policy.config.action_prediction_reconstruction_loss_weight = 0.0
+        torch.manual_seed(83)
+        baseline_loss, baseline_metrics = policy(masked, task_type="inverse_dynamics")
+        assert baseline_metrics["action_prediction_reconstruction_loss"] == 0
+        auxiliary = active_loss - baseline_loss
+        assert auxiliary.item() == pytest.approx(
+            0.1 * active_metrics["action_prediction_reconstruction_loss"], abs=1e-6
+        )
+        policy.zero_grad(set_to_none=True)
+        auxiliary.backward()
+        assert policy.generation.output_heads["action"].weight.grad.abs().sum() > 0
+        assert policy.physical_decoders["action"][-1].weight.grad.abs().sum() > 0
+        assert policy.generation.output_heads["state"].weight.grad is None
+        assert policy.physical_decoders["state"][-1].weight.grad is None
+        assert policy.physical_encoder.anchor.grad is None
+        policy.config.action_loss_weight = old_action_weight
+        policy.config.latent_action_loss_weight = old_latent_weight
+        policy.config.action_prediction_reconstruction_loss_weight = 0.1
+        oracle_clean, _, _, _ = policy._clean_physical_embedding(
+            batch, "action", torch.ones(2, dtype=torch.bool)
+        )
+
+        def perfect_velocity(module, args, outputs):
+            stream = next(stream for stream in args[0] if stream.name == "action")
+            velocity = (stream.values.float() - oracle_clean) / stream.sigma[:, None, None]
+            return {**outputs, "action": velocity}
+
+        oracle_hook = policy.generation.register_forward_hook(perfect_velocity)
+        _, oracle_metrics = policy(batch, task_type="inverse_dynamics")
+        oracle_hook.remove()
+        assert oracle_metrics["action_prediction_reconstruction_loss"] == pytest.approx(
+            oracle_metrics["action_reconstruction_loss"], abs=1e-5
+        )
+        policy.zero_grad(set_to_none=True)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            mixed_loss, mixed_metrics = policy(batch, task_type="inverse_dynamics")
+        assert torch.isfinite(mixed_loss)
+        assert mixed_metrics["action_prediction_reconstruction_elements"] == 32
+        mixed_loss.backward()
+        assert torch.isfinite(policy.generation.output_heads["action"].weight.grad).all()
     canonical_action = policy.sample_canonical_action(batch)
     assert canonical_action.shape == (2, 2, 4)
     if multiview:
@@ -1760,6 +1851,21 @@ def test_embedding_physical_path_with_real_stage1_transformer(dtype):
 def test_embedding_flow_rejects_invalid_codec_contracts(kwargs):
     with pytest.raises(ValueError):
         Qwen3VLMoTConfig(**kwargs)
+
+
+@pytest.mark.parametrize("weight", [-1.0, float("nan"), float("inf")])
+def test_predicted_action_reconstruction_rejects_invalid_weights(weight):
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        Qwen3VLMoTConfig(action_prediction_reconstruction_loss_weight=weight)
+
+
+def test_predicted_action_reconstruction_requires_embedding_at_model_construction():
+    config = Qwen3VLMoTConfig(action_prediction_reconstruction_loss_weight=0.1)
+    with pytest.raises(ValueError, match="requires embedding-space"):
+        config.validate_features()
+    Qwen3VLMoTConfig(
+        physical_flow_space="embedding", action_prediction_reconstruction_loss_weight=0.1
+    ).validate_features()
 
 
 def test_physical_decoder_outputs_eight_groups_of_160_then_32_by_40():

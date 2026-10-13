@@ -864,6 +864,7 @@ $$
 $$
 L=L_\mathrm{flow}+\lambda_\mathrm{latent}L_\mathrm{latent}
   +\lambda_\mathrm{physical\ recon}L_\mathrm{physical\ recon}
+  +\lambda_\mathrm{action\ prediction}L_\mathrm{action\ prediction}
 $$
 
 其中 `latent_action_loss_weight` 默认是 `1.0`。
@@ -871,6 +872,35 @@ embedding-space 模式对任务中每个存在的 state/action 模态计算
 `MSE(decoder(clean_embedding), clean_canonical_groups)`，只覆盖有效 canonical 元素；
 `physical_reconstruction_loss_weight` 默认 `1.0`。
 该损失训练 decoder，不更新冻结 encoder；没有物理输入的 i2v/t2v 不计算此项。
+
+### 10.4 预测 embedding 的 action 重建监督
+
+embedding-space 模式中，当 action 是 flow target 时，根据当前带噪 embedding 和预测速度计算：
+
+$$
+\hat z_0=z_\sigma-\sigma\hat v_\theta,\qquad
+L_\mathrm{action\ prediction}
+=\mathrm{MSE}_{\mathrm{valid}}\left(D_\mathrm{action}(\hat z_0),a\right)
+$$
+
+这里使用 action 自己的 sigma；endpoint 估计的减法在 FP32 中计算，不用
+`noise - v_pred`，也不除以 sigma。预测 embedding 不 detach，损失更新 Generation、
+action decoder 及参与条件计算的可训练 Understanding 参数；Physical Encoder 保持冻结。
+target 是归一化 canonical action，不是机器人原单位，mask 同时屏蔽无效 rows 和缺失维度。
+
+日志名为 `action_prediction_reconstruction_loss`，与只训练 decoder 的
+`action_reconstruction_loss` 区分，记录未乘权重的 MSE。
+inverse、joint、独立 action_prediction 会使用该项；forward 的 action 是干净条件，
+不增加预测 action loss，也不因此引入 state。原 flow、clean codec 重建和蒸馏损失均保留。
+
+配置项为 `action_prediction_reconstruction_loss_weight`：
+两个 launcher 的 fresh embedding 实验默认 `0.1`，这是初始权重而非质量 benchmark 的最优值；
+`ACTION_PRED_RECON_WEIGHT=0` 可关闭。直接构造 config 或旧 checkpoint 缺字段时默认为 `0`，
+避免隐式改变已有实验。resume 默认保留保存的权重，显式设置环境变量可启用或调整，
+不改变模型参数形状或 optimizer state；raw 模式不支持启用该项。
+
+采样仍直接在 embedding 上积分 velocity，最后 decode 一次；该改动只增加训练监督，
+不改变 Euler schedule、视频预训练输出语义、任务定义或现有 uniform sigma 分布。
 
 ---
 

@@ -43,6 +43,7 @@ STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
 STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
 PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
+ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
 GENERATION_BACKBONE="${GENERATION_BACKBONE:-}"
 GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-}"
 GENERATION_TUNING_MODE="${GENERATION_TUNING_MODE:-}"
@@ -253,6 +254,14 @@ if [[ -n "$PHYSICAL_FLOW_SPACE" ]]; then
         || die "PHYSICAL_FLOW_SPACE must be raw or embedding"
     PHYSICAL_FLOW_ARGS+=(--policy.physical_flow_space="${PHYSICAL_FLOW_SPACE}")
 fi
+if [[ "$WEIGHT_RESUME" != "true" && "$PHYSICAL_FLOW_SPACE" == "embedding" ]]; then
+    ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-0.1}"
+fi
+if [[ -n "$ACTION_PRED_RECON_WEIGHT" ]]; then
+    PHYSICAL_FLOW_ARGS+=(
+        --policy.action_prediction_reconstruction_loss_weight="${ACTION_PRED_RECON_WEIGHT}"
+    )
+fi
 GENERATION_ARGS=()
 if [[ "$WEIGHT_RESUME" != "true" ]]; then
     GENERATION_BACKBONE="${GENERATION_BACKBONE:-edge}"
@@ -382,6 +391,7 @@ fi
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
+echo "  action_pred_recon_weight=${ACTION_PRED_RECON_WEIGHT:-<from checkpoint; legacy default 0>}"
 echo "  generation_backbone=${GENERATION_BACKBONE:-<from checkpoint>} pretrained=${GENERATION_PRETRAINED_DIR:-<not required on resume>}"
 echo "  generation_tuning=${GENERATION_TUNING_MODE:-saved config on resume; full on fresh run}"
 echo "  training_stage=${TRAINING_STAGE} (auto: LIBERO=finetune, other mixtures=pretrain)"

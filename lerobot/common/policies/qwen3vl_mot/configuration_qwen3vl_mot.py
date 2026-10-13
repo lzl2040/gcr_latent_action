@@ -79,6 +79,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     # Saved configs without this field retain the original raw-space flow contract.
     physical_flow_space: str = "raw"
     physical_reconstruction_loss_weight: float = 1.0
+    action_prediction_reconstruction_loss_weight: float = 0.0
     physical_lr_scale: float = 0.3
     max_tactile_views: int = 6
     tactile_tokens_per_pad: int = 2
@@ -194,6 +195,11 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
             )
         if self.physical_flow_space not in ("raw", "embedding"):
             raise ValueError("`physical_flow_space` must be 'raw' or 'embedding'.")
+        if not (
+            math.isfinite(self.action_prediction_reconstruction_loss_weight)
+            and self.action_prediction_reconstruction_loss_weight >= 0
+        ):
+            raise ValueError("`action_prediction_reconstruction_loss_weight` must be finite and non-negative.")
         if self.physical_flow_space == "embedding":
             if self.physical_tuning_mode != "frozen":
                 raise ValueError("Embedding-space physical flow requires a frozen Physical Encoder.")
@@ -296,6 +302,8 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
         return None
 
     def validate_features(self) -> None:
+        if self.action_prediction_reconstruction_loss_weight > 0 and self.physical_flow_space != "embedding":
+            raise ValueError("Predicted action reconstruction requires embedding-space physical flow.")
         return None
 
     def get_optimizer_preset(self) -> AdamW8bitConfig:

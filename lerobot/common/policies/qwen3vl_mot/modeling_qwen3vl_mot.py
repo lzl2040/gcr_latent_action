@@ -2015,6 +2015,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         }
         loss = predicted_latent_action.sum() * 0.0
         loss_dict = {f"task_{name}": float(name == task.name) for name in self.config.task_names}
+        loss_dict["action_prediction_reconstruction_loss"] = 0.0
+        loss_dict["action_prediction_reconstruction_elements"] = 0.0
         for name, (target, mask) in targets.items():
             modality_loss, metric, count = self._distributed_mse(
                 predictions[name],
@@ -2032,6 +2034,20 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             loss = loss + self.config.physical_reconstruction_loss_weight * reconstruction_loss
             loss_dict[f"{name}_reconstruction_loss"] = metric
             loss_dict[f"{name}_reconstruction_elements"] = count
+            if (
+                name == "action" and task.action.is_target
+                and self.config.action_prediction_reconstruction_loss_weight > 0
+            ):
+                action_stream = next(stream for stream in physical_streams if stream.name == "action")
+                noisy = action_stream.values[:, :clean.shape[1]].float()
+                velocity = predictions["action"][:, :clean.shape[1]].float()
+                sigma = sigmas["action"].float()[:, None, None]
+                predicted_clean = noisy - sigma * velocity
+                predicted_action = self._decode_physical_embedding("action", predicted_clean)
+                prediction_loss, metric, count = self._distributed_mse(predicted_action, raw, mask)
+                loss = loss + self.config.action_prediction_reconstruction_loss_weight * prediction_loss
+                loss_dict["action_prediction_reconstruction_loss"] = metric
+                loss_dict["action_prediction_reconstruction_elements"] = count
 
         if task.understanding_image:
             latent_loss, metric, count = self._distributed_mse(

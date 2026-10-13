@@ -319,6 +319,11 @@ def _load_stage2_resume_policy_config(
             "Cannot change `policy.physical_flow_space` while resuming: flow heads, decoders, "
             "and optimizer states have different contracts. Start a fresh output directory."
         )
+    if parser.parse_arg("policy.action_prediction_reconstruction_loss_weight", args) is not None:
+        saved_policy.action_prediction_reconstruction_loss_weight = (
+            runtime_policy.action_prediction_reconstruction_loss_weight
+        )
+    saved_policy.validate_features()
     saved_policy.initialize_from_stage1 = False
     cfg.policy = saved_policy
     if cfg.use_policy_training_preset:
@@ -534,6 +539,7 @@ def train(cfg: ContrastiveTrainPipelineConfig):
             "latent_action_loss": AverageMeter("latent", ":.4f"),
             "video_flow_loss": AverageMeter("video", ":.4f"),
             "action_flow_loss": AverageMeter("action", ":.4f"),
+            "action_prediction_reconstruction_loss": AverageMeter("action_pred", ":.4f"),
             "state_flow_loss": AverageMeter("state", ":.4f"),
             "tactile_flow_loss": AverageMeter("tactile", ":.4f"),
             "valid_rows": AverageMeter("valid", ":.1f"),
