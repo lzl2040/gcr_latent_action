@@ -752,7 +752,7 @@ tactile_prediction  0.10
 ```
 
 forward/inverse 的 state role 为 `ABSENT`：不输入 Generation，也不参与 Physical Encoder
-的 action 编码，既没有 `state_flow_loss`，也没有 `state_reconstruction_loss`。
+的 action 编码，既没有 `state_flow_loss`，也没有 `state_prediction_reconstruction_loss`。
 没有有效 state 的 video/action 样本仍能训练这两个任务。只启用 forward、inverse、joint
 时，state loss 只来自 joint；固定日志列出现 0 不代表该 step 增加了 state 监督。
 
@@ -803,10 +803,25 @@ embedding-space 模式中，state/action 的 `x` 指冻结 Physical Transformer 
 flow loss。canonical 维度 mask 用于 encoder 输入和 decoder 重建，不把 40D mask
 错误地直接广播到 latent 维度。
 
-### 10.1 Sigma 解耦
+### 10.1 Sigma 分布和 joint 同步
 
-video、state、action 和 tactile 分别调用 `_sample_sigma()`，因此不同模态的 sigma
-相互独立，不只训练在同一个 sigma 对角线上。
+训练分布由 `time_sampling_distribution` 选择：
+
+| 值 | 单个样本的训练时间 |
+| --- | --- |
+| `uniform`（默认） | `u ~ Uniform(0,1)` |
+| `beta` | `u ~ Beta(alpha,beta)`，默认 `alpha=1.5, beta=1` |
+| `mixed` | 每个样本随机选 Uniform 或 Beta，再从选中的分布采样；默认各占 50% |
+
+统一映射为 `sigma = sigma_min + (sigma_max - sigma_min) * u`。
+`time_sampling_beta_probability` 控制 mixed 中选 Beta 的概率，默认 `0.5`；
+不是将两个采样值求平均。`0` 和 `1` 分别退化成纯 Uniform、纯 Beta。
+
+`joint_prediction` 每个样本只采一次 sigma，video/action/state 的目标共用该值，
+但每个模态各自生成独立高斯噪声；所有 RGB 视角也共用同一 sigma。
+已知当前图像和独立 current-state 条件 token 保持干净。
+其他任务只给需要预测的模态加噪，干净条件的 sigma 保持 `0`。
+分布开关不改变推理时默认 20 步 `1 -> 0` 等间隔 Euler schedule。
 
 ### 10.2 FUTURE_NOISY
 
@@ -863,44 +878,49 @@ $$
 
 $$
 L=L_\mathrm{flow}+\lambda_\mathrm{latent}L_\mathrm{latent}
-  +\lambda_\mathrm{physical\ recon}L_\mathrm{physical\ recon}
   +\lambda_\mathrm{action\ prediction}L_\mathrm{action\ prediction}
+  +\lambda_\mathrm{state\ prediction}L_\mathrm{state\ prediction}
 $$
 
 其中 `latent_action_loss_weight` 默认是 `1.0`。
-embedding-space 模式对任务中每个存在的 state/action 模态计算
-`MSE(decoder(clean_embedding), clean_canonical_groups)`，只覆盖有效 canonical 元素；
-`physical_reconstruction_loss_weight` 默认 `1.0`。
-该损失训练 decoder，不更新冻结 encoder；没有物理输入的 i2v/t2v 不计算此项。
+不再计算 `decoder(clean_GT_embedding)` 的 action/state codec 重建损失。
+旧字段 `physical_reconstruction_loss_weight` 仅用于兼容读取旧配置，
+加载时明确警告并清空，不再影响训练；旧的 action/state reconstruction 日志项也已移除。
 
-### 10.4 预测 embedding 的 action 重建监督
+### 10.4 预测 embedding 的 action/state 重建监督
 
-embedding-space 模式中，当 action 是 flow target 时，根据当前带噪 embedding 和预测速度计算：
+embedding-space 模式中，当 action/state 是 flow target 时，根据其带噪 embedding 和预测速度计算：
 
 $$
 \hat z_0=z_\sigma-\sigma\hat v_\theta,\qquad
-L_\mathrm{action\ prediction}
-=\mathrm{MSE}_{\mathrm{valid}}\left(D_\mathrm{action}(\hat z_0),a\right)
+L_\mathrm{m\ prediction}
+=\mathrm{MSE}_{\mathrm{valid}}\left(D_\mathrm{m}(\hat z_0),y_\mathrm{m}\right),
+\quad m\in\{\mathrm{action},\mathrm{state}\}
 $$
 
-这里使用 action 自己的 sigma；endpoint 估计的减法在 FP32 中计算，不用
+这里使用对应模态的 sigma；endpoint 估计的减法在 FP32 中计算，不用
 `noise - v_pred`，也不除以 sigma。预测 embedding 不 detach，损失更新 Generation、
-action decoder 及参与条件计算的可训练 Understanding 参数；Physical Encoder 保持冻结。
-target 是归一化 canonical action，不是机器人原单位，mask 同时屏蔽无效 rows 和缺失维度。
+对应 decoder 及参与条件计算的可训练 Understanding 参数；Physical Encoder 保持冻结。
+target 是归一化 canonical trajectory，不是机器人原单位，mask 屏蔽无效 rows 和缺失维度。
+state 只监督未来帧，已知第 0 帧不计入数值重建；只取 8 个目标 embedding，
+不把追加的 current-state 条件 token 交给 decoder。
 
-日志名为 `action_prediction_reconstruction_loss`，与只训练 decoder 的
-`action_reconstruction_loss` 区分，记录未乘权重的 MSE。
-inverse、joint、独立 action_prediction 会使用该项；forward 的 action 是干净条件，
-不增加预测 action loss，也不因此引入 state。原 flow、clean codec 重建和蒸馏损失均保留。
+日志名为 `action_prediction_reconstruction_loss` / `state_prediction_reconstruction_loss`，
+记录未乘权重的 MSE。inverse、joint、独立 action_prediction 有 action 重建；
+joint、独立 state_prediction 有未来 state 重建。forward 的 action 是干净条件，
+不增加预测 action loss，也不引入 state。干净条件模态不调用对应 decoder。
+原 flow 和蒸馏损失保留，干净 GT codec 重建已移除。
 
-配置项为 `action_prediction_reconstruction_loss_weight`：
-两个 launcher 的 fresh embedding 实验默认 `0.1`，这是初始权重而非质量 benchmark 的最优值；
-`ACTION_PRED_RECON_WEIGHT=0` 可关闭。直接构造 config 或旧 checkpoint 缺字段时默认为 `0`，
-避免隐式改变已有实验。resume 默认保留保存的权重，显式设置环境变量可启用或调整，
-不改变模型参数形状或 optimizer state；raw 模式不支持启用该项。
+两个 prediction reconstruction weight 在 embedding 模式缺省为 `0.1`，raw 模式为 `0`；
+这是初始权重而非质量 benchmark 的最优值。
+`ACTION_PRED_RECON_WEIGHT=0` / `STATE_PRED_RECON_WEIGHT=0` 可分别关闭。
+resume 保留已保存的权重（包括显式 `0`）；缺失的新字段按模式使用上述缺省值。
+旧实验若保存了 action prediction 权重 `0`，移除 clean codec 后 action decoder 就不会被监督，
+续训时应显式设置正的 action 权重。CLI 可覆盖权重和时间分布，不改变参数/optimizer 形状。
+这是有意的训练目标变更，resume 不会恢复已退役的 clean codec 损失。
 
 采样仍直接在 embedding 上积分 velocity，最后 decode 一次；该改动只增加训练监督，
-不改变 Euler schedule、视频预训练输出语义、任务定义或现有 uniform sigma 分布。
+不改变 Euler schedule、视频预训练输出语义或任务定义。
 
 ---
 

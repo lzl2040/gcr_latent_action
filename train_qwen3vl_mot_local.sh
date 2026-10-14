@@ -34,6 +34,11 @@ STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
 PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
+STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
+TIME_SAMPLING_DISTRIBUTION="${TIME_SAMPLING_DISTRIBUTION:-}"
+TIME_SAMPLING_BETA_ALPHA="${TIME_SAMPLING_BETA_ALPHA:-}"
+TIME_SAMPLING_BETA_BETA="${TIME_SAMPLING_BETA_BETA:-}"
+TIME_SAMPLING_BETA_PROBABILITY="${TIME_SAMPLING_BETA_PROBABILITY:-}"
 GENERATION_BACKBONE="${GENERATION_BACKBONE:-}"
 GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-}"
 GENERATION_TUNING_MODE="${GENERATION_TUNING_MODE:-}"
@@ -75,11 +80,33 @@ if [[ -n "$PHYSICAL_FLOW_SPACE" ]]; then
 fi
 if [[ "$WEIGHT_RESUME" != "true" && "$PHYSICAL_FLOW_SPACE" == "embedding" ]]; then
     ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-0.1}"
+    STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-0.1}"
 fi
 if [[ -n "$ACTION_PRED_RECON_WEIGHT" ]]; then
     PHYSICAL_FLOW_ARGS+=(
         --policy.action_prediction_reconstruction_loss_weight="${ACTION_PRED_RECON_WEIGHT}"
     )
+fi
+if [[ -n "$STATE_PRED_RECON_WEIGHT" ]]; then
+    PHYSICAL_FLOW_ARGS+=(
+        --policy.state_prediction_reconstruction_loss_weight="${STATE_PRED_RECON_WEIGHT}"
+    )
+fi
+if [[ -n "$TIME_SAMPLING_DISTRIBUTION" ]]; then
+    case "$TIME_SAMPLING_DISTRIBUTION" in
+        uniform|beta|mixed) ;;
+        *) echo "Error: TIME_SAMPLING_DISTRIBUTION must be uniform, beta or mixed" >&2; exit 1 ;;
+    esac
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_distribution="${TIME_SAMPLING_DISTRIBUTION}")
+fi
+if [[ -n "$TIME_SAMPLING_BETA_ALPHA" ]]; then
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_beta_alpha="${TIME_SAMPLING_BETA_ALPHA}")
+fi
+if [[ -n "$TIME_SAMPLING_BETA_BETA" ]]; then
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_beta_beta="${TIME_SAMPLING_BETA_BETA}")
+fi
+if [[ -n "$TIME_SAMPLING_BETA_PROBABILITY" ]]; then
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_beta_probability="${TIME_SAMPLING_BETA_PROBABILITY}")
 fi
 
 if [[ -n "$STAGE2_TASK_NAMES" || -n "$STAGE2_TASK_WEIGHTS" ]]; then

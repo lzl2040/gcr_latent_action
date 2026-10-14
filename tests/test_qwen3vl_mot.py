@@ -841,6 +841,8 @@ def test_spatial_tactile_target_and_generation_are_decodable():
         inference_steps=2,
         sigma_min=1e-3,
         sigma_max=0.999,
+        time_sampling_distribution="uniform",
+        time_sampling_beta_probability=0.5,
         task_weights=(1 / 3, 1 / 3, 1 / 3),
     )
     policy.physical_encoder = _FakePhysical(
@@ -928,8 +930,9 @@ def test_spatial_tactile_target_and_generation_are_decodable():
 @pytest.mark.parametrize("multiview", [False, True])
 @pytest.mark.parametrize("flow_space", ["raw", "embedding"])
 @pytest.mark.parametrize("generation_variant", ["random", "edge", "nano", "edge_frozen"])
+@pytest.mark.parametrize("time_distribution", ["uniform", "beta", "mixed"])
 def test_policy_runs_all_task_routes_with_lightweight_backends(
-    tmp_path, monkeypatch, multiview, flow_space, generation_variant
+    tmp_path, monkeypatch, multiview, flow_space, generation_variant, time_distribution
 ):
     import lerobot.common.policies.ace.cosmos3_encoders as cosmos3_encoders
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
@@ -1061,10 +1064,12 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         tactile_frames=2,
         tactile_img_size=8,
         use_tactile_conditioning=True,
-        generation_gradient_checkpointing=False,
+        generation_gradient_checkpointing=multiview,
         rgb_views=("primary", "secondary", "wrist") if multiview else ("primary",),
         physical_flow_space=flow_space,
         action_prediction_reconstruction_loss_weight=0.1 if flow_space == "embedding" else 0.0,
+        state_prediction_reconstruction_loss_weight=0.1 if flow_space == "embedding" else 0.0,
+        time_sampling_distribution=time_distribution,
         inference_steps=3,
     )
     policy = stage2.Qwen3VLMoTPolicy(config)
@@ -1101,7 +1106,15 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         batch["video_views"][:, 1:] = 125
     generation_inputs = {}
     generation_outputs = {}
-    decoder_inputs = []
+    decoder_inputs = {"action": [], "state": []}
+    sigma_calls = []
+    original_sample_sigma = policy._sample_sigma
+
+    def record_sigma(batch_size, device):
+        sigma_calls.append(batch_size)
+        return original_sample_sigma(batch_size, device)
+
+    policy._sample_sigma = record_sigma
 
     def record_generation_inputs(module, args):
         generation_inputs.clear()
@@ -1117,13 +1130,16 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
     policy.generation.register_forward_pre_hook(record_generation_inputs)
     policy.generation.register_forward_hook(record_generation_outputs)
     if flow_space == "embedding":
-        policy.physical_decoders["action"].register_forward_pre_hook(
-            lambda module, args: decoder_inputs.append(args[0].detach().clone())
-        )
+        for name in decoder_inputs:
+            policy.physical_decoders[name].register_forward_pre_hook(
+                lambda module, args, name=name: decoder_inputs[name].append(args[0].detach().clone())
+            )
 
     for task_name in TASK_SPECS:
         policy.physical_encoder.include_tactile_history.clear()
-        decoder_inputs.clear()
+        sigma_calls.clear()
+        for recorded in decoder_inputs.values():
+            recorded.clear()
         rng = torch.get_rng_state()
         loss, metrics = policy(batch, task_type=task_name)
         assert torch.isfinite(loss)
@@ -1146,20 +1162,33 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
             "action_prediction",
         ):
             assert metrics["action_target_elements"] == 32
-        if flow_space == "embedding" and TASK_SPECS[task_name].action.is_target:
-            assert len(decoder_inputs) == 2
-            noisy, sigma = generation_inputs["action"]
-            expected = noisy.float() - sigma.float()[:, None, None] * generation_outputs["action"].float()
-            torch.testing.assert_close(decoder_inputs[1], expected)
-            assert not torch.equal(decoder_inputs[0], decoder_inputs[1])
-            with torch.no_grad():
-                predicted = policy._decode_physical_embedding("action", expected)
-                expected_loss = (predicted - batch["action"].reshape(2, 2, 8)).square().mean()
-            assert metrics["action_prediction_reconstruction_loss"] == pytest.approx(expected_loss.item())
-            assert metrics["action_prediction_reconstruction_elements"] == 32
-        else:
-            assert metrics["action_prediction_reconstruction_loss"] == 0
-            assert metrics["action_prediction_reconstruction_elements"] == 0
+        assert "action_reconstruction_loss" not in metrics
+        assert "state_reconstruction_loss" not in metrics
+        if task_name == "joint_prediction":
+            assert sigma_calls == [2]
+            for name in ("action", "state"):
+                torch.testing.assert_close(generation_inputs[name][1], generation_inputs["video"][1])
+        for name in ("action", "state"):
+            if flow_space == "embedding" and TASK_SPECS[task_name].role(name).is_target:
+                assert len(decoder_inputs[name]) == 1
+                noisy, sigma = generation_inputs[name]
+                expected = (
+                    noisy[:, :config.num_groups].float()
+                    - sigma.float()[:, None, None] * generation_outputs[name][:, :config.num_groups].float()
+                )
+                torch.testing.assert_close(decoder_inputs[name][0], expected)
+                with torch.no_grad():
+                    predicted = policy._decode_physical_embedding(name, expected).reshape(2, 4, 4)
+                    target = batch["action" if name == "action" else "observation.state"]
+                    if name == "state":
+                        predicted, target = predicted[:, 1:], target[:, 1:]
+                    expected_loss = (predicted - target).square().mean()
+                assert metrics[f"{name}_prediction_reconstruction_loss"] == pytest.approx(expected_loss.item())
+                assert metrics[f"{name}_prediction_reconstruction_elements"] == (32 if name == "action" else 24)
+            else:
+                assert not decoder_inputs[name]
+                assert metrics[f"{name}_prediction_reconstruction_loss"] == 0
+                assert metrics[f"{name}_prediction_reconstruction_elements"] == 0
         if task_name in ("forward_dynamics", "inverse_dynamics"):
             assert "state_flow_loss" not in metrics
             assert "state_reconstruction_loss" not in metrics
@@ -1236,6 +1265,35 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         policy.config.action_loss_weight = old_action_weight
         policy.config.latent_action_loss_weight = old_latent_weight
         policy.config.action_prediction_reconstruction_loss_weight = 0.1
+        old_state_weight = policy.config.state_loss_weight
+        policy.config.state_loss_weight = 0.0
+        policy.config.latent_action_loss_weight = 0.0
+        masked = copy.deepcopy(batch)
+        masked["state_mask"][0, 1] = 0
+        masked["pair_is_valid"][1] = 0
+        if multiview:
+            masked["video_view_mask"][1] = False
+        torch.manual_seed(91)
+        state_loss, state_metrics = policy(masked, task_type="state_prediction")
+        assert state_metrics["state_prediction_reconstruction_elements"] == 9
+        policy.config.state_prediction_reconstruction_loss_weight = 0.0
+        torch.manual_seed(91)
+        state_baseline, baseline_metrics = policy(masked, task_type="state_prediction")
+        assert baseline_metrics["state_prediction_reconstruction_loss"] == 0
+        state_auxiliary = state_loss - state_baseline
+        assert state_auxiliary.item() == pytest.approx(
+            0.1 * state_metrics["state_prediction_reconstruction_loss"], abs=1e-6
+        )
+        policy.zero_grad(set_to_none=True)
+        state_auxiliary.backward()
+        assert policy.generation.output_heads["state"].weight.grad.abs().sum() > 0
+        assert policy.physical_decoders["state"][-1].weight.grad.abs().sum() > 0
+        assert policy.generation.output_heads["action"].weight.grad is None
+        assert policy.physical_decoders["action"][-1].weight.grad is None
+        assert policy.physical_encoder.anchor.grad is None
+        policy.config.state_loss_weight = old_state_weight
+        policy.config.latent_action_loss_weight = old_latent_weight
+        policy.config.state_prediction_reconstruction_loss_weight = 0.1
         oracle_clean, _, _, _ = policy._clean_physical_embedding(
             batch, "action", torch.ones(2, dtype=torch.bool)
         )
@@ -1248,8 +1306,11 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         oracle_hook = policy.generation.register_forward_hook(perfect_velocity)
         _, oracle_metrics = policy(batch, task_type="inverse_dynamics")
         oracle_hook.remove()
+        with torch.no_grad():
+            oracle_action = policy._decode_physical_embedding("action", oracle_clean)
+            oracle_error = (oracle_action - batch["action"].reshape_as(oracle_action)).square().mean()
         assert oracle_metrics["action_prediction_reconstruction_loss"] == pytest.approx(
-            oracle_metrics["action_reconstruction_loss"], abs=1e-5
+            oracle_error.item(), abs=1e-5
         )
         policy.zero_grad(set_to_none=True)
         with torch.autocast("cpu", dtype=torch.bfloat16):
@@ -1436,6 +1497,7 @@ def test_multiview_video_stream_and_sampling_keep_each_current_frame_without_fut
         rgb_views=("primary", "secondary", "wrist"), world_video_frames=9,
         video_image_size=16, video_latent_dim=4, video_latent_patch_size=2,
         inference_steps=2, sigma_min=1e-3, sigma_max=0.999,
+        time_sampling_distribution="uniform", time_sampling_beta_probability=0.5,
     )
     policy.video_vae = TemporalVAE(4)
     policy.temporal_compression = 4
@@ -1552,8 +1614,9 @@ def test_physical_flow_corrupts_clean_isolated_embeddings_not_encoder_inputs():
     torch.testing.assert_close(targets["action"][0][keep], (expected_noise - clean)[keep])
     assert targets["action"][1].sum() == 16
     assert raw_mask.sum() == 12
-    torch.testing.assert_close(reconstructions["action"][0], clean)
-    torch.testing.assert_close(reconstructions["action"][1], raw)
+    assert "state" not in reconstructions
+    torch.testing.assert_close(reconstructions["action"][0], raw)
+    torch.testing.assert_close(reconstructions["action"][1], raw_mask)
     assert not action.values[1].any()
     assert not action.keep[1].any()
     for recorded in policy.physical_encoder.input_history:
@@ -1830,14 +1893,19 @@ def test_embedding_physical_path_with_real_stage1_transformer(dtype):
     after, _, _, _ = policy._clean_physical_embedding(changed, "state", valid, current_only=True)
     torch.testing.assert_close(before, after)
     assert not before.requires_grad
-    streams, targets, _, reconstructions = policy._prepare_physical_streams(
+    streams, targets, sigmas, reconstructions = policy._prepare_physical_streams(
         TASK_SPECS["joint_prediction"], batch, valid
     )
     assert streams[0].values.shape == (2, 3, 8)
     assert targets["state"][1].sum() == 32
-    clean, raw, mask = reconstructions["state"]
-    loss, _, _ = policy._distributed_mse(policy._decode_physical_embedding("state", clean), raw, mask)
+    raw, mask = reconstructions["state"]
+    velocity = torch.zeros_like(streams[0].values[:, :2], requires_grad=True)
+    predicted_clean = streams[0].values[:, :2] - sigmas["state"][:, None, None] * velocity
+    mask = mask.clone()
+    mask[:, 0, :4] = False
+    loss, _, _ = policy._distributed_mse(policy._decode_physical_embedding("state", predicted_clean), raw, mask)
     loss.backward()
+    assert velocity.grad.abs().sum() > 0
     assert policy.physical_decoders["state"][-1].weight.grad is not None
     assert all(parameter.grad is None for parameter in policy.physical_encoder.parameters())
 
@@ -1845,8 +1913,6 @@ def test_embedding_physical_path_with_real_stage1_transformer(dtype):
 @pytest.mark.parametrize("kwargs", [
     {"physical_flow_space": "unknown"},
     {"physical_flow_space": "embedding", "physical_tuning_mode": "full"},
-    {"physical_flow_space": "embedding", "physical_reconstruction_loss_weight": 0},
-    {"physical_flow_space": "embedding", "physical_reconstruction_loss_weight": float("nan")},
 ])
 def test_embedding_flow_rejects_invalid_codec_contracts(kwargs):
     with pytest.raises(ValueError):
@@ -1854,18 +1920,75 @@ def test_embedding_flow_rejects_invalid_codec_contracts(kwargs):
 
 
 @pytest.mark.parametrize("weight", [-1.0, float("nan"), float("inf")])
-def test_predicted_action_reconstruction_rejects_invalid_weights(weight):
+@pytest.mark.parametrize("name", ["action", "state"])
+def test_predicted_action_reconstruction_rejects_invalid_weights(weight, name):
     with pytest.raises(ValueError, match="finite and non-negative"):
-        Qwen3VLMoTConfig(action_prediction_reconstruction_loss_weight=weight)
+        Qwen3VLMoTConfig(**{f"{name}_prediction_reconstruction_loss_weight": weight})
 
 
-def test_predicted_action_reconstruction_requires_embedding_at_model_construction():
-    config = Qwen3VLMoTConfig(action_prediction_reconstruction_loss_weight=0.1)
+@pytest.mark.parametrize("name", ["action", "state"])
+def test_predicted_action_reconstruction_requires_embedding_at_model_construction(name):
+    config = Qwen3VLMoTConfig(**{f"{name}_prediction_reconstruction_loss_weight": 0.1})
     with pytest.raises(ValueError, match="requires embedding-space"):
         config.validate_features()
     Qwen3VLMoTConfig(
         physical_flow_space="embedding", action_prediction_reconstruction_loss_weight=0.1
     ).validate_features()
+
+
+def test_legacy_clean_codec_weight_is_retired_with_explicit_warning(caplog):
+    config = Qwen3VLMoTConfig(physical_flow_space="embedding", physical_reconstruction_loss_weight=1.0)
+    assert config.physical_reconstruction_loss_weight is None
+    assert config.action_prediction_reconstruction_loss_weight == 0.1
+    assert config.state_prediction_reconstruction_loss_weight == 0.1
+    assert "Clean physical codec reconstruction has been removed" in caplog.text
+
+
+@pytest.mark.parametrize("distribution,mean,low_probability", [
+    ("uniform", 0.5, 0.1), ("beta", 0.6, 0.1 ** 1.5),
+    ("mixed", 0.55, 0.5 * (0.1 + 0.1 ** 1.5)),
+])
+@pytest.mark.parametrize("device", [
+    "cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")),
+])
+def test_time_sampling_distribution_statistics_and_bounds(distribution, mean, low_probability, device):
+    policy, _ = _embedding_physical_policy()
+    policy.config.time_sampling_distribution = distribution
+    torch.manual_seed(204)
+    with torch.autocast(device, dtype=torch.bfloat16):
+        sigma = policy._sample_sigma(50000, torch.device(device))
+    assert sigma.shape == (50000,)
+    assert sigma.device.type == device
+    assert sigma.dtype == torch.float32
+    assert torch.isfinite(sigma).all()
+    assert sigma.min() >= policy.config.sigma_min
+    assert sigma.max() <= policy.config.sigma_max
+    u = (sigma - policy.config.sigma_min) / (policy.config.sigma_max - policy.config.sigma_min)
+    assert u.mean().item() == pytest.approx(mean, abs=0.005)
+    assert (u < 0.1).float().mean().item() == pytest.approx(low_probability, abs=0.004)
+
+
+@pytest.mark.parametrize("probability,reference", [(0.0, "uniform"), (1.0, "beta")])
+def test_mixed_time_sampling_endpoints_match_pure_distribution(probability, reference):
+    policy, _ = _embedding_physical_policy()
+    policy.config.time_sampling_distribution = "mixed"
+    policy.config.time_sampling_beta_probability = probability
+    torch.manual_seed(13)
+    mixed = policy._sample_sigma(100, torch.device("cpu"))
+    policy.config.time_sampling_distribution = reference
+    torch.manual_seed(13)
+    torch.testing.assert_close(mixed, policy._sample_sigma(100, torch.device("cpu")))
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"time_sampling_distribution": "invalid"}, {"time_sampling_beta_alpha": 0},
+    {"time_sampling_beta_alpha": float("nan")}, {"time_sampling_beta_beta": -1},
+    {"time_sampling_beta_beta": float("inf")}, {"time_sampling_beta_probability": -0.1},
+    {"time_sampling_beta_probability": 1.1}, {"time_sampling_beta_probability": float("nan")},
+])
+def test_time_sampling_rejects_invalid_configuration(kwargs):
+    with pytest.raises(ValueError, match="time_sampling"):
+        Qwen3VLMoTConfig(**kwargs)
 
 
 def test_physical_decoder_outputs_eight_groups_of_160_then_32_by_40():

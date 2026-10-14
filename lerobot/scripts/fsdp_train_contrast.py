@@ -110,6 +110,7 @@ def _stage2_metrics(cfg) -> dict[str, AverageMeter]:
         "video_flow_loss": AverageMeter("video", ":.4f"),
         "action_flow_loss": AverageMeter("action", ":.4f"),
         "action_prediction_reconstruction_loss": AverageMeter("action_pred", ":.4f"),
+        "state_prediction_reconstruction_loss": AverageMeter("state_pred", ":.4f"),
         "state_flow_loss": AverageMeter("state", ":.4f"),
         "tactile_flow_loss": AverageMeter("tactile", ":.4f"),
         "valid_rows": AverageMeter("valid", ":.1f"),

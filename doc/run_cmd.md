@@ -204,34 +204,56 @@ PHYSICAL_FLOW_SPACE=embedding \
 
 保留冻结的 Physical Transformer，但只向它输入干净 state/action；分别编码各模态，
 在输出的 `(B,8,1024)` embedding 上加噪和计算 flow loss。
-Generation 预测 embedding velocity，新增 state/action decoder 经干净 embedding 重建损失
+Generation 预测 embedding velocity，state/action decoder 经预测 embedding 的重建损失
 训练，最终输出 `(B,8,160)`，reshape 为 `(B,32,40)`。
 action 推理先编码当前 state 一次，然后直接在 action embedding 空间做 Euler 更新，
 不会每一步把带噪 action 重新送入 Physical Transformer。
 
-新模式要求 `PHYSICAL_TUNING_MODE=frozen`，以保持 codec 和 flow target 空间固定。
-`physical_reconstruction_loss_weight` 默认 1.0，必须为正。
+新模式要求 `PHYSICAL_TUNING_MODE=frozen`，以保持 encoder 输出和 flow target 空间固定。
 旧 checkpoint/config 未保存模式时默认为 `raw`；resume 不设置 `PHYSICAL_FLOW_SPACE`
 就读取保存的模式，不能显式改模式续训，因为输出头、decoder 和 optimizer state 不兼容。
 需要复现旧的原始空间 flow 时，新实验可显式设置 `PHYSICAL_FLOW_SPACE=raw`。
 多视角、RGB flow、触觉 codec 和 primary-only teacher 的契约均保持不变。
 
-新建 embedding 实验还默认启用预测 action 重建，初始权重为 `0.1`：
-先计算 `z0_hat = z_sigma - sigma * v_pred`，再通过 action decoder，与真实归一化
-canonical action 计算 masked MSE。该损失不 detach 预测 embedding，因此会更新生成网络，
-而原 `action_reconstruction_loss` 仍使用干净真实 embedding、只训练 decoder。
-新日志名为 `action_prediction_reconstruction_loss`（控制台缩写 `action_pred`）。
+embedding 实验默认启用预测 action/state 重建，两项初始权重均为 `0.1`：
+计算 `z0_hat = z_sigma - sigma * v_pred` 后，通过对应 decoder 与真实归一化
+canonical trajectory 计算 masked MSE。预测 embedding 不 detach，损失更新生成网络和 decoder；
+state 只监督未来帧，不计算已知第 0 帧。原来解码真实干净 embedding 的 codec 损失已经移除。
+日志为 `action_prediction_reconstruction_loss` / `state_prediction_reconstruction_loss`
+（控制台缩写 `action_pred` / `state_pred`）。
 
 ```bash
 ACTION_PRED_RECON_WEIGHT=0.1 \
+STATE_PRED_RECON_WEIGHT=0.1 \
   bash train_qwen3vl_mot_fsdp.sh
 ```
 
-设置 `0` 关闭；该参数只适用于 embedding 模式。fresh raw 实验默认关闭。
-resume 默认使用 checkpoint 保存的权重，旧 checkpoint 缺字段时保持 `0`；
-若要给已有 embedding 实验增加该监督，显式设置 `ACTION_PRED_RECON_WEIGHT=0.1`。
-inverse/joint/action_prediction 的 action 目标启用该项，forward 不增加；
-state 任务语义、原 codec 重建、flow loss、噪声分布和多步采样器不变。
+设置对应权重为 `0` 可关闭；两项只适用于 embedding 模式，raw 默认关闭。
+resume 保留已保存的权重；缺字段时 embedding 默认 `0.1`，raw 默认 `0`。
+旧实验若 action prediction 权重保存为 `0`，移除 codec 后需显式设置正权重才能继续监督 action decoder。
+旧字段 `physical_reconstruction_loss_weight` 读取时会警告并清空，不再用于训练。
+inverse/joint/action_prediction 有 action 重建，joint/state_prediction 有未来 state 重建；
+forward 不引入 state，也不重建干净 action 条件。flow loss 和多步推理采样器保持。
+
+### 训练噪声时间分布
+
+两个 launcher 都支持 `TIME_SAMPLING_DISTRIBUTION=uniform|beta|mixed`：
+
+```bash
+TIME_SAMPLING_DISTRIBUTION=mixed \
+  bash train_qwen3vl_mot_fsdp.sh
+```
+
+未设置时 fresh 默认 `uniform`，resume 使用保存的分布。
+`beta` 默认 `Beta(1.5,1)`；`mixed` 默认每个样本以 50% 概率选择 Beta，其余选择 Uniform，
+不是将两个采样值求平均。所有分布映射到现有 `[sigma_min,sigma_max]`。
+可选 `TIME_SAMPLING_BETA_ALPHA`、`TIME_SAMPLING_BETA_BETA`、
+`TIME_SAMPLING_BETA_PROBABILITY`（mixed 中 Beta 占比，默认 `0.5`）调整参数。
+直接 Python CLI 等价选项是 `--policy.time_sampling_distribution=mixed`。
+resume 时显式设置这些参数可以覆盖保存的设置。
+
+`joint_prediction` 的 video/action/state 目标共享每个样本的 sigma，但高斯噪声各自独立；
+当前帧和 current-state 条件保持干净。推理仍用默认 20 步等间隔 Euler，不从 Beta 随机抽推理网格。
 
 首次运行或基础镜像更新后，安装 Stage 2 已验证的 FP8/8-bit optimizer 版本：
 
@@ -922,7 +944,12 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `GENERATION_EVAL_VIDEO_FPS` | `8` | 导出 MP4 的播放帧率 |
 | `STAGE2_TASK_NAMES` | 未设置 | 逗号分隔的任务列表；恢复时必须与 checkpoint 完全一致 |
 | `STAGE2_TASK_WEIGHTS` | 未设置 | 与任务列表等长的非负相对权重；global batch 内按可用监督重归一化 |
-| `ACTION_PRED_RECON_WEIGHT` | fresh embedding `0.1`；resume 使用保存值，旧配置 `0` | 预测 embedding 解码 action 的 masked MSE 权重；`0` 关闭，仅支持 embedding |
+| `ACTION_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码 action 的 masked MSE 权重；`0` 关闭，仅支持 embedding |
+| `STATE_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码未来 state 的 masked MSE 权重；不监督第 0 帧，`0` 关闭 |
+| `TIME_SAMPLING_DISTRIBUTION` | fresh `uniform`；resume 使用保存值 | 训练时间分布：`uniform` / `beta` / `mixed`；joint 三个目标共享 sigma |
+| `TIME_SAMPLING_BETA_ALPHA` | `1.5` | Beta 的 alpha 参数，必须为有限正数 |
+| `TIME_SAMPLING_BETA_BETA` | `1.0` | Beta 的 beta 参数，必须为有限正数 |
+| `TIME_SAMPLING_BETA_PROBABILITY` | `0.5` | mixed 中选 Beta 的概率，范围 `[0,1]` |
 | `TACTILE_GENERATION_TARGET` | `spatial_patches` | 新训练使用可解码触觉空间 latent |
 | `FSDP_CHECKPOINT_SYNC_FILES` | `false` | DCP 是否对每个 shard 强制 `fsync` |
 | `FSDP_CHECKPOINT_THREADS` | `1` | 每个 rank 的 DCP writer 线程数 |

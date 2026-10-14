@@ -925,10 +925,22 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         return task, self._task_valid_rows(task, batch, device)
 
     def _sample_sigma(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        return torch.empty(batch_size, device=device).uniform_(
-            self.config.sigma_min,
-            self.config.sigma_max,
+        distribution = self.config.time_sampling_distribution
+        probability = self.config.time_sampling_beta_probability
+        if distribution == "uniform" or (distribution == "mixed" and probability == 0):
+            return torch.empty(batch_size, device=device).uniform_(
+                self.config.sigma_min, self.config.sigma_max
+            )
+        beta = torch.distributions.Beta(
+            torch.tensor(self.config.time_sampling_beta_alpha, device=device, dtype=torch.float32),
+            torch.tensor(self.config.time_sampling_beta_beta, device=device, dtype=torch.float32),
+            validate_args=False,
         )
+        sample = beta.sample((batch_size,))
+        if distribution == "mixed" and probability < 1:
+            choose_beta = torch.rand(batch_size, device=device) < probability
+            sample = torch.where(choose_beta, sample, torch.rand(batch_size, device=device))
+        return self.config.sigma_min + (self.config.sigma_max - self.config.sigma_min) * sample
 
     @staticmethod
     def _flow_corrupt(
@@ -1126,6 +1138,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         role: ModalityRole,
         batch: dict,
         valid_rows: torch.Tensor,
+        sigma: torch.Tensor | None = None,
     ):
         if role is ModalityRole.ABSENT:
             return None, None, None, None
@@ -1150,7 +1163,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                     noise_mask=torch.zeros_like(keep),
                     fps=self._generation_video_fps(batch),
             ), None, None, sigma
-        sigma = self._sample_sigma(clean.shape[0], clean.device)
+        if sigma is None:
+            sigma = self._sample_sigma(clean.shape[0], clean.device)
         noisy, target = self._flow_corrupt(clean, sigma)
         loss_mask = keep.unsqueeze(-1).expand_as(target).clone()
         if role is ModalityRole.FUTURE_NOISY:
@@ -1378,6 +1392,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         values: torch.Tensor,
         dimension_mask: torch.Tensor,
         valid_rows: torch.Tensor,
+        sigma: torch.Tensor | None = None,
     ):
         dimension = values.shape[-1]
         if values.shape[1] != self.config.chunk_size:
@@ -1417,7 +1432,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 device=values.device,
             )
 
-        sigma = self._sample_sigma(values.shape[0], values.device)
+        if sigma is None:
+            sigma = self._sample_sigma(values.shape[0], values.device)
         noisy, target = self._flow_corrupt(clean, sigma)
         noisy = torch.where(element_mask, noisy, torch.zeros_like(noisy))
         target = torch.where(element_mask, target, torch.zeros_like(target))
@@ -1494,7 +1510,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         return decoder(tokens.to(decoder[1].weight.dtype)).float()
 
     def _prepare_embedding_physical_streams(
-        self, task: TaskSpec, batch: dict, valid_rows: torch.Tensor
+        self, task: TaskSpec, batch: dict, valid_rows: torch.Tensor, sigma: torch.Tensor | None = None
     ):
         streams, targets, sigmas, reconstructions = [], {}, {}, {}
         for name in ("state", "action"):
@@ -1504,10 +1520,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             clean, raw, keep, raw_mask = self._clean_physical_embedding(
                 batch, name, valid_rows, current_only=role is ModalityRole.CURRENT_ONLY
             )
-            reconstructions[name] = (clean, raw, raw_mask)
             if role.is_target:
-                sigma = self._sample_sigma(clean.shape[0], clean.device)
-                values, target = self._flow_corrupt(clean.float(), sigma)
+                reconstructions[name] = (raw, raw_mask)
+                modality_sigma = self._sample_sigma(clean.shape[0], clean.device) if sigma is None else sigma
+                values, target = self._flow_corrupt(clean.float(), modality_sigma)
                 loss_mask = keep.unsqueeze(-1).expand_as(target)
                 values = torch.where(keep.unsqueeze(-1), values, torch.zeros_like(values))
                 if role is ModalityRole.FUTURE_NOISY:
@@ -1525,10 +1541,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 targets[name] = (target, loss_mask)
             else:
                 values = clean
-                sigma = torch.zeros(clean.shape[0], device=clean.device)
+                modality_sigma = torch.zeros(clean.shape[0], device=clean.device)
             noise_mask = loss_mask.any(dim=-1) if role.is_target else torch.zeros_like(keep)
-            streams.append(GenerationStream(name, values, sigma, keep, noise_mask=noise_mask))
-            sigmas[name] = sigma
+            streams.append(GenerationStream(name, values, modality_sigma, keep, noise_mask=noise_mask))
+            sigmas[name] = modality_sigma
         return streams, targets, sigmas, reconstructions
 
     def _prepare_physical_streams(
@@ -1536,9 +1552,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         task: TaskSpec,
         batch: dict,
         valid_rows: torch.Tensor,
+        sigma: torch.Tensor | None = None,
     ):
         if self.physical_embedding_flow:
-            return self._prepare_embedding_physical_streams(task, batch, valid_rows)
+            return self._prepare_embedding_physical_streams(task, batch, valid_rows, sigma)
         streams: list[GenerationStream] = []
         targets: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         sigmas: dict[str, torch.Tensor] = {}
@@ -1554,6 +1571,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 state,
                 batch["state_mask"],
                 valid_rows,
+                sigma,
             )
         )
         action_input, action_mask, action_target, action_loss_mask, action_keep, action_sigma = (
@@ -1563,6 +1581,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 action,
                 batch["action_mask"],
                 valid_rows,
+                sigma,
             )
         )
         physical_batch = dict(batch)
@@ -1967,10 +1986,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         streams: list[GenerationStream] = []
         targets: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         sigmas: dict[str, torch.Tensor] = {}
+        joint_sigma = (
+            self._sample_sigma(valid_rows.shape[0], valid_rows.device)
+            if task.name == "joint_prediction" else None
+        )
         video_stream, video_target, video_mask, video_sigma = self._prepare_video_stream(
             task.video,
             batch,
             valid_rows,
+            joint_sigma,
         )
         if video_stream is not None:
             streams.append(video_stream)
@@ -1981,7 +2005,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         (
             physical_streams, physical_targets, physical_sigmas, physical_reconstructions
         ) = self._prepare_physical_streams(
-            task, batch, valid_rows
+            task, batch, valid_rows, joint_sigma
         )
         streams.extend(physical_streams)
         targets.update(physical_targets)
@@ -2015,8 +2039,9 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         }
         loss = predicted_latent_action.sum() * 0.0
         loss_dict = {f"task_{name}": float(name == task.name) for name in self.config.task_names}
-        loss_dict["action_prediction_reconstruction_loss"] = 0.0
-        loss_dict["action_prediction_reconstruction_elements"] = 0.0
+        for name in ("action", "state"):
+            loss_dict[f"{name}_prediction_reconstruction_loss"] = 0.0
+            loss_dict[f"{name}_prediction_reconstruction_elements"] = 0.0
         for name, (target, mask) in targets.items():
             modality_loss, metric, count = self._distributed_mse(
                 predictions[name],
@@ -2028,26 +2053,23 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             loss_dict[f"{name}_target_elements"] = count
             loss_dict[f"{name}_sigma"] = sigmas[name].float().mean().item()
 
-        for name, (clean, raw, mask) in physical_reconstructions.items():
-            reconstruction = self._decode_physical_embedding(name, clean)
-            reconstruction_loss, metric, count = self._distributed_mse(reconstruction, raw, mask)
-            loss = loss + self.config.physical_reconstruction_loss_weight * reconstruction_loss
-            loss_dict[f"{name}_reconstruction_loss"] = metric
-            loss_dict[f"{name}_reconstruction_elements"] = count
-            if (
-                name == "action" and task.action.is_target
-                and self.config.action_prediction_reconstruction_loss_weight > 0
-            ):
-                action_stream = next(stream for stream in physical_streams if stream.name == "action")
-                noisy = action_stream.values[:, :clean.shape[1]].float()
-                velocity = predictions["action"][:, :clean.shape[1]].float()
-                sigma = sigmas["action"].float()[:, None, None]
-                predicted_clean = noisy - sigma * velocity
-                predicted_action = self._decode_physical_embedding("action", predicted_clean)
-                prediction_loss, metric, count = self._distributed_mse(predicted_action, raw, mask)
-                loss = loss + self.config.action_prediction_reconstruction_loss_weight * prediction_loss
-                loss_dict["action_prediction_reconstruction_loss"] = metric
-                loss_dict["action_prediction_reconstruction_elements"] = count
+        for name, (raw, mask) in physical_reconstructions.items():
+            weight = getattr(self.config, f"{name}_prediction_reconstruction_loss_weight")
+            if weight is None or weight <= 0:
+                continue
+            stream = next(stream for stream in physical_streams if stream.name == name)
+            noisy = stream.values[:, :raw.shape[1]].float()
+            velocity = predictions[name][:, :raw.shape[1]].float()
+            sigma = sigmas[name].float()[:, None, None]
+            predicted_clean = noisy - sigma * velocity
+            prediction = self._decode_physical_embedding(name, predicted_clean)
+            if name == "state" and task.state is ModalityRole.FUTURE_NOISY:
+                mask = mask.clone()
+                mask[:, 0, :self.config.max_state_dim] = False
+            prediction_loss, metric, count = self._distributed_mse(prediction, raw, mask)
+            loss = loss + weight * prediction_loss
+            loss_dict[f"{name}_prediction_reconstruction_loss"] = metric
+            loss_dict[f"{name}_prediction_reconstruction_elements"] = count
 
         if task.understanding_image:
             latent_loss, metric, count = self._distributed_mse(

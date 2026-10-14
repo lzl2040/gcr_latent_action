@@ -44,6 +44,11 @@ STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
 PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
+STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
+TIME_SAMPLING_DISTRIBUTION="${TIME_SAMPLING_DISTRIBUTION:-}"
+TIME_SAMPLING_BETA_ALPHA="${TIME_SAMPLING_BETA_ALPHA:-}"
+TIME_SAMPLING_BETA_BETA="${TIME_SAMPLING_BETA_BETA:-}"
+TIME_SAMPLING_BETA_PROBABILITY="${TIME_SAMPLING_BETA_PROBABILITY:-}"
 GENERATION_BACKBONE="${GENERATION_BACKBONE:-}"
 GENERATION_PRETRAINED_DIR="${GENERATION_PRETRAINED_DIR:-}"
 GENERATION_TUNING_MODE="${GENERATION_TUNING_MODE:-}"
@@ -256,11 +261,33 @@ if [[ -n "$PHYSICAL_FLOW_SPACE" ]]; then
 fi
 if [[ "$WEIGHT_RESUME" != "true" && "$PHYSICAL_FLOW_SPACE" == "embedding" ]]; then
     ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-0.1}"
+    STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-0.1}"
 fi
 if [[ -n "$ACTION_PRED_RECON_WEIGHT" ]]; then
     PHYSICAL_FLOW_ARGS+=(
         --policy.action_prediction_reconstruction_loss_weight="${ACTION_PRED_RECON_WEIGHT}"
     )
+fi
+if [[ -n "$STATE_PRED_RECON_WEIGHT" ]]; then
+    PHYSICAL_FLOW_ARGS+=(
+        --policy.state_prediction_reconstruction_loss_weight="${STATE_PRED_RECON_WEIGHT}"
+    )
+fi
+if [[ -n "$TIME_SAMPLING_DISTRIBUTION" ]]; then
+    case "$TIME_SAMPLING_DISTRIBUTION" in
+        uniform|beta|mixed) ;;
+        *) die "TIME_SAMPLING_DISTRIBUTION must be uniform, beta or mixed" ;;
+    esac
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_distribution="${TIME_SAMPLING_DISTRIBUTION}")
+fi
+if [[ -n "$TIME_SAMPLING_BETA_ALPHA" ]]; then
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_beta_alpha="${TIME_SAMPLING_BETA_ALPHA}")
+fi
+if [[ -n "$TIME_SAMPLING_BETA_BETA" ]]; then
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_beta_beta="${TIME_SAMPLING_BETA_BETA}")
+fi
+if [[ -n "$TIME_SAMPLING_BETA_PROBABILITY" ]]; then
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_beta_probability="${TIME_SAMPLING_BETA_PROBABILITY}")
 fi
 GENERATION_ARGS=()
 if [[ "$WEIGHT_RESUME" != "true" ]]; then
@@ -391,7 +418,8 @@ fi
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
-echo "  action_pred_recon_weight=${ACTION_PRED_RECON_WEIGHT:-<from checkpoint; legacy default 0>}"
+echo "  predicted_recon_weights: action=${ACTION_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} state=${STATE_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} (no clean codec loss)"
+echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"
 echo "  generation_backbone=${GENERATION_BACKBONE:-<from checkpoint>} pretrained=${GENERATION_PRETRAINED_DIR:-<not required on resume>}"
 echo "  generation_tuning=${GENERATION_TUNING_MODE:-saved config on resume; full on fresh run}"
 echo "  training_stage=${TRAINING_STAGE} (auto: LIBERO=finetune, other mixtures=pretrain)"

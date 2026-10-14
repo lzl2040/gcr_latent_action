@@ -374,27 +374,114 @@ def test_stage2_resume_preserves_or_explicitly_overrides_prediction_reconstructi
         use_policy_training_preset=False,
     )
     _load_stage2_resume_policy_config(cfg, args=[])
-    assert cfg.policy.action_prediction_reconstruction_loss_weight == (saved_weight or 0.0)
+    assert cfg.policy.action_prediction_reconstruction_loss_weight == (0.1 if saved_weight is None else saved_weight)
     cfg.policy.action_prediction_reconstruction_loss_weight = override_weight
     _load_stage2_resume_policy_config(
         cfg, args=[f"--policy.action_prediction_reconstruction_loss_weight={override_weight}"]
     )
     assert cfg.policy.action_prediction_reconstruction_loss_weight == override_weight
     assert "action_prediction_reconstruction_loss" in _stage2_metrics(cfg)
+    assert "state_prediction_reconstruction_loss" in _stage2_metrics(cfg)
 
 
-def test_stage2_resume_rejects_prediction_reconstruction_for_raw_space(tmp_path):
+@pytest.mark.parametrize("name,saved_value,runtime_value", [
+    ("state_prediction_reconstruction_loss_weight", 0.2, 0.0),
+    ("time_sampling_distribution", "mixed", "beta"),
+    ("time_sampling_beta_alpha", 2.0, 1.5),
+    ("time_sampling_beta_beta", 2.0, 1.0),
+    ("time_sampling_beta_probability", 0.3, 0.5),
+])
+def test_stage2_resume_restores_or_explicitly_overrides_time_and_state_controls(
+    tmp_path, name, saved_value, runtime_value
+):
+    Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False,
+        physical_flow_space="embedding", **{name: saved_value},
+    )._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path,
+        policy=Qwen3VLMoTConfig(**{name: runtime_value}), use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert getattr(cfg.policy, name) == saved_value
+    cfg.policy = Qwen3VLMoTConfig(**{name: runtime_value})
+    _load_stage2_resume_policy_config(cfg, args=[f"--policy.{name}={runtime_value}"])
+    assert getattr(cfg.policy, name) == runtime_value
+
+
+def test_old_embedding_config_defaults_missing_time_and_state_controls(tmp_path):
+    Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False,
+        physical_flow_space="embedding",
+    )._save_pretrained(tmp_path)
+    path = tmp_path / "config.json"
+    payload = json.loads(path.read_text())
+    for name in (
+        "state_prediction_reconstruction_loss_weight", "time_sampling_distribution",
+        "time_sampling_beta_alpha", "time_sampling_beta_beta", "time_sampling_beta_probability",
+    ):
+        del payload[name]
+    path.write_text(json.dumps(payload))
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path, policy=Qwen3VLMoTConfig(),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.state_prediction_reconstruction_loss_weight == 0.1
+    assert cfg.policy.time_sampling_distribution == "uniform"
+    assert cfg.policy.time_sampling_beta_alpha == 1.5
+    assert cfg.policy.time_sampling_beta_beta == 1.0
+    assert cfg.policy.time_sampling_beta_probability == 0.5
+
+
+@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed"])
+def test_stage2_cli_decodes_time_and_prediction_reconstruction_controls(distribution):
+    cfg = draccus.parse(FSDPTrainPipelineConfig, args=[
+        "--dataset.repo_id=whatever", "--policy.type=qwen3vl_mot",
+        "--policy.physical_flow_space=embedding",
+        f"--policy.time_sampling_distribution={distribution}",
+        "--policy.time_sampling_beta_alpha=2", "--policy.time_sampling_beta_beta=1.25",
+        "--policy.time_sampling_beta_probability=0.4",
+        "--policy.action_prediction_reconstruction_loss_weight=0",
+        "--policy.state_prediction_reconstruction_loss_weight=0.2",
+    ])
+    assert cfg.policy.time_sampling_distribution == distribution
+    assert cfg.policy.time_sampling_beta_alpha == 2.0
+    assert cfg.policy.time_sampling_beta_beta == 1.25
+    assert cfg.policy.time_sampling_beta_probability == 0.4
+    assert cfg.policy.action_prediction_reconstruction_loss_weight == 0.0
+    assert cfg.policy.state_prediction_reconstruction_loss_weight == 0.2
+
+
+@pytest.mark.parametrize("launcher", ["train_qwen3vl_mot_fsdp.sh", "train_qwen3vl_mot_local.sh"])
+def test_stage2_launchers_reject_invalid_time_distribution(tmp_path, launcher):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["bash", str(root / launcher)], cwd=root,
+        env={
+            **os.environ, "WEIGHT_RESUME": "false", "CHECK_PATHS": "false", "DRY_RUN": "true",
+            "STAGE1_CHECKPOINT": str(tmp_path / "stage1"), "OUTPUT_DIR": str(tmp_path / "run"),
+            "TIME_SAMPLING_DISTRIBUTION": "invalid",
+        },
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert "TIME_SAMPLING_DISTRIBUTION must be uniform, beta or mixed" in result.stderr
+
+
+@pytest.mark.parametrize("name", ["action", "state"])
+def test_stage2_resume_rejects_prediction_reconstruction_for_raw_space(tmp_path, name):
     Qwen3VLMoTConfig(
         stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False,
     )._save_pretrained(tmp_path)
     cfg = SimpleNamespace(
         weight_resume=True, output_dir=tmp_path,
-        policy=Qwen3VLMoTConfig(action_prediction_reconstruction_loss_weight=0.1),
+        policy=Qwen3VLMoTConfig(**{f"{name}_prediction_reconstruction_loss_weight": 0.1}),
         use_policy_training_preset=False,
     )
     with pytest.raises(ValueError, match="requires embedding-space"):
         _load_stage2_resume_policy_config(
-            cfg, args=["--policy.action_prediction_reconstruction_loss_weight=0.1"]
+            cfg, args=[f"--policy.{name}_prediction_reconstruction_loss_weight=0.1"]
         )
 
 
@@ -416,6 +503,7 @@ def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedd
         "OUTPUT_DIR": str(run_dir), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
         "PHYSICAL_FLOW_SPACE": explicit_mode, "PYTHON_BIN": sys.executable,
         "ACTION_PRED_RECON_WEIGHT": "",
+        "STATE_PRED_RECON_WEIGHT": "", "TIME_SAMPLING_DISTRIBUTION": "",
         "NPROC_PER_NODE": "1", "NNODES": "1", "MASTER_PORT": "29599",
     }
     root = Path(__file__).resolve().parents[1]
@@ -430,12 +518,15 @@ def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedd
         assert f"--policy.physical_flow_space={expected_mode}" in result.stdout
     if not checkpoint_present and expected_mode == "embedding":
         assert "--policy.action_prediction_reconstruction_loss_weight=0.1" in result.stdout
+        assert "--policy.state_prediction_reconstruction_loss_weight=0.1" in result.stdout
     else:
         assert "--policy.action_prediction_reconstruction_loss_weight=" not in result.stdout
+        assert "--policy.state_prediction_reconstruction_loss_weight=" not in result.stdout
 
 
 @pytest.mark.parametrize("resume,weight", [(False, "0"), (False, "0.2"), (True, "0.1")])
-def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path, resume, weight):
+@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed"])
+def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path, resume, weight, distribution):
     run_dir = tmp_path / "run"
     if resume:
         checkpoint = run_dir / "checkpoint_00000001"
@@ -446,6 +537,9 @@ def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path,
         "CHECK_PATHS": "false", "DRY_RUN": "true", "WEIGHT_RESUME": "true",
         "OUTPUT_DIR": str(run_dir), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
         "PHYSICAL_FLOW_SPACE": "", "ACTION_PRED_RECON_WEIGHT": weight,
+        "STATE_PRED_RECON_WEIGHT": weight, "TIME_SAMPLING_DISTRIBUTION": distribution,
+        "TIME_SAMPLING_BETA_ALPHA": "2", "TIME_SAMPLING_BETA_BETA": "1.25",
+        "TIME_SAMPLING_BETA_PROBABILITY": "0.4",
         "PYTHON_BIN": sys.executable, "NPROC_PER_NODE": "1", "NNODES": "1",
         "MASTER_PORT": "29599",
     }
@@ -455,6 +549,11 @@ def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path,
         env=env, capture_output=True, text=True, check=True, timeout=30,
     )
     assert f"--policy.action_prediction_reconstruction_loss_weight={weight}" in result.stdout
+    assert f"--policy.state_prediction_reconstruction_loss_weight={weight}" in result.stdout
+    assert f"--policy.time_sampling_distribution={distribution}" in result.stdout
+    assert "--policy.time_sampling_beta_alpha=2" in result.stdout
+    assert "--policy.time_sampling_beta_beta=1.25" in result.stdout
+    assert "--policy.time_sampling_beta_probability=0.4" in result.stdout
 
 
 @pytest.mark.parametrize("resume,mode,weight,expected", [
@@ -462,7 +561,10 @@ def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path,
     (True, "", "", None), (True, "embedding", "", None),
     (False, "", "0", "0"), (True, "", "0", "0"), (True, "", "0.2", "0.2"),
 ])
-def test_local_launcher_wires_prediction_reconstruction_weight(tmp_path, resume, mode, weight, expected):
+@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed"])
+def test_local_launcher_wires_prediction_reconstruction_weight(
+    tmp_path, resume, mode, weight, expected, distribution
+):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     python_stub = bin_dir / "model-cache-stub"
@@ -477,6 +579,9 @@ def test_local_launcher_wires_prediction_reconstruction_weight(tmp_path, resume,
         "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHON_BIN": str(python_stub),
         "WEIGHT_RESUME": str(resume).lower(), "PHYSICAL_FLOW_SPACE": mode,
         "ACTION_PRED_RECON_WEIGHT": weight, "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
+        "STATE_PRED_RECON_WEIGHT": weight, "TIME_SAMPLING_DISTRIBUTION": distribution,
+        "TIME_SAMPLING_BETA_ALPHA": "2", "TIME_SAMPLING_BETA_BETA": "1.25",
+        "TIME_SAMPLING_BETA_PROBABILITY": "0.4",
         "OUTPUT_DIR": str(tmp_path / "run"), "MASTER_PORT": "29599",
         "STAGE2_TASK_NAMES": "", "STAGE2_TASK_WEIGHTS": "",
     }
@@ -486,8 +591,14 @@ def test_local_launcher_wires_prediction_reconstruction_weight(tmp_path, resume,
     )
     if expected is None:
         assert "--policy.action_prediction_reconstruction_loss_weight=" not in result.stdout
+        assert "--policy.state_prediction_reconstruction_loss_weight=" not in result.stdout
     else:
         assert f"--policy.action_prediction_reconstruction_loss_weight={expected}" in result.stdout
+        assert f"--policy.state_prediction_reconstruction_loss_weight={expected}" in result.stdout
+    assert f"--policy.time_sampling_distribution={distribution}" in result.stdout
+    assert "--policy.time_sampling_beta_alpha=2" in result.stdout
+    assert "--policy.time_sampling_beta_beta=1.25" in result.stdout
+    assert "--policy.time_sampling_beta_probability=0.4" in result.stdout
 
 
 @pytest.mark.parametrize("kind", ["random", "edge", "nano"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -78,8 +79,10 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     physical_tuning_mode: str = "frozen"
     # Saved configs without this field retain the original raw-space flow contract.
     physical_flow_space: str = "raw"
-    physical_reconstruction_loss_weight: float = 1.0
-    action_prediction_reconstruction_loss_weight: float = 0.0
+    # Accepted only to read older configs; clean physical codec losses are retired.
+    physical_reconstruction_loss_weight: float | None = None
+    action_prediction_reconstruction_loss_weight: float | None = None
+    state_prediction_reconstruction_loss_weight: float | None = None
     physical_lr_scale: float = 0.3
     max_tactile_views: int = 6
     tactile_tokens_per_pad: int = 2
@@ -90,6 +93,10 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     task_contract_version: int = TASK_CONTRACT_VERSION
     sigma_min: float = 1e-3
     sigma_max: float = 0.999
+    time_sampling_distribution: str = "uniform"
+    time_sampling_beta_alpha: float = 1.5
+    time_sampling_beta_beta: float = 1.0
+    time_sampling_beta_probability: float = 0.5
     video_loss_weight: float = 1.0
     action_loss_weight: float = 1.0
     state_loss_weight: float = 1.0
@@ -195,19 +202,25 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
             )
         if self.physical_flow_space not in ("raw", "embedding"):
             raise ValueError("`physical_flow_space` must be 'raw' or 'embedding'.")
-        if not (
-            math.isfinite(self.action_prediction_reconstruction_loss_weight)
-            and self.action_prediction_reconstruction_loss_weight >= 0
-        ):
-            raise ValueError("`action_prediction_reconstruction_loss_weight` must be finite and non-negative.")
-        if self.physical_flow_space == "embedding":
-            if self.physical_tuning_mode != "frozen":
-                raise ValueError("Embedding-space physical flow requires a frozen Physical Encoder.")
-            if not (
-                math.isfinite(self.physical_reconstruction_loss_weight)
-                and self.physical_reconstruction_loss_weight > 0
-            ):
-                raise ValueError("Embedding-space flow requires a positive physical reconstruction weight.")
+        for name in ("action", "state"):
+            field_name = f"{name}_prediction_reconstruction_loss_weight"
+            weight = getattr(self, field_name)
+            if weight is None:
+                weight = 0.1 if self.physical_flow_space == "embedding" else 0.0
+                setattr(self, field_name, weight)
+            if not (math.isfinite(weight) and weight >= 0):
+                raise ValueError(f"`{field_name}` must be finite and non-negative.")
+        if self.physical_reconstruction_loss_weight is not None:
+            logging.getLogger(__name__).warning(
+                "Clean physical codec reconstruction has been removed; legacy "
+                "`physical_reconstruction_loss_weight` is ignored. Only predicted-embedding "
+                "reconstruction remains (action weight=%s, state weight=%s).",
+                self.action_prediction_reconstruction_loss_weight,
+                self.state_prediction_reconstruction_loss_weight,
+            )
+            self.physical_reconstruction_loss_weight = None
+        if self.physical_flow_space == "embedding" and self.physical_tuning_mode != "frozen":
+            raise ValueError("Embedding-space physical flow requires a frozen Physical Encoder.")
         if self.chunk_size <= 0 or self.group_size <= 0 or self.chunk_size % self.group_size:
             raise ValueError(
                 f"`chunk_size` ({self.chunk_size}) must be divisible by positive "
@@ -264,6 +277,17 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
                 f"Expected 0 <= sigma_min < sigma_max <= 1, got "
                 f"{self.sigma_min} and {self.sigma_max}."
             )
+        if self.time_sampling_distribution not in ("uniform", "beta", "mixed"):
+            raise ValueError("`time_sampling_distribution` must be 'uniform', 'beta', or 'mixed'.")
+        for name in ("time_sampling_beta_alpha", "time_sampling_beta_beta"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value > 0):
+                raise ValueError(f"`{name}` must be finite and positive.")
+        if not (
+            math.isfinite(self.time_sampling_beta_probability)
+            and 0 <= self.time_sampling_beta_probability <= 1
+        ):
+            raise ValueError("`time_sampling_beta_probability` must be finite and in [0, 1].")
         if self.tactile_generation_target not in (
             "context_tokens",
             "spatial_patches",
@@ -302,8 +326,13 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
         return None
 
     def validate_features(self) -> None:
-        if self.action_prediction_reconstruction_loss_weight > 0 and self.physical_flow_space != "embedding":
-            raise ValueError("Predicted action reconstruction requires embedding-space physical flow.")
+        if self.physical_flow_space != "embedding" and any(
+            weight is not None and weight > 0 for weight in (
+                self.action_prediction_reconstruction_loss_weight,
+                self.state_prediction_reconstruction_loss_weight,
+            )
+        ):
+            raise ValueError("Predicted physical reconstruction requires embedding-space physical flow.")
         return None
 
     def get_optimizer_preset(self) -> AdamW8bitConfig:
