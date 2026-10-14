@@ -355,6 +355,21 @@ def make_transform_from_config(cfg: ImageTransformConfig):
         raise ValueError(f"Transform '{cfg.type}' is not valid.")
 
 
+def make_temporal_rgb_transform(image_size: int) -> v2.Compose:
+    """Sample one mild augmentation for an entire uint8 RGB window per call."""
+    return v2.Compose([
+        v2.RandomResizedCrop(
+            size=(image_size, image_size),
+            scale=(0.9, 1.0),
+            ratio=(1.0, 1.0),
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        ),
+        v2.RandomRotation(degrees=5, interpolation=InterpolationMode.BILINEAR),
+        v2.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05),
+    ])
+
+
 class ImageTransforms(Transform):
     """A class to compose image transforms based on configuration."""
 

@@ -32,6 +32,11 @@ SAMPLE_POOL_CACHE_DIR="${SAMPLE_POOL_CACHE_DIR:-${TMPDIR:-/tmp}/robo_contrast_sa
 STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
 STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
+RGB_AUG_ENABLED="${RGB_AUG_ENABLED:-false}"
+if [[ "$RGB_AUG_ENABLED" != "true" && "$RGB_AUG_ENABLED" != "false" ]]; then
+    echo "Error: RGB_AUG_ENABLED must be true or false" >&2
+    exit 1
+fi
 PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
 STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
@@ -194,7 +199,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --policy.scheduler_decay_lr=1.5e-6 \
     "${STAGE2_TASK_ARGS[@]}" \
     --dataset.repo_id="whatever" \
-    --dataset.image_transforms.enable=false \
+    --dataset.image_transforms.enable="${RGB_AUG_ENABLED}" \
     --dataset.image_transforms.img_size=256 \
     --dataset.wrist_image_transforms.enable=false \
     --dataset.wrist_image_transforms.is_primary=false \

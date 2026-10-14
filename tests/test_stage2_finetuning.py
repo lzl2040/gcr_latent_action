@@ -9,6 +9,7 @@ import pytest
 from lerobot.common.datasets.contrastive_dataset import MultiModalContrastiveDataset
 from lerobot.common.datasets.contrastive_sampler import ContrastiveBatchSampler, FullCoverageBatchSampler
 from lerobot.common.datasets.mixtures import expand_dataset_names, resolve_stage2_training_stage
+from lerobot.common.datasets.transforms import ImageTransformsConfig
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.qwen3vl_mot.configuration_qwen3vl_mot import Qwen3VLMoTConfig
 from lerobot.common.policies.qwen3vl_mot.generation_eval import (
@@ -42,6 +43,7 @@ def _build_libero_dataset(
     episodes=2,
     policy=None,
     missing_dataset=None,
+    rgb_aug=False,
 ):
     roots = tmp_path / "data"
     mapping = {}
@@ -67,6 +69,7 @@ def _build_libero_dataset(
         policy=policy or Qwen3VLMoTConfig(),
         dataset=DatasetConfig(
             repo_id="test",
+            image_transforms=ImageTransformsConfig(enable=rgb_aug),
             parent_dir_v21=str(roots),
             parent_dir_v30=str(roots),
             sample_pool_enabled=True,
@@ -220,6 +223,18 @@ def test_stage_one_keeps_contrastive_sampling_even_with_generic_finetune_stage(t
     assert not dataset.full_training_coverage
     assert dataset.sample_pool is not None
     assert isinstance(_make_training_sampler(cfg, dataset, 8, 1, 0), ContrastiveBatchSampler)
+
+
+@pytest.mark.parametrize("stage_one", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_temporal_rgb_augmentation_initializes_only_for_opted_in_stage_two(
+    tmp_path, monkeypatch, stage_one, enabled
+):
+    _, dataset = _build_libero_dataset(
+        tmp_path, monkeypatch, validation=False, rgb_aug=enabled,
+        policy=RoboContrastConfig() if stage_one else Qwen3VLMoTConfig(),
+    )
+    assert (dataset.rgb_augmentation is not None) is (enabled and not stage_one)
 
 
 def test_pretraining_still_removes_validation_episodes_and_preserves_legacy_manifest(tmp_path, monkeypatch):

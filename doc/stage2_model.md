@@ -157,6 +157,23 @@ video tokens，并使用独立可训练 camera embedding 区分视角，时间�
 旧 checkpoint 未保存 `rgb_views` 时默认单视角；resume 自动使用保存的视角列表，显式修改
 列表或顺序会报错，避免静默改变参数和监督契约。
 
+### 3.3 可选、时间一致的 RGB 增强
+
+Stage 2 的 `dataset.image_transforms.enable` 默认 `false`，两个 launcher 通过
+`RGB_AUG_ENABLED=true` 开启固定轻量 preset。每个相机窗口随机裁剪约 `90%-100%`
+面积并恢复原尺寸，旋转 `[-5,5]` 度，再做 brightness/contrast `0.9-1.1` 和
+saturation `0.95-1.05` 抖动；不改变 hue，不翻转，不做大角度旋转。
+
+首尾帧和 video 一起作为 uint8 时序 stack 送入 torchvision v2，
+**一次调用只采一组参数**，避免逐帧随机增强制造假的视觉变化。
+不同相机各自采样；primary 的 teacher 首尾图像、Qwen 当前图像和 video target 保持一致，
+包括多视角字段的 primary 副本。缺失视角保持 mask 和零填充，物理轨迹、语言及触觉不变。
+禁用时保留原读取与 RNG 行为，也不改变 Stage 1 loader 的行为。
+
+`__getitem__` 只在开关启用时增强训练样本，`get_heldout_item` 明确绕过增强；
+因此生成验证始终使用原始图像，即使该验证窗口也属于 finetune 训练集。
+该增强不改变模型/checkpoint 的参数形状，但会增加 DataLoader CPU 开销。
+
 ---
 
 ## 4. Stage 1 初始化与继承

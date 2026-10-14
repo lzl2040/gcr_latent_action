@@ -61,6 +61,7 @@ from lerobot.common.datasets.mixtures import (
     resolve_stage2_training_stage,
 )
 from lerobot.common.datasets.oxe_configs import OXE_DATASET_CONFIGS
+from lerobot.common.datasets.transforms import make_temporal_rgb_transform
 from lerobot.common.datasets_v30.dataset_metadata import (
     LeRobotDatasetMetadata as LeRobotDatasetMetadataV30,
 )
@@ -167,6 +168,16 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.image_transforms = image_transforms
 
         policy_cfg = cfg.policy
+        self.rgb_augmentation = None
+        if (
+            getattr(policy_cfg, "type", None) == "qwen3vl_mot"
+            and cfg.dataset.image_transforms.enable
+        ):
+            self.rgb_augmentation = make_temporal_rgb_transform(cfg.dataset.image_transforms.img_size)
+            logger.info(
+                "RGB training augmentation enabled: crop area 90-100%, rotation +/-5 degrees, "
+                "mild color jitter; shared over each camera window, disabled for validation."
+            )
         self.full_training_coverage = False
         if getattr(policy_cfg, "type", None) == "qwen3vl_mot":
             cfg.stage = resolve_stage2_training_stage(getattr(cfg, "stage", "auto"), data_mix)
@@ -1286,6 +1297,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             frame_idx,
             fallback_pool=getattr(self, "sample_pool", None),
             fallback_ranges=getattr(self, "episode_ranges", None),
+            augment_rgb=True,
         )
 
     def get_heldout_item(self, dataset_idx: int, frame_idx: int) -> dict:
@@ -1296,6 +1308,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             int(frame_idx),
             fallback_pool=self.heldout_sample_pool,
             fallback_ranges=self.heldout_episode_ranges,
+            augment_rgb=False,
         )
 
     def _get_item(
@@ -1305,6 +1318,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         *,
         fallback_pool,
         fallback_ranges: list[np.ndarray] | None,
+        augment_rgb: bool = False,
     ) -> dict:
         dataset = self.datasets[ds_idx]
         frame_idx = int(np.clip(frame_idx, 0, len(dataset) - 1))
@@ -1338,8 +1352,36 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             read_fallback = True
 
         result = self._to_canonical(item, ds_idx, frame_idx)
+        if augment_rgb and getattr(self, "rgb_augmentation", None) is not None:
+            result = self._augment_rgb_window(result)
         result["data_read_fallback"] = torch.tensor(float(read_fallback), dtype=torch.float32)
         result["requested_frame_index"] = torch.tensor(requested_frame_idx, dtype=torch.long)
+        return result
+
+    def _augment_rgb_window(self, result: dict) -> dict:
+        if "video_views" not in result:
+            frames = self.rgb_augmentation(torch.cat([
+                torch.stack([result["image_t0"], result["image_t1"]]), result["video"],
+            ]))
+            result["image_t0"], result["image_t1"] = frames[:2]
+            result["video"] = frames[2:]
+            return result
+
+        images = result["images_t0"].clone()
+        videos = result["video_views"].clone()
+        for view in range(videos.shape[0]):
+            if not (result["image_view_mask"][view] or result["video_view_mask"][view]):
+                continue
+            endpoints = [images[view]]
+            if view == 0:
+                endpoints.append(result["image_t1"])
+            frames = self.rgb_augmentation(torch.cat([torch.stack(endpoints), videos[view]]))
+            images[view] = frames[0]
+            videos[view] = frames[len(endpoints):]
+            if view == 0:
+                result["image_t1"] = frames[1]
+        result["images_t0"], result["video_views"] = images, videos
+        result["image_t0"], result["video"] = images[0], videos[0]
         return result
 
     @staticmethod

@@ -192,6 +192,32 @@ resume 不设置 `RGB_VIEWS` 时读取保存的列表，显式设置必须与 ch
 held-out 验证保留 primary 原文件名，secondary/wrist 的视频与 contact sheet 位于对应角色
 子目录，HTML 展示各有效视角，metrics 同时包含逐视角与平均视频 MAE。
 
+## 可选 RGB 数据增强
+
+两个 Stage 2 launcher 默认关闭 RGB 增强，可用同一开关显式启用：
+
+```bash
+RGB_AUG_ENABLED=true \
+  bash train_qwen3vl_mot_fsdp.sh
+```
+
+本地入口 `train_qwen3vl_mot_local.sh` 也支持。直接 Python CLI 对应
+`--dataset.image_transforms.enable=true`；Stage 2 使用独立的轻量窗口增强 preset，
+不套用通用单帧增强里的强 saturation/hue 或随机子集策略。
+
+开启后每个有效相机窗口执行：面积约 `90%-100%`、不改变宽高比的随机裁剪并恢复原尺寸，
+`[-5,5]` 度小角度旋转，以及 brightness/contrast `0.9-1.1`、
+saturation `0.95-1.05` 的颜色抖动。没有翻转、90/180 度旋转或 hue 变化。
+**同一相机的当前帧、结束帧和全部视频帧共用一次采样的增强参数**；
+多视角各自采样，但 primary 的 `image_t0/image_t1/video` 与多视角字段保持一致。
+缺失视角维持原来的零填充和 mask，不修改 action/state、语言或触觉。
+
+只增强训练读取；生成验证的 `get_heldout_item` 始终读取未增强图像，
+包括 finetune 从训练集抽取的固定诊断窗口。开启时视频条件和未来 GT target 同步增强，
+不会把逐帧随机变化当作真实运动。该操作在 DataLoader 中批量处理整段窗口，
+不增加模型参数；启用后仍有额外 CPU 开销。
+resume 时同样需显式设置 `RGB_AUG_ENABLED=true` 才继续增强，默认不会自动开启。
+
 ## Physical embedding-space flow
 
 两个 Stage 2 launcher 的新实验默认 `PHYSICAL_FLOW_SPACE=embedding`：
@@ -944,6 +970,7 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `GENERATION_EVAL_VIDEO_FPS` | `8` | 导出 MP4 的播放帧率 |
 | `STAGE2_TASK_NAMES` | 未设置 | 逗号分隔的任务列表；恢复时必须与 checkpoint 完全一致 |
 | `STAGE2_TASK_WEIGHTS` | 未设置 | 与任务列表等长的非负相对权重；global batch 内按可用监督重归一化 |
+| `RGB_AUG_ENABLED` | `false` | 可选训练 RGB 增强：轻量颜色抖动、90%-100% 裁剪和 +/-5 度旋转；验证关闭 |
 | `ACTION_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码 action 的 masked MSE 权重；`0` 关闭，仅支持 embedding |
 | `STATE_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码未来 state 的 masked MSE 权重；不监督第 0 帧，`0` 关闭 |
 | `TIME_SAMPLING_DISTRIBUTION` | fresh `uniform`；resume 使用保存值 | 训练时间分布：`uniform` / `beta` / `mixed`；joint 三个目标共享 sigma |

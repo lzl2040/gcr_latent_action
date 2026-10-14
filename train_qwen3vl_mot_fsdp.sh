@@ -42,6 +42,7 @@ GENERATION_EVAL_VIDEO_FPS="${GENERATION_EVAL_VIDEO_FPS:-8}"
 STAGE2_TASK_NAMES="${STAGE2_TASK_NAMES:-}"
 STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
+RGB_AUG_ENABLED="${RGB_AUG_ENABLED:-false}"
 PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
 STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
@@ -94,6 +95,7 @@ require_bool "WEIGHT_RESUME" "$WEIGHT_RESUME"
 require_bool "MODEL_AUTO_DOWNLOAD" "$MODEL_AUTO_DOWNLOAD"
 require_bool "SAMPLE_POOL_ENABLED" "$SAMPLE_POOL_ENABLED"
 require_bool "GENERATION_EVAL_ENABLED" "$GENERATION_EVAL_ENABLED"
+require_bool "RGB_AUG_ENABLED" "$RGB_AUG_ENABLED"
 require_bool "FP8_EMULATE" "$FP8_EMULATE"
 [[ "$FP8_ENABLED" == "auto" || "$FP8_ENABLED" == "true" || "$FP8_ENABLED" == "false" ]] \
     || die "FP8_ENABLED must be auto, true or false"
@@ -417,6 +419,7 @@ else
 fi
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
+echo "  rgb_augmentation=${RGB_AUG_ENABLED} (training only; crop 90-100%, rotation +/-5 degrees)"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
 echo "  predicted_recon_weights: action=${ACTION_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} state=${STATE_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} (no clean codec loss)"
 echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"
@@ -478,7 +481,7 @@ CMD=(
     --policy.scheduler_decay_lr="${DECAY_LR:-1.5e-6}"
     "${STAGE2_TASK_ARGS[@]}"
     --dataset.repo_id="whatever"
-    --dataset.image_transforms.enable=false
+    --dataset.image_transforms.enable="${RGB_AUG_ENABLED}"
     --dataset.image_transforms.img_size=256
     --dataset.wrist_image_transforms.enable=false
     --dataset.wrist_image_transforms.is_primary=false
