@@ -21,7 +21,8 @@ python -m lerobot.evaluation.eval_qwen3vl_mot_libero \
   --libero-root /home/v-wangxiaofa/lzl/LIBERO \
   --task-suite libero_goal \
   --trials-per-task 50 \
-  --replan-steps 8
+  --replan-steps 8 \
+  --output-dir /Data/lzl/libero_eval/step12k_goal
 ```
 
 Other supported suites are `libero_spatial`, `libero_object`, and `libero_10`.
@@ -61,8 +62,13 @@ external LIBERO repository.
 - Preserves the saved task embedding order, model size, physical flow space,
   and RGB views. This checkpoint is Nano, primary-camera-only, and uses
   **joint prediction** for action inference because no action-only task was
-  trained. Video, action, and state are jointly sampled; video decoding is not
-  required for robot controls.
+  trained. With future-video export enabled (default), the runner uses
+  `generate_validation` once per replan: the saved video and executed actions
+  come from the same joint sample, not from a second video-generation pass.
+  Ambient episode-seeded RNG is preserved, so exporting a video does not
+  reseed each replan or change this checkpoint's sampled actions.
+  A separate frozen VAE decoder is loaded once, without changing the strict
+  inference checkpoint's encoder-only model layout.
 - The local assets default to `/Data/lzl/huggingface/Qwen3-VL-4B-Instruct`,
   `/Data/lzl/huggingface/Cosmos3-Edge` (VAE), and
   `/Data/lzl/huggingface/siglip2-base-patch16-224` (Stage 1 text).
@@ -99,6 +105,30 @@ or the **new, nonexistent** directory specified by `--output-dir`:
 - `task_XX_trial_YYY_actions.npy`: the executed native 7D action sequence.
 - `task_XX_trial_YYY_success.mp4` / `_failure.mp4`: primary-camera rollout at
   source FPS (20 here); disable with `--no-save-video`.
+- `predictions/task_XX_trial_YYY/replan_NNNN_step_SSSS/primary.mp4`: the predicted
+  video at **every** replan, with separate `wrist.mp4` for saved multi-view
+  models when that camera is available. Missing views are skipped.
+- Each replan directory also contains `action_chunk.npy` (the complete predicted
+  native action chunk) and `metadata.json` (replan index, rollout control step,
+  episode seed/RNG mode, per-view paths, and source-frame timestamps). These are
+  referenced by `episodes[*].prediction_videos` in `results.json`.
+
+Future-video saving is on by default. `--no-save-predicted-video` disables only
+future decoding/export and calls `sample_canonical_action` instead (this
+checkpoint still requires joint sampling to produce its actions);
+`--no-save-video` independently disables only the **actual** rollout video.
+`--output-dir` controls all outputs, including future videos, and must name a
+new directory so an earlier run cannot be overwritten.
+
+This checkpoint predicts 9 sparse video frames over its 32-action window:
+one current conditioning frame and 8 future frames, spanning 1.55 seconds at
+20 Hz. Predicted MP4 playback therefore uses approximately **5.16 FPS**, not
+20 FPS; the exact rounded source-frame timestamps are saved in metadata.
+The full action chunk and corresponding future clip are saved even though
+only its first `--replan-steps` actions are executed before replanning.
+Decoding/export adds overhead; `inference_seconds` records model inference
+separately from `prediction_export_seconds`, while `planning_seconds` includes
+both.
 
 Success comes from `env.check_success()`, not merely an environment `done`
 flag. Timeouts count as failures. Episodes use the original benchmark language

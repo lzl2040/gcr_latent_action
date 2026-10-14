@@ -1907,7 +1907,9 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         return loss, (global_sum / global_count).item(), global_count.item()
 
     @staticmethod
-    def _generation_rng(device: torch.device, seed: int) -> torch.Generator:
+    def _generation_rng(device: torch.device, seed: int | None) -> torch.Generator | None:
+        if seed is None:
+            return None
         generator = torch.Generator(device=device)
         generator.manual_seed(int(seed))
         return generator
@@ -1917,9 +1919,9 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         self,
         batch: dict,
         *,
-        seed: int,
+        seed: int | None,
     ) -> dict[str, torch.Tensor]:
-        """Generate fixed-noise action, video, and decodable tactile predictions."""
+        """Generate predictions; seed=None preserves the ambient RNG for deployment."""
         device = next(self.generation.parameters()).device
         understanding = self._understand_batch(batch)
         joint_output: dict[str, torch.Tensor] = {}
@@ -1937,12 +1939,14 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 batch, understanding, generator=self._generation_rng(device, seed)
             )
             video_latents = self._sample_video_latents(
-                batch, understanding, generator=self._generation_rng(device, seed + 1)
+                batch,
+                understanding,
+                generator=self._generation_rng(device, seed + 1 if seed is not None else None),
             )
         tactile_decoded_z, tactile_mask = self._sample_tactile_images(
             batch,
             understanding,
-            generator=self._generation_rng(device, seed + 2),
+            generator=self._generation_rng(device, seed + 2 if seed is not None else None),
         )
         output = {
             "action_normalized": action,

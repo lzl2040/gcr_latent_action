@@ -1863,6 +1863,13 @@ def test_three_task_joint_sampling_uses_only_current_conditions(flow_space, mult
         torch.testing.assert_close(minimal[name], prediction[name])
     torch.manual_seed(47)
     torch.testing.assert_close(policy.sample_canonical_action(batch), prediction["action_normalized"])
+    torch.manual_seed(47)
+    ambient = policy.generate_validation(batch, seed=None)
+    ambient_rng_state = torch.get_rng_state()
+    torch.testing.assert_close(ambient["action_normalized"], prediction["action_normalized"])
+    torch.manual_seed(47)
+    torch.testing.assert_close(policy.sample_canonical_action(batch), ambient["action_normalized"])
+    torch.testing.assert_close(torch.get_rng_state(), ambient_rng_state)
     with pytest.raises(ValueError, match="valid current state"):
         policy.generate_validation({**batch, "state_mask": torch.zeros_like(batch["state_mask"])}, seed=47)
 

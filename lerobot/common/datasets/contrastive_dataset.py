@@ -48,6 +48,9 @@ from lerobot.common.datasets.contrastive_sample_pool import (
     build_or_load_sample_pool,
     resolve_sample_pool_paths,
 )
+from lerobot.common.datasets.dataset_fps import (
+    evenly_spaced_frame_timestamps as _evenly_spaced_frame_timestamps,
+)
 from lerobot.common.datasets.dataset_fps import resolve_true_fps
 from lerobot.common.datasets.instruction_text import is_real_instruction
 from lerobot.common.datasets.lerobot_dataset_for_ace import (
@@ -129,21 +132,6 @@ def resolve_pair_horizon(
             fps, exact, chunk_seconds, horizon, horizon / fps,
         )
     return max(1, horizon)
-
-
-def _evenly_spaced_frame_timestamps(
-    horizon: int,
-    count: int,
-    index_fps: float,
-) -> list[float]:
-    """Sample a window on actual frame boundaries, including both endpoints."""
-    if count < 2:
-        raise ValueError(f"At least two temporal samples are required, got {count}.")
-    offsets = [
-        int(round(horizon * index / (count - 1)))
-        for index in range(count)
-    ]
-    return [offset / index_fps for offset in offsets]
 
 
 class MultiModalContrastiveDataset(torch.utils.data.Dataset):

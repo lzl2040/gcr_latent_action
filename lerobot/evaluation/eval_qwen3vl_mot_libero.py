@@ -145,6 +145,7 @@ class LiberoAdapter:
             "state_mask": mask.to(device),
             "action_mask": mask.to(device),
             "sample_rate": torch.tensor([self.fps], device=device),
+            "tactile_image_mask": torch.zeros(1, config.max_tactile_views, device=device),
             "task": [instruction],
         }
         if len(images) > 1:
@@ -171,6 +172,102 @@ class LiberoAdapter:
                 np.count_nonzero(clipped != actions),
             )
         return clipped
+
+
+class PredictionVideoWriter:
+    def __init__(self, config, device: torch.device, source_fps: int):
+        self.config = config
+        self.device = device
+        self.source_fps = source_fps
+        self.decoder = None
+
+    def _prepare_decoder(self) -> None:
+        if self.decoder is not None:
+            return
+        from lerobot.common.policies.ace.cosmos3_encoders import build_cosmos3_vae
+
+        decoder, _, _, _, _ = build_cosmos3_vae(self.config.cosmos3_dir, encoder_only=False)
+        decoder.encoder = None
+        decoder.quant_conv = None
+        decoder.requires_grad_(False).eval()
+        decoder.enable_tiling()
+        self.decoder = decoder.to(device=self.device, dtype=torch.bfloat16)
+
+    @torch.inference_mode()
+    def save(
+        self,
+        prediction: dict,
+        actions: np.ndarray,
+        directory: Path,
+        *,
+        control_step: int,
+        replan_index: int,
+        seed: int,
+    ) -> dict:
+        import imageio.v2 as imageio
+
+        from lerobot.common.datasets.dataset_fps import evenly_spaced_frame_timestamps
+
+        views = tuple(self.config.rgb_views)
+        if len(views) == 1:
+            latents = prediction["video_latents"][:, None]
+            valid = torch.ones(1, 1, dtype=torch.bool)
+        else:
+            latents = prediction["video_latents_views"]
+            valid = prediction["video_view_mask"].bool().cpu()
+        if latents.ndim != 6 or latents.shape[:2] != (1, len(views)):
+            raise ValueError(
+                "Predicted video latents must have shape (1,V,C,T,H,W) matching saved RGB views."
+            )
+        if valid.shape != (1, len(views)) or not bool(valid[0, 0]):
+            raise ValueError("Predicted RGB masks must match saved views and include the primary camera.")
+        if not torch.isfinite(latents).all():
+            raise ValueError("Predicted video latents contain nonfinite values.")
+        directory.mkdir(parents=True, exist_ok=False)
+        self._prepare_decoder()
+        frames_expected = self.config.world_video_frames
+        times = evenly_spaced_frame_timestamps(self.config.chunk_size - 1, frames_expected, self.source_fps)
+        fps = self.source_fps * (frames_expected - 1) / (self.config.chunk_size - 1)
+        video_paths = {}
+        for view_index, view in enumerate(views):
+            if not bool(valid[0, view_index]):
+                continue
+            with torch.autocast(self.device.type, dtype=torch.bfloat16):
+                decoded = self.decoder.decode(
+                    latents[:, view_index].to(device=self.device, dtype=torch.bfloat16)
+                ).sample
+            expected = (1, 3, frames_expected, self.config.video_image_size, self.config.video_image_size)
+            if tuple(decoded.shape) != expected or not torch.isfinite(decoded).all():
+                raise ValueError(f"Decoded {view} video must be finite with shape {expected}.")
+            frames = (
+                ((decoded[0].float().clamp(-1, 1) + 1) * 127.5)
+                .round()
+                .to(torch.uint8)
+                .permute(1, 2, 3, 0)
+                .cpu()
+                .numpy()
+            )
+            video_path = directory / f"{view}.mp4"
+            imageio.mimsave(video_path, frames, fps=fps, codec="libx264", macro_block_size=1)
+            video_paths[view] = str(video_path.resolve())
+        actions_path = directory / "action_chunk.npy"
+        np.save(actions_path, actions.astype(np.float32))
+        metadata = {
+            "replan_index": replan_index,
+            "control_step": control_step,
+            "control_time_s": control_step / self.source_fps,
+            "episode_seed": seed,
+            "sampling_rng": "episode_seeded_continuous",
+            "video_frames": frames_expected,
+            "includes_current_frame": True,
+            "video_fps": fps,
+            "video_frame_times_s": times,
+            "videos": video_paths,
+            "action_chunk_path": str(actions_path.resolve()),
+            "metadata_path": str((directory / "metadata.json").resolve()),
+        }
+        (directory / "metadata.json").write_text(json.dumps(metadata, indent=2, allow_nan=False) + "\n")
+        return metadata
 
 
 def checkpoint_paths(checkpoint: Path, policy_config: Path | None) -> tuple[Path, Path]:
@@ -315,7 +412,7 @@ def rollout_episode(
             frames.append(np.ascontiguousarray(observation["agentview_image"][::-1, ::-1]))
         if not queue:
             started_plan = time.perf_counter()
-            chunk = np.asarray(plan(observation))
+            chunk = np.asarray(plan(observation, control_step=steps, replan_index=calls))
             inference_seconds += time.perf_counter() - started_plan
             calls += 1
             if (
@@ -411,8 +508,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Physical EGL device index, independent of CUDA_VISIBLE_DEVICES.",
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="New directory for results, rollout videos, and per-replan future videos.",
+    )
     parser.add_argument("--no-save-video", action="store_true")
+    parser.add_argument(
+        "--no-save-predicted-video",
+        action="store_true",
+        help="Disable future video decoding/export; independent of --no-save-video (actual rollout).",
+    )
     return parser
 
 
@@ -458,6 +564,9 @@ def main(argv: list[str] | None = None) -> None:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     policy = load_policy(args)
+    video_writer = (
+        None if args.no_save_predicted_video else PredictionVideoWriter(policy.config, device, adapter.fps)
+    )
     settings = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     settings.update(
         output_dir=str(output_dir.resolve()),
@@ -487,24 +596,64 @@ def main(argv: list[str] | None = None) -> None:
         try:
             for trial in range(args.trials_per_task):
                 policy.reset()
+                stem = f"task_{task_id:02d}_trial_{trial:03d}"
+                episode_seed = args.seed + task_id * 1000 + trial
+                prediction_root = output_dir / "predictions" / stem
+                prediction_records = []
+                plan_timings = []
 
-                def plan(observation, instruction=task.language):
+                def plan(
+                    observation,
+                    *,
+                    control_step,
+                    replan_index,
+                    instruction=task.language,
+                    seed=episode_seed,
+                    root=prediction_root,
+                    records=prediction_records,
+                    timings=plan_timings,
+                ):
+                    started_inference = time.perf_counter()
                     batch = adapter.observation_batch(observation, instruction, policy.config, device)
                     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-                        sampled = policy.sample_canonical_action(batch)
-                    return adapter.native_actions(sampled)
+                        if video_writer is None:
+                            sampled = policy.sample_canonical_action(batch)
+                        else:
+                            prediction = policy.generate_validation(batch, seed=None)
+                            sampled = prediction["action_normalized"]
+                    actions = adapter.native_actions(sampled)
+                    inference_seconds = time.perf_counter() - started_inference
+                    export_seconds = 0.0
+                    if video_writer is not None:
+                        started_export = time.perf_counter()
+                        records.append(
+                            video_writer.save(
+                                prediction,
+                                actions,
+                                root / f"replan_{replan_index:04d}_step_{control_step:04d}",
+                                control_step=control_step,
+                                replan_index=replan_index,
+                                seed=seed,
+                            )
+                        )
+                        export_seconds = time.perf_counter() - started_export
+                    timings.append((inference_seconds, export_seconds))
+                    return actions
 
                 episode, frames = rollout_episode(
                     env,
                     initial_states[task_id][trial],
                     plan,
-                    seed=args.seed + task_id * 1000 + trial,
+                    seed=episode_seed,
                     max_steps=settings["max_steps"],
                     wait_steps=args.wait_steps,
                     replan_steps=args.replan_steps,
                     save_video=not args.no_save_video,
                 )
-                stem = f"task_{task_id:02d}_trial_{trial:03d}"
+                episode["planning_seconds"] = episode["inference_seconds"]
+                episode["inference_seconds"] = sum(timing[0] for timing in plan_timings)
+                episode["prediction_export_seconds"] = sum(timing[1] for timing in plan_timings)
+                episode["prediction_videos"] = prediction_records
                 actions_path = output_dir / f"{stem}_actions.npy"
                 np.save(actions_path, np.asarray(episode.pop("actions"), dtype=np.float32).reshape(-1, 7))
                 episode.update(

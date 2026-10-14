@@ -49,3 +49,15 @@ DATASET_TRUE_FPS: dict[str, float] = {
 def resolve_true_fps(dataset_name: str, index_fps: float) -> float:
     """Capture rate for ``dataset_name``, falling back to the declared ``index_fps``."""
     return float(DATASET_TRUE_FPS.get(dataset_name, index_fps))
+
+
+def evenly_spaced_frame_timestamps(
+    horizon: int,
+    count: int,
+    index_fps: float,
+) -> list[float]:
+    """Sample a window on actual frame boundaries, including both endpoints."""
+    if count < 2:
+        raise ValueError(f"At least two temporal samples are required, got {count}.")
+    offsets = [int(round(horizon * index / (count - 1))) for index in range(count)]
+    return [offset / index_fps for offset in offsets]

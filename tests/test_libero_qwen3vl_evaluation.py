@@ -10,6 +10,8 @@ from scipy.spatial.transform import Rotation
 from lerobot.evaluation.eval_qwen3vl_mot_libero import (
     DUMMY_ACTION,
     LiberoAdapter,
+    PredictionVideoWriter,
+    build_parser,
     checkpoint_paths,
     configure_libero,
     libero_image,
@@ -114,7 +116,11 @@ def test_suite_normalization_and_multiview_masks(dataset):
     assert adapter.fps == 20
     assert adapter.state_std[0] == pytest.approx(1e-3)
     config = SimpleNamespace(
-        max_state_dim=40, max_action_dim=40, rgb_views=("primary", "secondary", "wrist"), video_image_size=4
+        max_state_dim=40,
+        max_action_dim=40,
+        rgb_views=("primary", "secondary", "wrist"),
+        video_image_size=4,
+        max_tactile_views=6,
     )
     obs = observation()
     batch = adapter.observation_batch(obs, "pick up the cup", config, torch.device("cpu"))
@@ -128,6 +134,8 @@ def test_suite_normalization_and_multiview_masks(dataset):
     assert batch["images_t0"].dtype == torch.uint8
     assert not batch["images_t0"][0, 1].any()
     assert batch["sample_rate"].item() == 20
+    assert batch["tactile_image_mask"].shape == (1, 6)
+    assert not batch["tactile_image_mask"].any()
     assert batch["task"] == ["pick up the cup"]
     torch.testing.assert_close(batch["image_t0"], batch["images_t0"][:, 0])
 
@@ -248,14 +256,18 @@ def test_episode_settling_replan_and_timeout():
     env = FakeEnv()
     calls = []
 
-    def plan(obs):
-        calls.append(obs)
+    def plan(obs, **context):
+        calls.append(context)
         return np.arange(28).reshape(4, 7) / 100
 
     result, frames = rollout(env, plan)
     assert env.initial_state == "fixed-state" and env.saved_seed == 123
     assert env.history[:2] == [DUMMY_ACTION, DUMMY_ACTION]
     assert result["policy_calls"] == len(calls) == 2
+    assert calls == [
+        {"control_step": 0, "replan_index": 0},
+        {"control_step": 3, "replan_index": 1},
+    ]
     assert result["steps"] == 5 and result["timeout"] and not result["success"]
     assert env.history[2] == env.history[5]
     assert len(frames) == 6
@@ -265,7 +277,7 @@ def test_episode_settling_replan_and_timeout():
 
 
 def test_success_is_not_the_environment_done_flag():
-    def plan(obs):
+    def plan(obs, **context):
         return np.zeros((3, 7))
 
     result, _ = rollout(FakeEnv(done_at=4), plan)
@@ -276,9 +288,9 @@ def test_success_is_not_the_environment_done_flag():
 
 def test_invalid_chunk_and_inference_error_are_not_success_fallbacks():
     with pytest.raises(ValueError, match="finite 7D"):
-        rollout(FakeEnv(), lambda obs: np.zeros((1, 7)))
+        rollout(FakeEnv(), lambda obs, **context: np.zeros((1, 7)))
 
-    def broken_plan(obs):
+    def broken_plan(obs, **context):
         raise RuntimeError("inference failed")
 
     with pytest.raises(RuntimeError, match="inference failed"):
@@ -319,3 +331,102 @@ def test_libero_configuration_does_not_modify_shared_home(tmp_path, monkeypatch)
     assert os.environ["MUJOCO_GL"] == "egl"
     assert os.environ["MUJOCO_EGL_DEVICE_ID"] == "3"
     assert (output / "libero_config/config.yaml").is_file()
+
+
+class FakeVideoDecoder:
+    def __init__(self, frames=9):
+        self.calls = 0
+        self.frames = frames
+
+    def decode(self, latents):
+        self.calls += 1
+        video = torch.linspace(-1, 1, self.frames).view(1, 1, -1, 1, 1).expand(1, 3, -1, 4, 4)
+        return SimpleNamespace(sample=video)
+
+
+def test_prediction_videos_per_replan_multiview_timing_and_output_directory(tmp_path):
+    import imageio.v2 as imageio
+
+    config = SimpleNamespace(
+        rgb_views=("primary", "secondary", "wrist"),
+        chunk_size=32,
+        world_video_frames=9,
+        video_image_size=4,
+    )
+    writer = PredictionVideoWriter(config, torch.device("cpu"), source_fps=20)
+    decoder = FakeVideoDecoder()
+    writer.decoder = decoder
+    prediction = {
+        "video_latents_views": torch.zeros(1, 3, 48, 3, 1, 1),
+        "video_view_mask": torch.tensor([[True, False, True]]),
+    }
+    actions = np.zeros((32, 7))
+    actions[:, 0] = np.arange(32) / 100
+    for index, step in enumerate((0, 8)):
+        directory = (
+            tmp_path / "custom_results/predictions/task_00_trial_000" / f"replan_{index:04d}_step_{step:04d}"
+        )
+        metadata = writer.save(
+            prediction, actions, directory, control_step=step, replan_index=index, seed=index
+        )
+        assert metadata["replan_index"] == index and metadata["control_step"] == step
+        assert metadata["episode_seed"] == index
+        assert metadata["sampling_rng"] == "episode_seeded_continuous"
+        assert metadata["video_frame_times_s"] == [0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.15, 1.35, 1.55]
+        assert metadata["video_fps"] == pytest.approx(160 / 31)
+        assert metadata["includes_current_frame"] and metadata["video_frames"] == 9
+        assert set(metadata["videos"]) == {"primary", "wrist"}
+        assert not (directory / "secondary.mp4").exists()
+        assert metadata == json.loads((directory / "metadata.json").read_text())
+        np.testing.assert_allclose(np.load(metadata["action_chunk_path"]), actions)
+        for path in metadata["videos"].values():
+            assert Path(path).parent == directory
+            with imageio.get_reader(path) as video:
+                assert video.count_frames() == 9
+                assert video.get_meta_data()["fps"] == pytest.approx(160 / 31, abs=0.01)
+                assert video.get_data(0).max() == 0
+                assert video.get_data(8).min() == 255
+    assert decoder.calls == 4
+
+
+def test_single_view_predicted_video_and_invalid_outputs(tmp_path):
+    config = SimpleNamespace(
+        rgb_views=("primary",),
+        chunk_size=32,
+        world_video_frames=9,
+        video_image_size=4,
+    )
+    writer = PredictionVideoWriter(config, torch.device("cpu"), source_fps=20)
+    writer.decoder = FakeVideoDecoder()
+    prediction = {"video_latents": torch.zeros(1, 48, 3, 1, 1)}
+    metadata = writer.save(
+        prediction, np.zeros((32, 7)), tmp_path / "first", control_step=0, replan_index=0, seed=0
+    )
+    assert set(metadata["videos"]) == {"primary"}
+    writer.decoder.frames = 8
+    with pytest.raises(ValueError, match="Decoded primary video"):
+        writer.save(
+            prediction, np.zeros((32, 7)), tmp_path / "wrong_frames", control_step=0, replan_index=0, seed=0
+        )
+    prediction["video_latents"][0, 0, 0, 0, 0] = torch.nan
+    with pytest.raises(ValueError, match="latents contain nonfinite"):
+        writer.save(
+            prediction, np.zeros((32, 7)), tmp_path / "bad_latents", control_step=0, replan_index=0, seed=0
+        )
+    assert not (tmp_path / "bad_latents").exists()
+
+
+def test_output_directory_and_independent_video_switches():
+    args = build_parser().parse_args(
+        [
+            "--checkpoint",
+            "/weights/step12k",
+            "--output-dir",
+            "/tmp/custom_libero_results",
+            "--no-save-video",
+        ]
+    )
+    assert args.output_dir == Path("/tmp/custom_libero_results")
+    assert args.no_save_video and not args.no_save_predicted_video
+    args = build_parser().parse_args(["--checkpoint", "/weights/step12k", "--no-save-predicted-video"])
+    assert not args.no_save_video and args.no_save_predicted_video
