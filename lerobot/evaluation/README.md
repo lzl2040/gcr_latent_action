@@ -108,7 +108,8 @@ or the **new, nonexistent** directory specified by `--output-dir`:
 - `evaluation.log`: checkpoint restoration and episode results.
 - `task_XX_trial_YYY_actions.npy`: the executed native 7D action sequence.
 - `task_XX_trial_YYY_success.mp4` / `_failure.mp4`: primary-camera rollout at
-  source FPS (20 here); disable with `--no-save-video`.
+  source FPS (20 here); disable with `--no-save-video`, or save only failures
+  with `--save-failed-videos-only`. These two options are mutually exclusive.
 - `predictions/task_XX_trial_YYY/replan_NNNN_step_SSSS/primary.mp4`: the predicted
   video at **every** replan, with separate `wrist.mp4` for saved multi-view
   models when that camera is available. Missing views are skipped.
@@ -121,6 +122,9 @@ Future-video saving is on by default. `--no-save-predicted-video` disables only
 future decoding/export and calls `sample_canonical_action` instead (this
 checkpoint still requires joint sampling to produce its actions);
 `--no-save-video` independently disables only the **actual** rollout video.
+For 20 trials per goal task without future decoding, keeping only failed
+rollout videos, use `--trials-per-task 20 --no-save-predicted-video
+--save-failed-videos-only` and do not pass `--stop-on-success`.
 `--output-dir` controls all outputs, including future videos, and must name a
 new directory so an earlier run cannot be overwritten.
 

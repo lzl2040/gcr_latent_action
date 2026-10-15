@@ -1,6 +1,7 @@
 import json
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -469,3 +470,92 @@ def test_stop_on_success_is_opt_in():
     assert not args.stop_on_success
     args = build_parser().parse_args(["--checkpoint", "/weights/step18k", "--stop-on-success"])
     assert args.stop_on_success
+
+
+def test_actual_video_modes_are_mutually_exclusive():
+    parser = build_parser()
+    args = parser.parse_args(["--checkpoint", "/weights/step18k", "--save-failed-videos-only"])
+    assert args.save_failed_videos_only and not args.no_save_video
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["--checkpoint", "/weights/step18k", "--save-failed-videos-only", "--no-save-video"]
+        )
+
+
+@pytest.mark.parametrize(
+    ("video_flags", "saved_names"),
+    [
+        ([], ["task_00_trial_000_success.mp4", "task_00_trial_001_failure.mp4"]),
+        (["--save-failed-videos-only"], ["task_00_trial_001_failure.mp4"]),
+        (["--no-save-video"], []),
+    ],
+)
+def test_main_actual_video_saving_modes(tmp_path, monkeypatch, video_flags, saved_names):
+    import imageio.v2 as imageio
+
+    import lerobot.evaluation.eval_qwen3vl_mot_libero as evaluation
+
+    closed, saved = [], []
+    suite = SimpleNamespace(
+        n_tasks=1,
+        get_task_init_states=lambda _: [0, 1],
+        get_task=lambda _: SimpleNamespace(name="toy", language="toy task"),
+        get_task_bddl_file_path=lambda _: "/unused/task.bddl",
+    )
+    package = ModuleType("libero")
+    libero = ModuleType("libero.libero")
+    envs = ModuleType("libero.libero.envs")
+    package.libero = libero
+    libero.benchmark = SimpleNamespace(get_benchmark_dict=lambda: {"libero_goal": lambda **kwargs: suite})
+    envs.OffScreenRenderEnv = lambda **kwargs: SimpleNamespace(close=lambda: closed.append(True))
+    for name, module in (("libero", package), ("libero.libero", libero), ("libero.libero.envs", envs)):
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(evaluation, "configure_libero", lambda *args: None)
+    monkeypatch.setattr(evaluation.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(evaluation.torch.cuda, "set_device", lambda device: None)
+    monkeypatch.setattr(evaluation.torch, "set_num_threads", lambda count: None)
+    monkeypatch.setattr(
+        evaluation.torch.backends.cuda.matmul,
+        "allow_tf32",
+        evaluation.torch.backends.cuda.matmul.allow_tf32,
+    )
+    config = SimpleNamespace(
+        inference_steps=20, rgb_views=("primary",), task_names=("joint_prediction",), video_image_size=4
+    )
+    monkeypatch.setattr(
+        evaluation, "load_policy", lambda args: SimpleNamespace(config=config, reset=lambda: None)
+    )
+    monkeypatch.setattr(evaluation.LiberoAdapter, "from_dataset", lambda path: SimpleNamespace(fps=20))
+
+    def fake_rollout(env, initial_state, plan, **kwargs):
+        return {
+            "success": initial_state == 0,
+            "steps": 1,
+            "policy_calls": 0,
+            "inference_seconds": 0.0,
+            "actions": [[0.0] * 7],
+        }, [np.zeros((4, 4, 3), dtype=np.uint8)] if kwargs["save_video"] else []
+
+    monkeypatch.setattr(evaluation, "rollout_episode", fake_rollout)
+    monkeypatch.setattr(imageio, "mimsave", lambda path, frames, **kwargs: saved.append(path))
+    output = tmp_path / "evaluation"
+    evaluation.main(
+        [
+            "--checkpoint",
+            "/weights/step18k",
+            "--trials-per-task",
+            "2",
+            "--no-save-predicted-video",
+            "--output-dir",
+            str(output),
+            *video_flags,
+        ]
+    )
+    assert closed == [True]
+    assert [path.name for path in saved] == saved_names
+    result = json.loads((output / "results.json").read_text())
+    assert result["evaluation_complete"] and result["episodes_completed"] == 2
+    assert result["successes"] == 1
+    assert [
+        Path(episode["video_path"]).name for episode in result["episodes"] if "video_path" in episode
+    ] == saved_names

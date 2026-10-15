@@ -518,7 +518,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="New directory for results, rollout videos, and per-replan future videos.",
     )
-    parser.add_argument("--no-save-video", action="store_true")
+    rollout_video = parser.add_mutually_exclusive_group()
+    rollout_video.add_argument("--no-save-video", action="store_true")
+    rollout_video.add_argument(
+        "--save-failed-videos-only",
+        action="store_true",
+        help="Save actual rollout videos only for failed episodes; does not control predicted videos.",
+    )
     parser.add_argument(
         "--no-save-predicted-video",
         action="store_true",
@@ -670,7 +676,7 @@ def main(argv: list[str] | None = None) -> None:
                     seed=args.seed + task_id * 1000 + trial,
                     actions_path=str(actions_path.resolve()),
                 )
-                if frames:
+                if frames and (not args.save_failed_videos_only or not episode["success"]):
                     import imageio.v2 as imageio
 
                     video_path = output_dir / f"{stem}_{'success' if episode['success'] else 'failure'}.mp4"
