@@ -488,9 +488,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-ids", type=int, nargs="+", help="Defaults to all tasks in benchmark order 0.")
     parser.add_argument("--trials-per-task", type=int, default=50)
     parser.add_argument(
+        "--stop-on-success",
+        action="store_true",
+        help="Stop after saving the first successful episode, without running further tasks or trials.",
+    )
+    parser.add_argument(
         "--replan-steps",
         type=int,
-        default=8,
+        default=10,
         help="Execute this many consecutive commands before replanning.",
     )
     parser.add_argument("--wait-steps", type=int, default=10)
@@ -685,6 +690,9 @@ def main(argv: list[str] | None = None) -> None:
                     result["episodes_completed"],
                     100 * result["success_rate"],
                 )
+                if args.stop_on_success and episode["success"]:
+                    logger.info("Stopping after the first success. Results: %s", output_dir / "results.json")
+                    return
         finally:
             env.close()
     logger.info("Results: %s", (output_dir / "results.json").resolve())

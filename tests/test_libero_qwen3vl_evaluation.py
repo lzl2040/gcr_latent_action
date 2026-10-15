@@ -276,6 +276,38 @@ def test_episode_settling_replan_and_timeout():
     assert env.history[2] == result["actions"][0]
 
 
+def test_default_replanning_executes_ten_of_thirty_two_actions():
+    args = build_parser().parse_args(["--checkpoint", "/weights/step12k"])
+    assert args.replan_steps == 10
+    calls, chunks = [], []
+
+    def plan(obs, **context):
+        calls.append(context)
+        chunk = np.arange(32 * 7).reshape(32, 7) / 1000 + len(chunks)
+        chunks.append(chunk)
+        return chunk
+
+    result, _ = rollout_episode(
+        FakeEnv(),
+        "fixed-state",
+        plan,
+        seed=123,
+        max_steps=25,
+        wait_steps=0,
+        replan_steps=args.replan_steps,
+        save_video=False,
+    )
+    assert result["steps"] == 25 and result["policy_calls"] == 3
+    assert calls == [
+        {"control_step": 0, "replan_index": 0},
+        {"control_step": 10, "replan_index": 1},
+        {"control_step": 20, "replan_index": 2},
+    ]
+    np.testing.assert_array_equal(
+        result["actions"], np.concatenate([chunks[0][:10], chunks[1][:10], chunks[2][:5]])
+    )
+
+
 def test_success_is_not_the_environment_done_flag():
     def plan(obs, **context):
         return np.zeros((3, 7))
@@ -430,3 +462,10 @@ def test_output_directory_and_independent_video_switches():
     assert args.no_save_video and not args.no_save_predicted_video
     args = build_parser().parse_args(["--checkpoint", "/weights/step12k", "--no-save-predicted-video"])
     assert not args.no_save_video and args.no_save_predicted_video
+
+
+def test_stop_on_success_is_opt_in():
+    args = build_parser().parse_args(["--checkpoint", "/weights/step18k"])
+    assert not args.stop_on_success
+    args = build_parser().parse_args(["--checkpoint", "/weights/step18k", "--stop-on-success"])
+    assert args.stop_on_success

@@ -21,7 +21,7 @@ python -m lerobot.evaluation.eval_qwen3vl_mot_libero \
   --libero-root /home/v-wangxiaofa/lzl/LIBERO \
   --task-suite libero_goal \
   --trials-per-task 50 \
-  --replan-steps 8 \
+  --replan-steps 10 \
   --output-dir /Data/lzl/libero_eval/step12k_goal
 ```
 
@@ -30,13 +30,17 @@ Run the command once for each suite; normalization uses that suite's original
 `*_no_noops_lerobot/meta/stats.json`, not pooled statistics or quantiles.
 Use `--task-ids 0 1` to select tasks. Standard control horizons are spatial 220,
 object 280, goal 300, and 10-suite 520 steps, after 10 settling steps.
+Use `--stop-on-success` for a smoke evaluation that saves the first successful
+episode and stops without running further tasks or trials. Early termination is
+not a complete benchmark evaluation.
 
 For a short plumbing check, add `--task-ids 0 --trials-per-task 1 --max-steps 16`.
 A shortened horizon is **not a benchmark success-rate evaluation**.
 The default flow integration count comes from the saved configuration (20 for
 this checkpoint); `--inference-steps` explicitly overrides it for ablations.
-`--replan-steps` executes the first N consecutive actions of each predicted chunk
-before replanning and cannot exceed the saved `n_action_steps` (32 here).
+`--replan-steps` defaults to 10 and executes the first N consecutive actions of
+each predicted chunk before replanning. It cannot exceed the saved
+`n_action_steps` (32 here).
 
 Use `CUDA_VISIBLE_DEVICES` to choose the policy GPU. For example, to use physical
 GPU 3 for both inference and EGL rendering:
