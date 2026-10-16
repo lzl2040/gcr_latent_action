@@ -674,6 +674,12 @@ PHYSICAL_SPECS: dict[str, dict] = {
             "observation.images.left_wrist_right_tactile"
         ],
     },
+    # simulation
+    "robodojo": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action.ee_ort6d_pos", 0, 20, 0)],
+        "state": [_seg("observation.ee_ort6d_pos", 0, 20, 0)],
+    },
 }
 
 # ms_data_xdof_5, ms_data_xdof_2,  ms_data_xdof_3

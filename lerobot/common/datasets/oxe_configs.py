@@ -828,23 +828,26 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": None,
     },
     "ms_data_scale":{
+        # cam_low is the table view, cam_high is the top view, cam_right_wrist is the wrist view
         # "image_obs_keys": {"primary": "cam_high", "secondary": "cam_low", "wrist": "cam_right_wrist"},
-        "image_obs_keys": {"primary": "cam_high", "secondary": None, "wrist": None},
+        "image_obs_keys": {"primary": "cam_high", "secondary": "cam_low", "wrist": "cam_right_wrist"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
         "state_encoding": StateEncoding.EEF_R6,
         "action_encoding": ActionEncoding.EEF_R6,
     },
     "ms_data_xdof_1":{
+        # has left and rihgt, cam_right and cam_left is wrist view
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
-        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
+        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": "cam_right"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
         "state_encoding": StateEncoding.EEF_R6,
         "action_encoding": ActionEncoding.EEF_R6,
     },
     "ms_data_xdof_2":{
-        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
+        # has left and rihgt
+        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": "cam_right"},
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
@@ -852,7 +855,8 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_R6,
     },
     "ms_data_xdof_3":{
-        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
+        # has left and rihgt
+        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": "cam_right"},
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
@@ -861,7 +865,8 @@ OXE_DATASET_CONFIGS = {
     },
     
     "ms_data_xdof_4":{
-        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
+        # has left and rihgt
+        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": "cam_right"},
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
@@ -870,7 +875,8 @@ OXE_DATASET_CONFIGS = {
     },
     
     "ms_data_xdof_5":{
-        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": None},
+        # has left and rihgt
+        "image_obs_keys": {"primary": "cam_top", "secondary": None, "wrist": "cam_right"},
         # "image_obs_keys": {"primary": "cam_right", "secondary": "cam_top", "wrist": None},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["proprio"],
@@ -1035,6 +1041,14 @@ OXE_DATASET_CONFIGS = {
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
+    },
+    # robodojo
+    "robodojo": {
+        "image_obs_keys": {"primary": "cam_high", "secondary": "cam_left_wrist", "wrist": "cam_right_wrist"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
     },
     # Pizza
     "pizza": {

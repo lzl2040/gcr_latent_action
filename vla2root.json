@@ -109,5 +109,6 @@
     "open_neo_flexiv": "OpenNeoData/flexiv",
     "open_neo_ur": "OpenNeoData/ur",
     "open_neo_umi": "OpenNeoData/umi",
-    "open_neo_umi_single": "OpenNeoData/umi_single"
+    "open_neo_umi_single": "OpenNeoData/umi_single",
+    "robodojo": "RoboDojo/data/RoboDojo_ee_lerobot_v30_video"
 }
