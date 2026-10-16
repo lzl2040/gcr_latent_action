@@ -239,17 +239,12 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
         weights = np.array(kept_weights, dtype=np.float64) * weight_sizes
         if weights.sum() <= 0:
             raise RuntimeError(
-                "The perception sample pool is empty. Every episode is shorter than its "
-                "required frame horizon."
+                "The perception sample pool is empty: no nonempty episodes with positive weight."
             )
         self.sample_weights = weights / weights.sum()
         self.dataset_size_one_epoch = dataset_size_one_epoch
         self.dataset_sample_counts = (self.sample_weights * dataset_size_one_epoch).astype(int)
 
-        # Frames from which ``t + horizon`` still lands inside the same episode. Sampling is
-        # restricted to these rather than clamping afterwards: a clamped pair has
-        # ``image_t1 == image_t0``, i.e. a target the predictor can hit by copying its input,
-        # and at short episode lengths those degenerate pairs are a large fraction of the data.
         self._valid_starts = [
             self._trim_episodes(rng_, h) for rng_, h in zip(self.episode_ranges, self.frame_horizons, strict=True)
         ]
@@ -390,21 +385,10 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def _trim_episodes(episode_ranges: np.ndarray, horizon: int) -> tuple[np.ndarray, np.ndarray]:
-        """``(starts, lengths)`` of the frames whose partner frame is in the same episode.
-
-        Episodes shorter than ``horizon + 1`` frames have no such frame and are dropped. If
-        that would empty the dataset the trim is abandoned and every episode contributes its
-        first frame, so a short-episode dataset degrades to clamped pairs instead of raising.
-        """
+        """Return every frame of nonempty episodes; future observations use edge padding."""
         starts = episode_ranges[:, 0]
-        lengths = episode_ranges[:, 1] - starts - horizon
+        lengths = episode_ranges[:, 1] - starts
         keep = lengths > 0
-        if not keep.any():
-            logger.warning(
-                "Every episode is shorter than the %d-frame window; pairs will be clamped "
-                "and mostly static. Lower chunk_seconds for this dataset.", horizon,
-            )
-            return starts, np.ones_like(starts)
         return starts[keep], lengths[keep]
 
     # ------------------------------------------------------------------
@@ -415,7 +399,7 @@ class PerceptionVideoDataset(torch.utils.data.Dataset):
 
         With a persistent pool, draws are uniform over its sparse logical anchors without
         materialising them. The disabled-pool fallback is uniform over all valid frames by
-        drawing episodes proportionally to their trimmed lengths.
+        drawing episodes proportionally to their lengths.
         """
         rng = np.random.default_rng(seed)
         plan: list[tuple[int, int]] = []

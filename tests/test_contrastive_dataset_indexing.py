@@ -111,3 +111,20 @@ def test_random_fallback_index_is_reproducible_and_excludes_failed_frame() -> No
 
     assert first == second
     assert all(fallback != requested for requested, fallback in enumerate(first))
+
+
+def test_fallback_stays_in_selected_episodes_and_uses_tail_frames() -> None:
+    dataset = _dataset_with_sizes([10])
+    dataset.seed = 123
+    ranges = [np.asarray([[1, 4], [8, 9]])]
+    replacements = {
+        dataset._random_fallback_index(0, index, 10, episode_ranges=ranges)
+        for index in range(10)
+    }
+    assert replacements == {1, 2, 3, 8}
+    for epoch in range(10):
+        dataset.epoch = epoch
+        for index in replacements:
+            fallback = dataset._random_fallback_index(0, index, 10, episode_ranges=ranges)
+            assert fallback in replacements
+            assert fallback != index

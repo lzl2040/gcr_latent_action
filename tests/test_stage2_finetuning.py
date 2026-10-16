@@ -41,6 +41,7 @@ def _build_libero_dataset(
     stage="auto",
     validation=True,
     episodes=2,
+    episode_length=64,
     policy=None,
     missing_dataset=None,
     rgb_aug=False,
@@ -78,7 +79,10 @@ def _build_libero_dataset(
             dataset_size_one_epoch=1,
         ),
     )
-    ranges = np.asarray([[index * 64, (index + 1) * 64] for index in range(episodes)], dtype=np.int64)
+    ranges = np.asarray(
+        [[index * episode_length, (index + 1) * episode_length] for index in range(episodes)],
+        dtype=np.int64,
+    )
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setattr(
         MultiModalContrastiveDataset, "_resolve_video_backend", staticmethod(lambda name: name)
@@ -87,7 +91,7 @@ def _build_libero_dataset(
         MultiModalContrastiveDataset,
         "_build_dataset",
         lambda *args: (
-            list(range(episodes * 64)),
+            list(range(episodes * episode_length)),
             SimpleNamespace(features={}, fps=20, video_keys=[]),
             {"primary": "image", "wrist": "wrist_image"},
             31,
@@ -168,13 +172,14 @@ def test_libero_finetuning_uses_all_windows_and_never_writes_sample_pools(tmp_pa
     assert not (tmp_path / "pools").exists()
     assert not (tmp_path / "pool_cache").exists()
     np.testing.assert_array_equal(dataset.anchor_strides, [1, 1, 1, 1])
-    assert dataset.total_pool_anchors == 4 * 2 * (64 - 31)
+    assert dataset.total_pool_anchors == 4 * 2 * 64
     assert cfg.dataset.dataset_size_one_epoch == dataset.total_pool_anchors
     assert dataset.total_source_episodes == 8
     sampler = _make_training_sampler(cfg, dataset, batch_size=8, world_size=1, rank=0)
     assert isinstance(sampler, FullCoverageBatchSampler)
     assert sampler.total_anchors == dataset.total_pool_anchors
-    expected = {(index, start + frame) for index in range(4) for start in (0, 64) for frame in range(33)}
+    assert all(stat["anchor_ratio"] == 1.0 for stat in dataset.dataset_statistics)
+    expected = {(index, frame) for index in range(4) for frame in range(128)}
     sampled = list(chain.from_iterable(sampler))
     assert set(sampled) == expected
     assert len(sampled) == len(expected)
@@ -200,6 +205,17 @@ def test_training_validation_accepts_one_episode_without_holding_it_out(tmp_path
     assert dataset.total_source_episodes == 4
     assert len(dataset.heldout_validation_samples()) == 4
     assert "training-sample validation uses all of them" in caplog.text
+
+
+def test_finetuning_and_validation_accept_single_frame_episodes(tmp_path, monkeypatch):
+    cfg, dataset = _build_libero_dataset(tmp_path, monkeypatch, episodes=1, episode_length=1)
+    assert dataset.total_pool_anchors == 4
+    np.testing.assert_array_equal(dataset.heldout_anchor_counts, np.ones(4, dtype=np.int64))
+    samples = dataset.heldout_validation_samples()
+    assert len(samples) == 4
+    assert all(sample["frame_index"] == 0 for sample in samples)
+    sampler = _make_training_sampler(cfg, dataset, batch_size=1, world_size=1, rank=0)
+    assert set(chain.from_iterable(sampler)) == {(index, 0) for index in range(4)}
 
 
 def test_explicit_pretraining_keeps_sparse_pools_and_contrastive_sampler(tmp_path, monkeypatch):
@@ -284,10 +300,11 @@ def test_distributed_full_epoch_covers_all_anchors_without_weighted_resampling()
         for rank in range(3)
         for sample in batches[rank][batch_index]
     ]
-    expected = {(0, frame) for frame in [0, 1, 2, 3, 10, 11, 12]} | {(1, frame) for frame in range(5)}
+    expected = {(0, frame) for frame in [*range(7), *range(10, 16)]} | {(1, frame) for frame in range(9)}
     assert set(global_samples) == expected
-    assert len(global_samples) == 12
-    assert Counter(global_samples) == Counter(expected)
+    assert len(global_samples) == 24
+    assert Counter(global_samples[:22]) == Counter(expected)
+    assert global_samples[22:] == global_samples[:2]
     assert all(len(batch) == 2 for rank_batches in batches for batch in rank_batches)
 
 
@@ -299,9 +316,9 @@ def test_distributed_padding_repeats_only_at_end_of_global_epoch():
         for rank in range(3)
         for sample in batches[rank][batch_index]
     ]
-    assert len(global_samples) == 18
-    assert len(set(global_samples[:12])) == 12
-    assert global_samples[12:] == global_samples[:6]
+    assert len(global_samples) == 27
+    assert len(set(global_samples[:22])) == 22
+    assert global_samples[22:] == global_samples[:5]
 
 
 def test_full_epoch_pads_only_final_batch_and_resumes_exactly():
@@ -314,9 +331,10 @@ def test_full_epoch_pads_only_final_batch_and_resumes_exactly():
     )
     original = list(sampler)
     sampled = list(chain.from_iterable(original))
-    assert len(sampled) == 6
-    assert len(set(sampled)) == 5
-    assert len(set(sampled[:5])) == 5
+    assert len(sampled) == 9
+    assert len(set(sampled)) == 8
+    assert len(set(sampled[:8])) == 8
+    assert sampled[8:] == sampled[:1]
     sampler.set_start_batch(1)
     assert list(sampler) == original[1:]
     sampler.set_epoch(1)
@@ -324,7 +342,7 @@ def test_full_epoch_pads_only_final_batch_and_resumes_exactly():
     assert len(list(sampler)) == len(original)
     assert list(sampler) != original
     with pytest.raises(ValueError, match="start_batch"):
-        sampler.set_start_batch(3)
+        sampler.set_start_batch(4)
 
 
 def test_full_sampler_resume_rejects_old_or_changed_sampling_geometry():
@@ -341,10 +359,10 @@ def test_full_sampler_resume_rejects_old_or_changed_sampling_geometry():
         _validate_training_sampler_resume(_full_sampler(batch_size=3), state)
 
 
-def test_empty_full_window_dataset_fails_explicitly():
-    with pytest.raises(ValueError, match="no valid full-length"):
+def test_empty_episode_dataset_fails_explicitly():
+    with pytest.raises(ValueError, match="no nonempty"):
         FullCoverageBatchSampler(
-            [np.asarray([[0, 3]])],
+            [np.asarray([[0, 0]])],
             2,
             horizon=[3],
             sample_weights=np.ones(1),

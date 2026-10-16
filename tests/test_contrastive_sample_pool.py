@@ -51,16 +51,18 @@ def test_compact_pool_stores_one_row_per_usable_episode() -> None:
         pool.episode_table,
         np.asarray(
             [
-                [0, 2, 2],
-                [50, 2, 4],
+                [0, 7, 7],
+                [50, 7, 14],
             ],
             dtype=np.int64,
         ),
     )
     np.testing.assert_array_equal(pool.dataset_episode_offsets, [0, 2])
-    np.testing.assert_array_equal(pool.dataset_anchor_counts, [4])
+    np.testing.assert_array_equal(pool.dataset_anchor_counts, [14])
     np.testing.assert_array_equal(pool.anchor_strides, [6])
-    assert pool.total_anchors == 4
+    assert pool.total_anchors == 14
+    assert pool.manifest["format_version"] == 2
+    assert pool.manifest["policy"]["pad_episode_tail"] is True
 
 
 def test_pool_persists_and_reloads_through_local_mmap(tmp_path: Path) -> None:
@@ -121,8 +123,8 @@ def test_sampler_draws_only_sparse_valid_starts() -> None:
 
     batch = next(iter(sampler))
     starts = [frame for _, frame in batch]
-    assert set(starts) <= {0, 6, 50, 56}
-    assert all(start + 31 < (40 if start < 50 else 90) for start in starts)
+    assert set(starts) <= set(range(0, 40, 6)) | set(range(50, 90, 6))
+    assert any(start + 31 >= (40 if start < 50 else 90) for start in starts)
 
 
 def test_perception_sampling_plan_uses_the_same_sparse_pool() -> None:
@@ -136,8 +138,8 @@ def test_perception_sampling_plan_uses_the_same_sparse_pool() -> None:
     plan = dataset._build_sampling_plan(seed=11)
 
     assert len(plan) == 128
-    assert {frame for _, frame in plan} <= {0, 6, 50, 56}
-    assert dataset.num_frames == 4
+    assert {frame for _, frame in plan} == set(range(0, 40, 6)) | set(range(50, 90, 6))
+    assert dataset.num_frames == 14
 
 
 def test_pool_episode_groups_respect_frame_gap() -> None:
@@ -161,7 +163,7 @@ def test_pool_episode_groups_respect_frame_gap() -> None:
         min_frame_gap=32,
     )
 
-    assert len(frames) == 5
+    assert len(frames) == 6
     assert all(frame % 6 == frames[0] % 6 for frame in frames)
     assert min(abs(left - right) for index, left in enumerate(frames) for right in frames[index + 1 :]) >= 32
 
@@ -226,7 +228,36 @@ def test_heldout_episode_split_is_deterministic_and_excluded_from_training() -> 
     assert len(samples) == 4
     for sample in samples:
         assert sample["episode_start"] <= sample["frame_index"]
-        assert (
-            sample["frame_index"] + sample["horizon"]
-            < sample["episode_end"]
-        )
+        assert sample["frame_index"] < sample["episode_end"]
+        assert (sample["frame_index"] - sample["episode_start"]) % sample["anchor_stride"] == 0
+
+
+@pytest.mark.parametrize("fps,stride", [(8.0, 1), (20.0, 4)])
+def test_pool_includes_short_episodes_and_skips_empty_ones(fps, stride) -> None:
+    pool = build_or_load_sample_pool(
+        data_mix="short_episodes",
+        dataset_names=["short"],
+        dataset_sizes=[8],
+        episode_ranges=[np.asarray([[0, 2], [2, 3], [3, 3], [3, 8]])],
+        true_fps=[fps],
+        horizons=[31],
+        keep_all_below_fps=10.0,
+        target_hz=5.0,
+        pool_root=None,
+        local_cache_root=None,
+    )
+    expected = set(range(0, 2, stride)) | {2} | set(range(3, 8, stride))
+    assert pool.total_anchors == len(expected)
+    assert pool.episode_table.shape == (3, 3)
+    sampled = pool.sample_frames(np.random.default_rng(17), 0, 256)
+    assert set(sampled) == expected
+
+
+def test_perception_without_pool_samples_all_frames_including_single_frame_episodes() -> None:
+    dataset = PerceptionVideoDataset.__new__(PerceptionVideoDataset)
+    dataset.sample_pool = None
+    dataset.dataset_sample_counts = np.asarray([128])
+    dataset._valid_starts = [
+        dataset._trim_episodes(np.asarray([[0, 1], [2, 2], [2, 6]]), horizon=31)
+    ]
+    assert {frame for _, frame in dataset._build_sampling_plan(seed=11)} == {0, 2, 3, 4, 5}

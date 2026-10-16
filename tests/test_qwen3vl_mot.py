@@ -1395,7 +1395,7 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         assert not hasattr(restored, "physical_decoders")
 
 
-def test_multiview_dataset_resolves_roles_and_masks_missing_duplicate_and_padded_views(monkeypatch):
+def test_multiview_dataset_keeps_padded_tails_and_masks_missing_duplicate_or_invalid_views(monkeypatch):
     import lerobot.common.datasets.contrastive_dataset as dataset_module
 
     dataset = object.__new__(MultiModalContrastiveDataset)
@@ -1424,7 +1424,7 @@ def test_multiview_dataset_resolves_roles_and_masks_missing_duplicate_and_padded
     assert result["images_t0"].shape == (3, 3, 8, 8)
     assert result["video_views"].shape == (3, 3, 3, 8, 8)
     assert result["image_view_mask"].tolist() == [True, True, True]
-    assert result["video_view_mask"].tolist() == [True, True, False]
+    assert result["video_view_mask"].tolist() == [True, True, True]
     assert result["video_views"][:, 0, 0, 0, 0].tolist() == [50, 100, 150]
     keys["secondary"] = None
     keys["wrist"] = keys["primary"]

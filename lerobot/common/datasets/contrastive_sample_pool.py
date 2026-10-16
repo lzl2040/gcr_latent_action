@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 import torch.distributed as dist
 
-SAMPLE_POOL_FORMAT_VERSION = 1
+SAMPLE_POOL_FORMAT_VERSION = 2
 _EPISODE_TABLE_NAME = "episodes.npy"
 _MANIFEST_NAME = "manifest.json"
 
@@ -211,6 +211,7 @@ def _pool_fingerprint(
             "keep_all_below_fps": float(keep_all_below_fps),
             "target_hz": float(target_hz),
             "phase": 0,
+            "pad_episode_tail": True,
         },
         "datasets": datasets,
     }
@@ -228,14 +229,14 @@ def _build_episode_table(
     chunks = []
     offsets = [0]
     dataset_anchor_counts = []
-    for ranges, horizon, stride in zip(
+    for ranges, _horizon, stride in zip(
         episode_ranges,
         horizons,
         anchor_strides,
         strict=True,
     ):
         normalized = _normalized_episode_ranges(ranges)
-        usable_spans = normalized[:, 1] - int(horizon) - normalized[:, 0]
+        usable_spans = normalized[:, 1] - normalized[:, 0]
         counts = np.where(
             usable_spans > 0,
             (usable_spans + int(stride) - 1) // int(stride),
@@ -484,6 +485,7 @@ def _build_pool_payload(
             "keep_all_below_fps": float(keep_all_below_fps),
             "target_hz": float(target_hz),
             "phase": 0,
+            "pad_episode_tail": True,
         },
         "dataset_episode_offsets": offsets.tolist(),
         "total_anchors": int(counts.sum(dtype=np.int64)),

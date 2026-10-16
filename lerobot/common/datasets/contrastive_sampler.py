@@ -14,8 +14,8 @@ are hard *by construction*:
 4. The remaining slots are filled from the whole mixture to keep some easy negatives and
    avoid collapsing onto a single dataset's statistics.
 
-Every frame is additionally kept at least ``horizon`` frames before the end of its episode
-so that both the future perception frame and the full action chunk exist without clamping.
+Every episode frame can start a window. The loader repeats final observations and
+zero-pads raw actions when the window extends beyond the episode.
 """
 
 from __future__ import annotations
@@ -106,10 +106,7 @@ class ContrastiveBatchSampler(Sampler):
         self.num_replicas = max(1, num_replicas)
         self.rank = rank
         self.seed = seed
-        # One horizon per dataset: the window is a fixed duration, so its length in *frames*
-        # differs per dataset (8 at fractal's 3 fps, 48 at 30 fps). Trimming every episode by a
-        # single global horizon would cut low-fps datasets by far more than their own window
-        # needs -- trimming fractal's ~43-frame episodes by 48 would leave almost nothing.
+        # Duration-based windows have a different frame horizon at each recording rate.
         if isinstance(horizon, (list, tuple, np.ndarray)):
             if len(horizon) != len(episode_ranges):
                 raise ValueError(
@@ -127,13 +124,9 @@ class ContrastiveBatchSampler(Sampler):
         self.epoch = 0
         self.start_batch = 0
 
-        # Usable frame span per episode: [start, end - horizon). Episodes too short to host a
-        # full chunk fall back to their single first frame (clamping is handled downstream).
         self.usable = []
-        for ds_idx, ranges in enumerate(episode_ranges):
-            starts = ranges[:, 0]
-            ends = np.maximum(ranges[:, 1] - self.horizons[ds_idx], starts + 1)
-            self.usable.append(np.stack([starts, ends], axis=1))
+        for ranges in episode_ranges:
+            self.usable.append(ranges[ranges[:, 1] > ranges[:, 0]].copy())
 
         total_batches = max(1, samples_per_epoch // (batch_size * self.num_replicas))
         self.num_batches = total_batches
@@ -353,7 +346,7 @@ class ContrastiveBatchSampler(Sampler):
 
 
 class FullCoverageBatchSampler(Sampler):
-    """Shuffle every full-window anchor once per epoch, padding only the final global batch."""
+    """Shuffle every episode-frame anchor once per epoch, padding the final global batch."""
 
     def __init__(
         self, episode_ranges: list[np.ndarray], batch_size: int, *,
@@ -378,11 +371,11 @@ class FullCoverageBatchSampler(Sampler):
             if weight <= 0:
                 continue
             for start, end in ranges:
-                count = int(end) - int(start) - int(frames)
+                count = int(end) - int(start)
                 if count > 0:
                     spans.append((dataset_idx, int(start), count))
         if not spans:
-            raise ValueError("Full-coverage finetuning has no valid full-length training windows.")
+            raise ValueError("Full-coverage finetuning has no nonempty training episodes.")
         self.spans = np.asarray(spans, dtype=np.int64)
         self.anchor_ends = np.cumsum(self.spans[:, 2], dtype=np.int64)
         self.total_anchors = int(self.anchor_ends[-1])
@@ -394,7 +387,8 @@ class FullCoverageBatchSampler(Sampler):
         self.epoch = 0
         self.start_batch = 0
         digest = hashlib.sha256(json.dumps({
-            "format_version": 1,
+            "format_version": 2,
+            "pad_episode_tail": True,
             "datasets": dataset_names, "horizons": [int(value) for value in horizon],
             "batch_size": batch_size, "world_size": num_replicas, "seed": self.seed,
         }, sort_keys=True).encode())

@@ -185,3 +185,16 @@ def test_stage2_sampler_keeps_video_only_datasets_with_micro_batch_one() -> None
     sampled_datasets = [batch[0][0] for batch in sampler]
     assert 0 in sampled_datasets
     assert 1 in sampled_datasets
+
+
+def test_sampler_without_pool_includes_tail_frames_and_single_frame_episodes() -> None:
+    sampler = ContrastiveBatchSampler(
+        episode_ranges=[np.asarray([[0, 3], [5, 6], [6, 6]])],
+        sample_weights=np.ones(1),
+        batch_size=128,
+        samples_per_epoch=128,
+        horizon=31,
+        same_dataset_frac=1.0,
+        episode_group_frac=0.0,
+    )
+    assert {frame for _, frame in next(iter(sampler))} == {0, 1, 2, 5}

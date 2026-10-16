@@ -5,7 +5,7 @@ This loader produces, for every sample:
 Perception side
     * ``image_t0`` / ``image_t1``  : the primary camera at time ``t`` and ``t + horizon``
     * ``task``                     : the language instruction
-    * ``pair_is_valid``            : 0 when ``t + horizon`` had to be clamped inside the episode
+    * ``pair_is_valid``            : 1 for a present, valid current image, including padded tails
     * ``has_physical``             : 1 only when this sample can form a contrastive pair
 
 Physical side
@@ -13,6 +13,9 @@ Physical side
     * ``observation.state`` / ``state_mask`` : state trajectory over the same chunk
     * ``tactile_signal`` / ``tactile_signal_mask`` : low-dimensional tactile readings at t, t+H
     * ``tactile_image``  / ``tactile_image_mask``  : tactile camera views at t, t+H
+
+All episode frames may start a window. Beyond the episode end, observations repeat the
+last frame and raw actions are zero-padded before canonical mean/std normalization.
 
 Heterogeneity is handled by :mod:`lerobot.common.datasets.canonical_space`: every dataset is
 mapped into the same slotted vector plus a validity mask, so datasets that only expose joint
@@ -453,8 +456,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         if not np.any(self.pool_anchor_counts > 0):
             raise RuntimeError(
-                "The temporal sample pool is empty. Every episode is shorter than its "
-                "required frame horizon."
+                "The temporal sample pool is empty: no nonempty training episodes."
             )
         for name, count in zip(
             self.dataset_names,
@@ -463,7 +465,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         ):
             if count == 0:
                 logger.warning(
-                    "%s has no full temporal window and will not be sampled.",
+                    "%s has no nonempty training episode and will not be sampled.",
                     name,
                 )
 
@@ -513,7 +515,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         )
         if self.full_training_coverage:
             logger.info(
-                "Full-coverage finetuning: %d valid windows, %d episodes; validation_split=training. "
+                "Full-coverage finetuning: %d windows including padded episode tails, "
+                "%d episodes; validation_split=training. "
                 "Validation episodes remain in training; metrics are not held-out generalization.",
                 self.total_pool_anchors, self.total_source_episodes,
             )
@@ -591,15 +594,13 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 eval_ranges.append(np.empty((0, 2), dtype=np.int64))
                 continue
 
-            usable = np.flatnonzero(
-                ranges[:, 1] - ranges[:, 0] > int(horizon)
-            )
+            usable = np.flatnonzero(ranges[:, 1] > ranges[:, 0])
             training_validation = getattr(self, "full_training_coverage", False)
             required_usable = 1 if training_validation else int(episodes_per_dataset) + int(training_source)
             if usable.size < required_usable:
                 if training_validation:
                     raise RuntimeError(
-                        f"{name} has no usable full-length episode for horizon={horizon}; "
+                        f"{name} has no nonempty episode for horizon={horizon}; "
                         "training-sample validation requires at least one."
                     )
                 raise RuntimeError(
@@ -645,7 +646,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         return train_ranges, eval_ranges, manifest
 
     def heldout_validation_samples(self) -> list[dict[str, int | float | str | bool]]:
-        """Return one fixed full-window anchor per validation episode, including training diagnostics."""
+        """Return one fixed, optionally tail-padded anchor per validation episode."""
         if self.heldout_sample_pool is None:
             return []
         samples = []
@@ -660,7 +661,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             ):
                 anchor_count = max(
                     0,
-                    (int(end) - horizon - int(start) + stride - 1) // stride,
+                    (int(end) - int(start) + stride - 1) // stride,
                 )
                 if anchor_count <= 0:
                     continue
@@ -1258,8 +1259,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             )
         if episode_ranges is not None:
             ranges = episode_ranges[ds_idx]
-            horizon = int(self.frame_horizons[ds_idx])
-            spans = np.maximum(ranges[:, 1] - horizon - ranges[:, 0], 0)
+            spans = np.maximum(ranges[:, 1] - ranges[:, 0], 0)
             total = int(spans.sum(dtype=np.int64))
             if total > 0:
                 logical = int(rng.integers(total))
@@ -1269,9 +1269,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 candidate = int(ranges[episode, 0]) + logical - previous
                 if total <= 1 or candidate != requested_frame_idx:
                     return candidate
-                return int(ranges[episode, 0]) + (
-                    (logical - previous + 1) % int(spans[episode])
-                )
+                logical = (logical + 1) % total
+                episode = int(np.searchsorted(cumulative, logical, side="right"))
+                previous = 0 if episode == 0 else int(cumulative[episode - 1])
+                return int(ranges[episode, 0]) + logical - previous
         candidate = int(rng.integers(dataset_length - 1))
         return candidate + int(candidate >= requested_frame_idx)
 
@@ -1412,7 +1413,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             first = frames[0]
             last = frames[-1] if frames.shape[0] > 1 else frames[0]
             is_pad = item.get(f"{primary_key}_is_pad")
-            valid = 0.0 if (is_pad is not None and bool(is_pad[-1])) else 1.0
+            valid = 0.0 if (is_pad is not None and bool(is_pad[0])) else 1.0
         else:
             first = frames
             last = frames
@@ -1474,7 +1475,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             )
             window_valid = current_valid and frames.ndim == 4 and (
                 frames.shape[0] == self.world_video_frames
-            ) and (padding is None or not bool(padding.any()))
+            )
             images.append(image)
             videos.append(self._extract_video(item, key))
             image_mask.append(current_valid)
@@ -1486,7 +1487,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "video_view_mask": torch.tensor(video_mask, dtype=torch.bool),
         }
 
-    def _build_canonical_vector(self, item, instructions, norm, is_chunk: bool):
+    def _build_canonical_vector(self, item, instructions, norm, is_chunk: bool, *, zero_pad: bool = False):
         width = CANON_DIM
         chunk = self.chunk_size if is_chunk else 1
         out = torch.zeros(chunk, width, dtype=torch.float32)
@@ -1499,11 +1500,21 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             value = value.to(torch.float32)
             if is_chunk:
                 if value.ndim == 1:
-                    value = value.unsqueeze(0).expand(chunk, -1)
+                    value = value.unsqueeze(0)
                 elif value.ndim > 2:
                     value = value.reshape(value.shape[0], -1)
+                padding = item.get(f"{src_key}_is_pad") if zero_pad else None
+                if padding is not None:
+                    padding = torch.as_tensor(padding, dtype=torch.bool, device=value.device)
+                    if padding.ndim != 1 or padding.shape[0] != value.shape[0]:
+                        raise ValueError(f"{src_key}_is_pad must match the action chunk's time dimension.")
+                    # Zero in raw action space, not after z-score normalization.
+                    value = value.masked_fill(padding.unsqueeze(-1), 0.0)
                 if value.shape[0] < chunk:
-                    pad = value[-1:].expand(chunk - value.shape[0], -1)
+                    pad = (
+                        value.new_zeros(chunk - value.shape[0], value.shape[1])
+                        if zero_pad else value[-1:].expand(chunk - value.shape[0], -1)
+                    )
                     value = torch.cat([value, pad], dim=0)
                 value = value[:chunk]
             else:
@@ -1605,7 +1616,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             if frame.ndim == 3:  # (C, H, W) -- no window was read
                 frame = frame.unsqueeze(0)
             if frame.shape[0] < n_frames:
-                frame = frame[:1].expand(n_frames, -1, -1, -1)
+                frame = torch.cat(
+                    [frame, frame[-1:].expand(n_frames - frame.shape[0], -1, -1, -1)],
+                    dim=0,
+                )
             frame = frame[:n_frames]
             frame = self._as_uint8(frame)
             frame = F.interpolate(
@@ -1627,7 +1641,9 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         primary_key = self.image_key_maps[ds_idx]["primary"]
 
         image_t0, image_t1, pair_valid = self._extract_frames(item, primary_key)
-        action, action_mask = self._build_canonical_vector(item, spec.get("action", []), norm["action"], True)
+        action, action_mask = self._build_canonical_vector(
+            item, spec.get("action", []), norm["action"], True, zero_pad=True
+        )
         state, state_mask = self._build_canonical_vector(item, spec.get("state", []), norm["state"], True)
         tactile_signal, tactile_signal_mask = self._build_tactile_signal(item, spec, norm["tactile_signal"])
         tactile_image, tactile_image_mask = self._build_tactile_images(item, spec)
