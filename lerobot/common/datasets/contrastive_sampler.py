@@ -15,7 +15,7 @@ are hard *by construction*:
    avoid collapsing onto a single dataset's statistics.
 
 Every episode frame can start a window. The loader repeats final observations and
-zero-pads raw actions when the window extends beyond the episode.
+pads actions with zero controls (identity ort6d rotations) beyond the episode.
 """
 
 from __future__ import annotations

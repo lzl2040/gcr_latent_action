@@ -62,8 +62,16 @@ def _canonical_dataset():
 
 @pytest.mark.parametrize("version", ["v2.1", "v3.0"])
 @pytest.mark.parametrize("frame_idx", [0, 8, 9, 38, 39, 40, 42])
-def test_episode_windows_repeat_observations_and_zero_raw_actions(version, frame_idx):
+@pytest.mark.parametrize("eef_action", [False, True])
+def test_episode_windows_repeat_observations_and_pad_zero_controls(version, frame_idx, eef_action):
     dataset = _canonical_dataset()
+    if eef_action:
+        dataset.specs[0]["action"] = [("action", 0, 10, 0)]
+        dataset.norm_stats[0]["action"] = _norm(
+            CANON_DIM,
+            [2.0, -3.0, 1.0, 0.999, 0.0, 0.0, 0.999, 0.0, 0.0, 0.5],
+            [2.0, 4.0, 1.0, 0.002, 0.1, 0.1, 0.002, 0.1, 0.1, 0.5],
+        )
     raw_type = LeRobotDataset if version == "v2.1" else LeRobotDatasetV30
     raw = raw_type.__new__(raw_type)
     raw.dataset_name = "tail_fixture"
@@ -87,6 +95,13 @@ def test_episode_windows_repeat_observations_and_zero_raw_actions(version, frame
     }
     raw.video_keys_to_decode = raw.meta.video_keys
     source_action = torch.arange(43, dtype=torch.float32)[:, None] + torch.tensor([3.0, 4.0])
+    if eef_action:
+        source_action = torch.cat([
+            source_action,
+            torch.zeros(43, 1),
+            torch.eye(3)[:, :2].reshape(1, 6).expand(43, -1),
+            torch.full((43, 1), 0.5),
+        ], dim=-1)
     source_state = torch.arange(43, dtype=torch.float32)[:, None] + torch.tensor([1.0, 10.0])
     source_touch = torch.arange(43, dtype=torch.float32)[:, None] * 2 + 1
     raw.hf_dataset = Dataset.from_dict({
@@ -118,10 +133,13 @@ def test_episode_windows_repeat_observations_and_zero_raw_actions(version, frame
 
     expected_action = source_action[query_indices["action"]].clone()
     expected_action[padding["action_is_pad"]] = 0
+    if eef_action:
+        expected_action[padding["action_is_pad"], 3:9] = torch.eye(3)[:, :2].reshape(6)
     norm = dataset.norm_stats[0]
+    action_width = 10 if eef_action else 2
     torch.testing.assert_close(
-        result["action"][:, :2],
-        (expected_action - norm["action"]["mean"][:2]) / norm["action"]["std"][:2],
+        result["action"][:, :action_width],
+        (expected_action - norm["action"]["mean"][:action_width]) / norm["action"]["std"][:action_width],
     )
     torch.testing.assert_close(
         result["observation.state"][:, :2],
@@ -132,8 +150,8 @@ def test_episode_windows_repeat_observations_and_zero_raw_actions(version, frame
         result["tactile_signal"][:, :1],
         (source_touch[query_indices["touch_signal"]] - 3.0) / 2.0,
     )
-    assert not result["action"][:, 2:].any()
-    assert result["action_mask"][:2].tolist() == [1, 1]
+    assert not result["action"][:, action_width:].any()
+    assert result["action_mask"][:action_width].eq(1).all()
     assert result["pair_is_valid"].item() == 1
     assert result["video_view_mask"].tolist() == [True, True]
     assert result["image_view_mask"].tolist() == [True, True]
@@ -178,7 +196,7 @@ def test_short_action_arrays_pad_with_raw_zero_while_states_repeat_last(action):
 
 def test_action_padding_uses_each_source_keys_own_mask():
     dataset = _canonical_dataset()
-    norm = _norm(CANON_DIM, [0.0] * 4, [1.0] * 4)
+    norm = _norm(CANON_DIM, [0.0] * 20, [1.0] * 20)
     actions, _ = dataset._build_canonical_vector(
         {
             "arm": torch.full((32, 2), 5.0),
@@ -186,15 +204,15 @@ def test_action_padding_uses_each_source_keys_own_mask():
             "gripper": torch.full((32, 2), 7.0),
             "gripper_is_pad": torch.arange(32) >= 1,
         },
-        [("arm", 0, 2, 0), ("gripper", 0, 2, 2)],
+        [("arm", 0, 2, 0), ("gripper", 0, 1, 9), ("gripper", 1, 2, 19)],
         norm,
         True,
         zero_pad=True,
     )
     assert actions[:2, :2].eq(5).all()
     assert not actions[2:, :2].any()
-    assert actions[0, 2:4].eq(7).all()
-    assert not actions[1:, 2:4].any()
+    assert actions[0, [9, 19]].eq(7).all()
+    assert not actions[1:, [9, 19]].any()
 
 
 def test_action_padding_rejects_misaligned_time_mask():
@@ -207,6 +225,84 @@ def test_action_padding_rejects_misaligned_time_mask():
             True,
             zero_pad=True,
         )
+
+
+@pytest.mark.parametrize("source_frames", [1, 17, 32, 35])
+@pytest.mark.parametrize("explicit_padding", [False, True])
+@pytest.mark.parametrize("instructions", [
+    [("action", 0, 10, 0)],
+    [("action", 0, 20, 0)],
+    [("action", 4, 24, 0)],
+    [("xyz", 0, 3, 0), ("rotation", 2, 8, 3), ("gripper", 0, 1, 9)],
+    [("left", 2, 12, 0), ("right", 4, 14, 10)],
+    [("joints", 0, 8, 20), ("joints", 8, 16, 28)],
+    [("eef", 0, 20, 0), ("joints", 0, 8, 20), ("joints", 8, 16, 28)],
+])
+def test_zero_control_padding_respects_canonical_slots_and_source_masks(
+    source_frames, explicit_padding, instructions
+):
+    dataset = _canonical_dataset()
+    source_widths = {}
+    for key, _, end, _ in instructions:
+        source_widths[key] = max(source_widths.get(key, 0), end)
+    item = {}
+    for index, (key, width) in enumerate(source_widths.items()):
+        item[key] = torch.arange(source_frames * width, dtype=torch.float32).reshape(source_frames, width) + 1
+        if explicit_padding:
+            item[f"{key}_is_pad"] = torch.arange(source_frames) >= index + 2
+    originals = {key: value.clone() for key, value in item.items()}
+    norm = _norm(CANON_DIM, [0.2] * CANON_DIM, [0.3] * CANON_DIM)
+    actions, mask = dataset._build_canonical_vector(item, instructions, norm, True, zero_pad=True)
+
+    zero_control = torch.zeros(CANON_DIM)
+    zero_control[3:9] = zero_control[13:19] = torch.eye(3)[:, :2].reshape(6)
+    expected = torch.zeros(32, CANON_DIM)
+    expected_mask = torch.zeros(CANON_DIM)
+    for key, start, end, destination in instructions:
+        width = end - start
+        count = min(source_frames, 32)
+        expected[:count, destination:destination + width] = item[key][:count, start:end]
+        padded = torch.arange(32) >= source_frames
+        if explicit_padding:
+            padded[:count] |= item[f"{key}_is_pad"][:count]
+        expected[padded, destination:destination + width] = zero_control[destination:destination + width]
+        expected_mask[destination:destination + width] = 1
+    expected = (expected - norm["mean"]) / norm["std"] * expected_mask
+    torch.testing.assert_close(actions, expected)
+    torch.testing.assert_close(mask, expected_mask)
+    for key, value in originals.items():
+        torch.testing.assert_close(item[key], value)
+
+
+def test_missing_actions_do_not_enable_identity_rotation_slots():
+    dataset = _canonical_dataset()
+    norm = _norm(CANON_DIM, [0.2] * CANON_DIM, [0.3] * CANON_DIM)
+    actions, mask = dataset._build_canonical_vector(
+        {}, [("action", 0, 20, 0)], norm, True, zero_pad=True
+    )
+    assert not actions.any()
+    assert not mask.any()
+
+
+def test_padded_libero_action_has_zero_translation_and_rotation_controls():
+    from lerobot.evaluation.eval_qwen3vl_mot_libero import ort6d_to_controls
+
+    dataset = _canonical_dataset()
+    norm = _norm(
+        CANON_DIM,
+        [0.1, -0.1, 0.0, 0.998706, 0.001, 0.0, 0.997762, 0.0, 0.0, 0.5],
+        [0.1, 0.1, 0.1, 0.002791, 0.01, 0.01, 0.003706, 0.01, 0.01, 0.5],
+    )
+    item = {"action": torch.ones(32, 10), "action_is_pad": torch.arange(32) > 0}
+    actions, _ = dataset._build_canonical_vector(
+        item, [("action", 0, 10, 0)], norm, True, zero_pad=True
+    )
+    raw = actions * norm["std"] + norm["mean"]
+    assert actions[1:, :10].abs().max() < 2
+    assert not raw[1:, :3].any()
+    assert not raw[1:, 9].any()
+    controls = ort6d_to_controls(raw[1:, 3:9].numpy())
+    np.testing.assert_allclose(controls, np.zeros((31, 3)), atol=1e-7)
 
 
 def test_short_tactile_video_preserves_frames_and_repeats_the_last():

@@ -52,6 +52,12 @@ CANON_SLOTS: dict[str, tuple[int, int]] = {
     "reserved": (36, 40),
 }
 
+# Zero controls use identity[:, :2].reshape(-1) for each arm's ort6d rotation.
+CANON_ZERO_ACTION: tuple[float, ...] = (
+    (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0) * 2
+    + (0.0,) * (CANON_DIM - 20)
+)
+
 # Translation dims: the only ones that carry an unbounded metric scale.
 CANON_XYZ_INDICES: list[int] = [0, 1, 2, 10, 11, 12]
 

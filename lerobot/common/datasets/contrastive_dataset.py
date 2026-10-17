@@ -15,7 +15,8 @@ Physical side
     * ``tactile_image``  / ``tactile_image_mask``  : tactile camera views at t, t+H
 
 All episode frames may start a window. Beyond the episode end, observations repeat the
-last frame and raw actions are zero-padded before canonical mean/std normalization.
+last frame and actions use zero controls with identity ort6d rotations before canonical
+mean/std normalization.
 
 Heterogeneity is handled by :mod:`lerobot.common.datasets.canonical_space`: every dataset is
 mapped into the same slotted vector plus a validity mask, so datasets that only expose joint
@@ -41,6 +42,7 @@ from tabulate import tabulate
 
 from lerobot.common.datasets.canonical_space import (
     CANON_DIM,
+    CANON_ZERO_ACTION,
     MAX_TACTILE_SIGNAL_DIM,
     MAX_TACTILE_VIEWS,
     get_spec,
@@ -1498,24 +1500,28 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             if value is None:
                 continue
             value = value.to(torch.float32)
+            padding = None
             if is_chunk:
                 if value.ndim == 1:
                     value = value.unsqueeze(0)
                 elif value.ndim > 2:
                     value = value.reshape(value.shape[0], -1)
-                padding = item.get(f"{src_key}_is_pad") if zero_pad else None
-                if padding is not None:
+                if zero_pad:
+                    padding = item.get(f"{src_key}_is_pad")
+                    if padding is None:
+                        padding = torch.zeros(value.shape[0], dtype=torch.bool, device=value.device)
                     padding = torch.as_tensor(padding, dtype=torch.bool, device=value.device)
                     if padding.ndim != 1 or padding.shape[0] != value.shape[0]:
                         raise ValueError(f"{src_key}_is_pad must match the action chunk's time dimension.")
-                    # Zero in raw action space, not after z-score normalization.
-                    value = value.masked_fill(padding.unsqueeze(-1), 0.0)
                 if value.shape[0] < chunk:
+                    missing = chunk - value.shape[0]
                     pad = (
-                        value.new_zeros(chunk - value.shape[0], value.shape[1])
-                        if zero_pad else value[-1:].expand(chunk - value.shape[0], -1)
+                        value.new_zeros(missing, value.shape[1])
+                        if zero_pad else value[-1:].expand(missing, -1)
                     )
                     value = torch.cat([value, pad], dim=0)
+                    if padding is not None:
+                        padding = F.pad(padding, (0, missing), value=True)
                 value = value[:chunk]
             else:
                 value = value.reshape(-1) if value.ndim == 1 else value.reshape(value.shape[0], -1)[0]
@@ -1523,7 +1529,11 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             if value.shape[-1] < s1:
                 continue
             span = s1 - s0
-            out[:, d0 : d0 + span] = value[:, s0:s1]
+            value = value[:, s0:s1]
+            if padding is not None:
+                zero_control = value.new_tensor(CANON_ZERO_ACTION[d0 : d0 + span])
+                value = torch.where(padding[:chunk, None], zero_control, value)
+            out[:, d0 : d0 + span] = value
             mask[d0 : d0 + span] = 1.0
 
         mask = mask * norm["mask"]
