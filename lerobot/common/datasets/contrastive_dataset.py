@@ -15,8 +15,8 @@ Physical side
     * ``tactile_image``  / ``tactile_image_mask``  : tactile camera views at t, t+H
 
 All episode frames may start a window. Beyond the episode end, observations repeat the
-last frame and actions use zero controls with identity ort6d rotations before canonical
-mean/std normalization.
+last frame and actions use zero controls with identity ort6d rotations and the last real
+gripper controls before canonical mean/std normalization.
 
 Heterogeneity is handled by :mod:`lerobot.common.datasets.canonical_space`: every dataset is
 mapped into the same slotted vector plus a validity mask, so datasets that only expose joint
@@ -42,6 +42,7 @@ from tabulate import tabulate
 
 from lerobot.common.datasets.canonical_space import (
     CANON_DIM,
+    CANON_GRIPPER_INDICES,
     CANON_ZERO_ACTION,
     MAX_TACTILE_SIGNAL_DIM,
     MAX_TACTILE_VIEWS,
@@ -1530,9 +1531,21 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 continue
             span = s1 - s0
             value = value[:, s0:s1]
-            if padding is not None:
+            if padding is not None and padding[:chunk].any():
+                padding = padding[:chunk]
                 zero_control = value.new_tensor(CANON_ZERO_ACTION[d0 : d0 + span])
-                value = torch.where(padding[:chunk, None], zero_control, value)
+                grippers = [
+                    index - d0 for index in CANON_GRIPPER_INDICES
+                    if d0 <= index < d0 + span and norm["mask"][index] > 0
+                ]
+                if grippers:
+                    real_values = value[~padding]
+                    if real_values.shape[0] == 0:
+                        raise ValueError(
+                            f"Cannot hold padded gripper for {src_key}: action chunk has no real timestep."
+                        )
+                    zero_control[grippers] = real_values[-1, grippers]
+                value = torch.where(padding[:, None], zero_control, value)
             out[:, d0 : d0 + span] = value
             mask[d0 : d0 + span] = 1.0
 

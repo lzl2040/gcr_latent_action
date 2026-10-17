@@ -52,7 +52,10 @@ CANON_SLOTS: dict[str, tuple[int, int]] = {
     "reserved": (36, 40),
 }
 
-# Zero controls use identity[:, :2].reshape(-1) for each arm's ort6d rotation.
+CANON_GRIPPER_INDICES: list[int] = [9, 19, 27, 35]
+
+# Base padding values; grippers are replaced with the last real controls.
+# ort6d stores identity[:, :2].reshape(-1) for each arm.
 CANON_ZERO_ACTION: tuple[float, ...] = (
     (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0) * 2
     + (0.0,) * (CANON_DIM - 20)

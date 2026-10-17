@@ -100,7 +100,7 @@ def test_episode_windows_repeat_observations_and_pad_zero_controls(version, fram
             source_action,
             torch.zeros(43, 1),
             torch.eye(3)[:, :2].reshape(1, 6).expand(43, -1),
-            torch.full((43, 1), 0.5),
+            torch.arange(43).remainder(2).float()[:, None],
         ], dim=-1)
     source_state = torch.arange(43, dtype=torch.float32)[:, None] + torch.tensor([1.0, 10.0])
     source_touch = torch.arange(43, dtype=torch.float32)[:, None] * 2 + 1
@@ -135,6 +135,7 @@ def test_episode_windows_repeat_observations_and_pad_zero_controls(version, fram
     expected_action[padding["action_is_pad"]] = 0
     if eef_action:
         expected_action[padding["action_is_pad"], 3:9] = torch.eye(3)[:, :2].reshape(6)
+        expected_action[padding["action_is_pad"], 9] = source_action[episode_end - 1, 9]
     norm = dataset.norm_stats[0]
     action_width = 10 if eef_action else 2
     torch.testing.assert_close(
@@ -212,7 +213,7 @@ def test_action_padding_uses_each_source_keys_own_mask():
     assert actions[:2, :2].eq(5).all()
     assert not actions[2:, :2].any()
     assert actions[0, [9, 19]].eq(7).all()
-    assert not actions[1:, [9, 19]].any()
+    assert actions[1:, [9, 19]].eq(7).all()
 
 
 def test_action_padding_rejects_misaligned_time_mask():
@@ -266,6 +267,10 @@ def test_zero_control_padding_respects_canonical_slots_and_source_masks(
         if explicit_padding:
             padded[:count] |= item[f"{key}_is_pad"][:count]
         expected[padded, destination:destination + width] = zero_control[destination:destination + width]
+        for gripper in (9, 19, 27, 35):
+            if destination <= gripper < destination + width and padded.any():
+                real_indices = torch.where(~padded)[0]
+                expected[padded, gripper] = item[key][real_indices[-1], start + gripper - destination]
         expected_mask[destination:destination + width] = 1
     expected = (expected - norm["mean"]) / norm["std"] * expected_mask
     torch.testing.assert_close(actions, expected)
@@ -300,9 +305,36 @@ def test_padded_libero_action_has_zero_translation_and_rotation_controls():
     raw = actions * norm["std"] + norm["mean"]
     assert actions[1:, :10].abs().max() < 2
     assert not raw[1:, :3].any()
-    assert not raw[1:, 9].any()
+    assert raw[1:, 9].eq(1).all()
     controls = ort6d_to_controls(raw[1:, 3:9].numpy())
     np.testing.assert_allclose(controls, np.zeros((31, 3)), atol=1e-7)
+
+
+@pytest.mark.parametrize("gripper", [0.0, 1.0])
+def test_single_action_holds_gripper_while_padding_pose_controls(gripper):
+    dataset = _canonical_dataset()
+    action = torch.tensor([0.3, 0.2, 0.1, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, gripper])
+    norm = _norm(CANON_DIM, [0.2] * 10, [0.3] * 10)
+    actions, _ = dataset._build_canonical_vector(
+        {"action": action}, [("action", 0, 10, 0)], norm, True, zero_pad=True
+    )
+    raw = actions * norm["std"] + norm["mean"]
+    torch.testing.assert_close(raw[0, :10], action)
+    torch.testing.assert_close(raw[1:, :3], torch.zeros(31, 3), atol=1e-7, rtol=0)
+    torch.testing.assert_close(raw[1:, 3:9], torch.eye(3)[:, :2].reshape(1, 6).expand(31, -1))
+    torch.testing.assert_close(raw[1:, 9], torch.full((31,), gripper), atol=1e-7, rtol=0)
+
+
+def test_gripper_padding_requires_a_real_action_value():
+    dataset = _canonical_dataset()
+    norm = _norm(CANON_DIM, [0.0] * 10, [1.0] * 10)
+    item = {"action": torch.ones(32, 10), "action_is_pad": torch.ones(32, dtype=torch.bool)}
+    with pytest.raises(ValueError, match="no real timestep"):
+        dataset._build_canonical_vector(item, [("action", 0, 10, 0)], norm, True, zero_pad=True)
+    norm["mask"][9] = 0
+    actions, mask = dataset._build_canonical_vector(item, [("action", 0, 10, 0)], norm, True, zero_pad=True)
+    assert not actions[:, 9].any()
+    assert not mask[9]
 
 
 def test_short_tactile_video_preserves_frames_and_repeats_the_last():
