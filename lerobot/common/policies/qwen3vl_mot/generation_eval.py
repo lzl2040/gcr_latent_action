@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
@@ -129,15 +130,23 @@ def _atomic_write_text(path: Path, text: str) -> None:
 def persist_generation_manifest(output_root: Path, manifest: dict) -> Path:
     path = output_root / "split_manifest.json"
     encoded = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    archive_path = None
     if path.is_file():
         existing = path.read_text(encoding="utf-8")
-        if existing != encoded:
-            raise RuntimeError(
-                f"Generation validation split changed relative to {path}. Use a new "
-                "output directory rather than mixing evaluation populations."
-            )
-        return path
+        if existing == encoded:
+            return path
+        digest = hashlib.sha256(existing.encode("utf-8")).hexdigest()
+        archive_path = output_root / "split_manifest_history" / f"{digest}.json"
+        _atomic_write_text(archive_path, existing)
     _atomic_write_text(path, encoded)
+    if archive_path is not None:
+        logger.warning(
+            "Generation validation split changed relative to %s. Previous manifest preserved at %s; "
+            "continuing with current validation samples. Metrics across different splits are "
+            "not directly comparable.",
+            path,
+            archive_path,
+        )
     return path
 
 

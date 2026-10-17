@@ -58,23 +58,66 @@ def test_generation_artifacts_are_directly_viewable(tmp_path):
     assert (tmp_path / "tactile_comparison.png").stat().st_size > 0
 
 
-def test_generation_manifest_refuses_split_drift(tmp_path):
+def test_generation_manifest_warns_and_preserves_previous_split(tmp_path, caplog):
     first = {"format_version": 1, "fingerprint": "abc", "samples": []}
     path = persist_generation_manifest(tmp_path, first)
 
     assert json.loads(path.read_text(encoding="utf-8")) == first
+    original_mtime = path.stat().st_mtime_ns
     persist_generation_manifest(tmp_path, first)
-    with pytest.raises(RuntimeError, match="split changed"):
-        persist_generation_manifest(
-            tmp_path,
-            {"format_version": 1, "fingerprint": "different", "samples": []},
-        )
+    assert path.stat().st_mtime_ns == original_mtime
+    assert not caplog.records
+    assert not (tmp_path / "split_manifest_history").exists()
+
+    second = {"format_version": 1, "fingerprint": "different", "samples": []}
+    assert persist_generation_manifest(tmp_path, second) == path
+    assert json.loads(path.read_text(encoding="utf-8")) == second
+    history = list((tmp_path / "split_manifest_history").glob("*.json"))
+    assert len(history) == 1
+    assert json.loads(history[0].read_text(encoding="utf-8")) == first
+    assert "Generation validation split changed" in caplog.text
+    assert "not directly comparable" in caplog.text
+
+    caplog.clear()
+    persist_generation_manifest(tmp_path, second)
+    assert not caplog.records
+    third = {**second, "samples": [{"episode_index": 1, "frame_index": 10}]}
+    persist_generation_manifest(tmp_path, third)
+    assert json.loads(path.read_text(encoding="utf-8")) == third
+    history = list((tmp_path / "split_manifest_history").glob("*.json"))
+    assert len(history) == 2
+    assert {json.loads(item.read_text())["fingerprint"] for item in history} == {"abc", "different"}
+
+
+@pytest.mark.parametrize("fail_during", ["archive", "update"])
+def test_generation_manifest_keeps_current_split_when_persistence_fails(
+    tmp_path, monkeypatch, fail_during
+):
+    import lerobot.common.policies.qwen3vl_mot.generation_eval as generation_eval
+
+    first = {"format_version": 1, "fingerprint": "abc", "samples": []}
+    path = persist_generation_manifest(tmp_path, first)
+    write = generation_eval._atomic_write_text
+
+    def fail_write(target, text):
+        is_archive = target.parent.name == "split_manifest_history"
+        if is_archive == (fail_during == "archive"):
+            raise OSError("disk unavailable")
+        write(target, text)
+
+    monkeypatch.setattr(generation_eval, "_atomic_write_text", fail_write)
+    with pytest.raises(OSError, match="disk unavailable"):
+        persist_generation_manifest(tmp_path, {**first, "fingerprint": "different"})
+    assert json.loads(path.read_text(encoding="utf-8")) == first
 
 
 @pytest.mark.parametrize("multiview", [False, True])
 @pytest.mark.parametrize("validation_split", ["heldout", "training"])
 @pytest.mark.parametrize("joint", [False, True])
-def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiview, validation_split, joint):
+@pytest.mark.parametrize("changed_split", [False, True])
+def test_generation_evaluator_publishes_complete_step_directory(
+    tmp_path, caplog, multiview, validation_split, joint, changed_split
+):
     class FakeDataset:
         heldout_eval_fingerprint = "split-1"
         norm_stats = [
@@ -186,6 +229,13 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
     dataset = FakeDataset()
     dataset.validation_split = validation_split
     model = FakeModel().train()
+    if changed_split:
+        previous_manifest = {
+            "format_version": 1,
+            "fingerprint": "previous-split",
+            "samples": [{"dataset": "heldout", "episode_index": 1, "frame_index": 0}],
+        }
+        persist_generation_manifest(tmp_path / "generation_eval", previous_manifest)
     evaluator = GenerationEvaluator(
         config=GenerationEvalConfig(
             enabled=True,
@@ -203,6 +253,14 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
         rank=0,
         local_rank=0,
     )
+    assert json.loads((evaluator.root / "split_manifest.json").read_text()) == (
+        dataset.heldout_validation_manifest()
+    )
+    if changed_split:
+        assert "Generation validation split changed" in caplog.text
+        history = list((evaluator.root / "split_manifest_history").glob("*.json"))
+        assert len(history) == 1
+        assert json.loads(history[0].read_text()) == previous_manifest
     evaluator._prepare_video_decoder = lambda: None
     evaluator._decode_video = lambda latents: torch.zeros(
         latents.shape[0],
@@ -220,6 +278,7 @@ def test_generation_evaluator_publishes_complete_step_directory(tmp_path, multiv
     assert (step_dir / "index.html").is_file()
     assert (step_dir / "metrics.json").is_file()
     payload = json.loads((step_dir / "metrics.json").read_text())
+    assert payload["split_fingerprint"] == dataset.heldout_eval_fingerprint
     if joint:
         sample_dir = step_dir / "heldout" / "episode_000003_frame_000000004"
         assert (sample_dir / "state_comparison.png").is_file()
