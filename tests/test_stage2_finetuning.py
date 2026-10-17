@@ -345,18 +345,21 @@ def test_full_epoch_pads_only_final_batch_and_resumes_exactly():
         sampler.set_start_batch(4)
 
 
-def test_full_sampler_resume_rejects_old_or_changed_sampling_geometry():
+def test_full_sampler_resume_warns_about_changed_sampling_geometry(caplog):
     sampler = _full_sampler()
     state = _training_sampler_checkpoint_state(sampler)
     _validate_training_sampler_resume(sampler, state)
-    with pytest.raises(ValueError, match="sampler changed"):
-        _validate_training_sampler_resume(sampler, {})
-    with pytest.raises(ValueError, match="sampler changed"):
-        _validate_training_sampler_resume(_full_sampler(seed=18), state)
-    with pytest.raises(ValueError, match="sampler changed"):
-        _validate_training_sampler_resume(_full_sampler(world_size=2), state)
-    with pytest.raises(ValueError, match="sampler changed"):
-        _validate_training_sampler_resume(_full_sampler(batch_size=3), state)
+    assert not caplog.records
+    for current, saved in [
+        (sampler, {}),
+        (_full_sampler(seed=18), state),
+        (_full_sampler(world_size=2), state),
+        (_full_sampler(batch_size=3), state),
+    ]:
+        caplog.clear()
+        _validate_training_sampler_resume(current, saved)
+        assert "sampler changed" in caplog.text
+        assert "Continuing with the current sampler" in caplog.text
 
 
 def test_empty_episode_dataset_fails_explicitly():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -21,6 +22,7 @@ import torch.distributed as dist
 SAMPLE_POOL_FORMAT_VERSION = 2
 _EPISODE_TABLE_NAME = "episodes.npy"
 _MANIFEST_NAME = "manifest.json"
+_LOGGER = logging.getLogger(__name__)
 
 
 def sample_anchor_stride(
@@ -308,20 +310,23 @@ def validate_sample_pool_resume(
     saved_fingerprint = loaded_state.get("sample_pool_fingerprint")
     if sample_pool is not None:
         if saved_fingerprint is None:
-            raise ValueError(
-                "This checkpoint predates persistent sample pools. Resume it with "
-                "`dataset.sample_pool_enabled=false`, or start a fresh run to use sparse "
-                "temporal anchors."
+            _LOGGER.warning(
+                "This checkpoint predates persistent sample pools. Continuing with current "
+                "pool %s; sample order will not be an exact continuation.",
+                sample_pool.fingerprint,
             )
-        if saved_fingerprint != sample_pool.fingerprint:
-            raise ValueError(
-                "The temporal sample pool changed across resume: "
-                f"checkpoint={saved_fingerprint}, current={sample_pool.fingerprint}."
+        elif saved_fingerprint != sample_pool.fingerprint:
+            _LOGGER.warning(
+                "The temporal sample pool changed across resume: checkpoint=%s, current=%s. "
+                "Continuing with current anchors; sample order will not be an exact continuation.",
+                saved_fingerprint,
+                sample_pool.fingerprint,
             )
     elif saved_fingerprint is not None:
-        raise ValueError(
-            "The checkpoint was trained with temporal sample pool "
-            f"{saved_fingerprint}, but the current run disabled the pool."
+        _LOGGER.warning(
+            "The checkpoint was trained with temporal sample pool %s, but the current run disabled "
+            "the pool. Continuing with current sampling; sample order will not be an exact continuation.",
+            saved_fingerprint,
         )
 
 

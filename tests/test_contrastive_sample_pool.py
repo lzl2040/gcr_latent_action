@@ -88,22 +88,26 @@ def test_pool_fingerprint_changes_with_temporal_window(tmp_path: Path) -> None:
     assert first.fingerprint != second.fingerprint
 
 
-def test_checkpoint_state_requires_the_same_pool() -> None:
+def test_checkpoint_state_warns_when_the_pool_changes(caplog) -> None:
     pool = _build_pool()
     state = sample_pool_checkpoint_state(pool)
 
     validate_sample_pool_resume(pool, state)
     validate_sample_pool_resume(None, {})
+    assert not caplog.records
 
-    with pytest.raises(ValueError, match="predates persistent sample pools"):
-        validate_sample_pool_resume(pool, {})
-    with pytest.raises(ValueError, match="changed across resume"):
-        validate_sample_pool_resume(
-            pool,
-            {"sample_pool_fingerprint": "different"},
-        )
-    with pytest.raises(ValueError, match="current run disabled"):
-        validate_sample_pool_resume(None, state)
+    validate_sample_pool_resume(pool, {})
+    assert "predates persistent sample pools" in caplog.text
+    caplog.clear()
+    validate_sample_pool_resume(
+        pool,
+        {"sample_pool_fingerprint": "different"},
+    )
+    assert "changed across resume" in caplog.text
+    caplog.clear()
+    validate_sample_pool_resume(None, state)
+    assert "current run disabled" in caplog.text
+    assert "sample order will not be an exact continuation" in caplog.text
 
 
 def test_sampler_draws_only_sparse_valid_starts() -> None:

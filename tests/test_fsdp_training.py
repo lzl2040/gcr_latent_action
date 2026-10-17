@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
 import logging
+import random
+from dataclasses import asdict
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed.checkpoint as dcp
 from torch import nn
 
+from lerobot.common.utils.deepspeed_checkpoint import optimizer_group_signature
 from lerobot.common.utils.fsdp_training import (
     FSDP_CHECKPOINT_IO_COMPAT_VERSION,
     FSDPCheckpointIOConfig,
@@ -20,6 +26,7 @@ from lerobot.common.utils.fsdp_training import (
     convert_policy_to_fp8,
     create_checkpoint_process_group,
     find_fsdp_wrap_modules,
+    load_fsdp_checkpoint,
     make_distributed_timeout,
     resolve_fp8_mode,
     resolve_latest_fsdp_checkpoint,
@@ -443,3 +450,168 @@ def test_distributed_timeout_rejects_invalid_values(value: str) -> None:
         match="DISTRIBUTED_TIMEOUT_MINUTES must be a positive integer",
     ):
         make_distributed_timeout(value)
+
+
+@pytest.fixture
+def resume_checkpoint(tmp_path, monkeypatch):
+    import lerobot.common.utils.fsdp_training as training
+
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10)
+    for _ in range(27):
+        optimizer.zero_grad()
+        model(torch.ones(1, 2)).square().sum().backward()
+        optimizer.step()
+        scheduler.step()
+    config = FSDPTrainingConfig(fp8=False, replicate_frozen_params=False)
+    geometry = {
+        "steps_per_epoch": 10,
+        "total_source_frames": 100,
+        "dataset_names": ["original"],
+        "full_training_sampler_fingerprint": "old-anchors",
+    }
+    metadata = {
+        "world_size": 1,
+        "fsdp_config": asdict(config),
+        "training_geometry": geometry,
+        "micro_step": 27,
+        "update_step": 27,
+        "epoch": 2,
+        "batch_in_epoch": 7,
+    }
+    checkpoint_dir = tmp_path / "checkpoint_00000027"
+    checkpoint_dir.mkdir()
+    (tmp_path / "latest_checkpoint").write_text(checkpoint_dir.name)
+    (checkpoint_dir / "metadata.json").write_text(json.dumps(metadata))
+    dcp.save(
+        {"model": model.state_dict()},
+        storage_writer=_make_checkpoint_writer(
+            checkpoint_dir / "model", FSDPCheckpointIOConfig(heartbeat_seconds=0)
+        ),
+        no_dist=True,
+    )
+    optimizer_state = optimizer.state_dict()
+    scheduler_state = scheduler.state_dict()
+    local_state = {
+        "optimizer": optimizer_state,
+        "optimizer_signature": optimizer_group_signature(model, optimizer),
+        "python_rng_state": random.getstate(),
+        "numpy_rng_state": np.random.get_state(),
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state": torch.tensor([1, 2, 3], dtype=torch.uint8),
+    }
+    torch.save(local_state, checkpoint_dir / "optimizer_rank_00000.pt")
+    torch.save({"scheduler": scheduler_state}, checkpoint_dir / "trainer_state.pt")
+    monkeypatch.setattr(training, "_run_checkpoint_phase", lambda name, fn, *args: fn())
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    cuda_states = []
+    monkeypatch.setattr(torch.cuda, "set_rng_state", lambda state, device: cuda_states.append(state))
+    return SimpleNamespace(
+        output_dir=tmp_path,
+        checkpoint_dir=checkpoint_dir,
+        config=config,
+        geometry=geometry,
+        metadata=metadata,
+        model_state=model.state_dict(),
+        optimizer_state=optimizer_state,
+        scheduler_state=scheduler_state,
+        local_state=local_state,
+        cuda_states=cuda_states,
+    )
+
+
+@pytest.mark.parametrize(
+    "changes,expected_position",
+    [
+        ({}, (2, 7)),
+        ({"total_source_frames": 120}, (2, 7)),
+        ({"steps_per_epoch": 20, "total_source_frames": 200}, (1, 7)),
+        ({"steps_per_epoch": 3, "total_source_frames": 30}, (9, 0)),
+        ({"steps_per_epoch": 9, "total_source_frames": 90}, (3, 0)),
+        ({"full_training_sampler_fingerprint": "padded-tail-anchors"}, (2, 7)),
+        ({"sample_pool_fingerprint": "new-pool"}, (2, 7)),
+        ({"dataset_names": ["original", "added"]}, (2, 7)),
+    ],
+)
+def test_fsdp_resume_allows_data_changes_and_preserves_training_state(
+    resume_checkpoint, caplog, changes, expected_position
+):
+    checkpoint = resume_checkpoint
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.02)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10)
+    current_geometry = {**checkpoint.geometry, **changes}
+
+    resume = load_fsdp_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        output_dir=checkpoint.output_dir,
+        fsdp_config=checkpoint.config,
+        training_geometry=current_geometry,
+        device=torch.device("cpu"),
+        checkpoint_io=FSDPCheckpointIOConfig(heartbeat_seconds=0),
+    )
+
+    assert resume.micro_step == resume.update_step == 27
+    assert (resume.epoch, resume.batch_in_epoch) == expected_position
+    assert resume.epoch * current_geometry["steps_per_epoch"] + resume.batch_in_epoch == resume.micro_step
+    assert 0 <= resume.batch_in_epoch < current_geometry["steps_per_epoch"]
+    torch.testing.assert_close(model.state_dict(), checkpoint.model_state, rtol=0, atol=0)
+    torch.testing.assert_close(optimizer.state_dict(), checkpoint.optimizer_state, rtol=0, atol=0)
+    assert scheduler.state_dict() == checkpoint.scheduler_state
+    assert random.getstate() == checkpoint.local_state["python_rng_state"]
+    np.testing.assert_equal(np.random.get_state(), checkpoint.local_state["numpy_rng_state"])
+    torch.testing.assert_close(torch.get_rng_state(), checkpoint.local_state["torch_rng_state"])
+    torch.testing.assert_close(checkpoint.cuda_states[0], checkpoint.local_state["cuda_rng_state"])
+    if changes:
+        assert "geometry changed across resume" in caplog.text
+        assert "sample order will not be an exact continuation" in caplog.text
+        assert "Remapped checkpoint data position" in caplog.text
+    else:
+        assert not caplog.records
+
+    optimizer.zero_grad()
+    model(torch.ones(1, 2)).square().sum().backward()
+    optimizer.step()
+    scheduler.step()
+    assert scheduler.last_epoch == 28
+    assert all(state["step"].item() == 28 for state in optimizer.state.values())
+
+
+@pytest.mark.parametrize(
+    "change,error",
+    [
+        ("world_size", "require the same world size"),
+        ("fsdp_config", "FSDP/FP8 settings changed"),
+        ("optimizer_signature", "Optimizer parameter groups changed"),
+    ],
+)
+def test_fsdp_resume_retains_non_data_compatibility_checks(resume_checkpoint, change, error):
+    checkpoint = resume_checkpoint
+    if change == "optimizer_signature":
+        state = {**checkpoint.local_state, "optimizer_signature": []}
+        torch.save(state, checkpoint.checkpoint_dir / "optimizer_rank_00000.pt")
+    else:
+        metadata = checkpoint.metadata.copy()
+        if change == "world_size":
+            metadata["world_size"] = 2
+        else:
+            metadata["fsdp_config"] = {**metadata["fsdp_config"], "fp8": True}
+        (checkpoint.checkpoint_dir / "metadata.json").write_text(json.dumps(metadata))
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10)
+    with pytest.raises(ValueError, match=error):
+        load_fsdp_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            output_dir=checkpoint.output_dir,
+            fsdp_config=checkpoint.config,
+            training_geometry={**checkpoint.geometry, "total_source_frames": 200},
+            device=torch.device("cpu"),
+            checkpoint_io=FSDPCheckpointIOConfig(heartbeat_seconds=0),
+        )

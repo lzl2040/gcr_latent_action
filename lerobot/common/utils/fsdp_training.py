@@ -892,10 +892,14 @@ def load_fsdp_checkpoint(
             f"{saved_fsdp_config}, current settings are {current_fsdp_config}."
         )
     saved_training_geometry = metadata.get("training_geometry")
-    if saved_training_geometry != training_geometry:
-        raise ValueError(
-            "Batching or sampler geometry changed across resume. Checkpoint geometry is "
-            f"{saved_training_geometry}, current geometry is {training_geometry}."
+    geometry_changed = saved_training_geometry != training_geometry
+    if geometry_changed:
+        _LOGGER.warning(
+            "Batching or sampler geometry changed across resume. Checkpoint geometry is %s, "
+            "current geometry is %s. Continuing with the current data configuration; "
+            "sample order will not be an exact continuation.",
+            saved_training_geometry,
+            training_geometry,
         )
 
     def materialize_model_state() -> dict[str, Any]:
@@ -1022,10 +1026,29 @@ def load_fsdp_checkpoint(
         device,
         checkpoint_process_group,
     )
+    micro_step = int(metadata["micro_step"])
+    epoch = int(metadata["epoch"])
+    batch_in_epoch = int(metadata["batch_in_epoch"])
+    if geometry_changed and "steps_per_epoch" in training_geometry:
+        steps_per_epoch = int(training_geometry["steps_per_epoch"])
+        if steps_per_epoch <= 0:
+            raise ValueError("Current steps_per_epoch must be positive when remapping resume progress.")
+        epoch, batch_in_epoch = divmod(micro_step, steps_per_epoch)
+        _LOGGER.warning(
+            "Remapped checkpoint data position from epoch %d batch %d to epoch %d batch %d "
+            "using current steps_per_epoch=%d. Preserving micro_step=%d and update_step=%d.",
+            int(metadata["epoch"]),
+            int(metadata["batch_in_epoch"]),
+            epoch,
+            batch_in_epoch,
+            steps_per_epoch,
+            micro_step,
+            int(metadata["update_step"]),
+        )
     return FSDPResumeState(
         checkpoint_dir=checkpoint_dir,
-        micro_step=int(metadata["micro_step"]),
+        micro_step=micro_step,
         update_step=int(metadata["update_step"]),
-        epoch=int(metadata["epoch"]),
-        batch_in_epoch=int(metadata["batch_in_epoch"]),
+        epoch=epoch,
+        batch_in_epoch=batch_in_epoch,
     )

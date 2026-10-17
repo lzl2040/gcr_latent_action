@@ -105,9 +105,11 @@ def _validate_training_sampler_resume(
     expected = _training_sampler_checkpoint_state(sampler).get("full_training_sampler_fingerprint")
     saved = state.get("full_training_sampler_fingerprint")
     if saved != expected:
-        raise ValueError(
-            "The full-coverage training sampler changed across resume. Keep the sampling mode, "
-            "datasets, batch size, world size and seed unchanged, or start a new output directory."
+        logging.getLogger(__name__).warning(
+            "The full-coverage training sampler changed across resume: checkpoint=%s, current=%s. "
+            "Continuing with the current sampler; sample order will not be an exact continuation.",
+            saved,
+            expected,
         )
 
 
