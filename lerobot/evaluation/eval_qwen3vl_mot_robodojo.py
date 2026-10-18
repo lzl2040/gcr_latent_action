@@ -72,7 +72,16 @@ def add_xpolicylab(root: Path) -> None:
 def create_workspace(root: Path, assets: Path, workspace: Path) -> None:
     """Use local package paths so env.global_configs resolves assets and outputs here."""
     workspace.mkdir(parents=True, exist_ok=False)
-    for name in ("env", "env_cfg", "task", "src", "utils", "third_party"):
+    # env must be a real directory: global_configs builds ROOT_DIR as env/..,
+    # and the OS would traverse a directory symlink before resolving that "..".
+    environment = workspace / "env"
+    environment.mkdir()
+    if not (root / "env").is_dir():
+        raise FileNotFoundError(f"Missing RoboDojo environment package: {root / 'env'}")
+    for source in (root / "env").iterdir():
+        if source.name != "__pycache__":
+            (environment / source.name).symlink_to(source.resolve(), target_is_directory=source.is_dir())
+    for name in ("env_cfg", "task", "src", "utils", "third_party"):
         source = root / name
         if not source.is_dir():
             raise FileNotFoundError(f"Missing RoboDojo simulator component: {source}")

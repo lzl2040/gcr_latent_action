@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -256,12 +259,23 @@ def test_workspace_isolated_from_shared_source(tmp_path):
         (source / name).mkdir(parents=True)
     (source / "XPolicyLab/__init__.py").write_text("")
     (source / "XPolicyLab/model_template.py").write_text("")
+    (source / "env/global_configs.py").write_text(
+        "import os\nROOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')\n"
+    )
     workspace = tmp_path / "workspace"
     create_workspace(source, source / "Assets", workspace)
     assert (workspace / "Assets").resolve() == source / "Assets"
     assert not (source / "XPolicyLab/policy" / POLICY_NAME).exists()
     assert (workspace / "XPolicyLab/policy" / POLICY_NAME / "deploy.py").is_file()
     assert "eval_batch: true" in (workspace / "XPolicyLab/policy" / POLICY_NAME / "deploy.yml").read_text()
+    resolved_root = subprocess.check_output(
+        [sys.executable, "-c", "from env.global_configs import ROOT_DIR; print(ROOT_DIR)"],
+        cwd=workspace,
+        env=dict(os.environ, PYTHONPATH=str(workspace)),
+        text=True,
+    ).strip()
+    assert (Path(resolved_root) / "XPolicyLab/policy" / POLICY_NAME / "deploy.yml").is_file()
+    assert Path(resolved_root).resolve() == workspace
     with pytest.raises(FileExistsError):
         create_workspace(source, source / "Assets", workspace)
 
