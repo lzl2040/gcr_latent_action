@@ -22,5 +22,7 @@ tabulate>=0.9,<1
 termcolor>=2.4,<4
 websockets>=14,<16
 msgpack>=1,<2
+msgpack-numpy>=0.4.8,<1
+pydantic>=2,<3
 pytest>=8,<9
 ruff>=0.9,<1
