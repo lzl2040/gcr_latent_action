@@ -251,6 +251,7 @@ def evaluate(args) -> None:
     workspace = args.output_dir / "simulator"
     create_workspace(args.robodojo_root, args.assets, workspace)
     with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((args.host, args.port))
     repo_root = Path(__file__).resolve().parents[2]
     policy_env = dict(
