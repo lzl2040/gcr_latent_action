@@ -16,7 +16,7 @@ from lerobot.evaluation.eval_qwen3vl_mot_robodojo import (
     create_workspace,
     validate_result,
 )
-from lerobot.evaluation.robodojo_deploy import eval_one_episode_batch
+from lerobot.evaluation.robodojo_deploy import eval_one_episode, eval_one_episode_batch
 from lerobot.evaluation.robodojo_qwen3vl import (
     RoboDojoAdapter,
     RoboDojoModel,
@@ -247,7 +247,7 @@ def test_batched_deploy_removes_finished_environments_and_records_each_step():
             return None
 
     env = Env()
-    eval_one_episode_batch(env, Client())
+    eval_one_episode_batch(TASK_ENV=env, model_client=Client())
     assert [indices for indices, _ in env.executed] == [[2, 8], [8], [8]]
     assert env.executed[-1][1] == ["8-2"]
     assert env.observations == [[2, 8], [8], [8]]
@@ -339,8 +339,30 @@ def test_deploy_does_not_duplicate_observations_at_chunk_boundaries():
             return [[{}, {}]] if func_name == "get_action_batch" else None
 
     env = Env()
-    eval_one_episode_batch(env, Client())
+    eval_one_episode_batch(TASK_ENV=env, model_client=Client())
     assert env.captured_steps == [0, 1, 2, 3]
+
+
+def test_single_deploy_accepts_upstream_keyword_contract():
+    class Env:
+        steps = 0
+
+        def is_episode_end(self):
+            return self.steps == 1
+
+        def get_obs(self):
+            return {}
+
+        def take_action(self, action):
+            self.steps += 1
+
+    class Client:
+        def call(self, func_name, obs=None):
+            return [{}] if func_name == "get_action" else None
+
+    env = Env()
+    eval_one_episode(TASK_ENV=env, model_client=Client())
+    assert env.steps == 1
 
 
 def test_default_checkpoint_and_cli():

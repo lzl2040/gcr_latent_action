@@ -1,7 +1,8 @@
 """Simulator-side rollouts; imported without any policy/PyTorch dependencies."""
 
 
-def eval_one_episode(task_env, model_client):
+def eval_one_episode(TASK_ENV, model_client):  # noqa: N803
+    task_env = TASK_ENV
     model_client.call(func_name="reset")
     while not task_env.is_episode_end():
         model_client.call(func_name="update_obs", obs=task_env.get_obs())
@@ -17,7 +18,8 @@ def eval_one_episode(task_env, model_client):
                 task_env.get_obs()
 
 
-def eval_one_episode_batch(task_env, model_client):
+def eval_one_episode_batch(TASK_ENV, model_client):  # noqa: N803
+    task_env = TASK_ENV
     model_client.call(func_name="reset")
     while not task_env.is_episode_end():
         indices = task_env.get_running_env_idx_list()
