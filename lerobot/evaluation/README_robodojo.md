@@ -124,6 +124,11 @@ There are **9 sparse frames including the current frame**, covering
 31/25 = 1.24 seconds. Playback uses about 6.45 FPS, not the actual rollout's
 25 FPS. Rounded training timestamps are recorded in metadata; compare
 PNG frames at those timestamps, not equally numbered rollout frames.
+With the default 10-action replan, only the first 0.4 seconds share the
+original planned action prefix. Later actual observations incorporate
+subsequent replans, whereas this prediction still describes the original
+32-action sample; divergence beyond that point is not a controlled
+open-loop video error measurement.
 Export loads a separate Cosmos VAE decoder and adds memory/time overhead;
 inference and export timing are recorded separately.
 
@@ -353,3 +358,66 @@ the final frame is included in addition to the 800 control-step
 observations. Physics profiling independently records 800 executed steps,
 one completed episode and zero unstable episodes. Evaluator-owned policy
 and simulator processes exited and GPU memory was released.
+
+### Matched future-frame rerun and inference audit (2026-10-18, 23:17-23:49)
+
+The same checkpoint, task, seed/layout 0, 20 flow steps and 10-action
+replan interval were rerun with `--save-predicted-video`. The native
+episode completed all 800 control steps, again with success false and
+score 0.0. All 80 joint samples were exported: **240 predicted MP4s and
+2160 lossless PNG frames**, plus the actual conditioning images and
+native action/state arrays. Every exported native action chunk was
+checked against the corresponding adapter output; all saved numeric
+outputs were finite. Mean model inference was 11.01 seconds and mean
+export time was 8.48 seconds per chunk on the shared GPU; total wall time
+was 1947.94 seconds. These timings are not directly comparable to the
+earlier run under different shared-machine load.
+
+Run directory:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_step4k_futures_20261018_v1/
+```
+
+The first sample is in:
+
+```text
+policy/predictions/reset_0002/env_000/replan_000000_step_0000/
+```
+
+`reset_0002` reflects startup/native reset calls, not a third evaluated
+episode. Each sample has `primary`, `secondary` and `wrist` MP4s,
+`*_frames/frame_000.png` through `frame_008.png`, `*_filmstrip.png` and
+`conditioning_*.png`. Replans continue through
+`replan_000079_step_0790/`.
+
+For a quick side-by-side inspection, the run's `diagnostics/` contains:
+
+- `first_replan_primary_prediction_vs_actual.png` and `.mp4`: first
+  sample's predictions versus native observations at matching timestamps.
+  The PNG labels which observations occur after another policy replan.
+- Equivalent `secondary` and `wrist` comparisons.
+- `training_*_episode_3000_t0.png` and
+  `training_episode_3000_t0.json`: actual training stack-bowls inputs,
+  for checking camera roles and initial-state convention.
+- `inference_audit.json`: artifact checks and measured end-effector
+  tracking errors at all 79 consecutive replan boundaries.
+
+The initial native canonical state agrees with training episode 3000 to
+6.73e-8. At replan boundaries, the actual end effector follows the
+preceding chunk's last executed target with median position error
+2.25 mm / 2.55 mm and median angular error 0.54 / 0.72 degrees
+(left/right). Maximum position errors were 6.23 / 24.75 mm; maximum
+angular errors were 4.59 / 10.57 degrees. This argues against a gross
+axis, quaternion or absolute/delta mismatch, but is not a complete
+controller audit.
+
+The first decoded conditioning-frame reconstruction has mean absolute
+RGB error 2.51 / 1.92 / 1.95 on the uint8 scale across the three views.
+It visually matches the actual input, supporting the latent decoding and
+camera pipeline. The generated futures themselves do not show successful
+stacking, and some later frames deform/blur the arms. The later rollout
+also stays near the bowls without completing the task. These observations
+do **not** establish whether checkpoint quality, remaining input/domain
+differences or another inference issue is the root cause. No speculative
+coordinate/channel swaps or action rescaling were applied.
