@@ -449,6 +449,38 @@ def test_single_view_predicted_video_and_invalid_outputs(tmp_path):
     assert not (tmp_path / "bad_latents").exists()
 
 
+def test_prediction_png_frames_are_exact_and_filmstrip_preserves_order(tmp_path):
+    import imageio.v2 as imageio
+
+    config = SimpleNamespace(
+        rgb_views=("primary",),
+        chunk_size=32,
+        world_video_frames=9,
+        video_image_size=4,
+    )
+    writer = PredictionVideoWriter(config, torch.device("cpu"), source_fps=25)
+    writer.decoder = FakeVideoDecoder()
+    metadata = writer.save(
+        {"video_latents": torch.zeros(1, 48, 3, 1, 1)},
+        np.zeros((32, 16)),
+        tmp_path / "prediction",
+        control_step=10,
+        replan_index=1,
+        seed=0,
+        save_frames=True,
+    )
+    assert metadata["video_fps"] == pytest.approx(200 / 31)
+    assert metadata["video_frame_times_s"][-1] == pytest.approx(1.24)
+    frames = [imageio.imread(path) for path in metadata["frames"]["primary"]]
+    assert len(frames) == 9
+    for index, frame in enumerate(frames):
+        np.testing.assert_array_equal(frame, np.full((4, 4, 3), round(index * 255 / 8), dtype=np.uint8))
+    np.testing.assert_array_equal(
+        imageio.imread(tmp_path / "prediction/primary_filmstrip.png"), np.concatenate(frames, axis=1)
+    )
+    assert metadata == json.loads((tmp_path / "prediction/metadata.json").read_text())
+
+
 def test_output_directory_and_independent_video_switches():
     args = build_parser().parse_args(
         [

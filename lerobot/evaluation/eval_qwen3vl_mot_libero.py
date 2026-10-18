@@ -203,6 +203,7 @@ class PredictionVideoWriter:
         control_step: int,
         replan_index: int,
         seed: int,
+        save_frames: bool = False,
     ) -> dict:
         import imageio.v2 as imageio
 
@@ -229,6 +230,7 @@ class PredictionVideoWriter:
         times = evenly_spaced_frame_timestamps(self.config.chunk_size - 1, frames_expected, self.source_fps)
         fps = self.source_fps * (frames_expected - 1) / (self.config.chunk_size - 1)
         video_paths = {}
+        frame_paths = {}
         for view_index, view in enumerate(views):
             if not bool(valid[0, view_index]):
                 continue
@@ -250,6 +252,16 @@ class PredictionVideoWriter:
             video_path = directory / f"{view}.mp4"
             imageio.mimsave(video_path, frames, fps=fps, codec="libx264", macro_block_size=1)
             video_paths[view] = str(video_path.resolve())
+            if save_frames:
+                frame_dir = directory / f"{view}_frames"
+                frame_dir.mkdir()
+                paths = []
+                for frame_index, frame in enumerate(frames):
+                    frame_path = frame_dir / f"frame_{frame_index:03d}.png"
+                    imageio.imwrite(frame_path, frame)
+                    paths.append(str(frame_path.resolve()))
+                frame_paths[view] = paths
+                imageio.imwrite(directory / f"{view}_filmstrip.png", np.concatenate(frames, axis=1))
         actions_path = directory / "action_chunk.npy"
         np.save(actions_path, actions.astype(np.float32))
         metadata = {
@@ -266,6 +278,8 @@ class PredictionVideoWriter:
             "action_chunk_path": str(actions_path.resolve()),
             "metadata_path": str((directory / "metadata.json").resolve()),
         }
+        if save_frames:
+            metadata["frames"] = frame_paths
         (directory / "metadata.json").write_text(json.dumps(metadata, indent=2, allow_nan=False) + "\n")
         return metadata
 

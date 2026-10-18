@@ -86,6 +86,47 @@ Every invocation requires a **new output directory**. Artifacts:
 left/right wxyz poses and grippers. `chunks/inference.jsonl` records timing,
 environment IDs, reset index and instruction for each prediction.
 
+### Save matched future frames
+
+Add `--save-predicted-video` to `offline`, `serve` or `eval`. For this
+checkpoint it calls `generate_validation(seed=None)` once, using the same
+joint sample for both executed actions and predicted video/state. It does
+not run a second video prediction or reseed each replan. A checkpoint
+with an enabled action-only sampler is rejected rather than silently
+changing its action semantics. Decoder initialization/export preserves the
+policy's torch RNG state.
+
+In closed-loop mode, each replan writes:
+
+```text
+policy/predictions/reset_0000/env_000/replan_000000_step_0000/
+  conditioning_primary.png       # actual resized model input (not generated)
+  conditioning_secondary.png
+  conditioning_wrist.png
+  primary.mp4                   # same-sample prediction; analogous files for other views
+  primary_frames/frame_000.png   # VAE reconstruction of the current conditioning frame
+  primary_frames/frame_001.png   # first predicted future frame
+  ... frame_008.png
+  primary_filmstrip.png          # all 9 decoded frames, left to right
+  action_chunk.npy               # all 32 native actions, shape (32,16)
+  metadata.json
+```
+
+The 16 native action columns are left xyz/wxyz/gripper, then right
+xyz/wxyz/gripper. Only the first `--replan-steps` actions are executed.
+`metadata.json` gives timestamps and absolute artifact paths; the
+corresponding `chunks/inference.jsonl` entry links this metadata to the
+action NPZ and executed prefix. NPZs also include the actual canonical and
+normalized current state, and normalized predicted future states when
+export is enabled. Offline artifacts omit the `policy/` prefix.
+
+There are **9 sparse frames including the current frame**, covering
+31/25 = 1.24 seconds. Playback uses about 6.45 FPS, not the actual rollout's
+25 FPS. Rounded training timestamps are recorded in metadata; compare
+PNG frames at those timestamps, not equally numbered rollout frames.
+Export loads a separate Cosmos VAE decoder and adds memory/time overhead;
+inference and export timing are recorded separately.
+
 ## Closed-loop evaluation
 
 After reviewing and accepting the [Isaac Sim license terms](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/install_workstation.html):
@@ -160,10 +201,17 @@ arms. The first three-camera inference took 11.38 seconds on GPU 0.
 Evidence: `outputs/evaluation/robodojo/offline_step4k_20261018/`.
 This is recorded-observation evidence only, not a success-rate result.
 
-The quaternion/ort6d mapping was also compared against a real converted
-training parquet row: maximum absolute errors were below 8e-8 for state
-and action. The original 16D fields and the converted 20D fields agree
-with wxyz input and interleaved first-two matrix columns.
+The quaternion/ort6d mapping was additionally audited against 128 real
+converted training parquet rows: maximum errors were 2.98e-7 for state,
+1.49e-8 for action xyz and 1.20e-7 for action rotation matrices after
+inverse normalization. The original 16D fields and converted 20D fields
+agree with wxyz input and interleaved first-two matrix columns. Native
+observations use environment-origin-relative, world-axis end-effector
+poses (not robot-base poses); native IK accepts absolute targets in this
+same convention. Camera roles, RGB decoding and deterministic resizing
+were checked against the training/native interfaces. No coordinate or
+normalization bug was established by these checks; they do **not** prove
+correct model behavior or simulator/training image equivalence.
 
 Source revisions inspected:
 RoboDojo `726e9aabfaa642203722eb126f5eaf0f37f3e1ad`;

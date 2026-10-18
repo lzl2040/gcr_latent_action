@@ -71,6 +71,8 @@ def config():
         video_image_size=4,
         use_tactile_conditioning=False,
         n_action_steps=32,
+        task_names=("forward_dynamics", "inverse_dynamics", "joint_prediction"),
+        task_weights=(0.15, 0.15, 0.7),
     )
 
 
@@ -219,6 +221,153 @@ def test_model_preserves_requested_env_order_and_resets(adapter, tmp_path):
         model.get_action()
     with pytest.raises(KeyError):
         model.get_action_batch([3])
+
+
+def test_matching_futures_share_one_sample_and_preserve_next_replan_rng(adapter, tmp_path):
+    import imageio.v2 as imageio
+
+    class Policy:
+        config = config()
+        joint_calls = 0
+        action_calls = 0
+
+        def reset(self):
+            pass
+
+        def _sample(self):
+            output = torch.zeros(1, 32, 40)
+            raw = torch.from_numpy(state_to_canonical(observation()))
+            output[:, :, :20] = (raw - adapter.action_mean) / adapter.action_std
+            output[:, :, 0] += torch.rand(32)
+            return output
+
+        def sample_canonical_action(self, batch):
+            self.action_calls += 1
+            return self._sample()
+
+        def generate_validation(self, batch, *, seed):
+            assert seed is None
+            self.joint_calls += 1
+            self.prediction = {"action_normalized": self._sample(), "state_normalized": torch.ones(1, 9, 40)}
+            return self.prediction
+
+    class Writer:
+        def __init__(self, policy):
+            self.policy = policy
+            self.chunks = []
+
+        def save(self, prediction, actions, directory, **kwargs):
+            assert prediction is self.policy.prediction
+            assert kwargs["save_frames"] and kwargs["seed"] == 42
+            # Simulate random draws during lazy VAE construction.
+            torch.rand(1000)
+            directory.mkdir(parents=True)
+            self.chunks.append((actions, directory, kwargs))
+            return {"directory": str(directory)}
+
+    plain_policy, export_policy = Policy(), Policy()
+    writer = Writer(export_policy)
+    outputs = []
+    for name, policy, exporter in (("plain", plain_policy, None), ("export", export_policy, writer)):
+        torch.manual_seed(42)
+        model = RoboDojoModel(
+            policy,
+            adapter,
+            device="cpu",
+            replan_steps=10,
+            output_dir=tmp_path / name / "chunks",
+            prediction_writer=exporter,
+            seed=42,
+        )
+        model.reset()
+        model.update_obs(observation())
+        outputs.append([model.get_action(), model.get_action()])
+    assert plain_policy.action_calls == 2 and plain_policy.joint_calls == 0
+    assert export_policy.joint_calls == 2 and export_policy.action_calls == 0
+    for chunk_index in range(2):
+        exported, directory, metadata = writer.chunks[chunk_index]
+        assert exported.shape == (32, 16)
+        assert metadata["control_step"] == chunk_index * 10
+        assert "reset_0000/env_000" in str(directory)
+        for action_index, (plain, saved) in enumerate(
+            zip(outputs[0][chunk_index], outputs[1][chunk_index], strict=True)
+        ):
+            for key in plain:
+                np.testing.assert_array_equal(plain[key], saved[key])
+            np.testing.assert_array_equal(
+                exported[action_index],
+                np.concatenate(
+                    [
+                        saved[f"{arm}_{key}"]
+                        for arm in ("left", "right")
+                        for key in ("ee_pose", "ee_joint_state")
+                    ]
+                ),
+            )
+        for view, value in (("primary", 17), ("secondary", 53), ("wrist", 91)):
+            np.testing.assert_array_equal(
+                imageio.imread(directory / f"conditioning_{view}.png"),
+                np.full((4, 4, 3), value, dtype=np.uint8),
+            )
+    with np.load(tmp_path / "export/chunks/chunk_000000_env_000.npz") as data:
+        np.testing.assert_array_equal(data["current_state"], state_to_canonical(observation()))
+        np.testing.assert_array_equal(data["normalized_predicted_states"], np.ones((1, 9, 40)))
+    records = [
+        json.loads(line) for line in (tmp_path / "export/chunks/inference.jsonl").read_text().splitlines()
+    ]
+    assert [r["control_step"] for r in records] == [0, 10]
+    assert all("prediction" in record for record in records)
+    model.reset()
+    model.update_obs(observation())
+    model.get_action()
+    assert writer.chunks[-1][2]["control_step"] == 0
+    assert "reset_0001" in str(writer.chunks[-1][1])
+
+
+@pytest.mark.parametrize("action_weight,joint_weight", [(1, 1), (0, 0)])
+def test_future_export_rejects_sampler_contract_changes(adapter, tmp_path, action_weight, joint_weight):
+    cfg = config()
+    cfg.task_names = ("action_prediction", "joint_prediction")
+    cfg.task_weights = (action_weight, joint_weight)
+    with pytest.raises(ValueError, match="joint-only"):
+        RoboDojoModel(
+            SimpleNamespace(config=cfg),
+            adapter,
+            device="cpu",
+            replan_steps=10,
+            output_dir=tmp_path,
+            prediction_writer=object(),
+        )
+
+
+def test_future_export_errors_are_not_silently_swallowed(adapter, tmp_path):
+    raw = torch.from_numpy(state_to_canonical(observation()))
+    normalized = torch.zeros(1, 32, 40)
+    normalized[:, :, :20] = (raw - adapter.action_mean) / adapter.action_std
+    policy = SimpleNamespace(
+        config=config(),
+        reset=lambda: None,
+        generate_validation=lambda batch, seed: {"action_normalized": normalized},
+    )
+
+    class Writer:
+        def save(self, *args, **kwargs):
+            raise RuntimeError("decoder failure")
+
+    model = RoboDojoModel(
+        policy,
+        adapter,
+        device="cpu",
+        replan_steps=10,
+        output_dir=tmp_path / "chunks",
+        prediction_writer=Writer(),
+    )
+    model.reset()
+    model.update_obs(observation())
+    with pytest.raises(RuntimeError, match="decoder failure"):
+        model.get_action()
+    assert not (tmp_path / "chunks/inference.jsonl").exists()
+    assert model.control_steps == {}
 
 
 def test_batched_deploy_removes_finished_environments_and_records_each_step():
@@ -373,6 +522,8 @@ def test_default_checkpoint_and_cli():
     assert args.eval_num == "1"
     assert args.sim_python.name == "python"
     assert isinstance(args.dataset_root, Path)
+    assert not args.save_predicted_video
+    assert build_parser().parse_args(["eval", "--save-predicted-video"]).save_predicted_video
 
 
 def test_simulator_subprocess_uses_its_own_environment_bin(tmp_path, monkeypatch):

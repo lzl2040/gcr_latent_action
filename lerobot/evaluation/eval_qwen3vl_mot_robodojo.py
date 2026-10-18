@@ -42,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sim-gpu", type=int, default=0, help="Physical simulator GPU for eval mode.")
     parser.add_argument("--inference-steps", type=int)
     parser.add_argument("--replan-steps", type=int, default=10)
+    parser.add_argument(
+        "--save-predicted-video",
+        action="store_true",
+        help="Export matching joint-sample future RGB and PNG frames.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--robodojo-root", type=Path, default=REPRO_ROOT)
@@ -108,7 +113,7 @@ def load_model(args):
     import numpy as np
     import torch
 
-    from lerobot.evaluation.eval_qwen3vl_mot_libero import load_policy
+    from lerobot.evaluation.eval_qwen3vl_mot_libero import PredictionVideoWriter, load_policy
     from lerobot.evaluation.robodojo_qwen3vl import RoboDojoAdapter, RoboDojoModel
 
     if not args.device.startswith("cuda") or not torch.cuda.is_available():
@@ -123,6 +128,12 @@ def load_model(args):
         device=args.device,
         replan_steps=args.replan_steps,
         output_dir=args.output_dir / "chunks",
+        prediction_writer=(
+            PredictionVideoWriter(policy.config, torch.device(args.device), adapter.fps)
+            if args.save_predicted_video
+            else None
+        ),
+        seed=args.seed,
     )
     model.reset()
     return model
@@ -302,6 +313,8 @@ def evaluate(args) -> None:
         policy_command.extend(("--policy-config", str(args.policy_config.resolve())))
     if args.inference_steps is not None:
         policy_command.extend(("--inference-steps", str(args.inference_steps)))
+    if args.save_predicted_video:
+        policy_command.append("--save-predicted-video")
     run_id = args.output_dir.name
     sim_env = dict(
         os.environ,
@@ -383,6 +396,7 @@ def evaluate(args) -> None:
         "policy_gpu": args.gpu,
         "simulator_gpu": args.sim_gpu,
         "replan_steps": args.replan_steps,
+        "save_predicted_video": args.save_predicted_video,
         "checkpoint": str(args.checkpoint.resolve()),
         "dataset_root": str(args.dataset_root.resolve()),
         "assets": str(args.assets.resolve()),

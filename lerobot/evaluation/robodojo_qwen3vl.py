@@ -13,7 +13,11 @@ import torch
 from scipy.spatial.transform import Rotation
 from torch.nn import functional
 
-from lerobot.evaluation.eval_qwen3vl_mot_libero import _finite_array, ort6d_to_controls
+from lerobot.evaluation.eval_qwen3vl_mot_libero import (
+    PredictionVideoWriter,
+    _finite_array,
+    ort6d_to_controls,
+)
 
 logger = logging.getLogger(__name__)
 CAMERAS = {"primary": "cam_head", "secondary": "cam_left_wrist", "wrist": "cam_right_wrist"}
@@ -132,23 +136,43 @@ class RoboDojoAdapter:
 class RoboDojoModel:
     """XPolicyLab model interface; one model, independent latest observations per environment."""
 
-    def __init__(self, policy, adapter: RoboDojoAdapter, *, device: str, replan_steps: int, output_dir: Path):
+    def __init__(
+        self,
+        policy,
+        adapter: RoboDojoAdapter,
+        *,
+        device: str,
+        replan_steps: int,
+        output_dir: Path,
+        prediction_writer: PredictionVideoWriter | None = None,
+        seed: int = 0,
+    ):
         if not 1 <= replan_steps <= policy.config.n_action_steps:
             raise ValueError("replan_steps must be in [1, saved n_action_steps].")
         self.policy = policy
         self.adapter = adapter
         self.device = torch.device(device)
         self.replan_steps = replan_steps
+        self.prediction_writer = prediction_writer
+        self.seed = seed
+        if prediction_writer is not None:
+            weights = dict(zip(policy.config.task_names, policy.config.task_weights, strict=True))
+            if weights.get("joint_prediction", 0) <= 0 or weights.get("action_prediction", 0) > 0:
+                raise ValueError(
+                    "Matched future export requires joint-only action sampling, not an action-only task."
+                )
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.observations: dict[int, dict] = {}
         self.single_env_idx: int | None = None
         self.calls = 0
         self.reset_index = -1
+        self.control_steps: dict[int, int] = {}
 
     def reset(self):
         self.observations.clear()
         self.single_env_idx = None
+        self.control_steps.clear()
         self.policy.reset()
         self.reset_index += 1
 
@@ -169,31 +193,89 @@ class RoboDojoModel:
         observation = self.observations[index]
         batch = self.adapter.observation_batch(observation, self.policy.config, self.device)
         started = time.perf_counter()
+        prediction = None
         with torch.autocast(self.device.type, dtype=torch.bfloat16):
-            predicted = self.policy.sample_canonical_action(batch)
+            if self.prediction_writer is None:
+                predicted = self.policy.sample_canonical_action(batch)
+            else:
+                prediction = self.policy.generate_validation(batch, seed=None)
+                predicted = prediction["action_normalized"]
         actions = self.adapter.native_actions(predicted)
         if len(actions) < self.replan_steps:
             raise ValueError("The sampled chunk is shorter than replan_steps.")
         seconds = time.perf_counter() - started
+        state_arrays = {}
+        if prediction is not None and "state_normalized" in prediction:
+            state_arrays["normalized_predicted_states"] = (
+                prediction["state_normalized"].detach().float().cpu().numpy()
+            )
         path = self.output_dir / f"chunk_{self.calls:06d}_env_{index:03d}.npz"
         np.savez_compressed(
             path,
             normalized_actions=predicted.detach().float().cpu().numpy(),
+            normalized_current_state=batch["observation.state"].float().cpu().numpy(),
+            current_state=state_to_canonical(observation),
+            **state_arrays,
             **{key: np.stack([action[key] for action in actions]) for key in actions[0]},
         )
+        control_step = self.control_steps.get(index, 0)
+        export_seconds = 0.0
+        future = None
+        if prediction is not None:
+            import imageio.v2 as imageio
+
+            directory = (
+                self.output_dir.parent
+                / "predictions"
+                / f"reset_{self.reset_index:04d}"
+                / f"env_{index:03d}"
+                / f"replan_{self.calls:06d}_step_{control_step:04d}"
+            )
+            native = np.stack(
+                [
+                    np.concatenate(
+                        [action[f"{arm}_{key}"] for arm in ARMS for key in ("ee_pose", "ee_joint_state")]
+                    )
+                    for action in actions
+                ]
+            )
+            started_export = time.perf_counter()
+            # Decoder construction/export must not perturb the next replan's sampling RNG.
+            with torch.random.fork_rng(devices=[self.device] if self.device.type == "cuda" else []):
+                future = self.prediction_writer.save(
+                    prediction,
+                    native,
+                    directory,
+                    control_step=control_step,
+                    replan_index=self.calls,
+                    seed=self.seed,
+                    save_frames=True,
+                )
+            inputs = batch.get("images_t0", batch["image_t0"][:, None])[0]
+            for view, image in zip(self.policy.config.rgb_views, inputs, strict=True):
+                imageio.imwrite(
+                    directory / f"conditioning_{view}.png",
+                    image.permute(1, 2, 0).cpu().numpy(),
+                )
+            export_seconds = time.perf_counter() - started_export
         record = {
             "call": self.calls,
             "reset_index": self.reset_index,
             "env_idx": index,
             "instruction": observation["instruction"],
             "inference_seconds": seconds,
+            "prediction_export_seconds": export_seconds,
+            "control_step": control_step,
             "predicted_steps": len(actions),
             "executed_chunk_steps": self.replan_steps,
             "action_path": str(path.resolve()),
         }
+        if future is not None:
+            record["prediction"] = future
         with (self.output_dir / "inference.jsonl").open("a") as stream:
             stream.write(json.dumps(record, allow_nan=False) + "\n")
         self.calls += 1
+        self.control_steps[index] = control_step + self.replan_steps
         logger.info("env=%d chunk=%d steps=%d inference=%.3fs", index, self.calls, self.replan_steps, seconds)
         return actions[: self.replan_steps]
 
