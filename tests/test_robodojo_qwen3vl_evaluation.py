@@ -14,6 +14,7 @@ from lerobot.evaluation.eval_qwen3vl_mot_robodojo import (
     POLICY_NAME,
     build_parser,
     create_workspace,
+    evaluate,
     validate_result,
 )
 from lerobot.evaluation.robodojo_deploy import eval_one_episode, eval_one_episode_batch
@@ -372,3 +373,32 @@ def test_default_checkpoint_and_cli():
     assert args.eval_num == "1"
     assert args.sim_python.name == "python"
     assert isinstance(args.dataset_root, Path)
+
+
+def test_simulator_subprocess_uses_its_own_environment_bin(tmp_path, monkeypatch):
+    args = build_parser().parse_args(["eval"])
+    args.robodojo_root = tmp_path / "source"
+    configs = args.robodojo_root / "task/RoboDojo/config"
+    configs.mkdir(parents=True)
+    (configs / "stack_bowls.yml").write_text("{}")
+    (configs / "_task.yml").write_text("common:\n  eval_nums: 50\ntasks: {}\n")
+    args.sim_python = tmp_path / "simulator_env/bin/python"
+    args.sim_python.parent.mkdir(parents=True)
+    args.sim_python.touch()
+    args.output_dir = tmp_path / "output"
+    args.port = 0
+    monkeypatch.setenv("OMNI_KIT_ACCEPT_EULA", "YES")
+    monkeypatch.setenv("PATH", "/policy_env/bin:/usr/bin")
+    monkeypatch.setattr("lerobot.evaluation.eval_qwen3vl_mot_robodojo.create_workspace", lambda *args: None)
+
+    class PreflightReachedError(Exception):
+        pass
+
+    def check_output(command, *, text, env):
+        assert command[0] == str(args.sim_python)
+        assert env["PATH"].split(os.pathsep) == [str(args.sim_python.parent), "/policy_env/bin", "/usr/bin"]
+        raise PreflightReachedError
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+    with pytest.raises(PreflightReachedError):
+        evaluate(args)

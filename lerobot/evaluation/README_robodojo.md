@@ -103,6 +103,9 @@ python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo eval \
 policy device inside `CUDA_VISIBLE_DEVICES` (normally `cuda:0`).
 `--sim-python` selects the simulator interpreter; its default is
 `/home/jianf/miniforge3/envs/RoboDojo6/bin/python` on this machine.
+The simulator interpreter's `bin/` directory is prepended to its child
+process `PATH`, so native video recording finds `RoboDojo6`'s `ffmpeg`
+even though the launcher itself runs in `wam`.
 The launcher starts a policy server in `wam`, verifies its WebSocket
 handshake, and starts RoboDojo's native evaluation client. Both child
 process groups are stopped on completion, error, timeout or interruption.

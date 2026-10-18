@@ -305,6 +305,7 @@ def evaluate(args) -> None:
     run_id = args.output_dir.name
     sim_env = dict(
         os.environ,
+        PATH=os.pathsep.join((str(args.sim_python.absolute().parent), os.environ.get("PATH", ""))),
         CUDA_VISIBLE_DEVICES=str(args.sim_gpu),
         PYTHONPATH=f"{workspace}:{workspace / 'XPolicyLab'}",
         PYTHONDONTWRITEBYTECODE="1",
