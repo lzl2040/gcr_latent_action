@@ -1,5 +1,7 @@
 # Qwen3-VL/Cosmos LIBERO rollout
 
+For the dual-arm RoboDojo benchmark, see [README_robodojo.md](README_robodojo.md).
+
 From the repository root:
 
 ```bash

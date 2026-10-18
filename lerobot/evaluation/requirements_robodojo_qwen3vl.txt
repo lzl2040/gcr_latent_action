@@ -1,0 +1,26 @@
+# Install the CUDA torch wheels first; see README_robodojo.md.
+torch==2.9.1
+torchvision==0.24.1
+numpy==1.26.4
+scipy>=1.14,<2
+transformers==4.57.4
+diffusers==0.36.0
+peft==0.18.1
+accelerate>=1.2,<2
+draccus==0.10.0
+safetensors>=0.5.3,<1
+datasets>=3.0,<4
+pyarrow==19.0.1
+jsonlines>=4,<5
+av>=14,<17
+einops>=0.8,<1
+imageio[ffmpeg]>=2.34,<3
+opencv-python-headless==4.11.0.86
+PyYAML>=6,<7
+h5py>=3.12,<4
+tabulate>=0.9,<1
+termcolor>=2.4,<4
+websockets>=14,<16
+msgpack>=1,<2
+pytest>=8,<9
+ruff>=0.9,<1
