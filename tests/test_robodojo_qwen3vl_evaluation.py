@@ -296,6 +296,37 @@ def test_incomplete_and_inconsistent_result_rejected(tmp_path):
     path.write_text(json.dumps(data))
     with pytest.raises(RuntimeError, match="success rate"):
         validate_result(tmp_path, "stack_bowls", 2)
+    data["success_rate"] = float("nan")
+    path.write_text(json.dumps(data))
+    with pytest.raises(RuntimeError, match="success rate"):
+        validate_result(tmp_path, "stack_bowls", 2)
+
+
+def test_deploy_does_not_duplicate_observations_at_chunk_boundaries():
+    class Env:
+        steps = 0
+        captured_steps = []
+
+        def is_episode_end(self):
+            return self.steps == 4
+
+        def get_running_env_idx_list(self):
+            return [0]
+
+        def get_obs_batch(self, indices):
+            self.captured_steps.append(self.steps)
+            return [{"env_idx": 0}]
+
+        def take_action_batch(self, actions, indices):
+            self.steps += 1
+
+    class Client:
+        def call(self, func_name, obs=None):
+            return [[{}, {}]] if func_name == "get_action_batch" else None
+
+    env = Env()
+    eval_one_episode_batch(env, Client())
+    assert env.captured_steps == [0, 1, 2, 3]
 
 
 def test_default_checkpoint_and_cli():

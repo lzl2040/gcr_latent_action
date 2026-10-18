@@ -8,12 +8,13 @@ def eval_one_episode(task_env, model_client):
         actions = model_client.call(func_name="get_action")
         if not actions:
             raise ValueError("Policy returned an empty action chunk.")
-        for action in actions:
+        for step, action in enumerate(actions):
             task_env.take_action(action)
             if task_env.is_episode_end():
                 break
             # Preserve benchmark video sampling at every control step, including inside chunks.
-            task_env.get_obs()
+            if step + 1 < len(actions):
+                task_env.get_obs()
 
 
 def eval_one_episode_batch(task_env, model_client):
@@ -35,4 +36,5 @@ def eval_one_episode_batch(task_env, model_client):
             active = [index for index, env_idx in enumerate(indices) if env_idx in running]
             actions = [actions[index] for index in active]
             indices = [indices[index] for index in active]
-            task_env.get_obs_batch(indices)
+            if step + 1 < horizon:
+                task_env.get_obs_batch(indices)

@@ -147,3 +147,52 @@ python -m pytest --noconftest -q \
   tests/test_robodojo_qwen3vl_evaluation.py \
   tests/test_libero_qwen3vl_evaluation.py
 ```
+
+## Verified local setup
+
+`wam` was installed and its dependency consistency check passed. Real `step4k`
+inference restored 12.585B parameters and produced finite `(1,32,40)`
+normalized predictions and native `(32,7)` poses / `(32,1)` grippers for both
+arms. The first three-camera inference took 11.38 seconds on GPU 0.
+Evidence: `outputs/evaluation/robodojo/offline_step4k_20261018/`.
+This is recorded-observation evidence only, not a success-rate result.
+
+The quaternion/ort6d mapping was also compared against a real converted
+training parquet row: maximum absolute errors were below 8e-8 for state
+and action. The original 16D fields and the converted 20D fields agree
+with wxyz input and interleaved first-two matrix columns.
+
+Source revisions inspected:
+RoboDojo `726e9aabfaa642203722eb126f5eaf0f37f3e1ad`;
+XPolicyLab `bb9a0b5f5136a74503b679af830bfd0a3a837d5c`.
+The policy uses PyTorch 2.9.1+cu128; the separate simulator uses
+Isaac Sim 6.0.0.1, IsaacLab 6.1.11 and PyTorch 2.11.0+cu128.
+
+The initial mounted-asset/shared-disk load took over three hours. To avoid
+repeating slow random reads, the required assets can be cached on the
+repository's local NVMe (about 36 GB; no optimizer files):
+
+```bash
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+mkdir -p "$CACHE/checkpoint" "$CACHE/pretrained/Cosmos3-Edge"
+cp -a /data2/lizuolei/weights/qwen3vl_mot_weights/1016_ft_on_robodojo/config.json \
+  "$CACHE/checkpoint/"
+cp -a /data2/lizuolei/weights/qwen3vl_mot_weights/1016_ft_on_robodojo/step4k \
+  "$CACHE/checkpoint/"
+cp -a /home/jianf/blob_data/pt_weights/Qwen3-VL-4B-Instruct \
+  /home/jianf/blob_data/pt_weights/siglip2-base-patch16-224 "$CACHE/pretrained/"
+cp -a /home/jianf/blob_data/pt_weights/Cosmos3-Edge/vae \
+  "$CACHE/pretrained/Cosmos3-Edge/"
+```
+
+Then append these options to `offline` or `eval`:
+
+```bash
+--checkpoint "$CACHE/checkpoint/step4k" \
+--qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+--cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+--stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224"
+```
+
+Cached files are untracked evaluation artifacts; original model and
+simulation assets remain untouched.

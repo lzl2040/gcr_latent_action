@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 import socket
@@ -222,7 +223,7 @@ def validate_result(workspace: Path, task: str, expected: int) -> tuple[Path, di
     if any(not isinstance(item["success"], bool) for item in details.values()):
         raise RuntimeError("Native episode success labels must be Boolean.")
     successes = sum(item["success"] for item in details.values())
-    if abs(result["success_rate"] - successes / expected) > 1e-8:
+    if not math.isclose(result["success_rate"], successes / expected, abs_tol=1e-8):
         raise RuntimeError("Native success rate does not match the episode success labels.")
     return paths[0], result
 
@@ -243,7 +244,14 @@ def evaluate(args) -> None:
     with socket.socket() as probe:
         probe.bind((args.host, args.port))
     repo_root = Path(__file__).resolve().parents[2]
-    policy_env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(args.gpu), PYTHONPATH=str(repo_root))
+    policy_env = dict(
+        os.environ,
+        CUDA_VISIBLE_DEVICES=str(args.gpu),
+        PYTHONPATH=str(repo_root),
+        OMP_NUM_THREADS="8",
+        OPENBLAS_NUM_THREADS="8",
+        PYTHONNOUSERSITE="1",
+    )
     policy_command = [
         sys.executable,
         "-u",
