@@ -196,3 +196,49 @@ Then append these options to `offline` or `eval`:
 
 Cached files are untracked evaluation artifacts; original model and
 simulation assets remain untouched.
+
+### Closed-loop run status (2026-10-18)
+
+Local caching reduced model startup to roughly 25 seconds, including a
+strict DCP restore. The real model WebSocket server and the native Isaac Sim
+scene were both launched. The deployment keyword interface was corrected
+to match RoboDojo's `TASK_ENV=...` calls, with regression coverage.
+
+**No complete closed-loop episode or success rate is available yet.**
+During the smoke evaluation, unrelated jobs increased GPU memory use.
+The same-GPU run failed in cuRobo warmup with CUDA OOM; a split-GPU attempt
+then failed while moving the 12.585B model to GPU 0. At that point only
+about 21 GiB was free on GPU 0 and 6 GiB on GPU 1. No other jobs were
+stopped, and all evaluator-owned child processes were cleaned up.
+The failed runs have `evaluation_complete: false`, not a fabricated 0%
+success rate. Their logs and summaries are retained in:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_step4k_smoke_20261018_v2/
+outputs/evaluation/robodojo/stack_bowls_step4k_smoke_20261018_split_v2/
+```
+
+Reserve enough free GPU memory before running. Model parameters alone use
+about 24 GiB, excluding inference workspace and the simulator. As practical
+headroom, aim for at least 40 GiB free for a shared policy/simulator GPU,
+or 30 GiB for the policy and 10 GiB for a separate simulator GPU; these are
+recommendations, not validated minimums or reservations.
+
+After GPU resources are available, run the same native one-episode check:
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo eval \
+  --task stack_bowls --eval-num 1 --num-envs 1 \
+  --gpu 0 --sim-gpu 0 --seed 0 \
+  --checkpoint "$CACHE/checkpoint/step4k" \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_step4k_smoke_ready
+```
+
+Choose a new output directory if this name already exists. Do not promote
+this checkpoint to a full benchmark run until one complete smoke episode
+has produced and passed validation of its native `_result.json`.

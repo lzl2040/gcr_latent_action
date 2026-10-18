@@ -193,6 +193,8 @@ def serve(args) -> None:
 
 
 def wait_for_server(process, args) -> None:
+    from websockets.sync.client import connect
+
     add_xpolicylab(args.robodojo_root)
     from client_server.ws.model_client import WsModelClient
 
@@ -205,7 +207,10 @@ def wait_for_server(process, args) -> None:
         except (ConnectionRefusedError, TimeoutError):
             time.sleep(1)
             continue
-        connection.close()
+        # Complete a valid handshake on the probe socket instead of causing a
+        # spurious "invalid HTTP request" traceback in the server log.
+        with connect(f"ws://{args.host}:{args.port}", sock=connection, open_timeout=30):
+            pass
         client = WsModelClient(
             url=f"ws://{args.host}:{args.port}",
             evaluation_id="qwen3vl-readiness",
