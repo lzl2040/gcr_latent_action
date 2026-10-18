@@ -200,14 +200,15 @@ Then append these options to `offline` or `eval`:
 Cached files are untracked evaluation artifacts; original model and
 simulation assets remain untouched.
 
-### Closed-loop run status (2026-10-18)
+### Initial resource-blocked attempts (2026-10-18, before 22:11)
 
 Local caching reduced model startup to roughly 25 seconds, including a
 strict DCP restore. The real model WebSocket server and the native Isaac Sim
 scene were both launched. The deployment keyword interface was corrected
 to match RoboDojo's `TASK_ENV=...` calls, with regression coverage.
 
-**No complete closed-loop episode or success rate is available yet.**
+These initial attempts did not complete a closed-loop episode. A later
+completed smoke evaluation is documented below.
 During the smoke evaluation, unrelated jobs increased GPU memory use.
 The same-GPU run failed in cuRobo warmup with CUDA OOM; a split-GPU attempt
 then failed while moving the 12.585B model to GPU 0. At that point only
@@ -242,6 +243,65 @@ OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo 
   --output-dir outputs/evaluation/robodojo/stack_bowls_step4k_smoke_ready
 ```
 
-Choose a new output directory if this name already exists. Do not promote
-this checkpoint to a full benchmark run until one complete smoke episode
-has produced and passed validation of its native `_result.json`.
+Choose a new output directory if this name already exists. A complete
+smoke episode with a validated native `_result.json` is required before
+attempting a full benchmark run.
+
+### Completed closed-loop smoke evaluation (2026-10-18, 22:13-22:23)
+
+The rerun completed after GPU memory became available. The first renewed
+attempt reached video capture but exposed a simulator subprocess PATH
+issue: `ffmpeg` was installed in `RoboDojo6`, while the subprocess inherited
+`wam`'s PATH. The launcher now prepends the simulator's own `bin/` directory;
+this fix and its regression test were committed separately as `6fded4d`.
+
+| Setting / result | Value |
+|---|---|
+| Checkpoint | `1016_ft_on_robodojo/step4k`, strict restore from local cache |
+| Task | `stack_bowls` |
+| Seed / native layout ID | 0 / 0 |
+| Episodes completed | 1 |
+| Episode success | false (0/1) |
+| Native partial score | 0.0 |
+| Executed control steps | 800 (native horizon reached) |
+| Flow integration steps | 20 (saved checkpoint setting) |
+| Replan interval | 10 consecutive actions |
+| Policy calls | 80 |
+| Mean inference per chunk | 4.915 seconds |
+| Total wall time, including startup | 584.58 seconds |
+| Policy / rendering GPU | Physical GPU 0 |
+| Simulator / physics | Isaac Sim 6.0.0.1 / native CPU PhysX configuration |
+
+This was a **completed but unsuccessful** episode, not an infrastructure
+failure or an incomplete run counted as a failure. Top-level
+`summary.json` has `status: completed` and `evaluation_complete: true`.
+The native result has one entry for layout 0, `success: false`,
+`score: 0.0` and `eval_time: 1`. No unstable episodes were replaced.
+One layout is not enough to estimate the model's overall success rate.
+The Isaac Sim 6 compatibility runtime is not the official Isaac Sim 5.1
+leaderboard runtime.
+
+Artifacts are under:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_step4k_smoke_20261018_2211_v2/
+```
+
+`summary.json` contains the exact commands and native result path.
+`policy/chunks/` contains all 80 full prediction chunks; every saved
+normalized/native value was checked to be finite.
+The native result directory contains `_result.json`,
+`_physics_profile.json` and three videos:
+
+```text
+episode_0000000_cam_head_fail.mp4
+episode_0000000_cam_left_wrist_fail.mp4
+episode_0000000_cam_right_wrist_fail.mp4
+```
+
+Each video is 640x480 at 25 FPS, with 801 frames / 32.04 seconds.
+RoboDojo captures the terminal observation when the end flag changes, so
+the final frame is included in addition to the 800 control-step
+observations. Physics profiling independently records 800 executed steps,
+one completed episode and zero unstable episodes. Evaluator-owned policy
+and simulator processes exited and GPU memory was released.
