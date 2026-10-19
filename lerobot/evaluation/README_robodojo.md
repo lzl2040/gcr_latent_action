@@ -230,6 +230,51 @@ python -m pytest --noconftest -q \
   tests/test_libero_qwen3vl_evaluation.py
 ```
 
+## Training/validation versus deployment diagnostics
+
+The optional `diagnose` mode uses the actual `MultiModalContrastiveDataset`
+loader and saved `train_config.json`, not a separate approximation of the
+training preprocessing. Additional dependencies in `wam`:
+
+```bash
+conda install -n wam -c conda-forge 'ffmpeg>=7,<8'
+python -m pip install 'polars>=1,<2' 'qwen-vl-utils>=0.0.14,<0.1' torchcodec==0.8.1
+```
+
+Run with the cached backbone options documented below, a new output
+directory, and the checkpoint being investigated:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo diagnose \
+  --checkpoint outputs/evaluation/robodojo/runtime_assets/checkpoint/step8k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --diagnostic-episodes 3000 3001 3002 --diagnostic-frames 0 64 \
+  --output-dir outputs/evaluation/robodojo/step8k_training_diagnostics
+```
+
+It includes the two configured generation-validation samples and the
+requested extra training episodes/frames. It compares masks, camera tensors,
+instruction, sample rate and state normalization, then compares the actual
+validation sampler and deployment sampler with the same current inputs and
+sampling seed. Adapter state-roundtrip error is measured separately; exact
+normalized current state is shared for sampler comparison.
+
+`diagnostics.json` and per-sample `actions.npz`/`metrics.json` distinguish
+free-running 20-step sampling, an explicitly labeled 50-step integration
+ablation, and a hold-current-pose baseline. Physical xyz, angular and gripper
+errors are reported separately from normalized MSE, including the executed
+prefix. Fixed-noise probes at sigma 0.1, 0.5 and 0.9 measure the saved
+training reconstruction/flow losses for joint prediction and inverse
+dynamics. These probes use ground-truth-corrupted trajectories; inverse
+dynamics also receives the ground-truth future video. They are not
+free-running action errors or benchmark success rates.
+
+The saved finetuning setup validates on **training-set diagnostic samples**,
+not held-out episodes, and chooses only two episodes for the entire
+RoboDojo mixture. The diagnostic reports their episode IDs/instructions.
+Training FP8 transformations are not enabled in this BF16 restore; this
+remaining numerical difference is recorded rather than assumed harmless.
+
 ## Verified local setup
 
 `wam` was installed and its dependency consistency check passed. Real `step4k`

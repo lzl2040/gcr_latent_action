@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("offline", "serve", "eval"))
+    parser.add_argument("mode", choices=("offline", "serve", "eval", "diagnose"))
     parser.add_argument("--checkpoint", type=Path, default=EXPERIMENT / "step4k")
     parser.add_argument("--policy-config", type=Path)
     parser.add_argument("--dataset-root", type=Path, default=DATASET)
@@ -48,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export matching joint-sample future RGB and PNG frames.",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--training-config", type=Path, default=EXPERIMENT / "train_config.json")
+    parser.add_argument("--diagnostic-episodes", type=int, nargs="+", default=[3000, 3001, 3002])
+    parser.add_argument("--diagnostic-frames", type=int, nargs="+", default=[0, 64])
+    parser.add_argument("--diagnostic-inference-steps", type=int, nargs="+", default=[20, 50])
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--robodojo-root", type=Path, default=REPRO_ROOT)
     parser.add_argument("--assets", type=Path, default=REPRO_ROOT / "Assets")
@@ -489,7 +493,12 @@ def main() -> None:
         )
         + "\n"
     )
-    {"offline": offline, "serve": serve, "eval": evaluate}[args.mode](args)
+    if args.mode == "diagnose":
+        from lerobot.evaluation.robodojo_diagnostics import diagnose
+
+        diagnose(args)
+    else:
+        {"offline": offline, "serve": serve, "eval": evaluate}[args.mode](args)
 
 
 if __name__ == "__main__":

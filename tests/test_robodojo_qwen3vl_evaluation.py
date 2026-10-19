@@ -524,6 +524,89 @@ def test_default_checkpoint_and_cli():
     assert isinstance(args.dataset_root, Path)
     assert not args.save_predicted_video
     assert build_parser().parse_args(["eval", "--save-predicted-video"]).save_predicted_video
+    diagnostic = build_parser().parse_args(["diagnose"])
+    assert diagnostic.diagnostic_episodes == [3000, 3001, 3002]
+    assert diagnostic.diagnostic_inference_steps == [20, 50]
+
+
+def test_training_sample_roundtrip_and_input_parity(adapter):
+    from lerobot.evaluation.robodojo_diagnostics import input_parity, validation_observation
+
+    batch = adapter.observation_batch(observation(), config(), torch.device("cpu"))
+    validation = {**batch, "observation.state": batch["observation.state"][:, None].expand(-1, 32, -1)}
+    item = {key: value[0] for key, value in validation.items()}
+    reconstructed = validation_observation(item, adapter, config().rgb_views)
+    deployed = adapter.observation_batch(reconstructed, config(), torch.device("cpu"))
+    parity = input_parity(validation, deployed)
+    assert parity["normalized_current_state_max_error"] < 1e-5
+    assert parity["images_t0"] == 0
+    deployed["images_t0"][0, 1, 0, 0, 0] += 1
+    with pytest.raises(ValueError, match="images_t0"):
+        input_parity(validation, deployed)
+
+
+def test_diagnostic_action_metrics_use_physical_units_and_executed_prefix(adapter):
+    from lerobot.evaluation.robodojo_diagnostics import action_metrics
+
+    target = torch.zeros(1, 32, 40)
+    target[..., :20] = (
+        torch.from_numpy(state_to_canonical(observation())) - adapter.action_mean
+    ) / adapter.action_std
+    predicted = target.clone()
+    predicted[:, 10:, 0] += 0.5
+    metrics = action_metrics(predicted, target, adapter, 10)
+    assert metrics["prefix_normalized_mse"] == 0
+    assert metrics["normalized_mse"] > 0
+    assert metrics["left"]["xyz_mean_l2_m"] == pytest.approx(22 / 32)
+    assert metrics["left"]["prefix_xyz_mean_l2_m"] == 0
+    assert metrics["left"]["rotation_mean_deg"] == pytest.approx(0, abs=1e-6)
+    assert metrics["right"]["xyz_mean_l2_m"] == 0
+    predicted[0, 0, 0] = torch.nan
+    with pytest.raises(ValueError, match="finite"):
+        action_metrics(predicted, target, adapter, 10)
+
+
+def test_diagnostic_samples_include_configured_validation_and_check_episode_bounds():
+    from lerobot.evaluation.robodojo_diagnostics import diagnostic_samples
+
+    dataset = SimpleNamespace(
+        heldout_validation_samples=lambda: [{"dataset_index": 0, "episode_index": 1, "frame_index": 101}],
+        all_episode_ranges=[np.array([[0, 100], [100, 200]])],
+    )
+    samples = diagnostic_samples(dataset, [0], [0, 64])
+    assert [s["frame_index"] for s in samples] == [101, 0, 64]
+    assert samples[0]["source"] == "configured_generation_validation"
+    with pytest.raises(ValueError, match="episode"):
+        diagnostic_samples(dataset, [2], [0])
+    with pytest.raises(ValueError, match="outside"):
+        diagnostic_samples(dataset, [0], [100])
+
+
+def test_conditional_losses_fix_noise_levels_and_restore_rng_and_sampler():
+    from lerobot.evaluation.robodojo_diagnostics import conditional_losses
+
+    class Policy:
+        config = SimpleNamespace(task_names=("joint_prediction", "inverse_dynamics"))
+
+        def _sample_sigma(self, size, device):
+            return torch.rand(size, device=device)
+
+        def __call__(self, batch, *, task_type):
+            sigma = self._sample_sigma(1, torch.device("cpu")).item()
+            torch.rand(100)
+            return torch.tensor(0.0), {"action_prediction_reconstruction_loss": sigma, "state_flow_loss": 1}
+
+    policy = Policy()
+    torch.manual_seed(19)
+    before = torch.random.get_rng_state()
+    results = conditional_losses(policy, {}, 42, torch.device("cpu"))
+    torch.testing.assert_close(torch.random.get_rng_state(), before)
+    assert len(results) == 6
+    assert [row["action_prediction_reconstruction_loss"] for row in results] == pytest.approx(
+        [0.1, 0.5, 0.9] * 2
+    )
+    assert all("state_flow_loss" not in row for row in results)
+    assert "_sample_sigma" not in policy.__dict__
 
 
 def test_simulator_subprocess_uses_its_own_environment_bin(tmp_path, monkeypatch):
