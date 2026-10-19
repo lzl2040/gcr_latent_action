@@ -508,3 +508,67 @@ also stays near the bowls without completing the task. These observations
 do **not** establish whether checkpoint quality, remaining input/domain
 differences or another inference issue is the root cause. No speculative
 coordinate/channel swaps or action rescaling were applied.
+
+### Completed step8k evaluation (2026-10-20, 00:18-00:48)
+
+The newly supplied `1016_ft_on_robodojo/step8k` checkpoint was strictly
+restored from its local cache. The run explicitly used the user's
+`/data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video`
+dataset and the same task, seed/layout 0, 20 flow steps and 10-action
+replan interval as the step4k future-export run.
+
+| Setting / result | Value |
+|---|---|
+| Task / seed / native layout | `stack_bowls` / 0 / 0 |
+| Completed episodes / successful episodes | 1 / 0 |
+| Native partial score | 0.0 |
+| Control steps / policy calls | 800 / 80 |
+| Unstable episodes | 0 |
+| Predicted MP4s / lossless PNG frames | 240 / 2160 |
+| Actual videos | Three 640x480, 25 FPS videos, 801 frames each |
+| Mean inference / future export per chunk | 9.50 / 6.77 seconds |
+| Wall time including startup | 1854.45 seconds |
+
+This is a completed unsuccessful **single-layout** episode, not an
+infrastructure failure or an overall RoboDojo success-rate estimate.
+The actual video shows the right arm moving around the bowls without
+completing a stack. The first generated future likewise does not show
+successful stacking; its arm motion already differs from the observed
+execution before the first replan.
+
+Artifacts:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_step8k_futures_20261020_v1/
+  summary.json
+  policy/chunks/
+  policy/predictions/reset_0002/env_000/replan_000000_step_0000/
+  diagnostics/inference_audit.json
+  diagnostics/native_rollout_primary_contact_sheet.png
+  diagnostics/first_replan_primary_prediction_vs_actual.png
+  diagnostics/first_replan_primary_prediction_vs_actual.mp4
+```
+
+The comparison PNG/MP4 also exists for `secondary` and `wrist`. Native
+videos and `_result.json` are in:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/
+0_action_type=ee,simulator=isaacsim6/stack_bowls_step8k_futures_20261020_v1/
+```
+
+The primary actual video is `episode_0000000_cam_head_fail.mp4`.
+Predictions after 0.4 seconds are counterfactual: only the first ten
+actions are executed before replanning, so later prediction-versus-actual
+differences alone cannot establish model inconsistency.
+
+All 80 saved normalized/native outputs were finite, and every exported
+native action chunk exactly equaled the corresponding adapter output.
+At the 79 saved replan boundaries, measured median end-effector tracking
+errors were **1.76 / 1.56 mm** and **0.43 / 0.38 degrees** (left/right).
+Maximum position errors were 14.90 / 10.19 mm. The initial canonical state
+was exactly equal to the step4k run's initial state. The first decoded
+conditioning frame's RGB MAE was 2.50 / 1.87 / 1.86 on the uint8 scale.
+These checks argue against a gross pose/frame/action-export error, not
+against every possible controller or visual-domain difference. The
+evaluator-owned processes exited; unrelated GPU jobs were left untouched.
