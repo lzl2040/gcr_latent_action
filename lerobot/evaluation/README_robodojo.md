@@ -34,11 +34,44 @@ wrist=cam_right_wrist. Source rate is 25 Hz.
 
 Normalization must use `observation.ee_ort6d_pos` and `action.ee_ort6d_pos`
 statistics from the training dataset, with the training standard-deviation
-floor of 1e-3. The local copy under
-`/data2/lizuolei/data/lerobot_data/simulation_data` lacks these statistics and
-must **not** be substituted. Dataset `info.json` may retain its original 16D
-quaternion features even though converted parquet and statistics contain the
-20D ort6d fields.
+floor of 1e-3. The user-specified dataset at
+`/data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video`
+was rechecked on 2026-10-19 and currently contains both converted fields
+and their statistics. The earlier statement that this local copy lacked
+the statistics is no longer accurate. Both checked `info.json` files
+declare the original 16D quaternion features and the converted 20D ort6d
+features.
+
+### User training-dataset comparison (2026-10-19)
+
+The user-specified dataset above was compared directly with the default
+dataset under `/home/jianf/blob_data/robot_dataset/lerobot-format-v30/`.
+All three data parquets were checked, covering **1,856,102 rows**:
+
+- `observation.ee_ort6d_pos` and `action.ee_ort6d_pos` are exactly equal,
+  with maximum absolute difference 0. Both are float32, 20-dimensional:
+  left xyz/ort6d/gripper, then right xyz/ort6d/gripper.
+- Original `observation.state` and `action`, plus row, episode, frame and
+  task indices and timestamps, are also exactly equal.
+- Parsed `meta/info.json` and `meta/stats.json` are exactly equal,
+  including converted-field mean/std. The adapter's effective
+  normalization tensors are therefore identical.
+- Reconstructing ort6d from original wxyz quaternions across all rows
+  confirms the adapter's interleaved first-two-column convention:
+  `[R00,R01,R10,R11,R20,R21]`. Maximum conversion errors are 7.01e-7
+  for state and 3.03e-7 for action, consistent with float32 rounding.
+
+The numeric report is retained at
+`outputs/evaluation/robodojo/dataset_comparison_20261019/comparison.json`.
+This comparison covers physical fields and normalization, not video-file
+contents. It establishes no mismatch in these fields between the two
+dataset paths, but does not establish the root cause of the failed rollout.
+To explicitly use the supplied path, append this option to any evaluation
+command:
+
+```bash
+--dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video
+```
 
 ## Policy environment
 
