@@ -52,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--diagnostic-episodes", type=int, nargs="+", default=[3000, 3001, 3002])
     parser.add_argument("--diagnostic-frames", type=int, nargs="+", default=[0, 64])
     parser.add_argument("--diagnostic-inference-steps", type=int, nargs="+", default=[20, 50])
+    parser.add_argument(
+        "--diagnostic-fp8", action="store_true", help="Reapply the saved training FP8 recipe."
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--robodojo-root", type=Path, default=REPRO_ROOT)
     parser.add_argument("--assets", type=Path, default=REPRO_ROOT / "Assets")

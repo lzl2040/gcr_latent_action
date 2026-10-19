@@ -272,8 +272,11 @@ free-running action errors or benchmark success rates.
 The saved finetuning setup validates on **training-set diagnostic samples**,
 not held-out episodes, and chooses only two episodes for the entire
 RoboDojo mixture. The diagnostic reports their episode IDs/instructions.
-Training FP8 transformations are not enabled in this BF16 restore; this
-remaining numerical difference is recorded rather than assumed harmless.
+By default, training FP8 transformations are not enabled in the BF16
+restore; this numerical difference is recorded rather than assumed harmless.
+For a paired precision ablation, install `torchao>=0.15,<0.16` and add
+`--diagnostic-fp8` to reapply the saved native FP8 recipe and layer scope.
+Use identical episodes, frames, seeds and flow steps for comparison.
 
 ## Verified local setup
 

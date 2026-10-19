@@ -527,6 +527,8 @@ def test_default_checkpoint_and_cli():
     diagnostic = build_parser().parse_args(["diagnose"])
     assert diagnostic.diagnostic_episodes == [3000, 3001, 3002]
     assert diagnostic.diagnostic_inference_steps == [20, 50]
+    assert not diagnostic.diagnostic_fp8
+    assert build_parser().parse_args(["diagnose", "--diagnostic-fp8"]).diagnostic_fp8
 
 
 def test_training_sample_roundtrip_and_input_parity(adapter):

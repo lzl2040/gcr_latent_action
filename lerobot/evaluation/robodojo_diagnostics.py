@@ -181,6 +181,17 @@ def diagnose(args) -> None:
         raise ValueError("Diagnostic inference steps must be positive.")
     model = load_model(args)
     policy, adapter, device = model.policy, model.adapter, model.device
+    precision = "bfloat16; training FP8 transformation is not enabled"
+    if args.diagnostic_fp8:
+        from lerobot.common.utils.fsdp_training import FSDPTrainingConfig, convert_policy_to_fp8
+
+        saved = json.loads(args.training_config.read_text())
+        config = FSDPTrainingConfig(**saved["fsdp"])
+        if config.fp8 is not True or config.fp8_emulate:
+            raise ValueError("The native FP8 diagnostic requires saved native FP8 training settings.")
+        converted = convert_policy_to_fp8(policy, config, device)
+        policy.requires_grad_(False).eval()
+        precision = f"native FP8 {config.fp8_recipe}, scope={config.fp8_scope}, converted={len(converted)}"
     dataset = training_dataset(args, policy.config)
     samples = diagnostic_samples(dataset, args.diagnostic_episodes, args.diagnostic_frames)
     report = {
@@ -193,7 +204,7 @@ def diagnose(args) -> None:
         "frame_horizon": dataset.frame_horizons[0],
         "true_fps": dataset.true_fps[0],
         "video_backend": dataset._video_backend,
-        "precision": "bfloat16; training FP8 transformation is not enabled",
+        "precision": precision,
         "sampler_parity_note": "Uses identical normalized current state after separately measuring adapter roundtrip.",
         "samples": [],
     }
