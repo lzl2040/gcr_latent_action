@@ -2,7 +2,7 @@
 
 更新日期：2026-10-19。
 
-本文汇总已完成的正式评测，共 30 份结果、6,000 次 rollout。数据来自对应的
+本文汇总已完成的正式评测，共 33 份结果、6,600 次 rollout。数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查或尚未完成的评测。
 
 ## 评测设置
@@ -44,6 +44,7 @@
 | `1014_v1_8gpu` | 24k | `primary` + `wrist` | 91.5%（183/200） | 83.5%（167/200） | 83.0%（166/200） |
 | `1014_v1_8gpu` | 28k | `primary` + `wrist` | 97.0%（194/200） | 85.0%（170/200） | 81.5%（163/200） |
 | `1014_v1_8gpu` | 32k | `primary` + `wrist` | 96.0%（192/200） | 89.5%（179/200） | 86.5%（173/200） |
+| `1014_v1_8gpu` | 36k | `primary` + `wrist` | 95.5%（191/200） | 89.5%（179/200） | 89.0%（178/200） |
 
 `1014_v0` 的 48k 相比同版本 40k，Object 提升 2.0 个百分点，
 Spatial 提升 1.5 个百分点。
@@ -71,6 +72,12 @@ Goal 任务 0（打开中层抽屉）从 28k 的 5/20（25.0%）提高到 11/20�
 任务 3（打开上层抽屉并将碗放入）和任务 9（将酒瓶放上酒架）均为 12/20（60.0%）。
 这三个任务合计贡献 32k Goal 的 25/27 次失败。
 
+`1014_v1_8gpu` 的 36k 相比同版本 32k，Object 下降 0.5 个百分点，
+Spatial 持平，Goal 提升 2.5 个百分点。
+Goal 任务 0（打开中层抽屉）为 11/20（55.0%），与 32k 持平；
+任务 3（打开上层抽屉并将碗放入）为 15/20（75.0%），任务 9（将酒瓶放上酒架）为 12/20（60.0%）。
+这三个任务贡献 36k Goal 的全部 22 次失败，其余 7 个任务合计 140/140。
+
 `1014_v0` 与 `1014_v1_8gpu` 的训练步数、输入视角和训练配置不同；
 虽然使用相同评测协议，但这些结果不是仅增加 wrist 视角的受控消融实验。
 
@@ -79,7 +86,7 @@ Goal 任务 0（打开中层抽屉）从 28k 的 5/20（25.0%）提高到 11/20�
 | 训练版本 | 评测时使用的 checkpoint 路径 |
 | --- | --- |
 | `1014_v0` | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1014_v0/step{18,24,32,40,48}k/model` |
-| `1014_v1_8gpu` | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1014_v1_8gpu/step{10,16,20,24,28,32}k/model` |
+| `1014_v1_8gpu` | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1014_v1_8gpu/step{10,16,20,24,28,32,36}k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -123,6 +130,9 @@ Goal 任务 0（打开中层抽屉）从 28k 的 5/20（25.0%）提高到 11/20�
 | `1014_v1_8gpu` | 32k | Object | `outputs/evaluation/libero/v1_8gpu_step32k_object_20trials_20261019/results.json` |
 | `1014_v1_8gpu` | 32k | Spatial | `outputs/evaluation/libero/v1_8gpu_step32k_spatial_20trials_20261019/results.json` |
 | `1014_v1_8gpu` | 32k | Goal | `outputs/evaluation/libero/v1_8gpu_step32k_goal_20trials_20261019/results.json` |
+| `1014_v1_8gpu` | 36k | Object | `outputs/evaluation/libero/v1_8gpu_step36k_object_20trials_20261019/results.json` |
+| `1014_v1_8gpu` | 36k | Spatial | `outputs/evaluation/libero/v1_8gpu_step36k_spatial_20trials_20261019/results.json` |
+| `1014_v1_8gpu` | 36k | Goal | `outputs/evaluation/libero/v1_8gpu_step36k_goal_20trials_20261019/results.json` |
 
 各结果目录同时保留 `evaluation.log`、逐次 rollout 的 `*_actions.npy`，
 以及失败 rollout 的 `*_failure.mp4`。任务级成功次数和成功率见
