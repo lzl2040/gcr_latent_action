@@ -572,3 +572,113 @@ conditioning frame's RGB MAE was 2.50 / 1.87 / 1.86 on the uint8 scale.
 These checks argue against a gross pose/frame/action-export error, not
 against every possible controller or visual-domain difference. The
 evaluator-owned processes exited; unrelated GPU jobs were left untouched.
+
+### Step8k training/validation/deployment comparison
+
+Completed BF16 diagnostics are saved in:
+
+```text
+outputs/evaluation/robodojo/step8k_training_diagnostics_20261020_v1/
+  diagnostics.json
+  aggregate_analysis.json
+  sample_*/metrics.json
+  sample_*/actions.npz
+  sample_*/conditioning_*.png
+```
+
+The eight samples comprise the two reconstructed configured generation
+validation windows, plus stack-bowls episodes 3000, 3001 and 3002 at
+offsets 0 and 64. These are diagnostic training windows, not a new
+held-out test set. The original training validation artifacts/logs were
+not supplied, so their actual contents and the exact metric behind the
+reported `0.04` cannot be independently identified.
+
+**Input and sampler alignment.** Using the actual saved training
+configuration and training dataset loader, all eight samples had identical
+camera tensors, masks, instructions and sample rates in the reconstructed
+validation and deployment inputs. Maximum normalized state roundtrip error
+through native xyz/wxyz/gripper was 7.75e-7. After separately measuring
+that roundtrip and sharing the exact current normalized state, the actual
+validation and deployment samplers produced **exactly identical action
+tensors for the same seed** on all eight samples. Full training windows
+contain ground-truth future frames/states, but `generate_validation`
+selects current conditioning rather than consuming those futures.
+
+This supports the existing 20D xyz/ort6d/gripper representation,
+normalization, camera mapping and inference entry point. It does not prove
+that online simulator images match the training capture domain, or that
+the training and evaluation numerical runtimes are equivalent.
+
+**Low reconstruction loss is not free-running action accuracy.**
+`modeling_qwen3vl_mot.py::_flow_corrupt` constructs
+`noisy = (1 - sigma) * clean + sigma * noise`. During training,
+`forward` decodes `noisy - sigma * predicted_velocity` and computes the
+masked physical reconstruction MSE against normalized ground-truth
+actions. This is a one-step denoising problem with a ground-truth-corrupted
+trajectory. At low sigma it already contains much of the true trajectory.
+Inverse dynamics additionally conditions on the ground-truth future
+video. Deployed joint prediction instead integrates video/state/action
+from random noise using current images/state only.
+
+For the six stack-bowls windows, the measured means were:
+
+| Measurement | Value |
+|---|---:|
+| Joint reconstruction MSE, fixed sigma 0.1 | 0.02163 |
+| Joint reconstruction MSE, fixed sigma 0.5 | 0.01433 |
+| Joint reconstruction MSE, fixed sigma 0.9 | 0.13223 |
+| Inverse-dynamics reconstruction MSE, fixed sigma 0.9 | 0.02458 |
+| Free-running joint normalized action MSE, 20 steps / full 32 actions | 0.45012 |
+| Free-running joint normalized action MSE, 50 steps / full 32 actions | 0.44206 |
+| Free-running normalized action MSE, first 10 actions, 20 / 50 steps | 0.14835 / 0.15095 |
+| First-10-action xyz L2 error versus demonstration, left / right | 2.55 / 6.85 cm |
+
+For example, episode 3000 offset 0 has joint reconstruction MSE 0.01322
+at sigma 0.5, inverse-dynamics reconstruction MSE 0.03096 at sigma 0.9,
+but free-running full-chunk MSE 0.71372. Its right-arm xyz discrepancy
+averages 19.65 cm over the full chunk and 7.82 cm over the executed
+prefix. Thus a reconstruction loss near/below 0.04 can coexist with poor
+free-running predictions even on recorded training observations, without
+any simulator in the loop. This is a measured objective/sampling gap,
+not proof that every deviation from a demonstration is invalid: multiple
+successful trajectories can differ, and offline MSE is not task success.
+Increasing flow integration from 20 to 50 steps did not meaningfully
+resolve this gap; the baseline rollout remains at the saved 20 steps.
+
+**The configured validation is weak coverage for this task.** The saved
+finetuning setup keeps full training coverage and reports
+`validation_split="training"`. Reconstructed configured validation selects
+only episode 2975 (stack textured blocks) and episode 3435 (broom/dustpan
+sweeping); neither is stack bowls. Their mean free-running normalized MSE
+is 0.14978 at 20 steps, compared with 0.45012 on the six bowl windows.
+Neither these two training samples nor an aggregate denoising loss
+establish stack-bowls closed-loop competence or held-out generalization.
+
+**Other differences and remaining uncertainty.** Training validation's
+`generation_eval.py::_denormalize_action` clips displayed predictions to
+empirical per-dimension min/max; deployment does not apply that arbitrary
+pose clipping and only enforces native gripper limits. Reapplying the
+display bounds to the six saved bowl predictions changes normalized MSE
+only from 0.45012 to 0.44925, with **zero xyz values clipped**. It cannot
+explain these measured centimeter-scale position discrepancies. No pose
+clipping or speculative rescaling was added to deployment.
+
+The saved training config enables native rowwise FP8 for the generation
+and VLM layers; the completed diagnostics and native rollout restore BF16.
+The paired native FP8 attempt was blocked by TorchAO's axiswise reshape
+support, as documented above. Its failed output directory is
+`outputs/evaluation/robodojo/step8k_fp8_diagnostics_20261020_v1/`;
+it is not a completed diagnostic or evidence that precision is harmless.
+Likewise, the local Isaac Sim 6 runtime differs from the official
+Isaac Sim 5.1 setup, and the training capture's exact simulator version
+and scene overlap remain unverified.
+
+The strongest supported explanation is therefore **a gap between
+conditional denoising loss and free-running joint sampling, combined with
+nonrepresentative training-set validation**, rather than an established
+xyz/ort6d adapter bug. Precision, visual-domain and simulator differences
+are not fully ruled out. A useful subsequent training comparison would
+track current-input-only free-running action/physical errors separately
+from sigma/task-stratified denoising losses, validate held-out episodes
+including stack bowls, and reproduce sampling in the exact training FP8
+runtime before attributing the failure solely to model quality.
