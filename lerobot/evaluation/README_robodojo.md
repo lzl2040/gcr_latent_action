@@ -277,6 +277,12 @@ restore; this numerical difference is recorded rather than assumed harmless.
 For a paired precision ablation, install `torchao>=0.15,<0.16` and add
 `--diagnostic-fp8` to reapply the saved native FP8 recipe and layer scope.
 Use identical episodes, frames, seeds and flow steps for comparison.
+On the current Torch 2.9.1/TorchAO 0.15 stack, this native FP8 probe failed
+with `aten.reshape.default with axiswise scaling is not supported yet`;
+even a matrix-input Linear smoke test hit the same error. No FP8 result
+was obtained, no library monkey patch was retained, and the probe does
+not silently fall back to BF16. A paired precision result requires a
+compatible training-runtime stack; FP8/BF16 differences remain unresolved.
 
 ## Verified local setup
 
