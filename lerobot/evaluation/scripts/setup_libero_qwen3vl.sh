@@ -28,6 +28,7 @@ Verifier options include --checkpoint, --model-cache-dir, --offline, --dataset-r
 --device, --render-gpu-device-id, --precisions bf16 fp8, and --environment-only.
 The default verification compares BF16 and native FP8 using the saved FP8 recipe.
 Use --precisions bf16 on GPUs without native FP8 support.
+Existing output directories are kept; reruns use a fresh timestamped run subdirectory.
 
 Requires an existing lerobot environment with Python 3.10-3.12, git for cloning, and host NVIDIA EGL drivers
 inside the container. The GPU container must expose graphics capability as well

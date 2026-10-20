@@ -117,7 +117,10 @@ def test_verifier_resolves_default_assets_and_persists_download_failure(tmp_path
     assert not (output / "bf16").exists()
 
 
-def test_verifier_runs_only_fine_tuned_checkpoint_with_resolved_offline_assets(tmp_path, monkeypatch):
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_verifier_runs_only_fine_tuned_checkpoint_with_resolved_offline_assets(
+    tmp_path, monkeypatch, preexisting
+):
     from lerobot.common.utils import stage2_model_cache
 
     paths = tuple(str(tmp_path / key) for key in ("qwen", "vae", "text"))
@@ -125,6 +128,11 @@ def test_verifier_runs_only_fine_tuned_checkpoint_with_resolved_offline_assets(t
     monkeypatch.setattr(verification, "checkpoint_paths", lambda *args: None)
     monkeypatch.setattr(stage2_model_cache, "resolve_evaluation_model_paths", lambda *args, **kwargs: paths)
     calls = []
+    output = tmp_path / "output"
+    if preexisting:
+        output.mkdir()
+        (output / "dataset_metadata").mkdir()
+        (output / "bf16.log").write_text("previous log")
 
     def stop(command, **options):
         calls.append((command, options))
@@ -143,7 +151,7 @@ def test_verifier_runs_only_fine_tuned_checkpoint_with_resolved_offline_assets(t
                 "--precisions",
                 "bf16",
                 "--output-dir",
-                str(tmp_path / "output"),
+                str(output),
             ]
         )
     command, options = calls[0]
@@ -152,6 +160,16 @@ def test_verifier_runs_only_fine_tuned_checkpoint_with_resolved_offline_assets(t
     assert command[command.index("--cosmos3-dir") + 1] == paths[1]
     assert command[command.index("--stage1-text-dir") + 1] == paths[2]
     assert options["env"]["HF_HUB_OFFLINE"] == options["env"]["TRANSFORMERS_OFFLINE"] == "1"
+    actual_output = Path(command[command.index("--output-dir") + 1]).parent
+    assert actual_output.parent == output if preexisting else actual_output == output
+    assert command[command.index("--dataset-root") + 1] == str(actual_output / "dataset_metadata")
+    assert options["stdout"].name == str(actual_output / "bf16.log")
+    report = json.loads((actual_output / "verification.json").read_text())
+    assert report["requested_output_dir"] == str(output)
+    assert report["output_dir"] == str(actual_output)
+    if preexisting:
+        assert (output / "bf16.log").read_text() == "previous log"
+        assert not list((output / "dataset_metadata").iterdir())
 
 
 def test_fp8_rejects_missing_recipe_emulation_and_unsupported_hardware(tmp_path, monkeypatch):
@@ -338,8 +356,85 @@ def test_verifier_persists_failures_and_never_overwrites(tmp_path, monkeypatch):
     report = json.loads((output / "verification.json").read_text())
     assert report["status"] == "failed" and not report["native_fp8_model_validated"]
     assert "EGL unavailable" in report["error"]
-    with pytest.raises(FileExistsError):
+    original = (output / "verification.json").read_bytes()
+    with pytest.raises(RuntimeError, match="EGL unavailable"):
         verification.main(command)
+    assert (output / "verification.json").read_bytes() == original
+    reruns = list(output.glob("run_*/verification.json"))
+    assert len(reruns) == 1
+    rerun = json.loads(reruns[0].read_text())
+    assert rerun["status"] == "failed" and "EGL unavailable" in rerun["error"]
+    assert rerun["requested_output_dir"] == str(output)
+    assert rerun["output_dir"] == str(reruns[0].parent)
+
+
+@pytest.mark.parametrize("existing", ["missing", "empty", "populated"])
+def test_verifier_repeated_runs_have_unique_outputs_and_preserve_existing_results(
+    tmp_path, monkeypatch, capsys, existing
+):
+    output = tmp_path / "output"
+    original = '{"status": "previous result"}\n'
+    if existing != "missing":
+        output.mkdir()
+    if existing == "populated":
+        (output / "verification.json").write_text(original)
+    actual_outputs = []
+
+    def check_environment(args, actual_output):
+        assert actual_output.is_dir()
+        actual_outputs.append(actual_output)
+        return {"checked": True}
+
+    monkeypatch.setattr(verification, "check_environment", check_environment)
+    command = [
+        "--libero-root",
+        str(tmp_path),
+        "--output-dir",
+        str(output),
+        "--render-gpu-device-id",
+        "0",
+        "--environment-only",
+        "--precisions",
+        "bf16",
+    ]
+    verification.main(command)
+    verification.main(command)
+    assert len(set(actual_outputs)) == 2
+    assert actual_outputs[0] == output if existing == "missing" else actual_outputs[0].parent == output
+    assert actual_outputs[1].parent == output
+    stdout = capsys.readouterr().out
+    for actual_output in actual_outputs:
+        report = json.loads((actual_output / "verification.json").read_text())
+        assert report["status"] == "passed"
+        assert report["environment"] == {"checked": True}
+        assert report["requested_output_dir"] == str(output)
+        assert report["output_dir"] == str(actual_output)
+        assert f"Verification output directory: {actual_output}" in stdout
+    if existing == "populated":
+        assert (output / "verification.json").read_text() == original
+
+
+def test_verifier_rejects_output_file_without_modifying_it(tmp_path, monkeypatch):
+    output = tmp_path / "output"
+    output.write_text("keep this file")
+    monkeypatch.setattr(
+        verification, "check_environment", lambda *args: pytest.fail("Invalid output must fail before CUDA.")
+    )
+    with pytest.raises(FileExistsError):
+        verification.main(
+            [
+                "--libero-root",
+                str(tmp_path),
+                "--output-dir",
+                str(output),
+                "--render-gpu-device-id",
+                "0",
+                "--environment-only",
+                "--precisions",
+                "bf16",
+            ]
+        )
+    assert output.read_text() == "keep this file"
 
 
 def test_installer_shell_syntax_help_and_explicit_unknown_option_failure():

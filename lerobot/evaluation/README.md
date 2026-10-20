@@ -94,7 +94,12 @@ its adjacent saved `config.json`, or supply `--policy-config`; native FP8 also n
 the same run's saved `train_config.json`. These are never downloaded or replaced.
 The evaluator still restores every model tensor strictly from this fine-tuned DCP
 checkpoint; downloading base assets does not switch evaluation to a base model.
-Use a new output directory each run.
+You can reuse the verifier's `--output-dir`: a new path is used directly, while
+an existing directory receives a fresh `run_<UTC timestamp>_<unique suffix>`
+subdirectory. Old results are never overwritten or resumed. The printed output
+path and `verification.json`'s `output_dir` identify the actual run directory;
+`requested_output_dir` records the original path. Logs, environment configuration,
+normalization metadata and BF16/FP8 outputs all remain inside that run directory.
 
 Default pretrained downloads use fixed revisions of `Qwen/Qwen3-VL-4B-Instruct`,
 `nvidia/Cosmos3-Edge` (**VAE only**, not its large original generation transformer),

@@ -10,6 +10,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -222,7 +223,12 @@ def compare_results(output: Path, task_id: int) -> dict:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--libero-root", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True, help="New directory, never overwritten.")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Output directory; if it exists, create a fresh timestamped run subdirectory. Never overwrite.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--render-gpu-device-id", type=int, required=True, help="Physical EGL device index.")
     parser.add_argument("--precisions", nargs="+", choices=("bf16", "fp8"), default=["bf16", "fp8"])
@@ -256,14 +262,24 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("Model validation requires --checkpoint pointing to cluster-local fine-tuned weights.")
     if "fp8" in args.precisions and args.fp8_training_config is None:
         parser.error("FP8 validation requires --fp8-training-config from the same training run.")
-    output = args.output_dir.resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    requested_output = args.output_dir.expanduser().resolve()
+    try:
+        requested_output.mkdir(parents=True, exist_ok=False)
+        output = requested_output
+    except FileExistsError:
+        if not requested_output.is_dir():
+            raise
+        prefix = datetime.now(timezone.utc).strftime("run_%Y%m%d_%H%M%S_")
+        output = Path(tempfile.mkdtemp(prefix=prefix, dir=requested_output))
+    print(f"Verification output directory: {output}", flush=True)
     report = {
         "status": "running",
         "purpose": "environment_and_precision_smoke_not_benchmark",
         "precisions_requested": args.precisions,
         "model_validation_requested": not args.environment_only,
         "native_fp8_model_validated": False,
+        "requested_output_dir": str(requested_output),
+        "output_dir": str(output),
     }
     try:
         report["environment"] = check_environment(args, output)
