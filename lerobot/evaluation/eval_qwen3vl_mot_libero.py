@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import random
 import sys
 import time
 from collections import deque
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -327,6 +329,7 @@ def load_policy(args):
     from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import Qwen3VLMoTPolicy
     from lerobot.common.policies.qwen3vl_mot.tasks import validate_saved_task_contract
 
+    fp8_config = inference_fp8_config(args.precision, args.fp8_training_config, torch.device(args.device))
     model_dir, config_file = checkpoint_paths(args.checkpoint, args.policy_config)
     payload = json.loads(config_file.read_text())
     validate_saved_task_contract(payload)
@@ -357,6 +360,22 @@ def load_policy(args):
     )
     load_dcp_model(policy, model_dir)
     policy.requires_grad_(False).eval().to(args.device)
+    precision_details = {"precision": args.precision, "converted_linears": 0}
+    if fp8_config is not None:
+        from lerobot.common.utils.fsdp_training import convert_policy_to_fp8
+
+        converted = convert_policy_to_fp8(policy, fp8_config, torch.device(args.device))
+        policy.requires_grad_(False).eval()
+        precision_details.update(
+            converted_linears=len(converted),
+            recipe=fp8_config.fp8_recipe,
+            scope=fp8_config.fp8_scope,
+            min_features=fp8_config.fp8_min_features,
+            emulate=False,
+            training_config_sha256=hashlib.sha256(args.fp8_training_config.read_bytes()).hexdigest(),
+        )
+    policy.libero_precision_details = precision_details
+    logger.info("Inference precision: %s", precision_details)
     logger.info(
         "Loaded %.3fB parameters; tasks=%s, RGB views=%s, denoising steps=%d.",
         sum(p.numel() for p in policy.parameters()) / 1e9,
@@ -365,6 +384,64 @@ def load_policy(args):
         config.inference_steps,
     )
     return policy
+
+
+def inference_fp8_config(precision: str, training_config: Path | None, device: torch.device):
+    if precision == "bf16":
+        return None
+    if precision != "fp8" or training_config is None:
+        raise ValueError("FP8 requires --fp8-training-config pointing to the saved train_config.json.")
+    from lerobot.common.utils.fsdp_training import FSDPTrainingConfig, resolve_fp8_mode
+
+    saved = json.loads(training_config.read_text())["fsdp"]
+    required = {"fp8", "fp8_recipe", "fp8_scope", "fp8_emulate", "fp8_min_features"}
+    if missing := required - saved.keys():
+        raise ValueError(f"Saved training configuration lacks explicit FP8 settings: {sorted(missing)}.")
+    config = FSDPTrainingConfig(**saved)
+    if config.fp8 is not True or config.fp8_emulate:
+        raise ValueError("The saved training configuration must enable native FP8, not emulation.")
+    resolve_fp8_mode(config, device)
+    import importlib.metadata
+
+    from packaging.version import Version
+
+    if not Version("0.15") <= Version(importlib.metadata.version("torchao")) < Version("0.16"):
+        raise RuntimeError("Native FP8 evaluation requires the training-compatible torchao>=0.15,<0.16.")
+    return config
+
+
+def sampling_fingerprint(batch: dict, device: torch.device) -> dict:
+    digest = hashlib.sha256()
+    for key, value in sorted(batch.items()):
+        digest.update(key.encode())
+        if isinstance(value, torch.Tensor):
+            digest.update(f"{value.dtype}:{tuple(value.shape)}".encode())
+            digest.update(value.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+        else:
+            digest.update(json.dumps(value, sort_keys=True).encode())
+    return {
+        "batch_sha256": digest.hexdigest(),
+        "cpu_rng_sha256": hashlib.sha256(torch.get_rng_state().numpy().tobytes()).hexdigest(),
+        "cuda_rng_sha256": hashlib.sha256(
+            torch.cuda.get_rng_state(device).cpu().numpy().tobytes()
+        ).hexdigest(),
+    }
+
+
+@contextmanager
+def policy_inference_context(precision: str):
+    # TorchAO 0.15 rowwise reshape needs view tracking, which inference_mode disables.
+    with torch.inference_mode(precision != "fp8"), torch.no_grad():
+        yield
+
+
+def load_libero_initial_states(suite, task_id: int):
+    from libero.libero import get_libero_path
+
+    task = suite.get_task(task_id)
+    path = Path(get_libero_path("init_states")) / task.problem_folder / task.init_states_file
+    # Official LIBERO assets contain NumPy pickles, not weights-only state dicts.
+    return torch.load(path, map_location="cpu", weights_only=False)
 
 
 def configure_libero(libero_root: Path, output_dir: Path, render_gpu_device_id: int) -> None:
@@ -520,6 +597,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--inference-steps", type=int, help="Defaults to the saved flow integration step count."
     )
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--precision", choices=("bf16", "fp8"), default="bf16")
+    parser.add_argument(
+        "--fp8-training-config", type=Path, help="Saved train_config.json; required for native FP8."
+    )
+    parser.add_argument(
+        "--verify-fp8-kernels", action="store_true", help="Require real scaled_mm calls in the first plan."
+    )
+    parser.add_argument(
+        "--capture-first-plan",
+        action="store_true",
+        help="Save inputs/RNG fingerprints and first action chunk.",
+    )
     parser.add_argument(
         "--render-gpu-device-id",
         type=int,
@@ -556,6 +645,10 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(f"--{name.replace('_', '-')} must be positive.")
     if args.wait_steps < 0 or args.seed < 0 or args.render_gpu_device_id < -1:
         parser.error("wait-steps/seed must be nonnegative, and render-gpu-device-id must be >= -1.")
+    if args.precision == "fp8" and args.fp8_training_config is None:
+        parser.error("--precision fp8 requires --fp8-training-config.")
+    if args.verify_fp8_kernels and args.precision != "fp8":
+        parser.error("--verify-fp8-kernels requires --precision fp8.")
     device = torch.device(args.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         parser.error("A CUDA device is required for the full Qwen3-VL/Cosmos checkpoint.")
@@ -581,7 +674,7 @@ def main(argv: list[str] | None = None) -> None:
         task_id < 0 or task_id >= suite.n_tasks for task_id in task_ids
     ):
         parser.error("task-ids must be unique valid indices for the selected suite.")
-    initial_states = {task_id: suite.get_task_init_states(task_id) for task_id in task_ids}
+    initial_states = {task_id: load_libero_initial_states(suite, task_id) for task_id in task_ids}
     if any(len(states) < args.trials_per_task for states in initial_states.values()):
         parser.error("trials-per-task exceeds the number of fixed benchmark initial states.")
     adapter = LiberoAdapter.from_dataset(args.dataset_root / SUITE_DATASETS[args.task_suite])
@@ -605,6 +698,7 @@ def main(argv: list[str] | None = None) -> None:
         rotation_encoding="Euler XYZ -> matrix[:, :2].reshape(6)",
         state_gripper="second finger",
         action_gripper="0=close, 1=open; native=-sign(2*x-1)",
+        precision_details=policy.libero_precision_details,
     )
     episodes: list[dict] = []
     write_results(output_dir / "results.json", settings, episodes)
@@ -637,16 +731,51 @@ def main(argv: list[str] | None = None) -> None:
                     root=prediction_root,
                     records=prediction_records,
                     timings=plan_timings,
+                    probe_stem=stem,
                 ):
                     started_inference = time.perf_counter()
                     batch = adapter.observation_batch(observation, instruction, policy.config, device)
-                    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+                    fingerprint = (
+                        sampling_fingerprint(batch, device)
+                        if args.capture_first_plan and replan_index == 0
+                        else None
+                    )
+                    verify_kernels = args.verify_fp8_kernels and "fp8_kernel_evidence" not in settings
+                    profile = (
+                        torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU])
+                        if verify_kernels
+                        else nullcontext()
+                    )
+                    with (
+                        profile,
+                        policy_inference_context(args.precision),
+                        torch.autocast("cuda", dtype=torch.bfloat16),
+                    ):
                         if video_writer is None:
                             sampled = policy.sample_canonical_action(batch)
                         else:
                             prediction = policy.generate_validation(batch, seed=None)
                             sampled = prediction["action_normalized"]
+                    if verify_kernels:
+                        calls = sum(
+                            event.count for event in profile.key_averages() if "_scaled_mm" in event.key
+                        )
+                        if not calls:
+                            raise RuntimeError("FP8 requested but no native scaled_mm calls were observed.")
+                        settings["fp8_kernel_evidence"] = {"scaled_mm_calls": calls}
                     actions = adapter.native_actions(sampled)
+                    if fingerprint is not None:
+                        probe_dir = output_dir / "first_plans"
+                        probe_dir.mkdir(exist_ok=True)
+                        np.savez(
+                            probe_dir / f"{probe_stem}.npz",
+                            normalized_actions=sampled.float().cpu().numpy(),
+                            action_mask=batch["action_mask"].cpu().numpy(),
+                            native_actions=actions,
+                        )
+                        (probe_dir / f"{probe_stem}.json").write_text(
+                            json.dumps(fingerprint, indent=2) + "\n"
+                        )
                     inference_seconds = time.perf_counter() - started_inference
                     export_seconds = 0.0
                     if video_writer is not None:

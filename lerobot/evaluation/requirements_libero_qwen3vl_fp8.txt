@@ -1,0 +1,2 @@
+-r requirements_libero_qwen3vl.txt
+torchao==0.15.0

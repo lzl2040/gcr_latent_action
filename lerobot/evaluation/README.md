@@ -59,6 +59,88 @@ EGL device index**, not the remapped CUDA index. The runner creates its own LIBE
 configuration inside the output directory and does not modify `~/.libero` or the
 external LIBERO repository.
 
+## Cluster installation and BF16/FP8 validation
+
+Run this **inside the allocated GPU node/container**, after mounting the repository,
+checkpoint, dataset metadata, and pretrained assets. It does not submit any cluster
+jobs. Installation requires Conda, git, package-index access, and GitHub access;
+verification itself is offline and never downloads weights.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash lerobot/evaluation/scripts/setup_libero_qwen3vl.sh \
+  --env-prefix /mnt/work/envs/libero_qwen3vl \
+  --libero-root /mnt/work/LIBERO \
+  -- \
+  --checkpoint /mnt/weights/1014_v1_8gpu/step40k \
+  --fp8-training-config /mnt/weights/1014_v1_8gpu/train_config.json \
+  --dataset-root /mnt/lerobot_data_ort6d/v30 \
+  --qwen3vl-dir /mnt/huggingface/Qwen3-VL-4B-Instruct \
+  --cosmos3-dir /mnt/huggingface/Cosmos3-Edge \
+  --stage1-text-dir /mnt/huggingface/siglip2-base-patch16-224 \
+  --render-gpu-device-id 0 \
+  --output-dir /mnt/results/libero_precision_smoke
+```
+
+Replace `/mnt/...` with actual cluster mounts. The checkpoint must retain its
+adjacent saved `config.json`, or supply `--policy-config`. Dataset access needs the
+selected suite's `meta/info.json` and `meta/stats.json`; no training-video download
+is needed. Use a new output directory each run.
+
+The installer creates a separate Python 3.12 Conda prefix, installs the existing
+minimal evaluation requirements plus TorchAO 0.15.0, and clones official LIBERO at
+`8f1084e3132a39270c3a13ebe37270a43ece2a01`. It does **not** install LIBERO's obsolete
+requirements or the entire LeRobot hardware/training stack. Existing LIBERO trees
+are never patched/reset; a different revision requires an explicit `--libero-ref`
+full SHA. The evaluator handles official NumPy-pickled initial states explicitly
+under PyTorch 2.9. Use only trusted LIBERO assets.
+
+The default wheels are PyTorch 2.9.1 / torchvision 0.24.1 **CUDA 12.8**.
+The host NVIDIA driver must support that CUDA runtime; wheels do not install or
+upgrade the driver. Use `--torch-index-url https://download.pytorch.org/whl/cu130`
+only when the driver supports CUDA 13.0. EGL additionally needs the host NVIDIA
+graphics libraries exposed to the container, e.g.
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics` **when launching the container**;
+setting it after container creation cannot mount missing driver libraries.
+There is no silent software-rendering fallback.
+
+By default the verifier checks CUDA and real NVIDIA EGL rendering for both
+cameras, then runs BF16 and native FP8 sequentially in separate processes. Both
+use the same checkpoint, task 0 / fixed initial state 0, seed, saved flow-step count,
+and one 32-step prediction, executing only its first 10 actions. First-plan input
+and CPU/CUDA RNG hashes must match. The FP8 run uses the saved training recipe,
+scope and dimension threshold, preserves BF16 master weights, and must exhibit
+actual `scaled_mm` operator calls; counting converted layers alone is insufficient.
+TorchAO 0.15's rowwise tensor subclass needs view tracking, so FP8 uses
+`eval()` + `no_grad()` with inference mode disabled; BF16 retains its original
+inference-mode behavior. Neither mode builds backward graphs or changes the recipe.
+
+`verification.json` records environment details, failures, native-FP8 verification
+status and action differences. Each precision directory preserves its rollout,
+actions, first-plan probes and evaluator settings; subprocess logs are next to the
+report. These are **environment/precision smoke checks, not benchmark success rates
+or a speed benchmark**. No numerical-difference threshold is interpreted as policy
+accuracy. Full accuracy comparisons require the normal multi-task, multi-trial
+rollout protocol with `--precision bf16` versus
+`--precision fp8 --fp8-training-config ...`.
+
+Native FP8 requires the training implementation's compute capability **>= 9.0**,
+e.g. H100/H200/B200. A6000 cannot validate it; an explicitly requested unsupported
+FP8 run fails rather than falling back to BF16 or emulation. For BF16-only checking,
+append `--precisions bf16` after `--`. Add installer flag `--verify-only` before `--`
+to reuse an existing environment/source without changing dependencies. To check
+only CUDA/EGL without loading a checkpoint, use:
+
+```bash
+bash lerobot/evaluation/scripts/setup_libero_qwen3vl.sh \
+  --verify-only --env-prefix /path/to/existing/env --libero-root /path/to/LIBERO \
+  -- --environment-only --precisions bf16 --render-gpu-device-id 0 \
+  --output-dir /mnt/results/libero_egl_smoke
+```
+
+**Local validation limitation:** the development machine has A6000 GPUs. BF16
+model/EGL validation and CPU FP8-emulation tests do not establish native FP8
+execution; that part must pass on the cluster's supported GPU.
+
 ## Checkpoint and embodiment contract
 
 - Loads the four `step12k/model/*.distcp` shards into one inference model,
@@ -153,5 +235,5 @@ Isolated evaluator regression tests (without the repository's unrelated
 hardware-test fixtures):
 
 ```bash
-python -m pytest --noconftest -q tests/test_libero_qwen3vl_evaluation.py
+python -m pytest --noconftest -q tests/test_libero_qwen3vl_evaluation.py tests/test_libero_cluster_setup.py
 ```

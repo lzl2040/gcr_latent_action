@@ -543,6 +543,7 @@ def test_main_actual_video_saving_modes(tmp_path, monkeypatch, video_flags, save
     for name, module in (("libero", package), ("libero.libero", libero), ("libero.libero.envs", envs)):
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(evaluation, "configure_libero", lambda *args: None)
+    monkeypatch.setattr(evaluation, "load_libero_initial_states", lambda suite, task_id: [0, 1])
     monkeypatch.setattr(evaluation.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(evaluation.torch.cuda, "set_device", lambda device: None)
     monkeypatch.setattr(evaluation.torch, "set_num_threads", lambda count: None)
@@ -555,7 +556,11 @@ def test_main_actual_video_saving_modes(tmp_path, monkeypatch, video_flags, save
         inference_steps=20, rgb_views=("primary",), task_names=("joint_prediction",), video_image_size=4
     )
     monkeypatch.setattr(
-        evaluation, "load_policy", lambda args: SimpleNamespace(config=config, reset=lambda: None)
+        evaluation,
+        "load_policy",
+        lambda args: SimpleNamespace(
+            config=config, reset=lambda: None, libero_precision_details={"precision": "bf16"}
+        ),
     )
     monkeypatch.setattr(evaluation.LiberoAdapter, "from_dataset", lambda path: SimpleNamespace(fps=20))
 
