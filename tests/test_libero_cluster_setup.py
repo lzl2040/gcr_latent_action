@@ -9,6 +9,7 @@ from types import ModuleType, SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from packaging.requirements import Requirement
 
 from lerobot.common.utils.fsdp_training import FSDPTrainingConfig, convert_policy_to_fp8
 from lerobot.evaluation.eval_qwen3vl_mot_libero import (
@@ -350,6 +351,28 @@ def test_installer_shell_syntax_help_and_explicit_unknown_option_failure():
 
 
 @pytest.mark.parametrize(
+    ("name", "compatible", "incompatible"),
+    [
+        ("numpy", ["1.26.4"], ["2.0.0", "2.3.0"]),
+        ("zarr", ["2.17.0", "2.18.3", "2.18.7"], ["2.16.0", "3.0.0", "3.1.6"]),
+        ("numcodecs", ["0.10.0", "0.15.1"], ["0.9.0", "0.16.0", "0.16.3"]),
+    ],
+)
+def test_installer_requirements_keep_numpy_zarr_and_numcodecs_compatible(name, compatible, incompatible):
+    manifest = SCRIPT.parent.parent / "requirements_libero_qwen3vl.txt"
+    requirements = [
+        Requirement(line)
+        for line in manifest.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    specifiers = {requirement.name: requirement.specifier for requirement in requirements}
+    assert all(version in specifiers[name] for version in compatible)
+    assert all(version not in specifiers[name] for version in incompatible)
+    fp8_manifest = manifest.with_name("requirements_libero_qwen3vl_fp8.txt")
+    assert f"-r {manifest.name}" in fp8_manifest.read_text().splitlines()
+
+
+@pytest.mark.parametrize(
     ("arguments", "message"),
     [
         (["--torch-index-url"], "Missing value"),
@@ -427,6 +450,10 @@ def test_installer_installs_and_verifies_with_only_existing_lerobot_python(selec
     assert records[1]["args"][:3] == ["-m", "pip", "install"]
     assert "torch==2.9.1" in records[1]["args"]
     assert records[2]["args"][:3] == ["-m", "pip", "install"]
+    assert records[2]["args"][-2:] == [
+        "-r",
+        str(SCRIPT.parent.parent / "requirements_libero_qwen3vl_fp8.txt"),
+    ]
     assert all("--no-user" in record["args"] for record in records[1:3])
     assert records[3]["args"] == ["-m", "pip", "check"]
     assert records[4]["args"][:2] == ["-m", "lerobot.evaluation.scripts.verify_libero_qwen3vl"]
