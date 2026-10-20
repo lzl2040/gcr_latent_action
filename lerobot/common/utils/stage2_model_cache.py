@@ -16,11 +16,16 @@ _MODELS = {
     "Qwen3-VL-4B-Instruct": ("Qwen/Qwen3-VL-4B-Instruct", "ebb281ec70b05090aa6165b016eac8ec08e71b17"),
     "Cosmos3-Edge": ("nvidia/Cosmos3-Edge", "344d602b128d1bbdacb43b08d0a3626f46343e29"),
     "Cosmos3-Nano": ("nvidia/Cosmos3-Nano", "e59a53c25979a090fa8706c9acc0c254a6e89b92"),
+    "siglip2-base-patch16-224": (
+        "google/siglip2-base-patch16-224",
+        "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
+    ),
 }
 _PATTERNS = {
     "qwen": ["*.json", "*.txt", "*.jinja", "*.safetensors"],
     "vae": ["vae/*"],
     "generation": ["transformer/*", "vae/config.json"],
+    "text": ["*.json", "*.txt", "*.model", "*.safetensors"],
 }
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,6 +82,15 @@ def check_model_directory(root: Path, component: str) -> None:
             or _read_json(root / "tokenizer_config.json").get("chat_template")
         ):
             raise FileNotFoundError(f"Missing Qwen chat template in {root}.")
+        _check_weights(root, "model")
+    elif component == "text":
+        for filename in ("config.json", "tokenizer_config.json"):
+            _read_json(root / filename)
+        if not any(
+            (root / filename).is_file() and (root / filename).stat().st_size > 0
+            for filename in ("tokenizer.json", "tokenizer.model")
+        ):
+            raise FileNotFoundError(f"Missing SigLIP tokenizer in {root}.")
         _check_weights(root, "model")
     elif component in ("vae", "generation"):
         subdir = "vae" if component == "vae" else "transformer"
@@ -215,6 +229,37 @@ def resolve_model_paths(
             generation_dir, model, "generation", cache, auto_download=auto_download
         )
     return qwen_dir, cosmos_dir, generation_dir
+
+
+def resolve_evaluation_model_paths(
+    qwen_dir: Path | None,
+    cosmos_dir: Path | None,
+    text_dir: Path | None,
+    cache: Path,
+    *,
+    auto_download: bool = True,
+) -> tuple[str, str, str]:
+    paths = []
+    for requested, model, component in (
+        (qwen_dir, "Qwen3-VL-4B-Instruct", "qwen"),
+        (cosmos_dir, "Cosmos3-Edge", "vae"),
+        (text_dir, "siglip2-base-patch16-224", "text"),
+    ):
+        if requested is not None:
+            source = requested.expanduser().resolve()
+            check_model_directory(source, component)
+            paths.append(str(source))
+        else:
+            paths.append(
+                _resolve_model(
+                    str(cache / model),
+                    model,
+                    component,
+                    cache,
+                    auto_download=auto_download,
+                )
+            )
+    return paths[0], paths[1], paths[2]
 
 
 def main() -> None:

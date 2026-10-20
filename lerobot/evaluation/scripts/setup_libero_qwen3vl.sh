@@ -12,7 +12,8 @@ usage() {
     cat <<'EOF'
 Install an isolated Python 3.12 LIBERO/Qwen3-VL environment and verify it.
 No cluster jobs are submitted, existing environments are not activated globally,
-and model weights/statistics must already be mounted on the node.
+and only fine-tuned weights/configuration need to be mounted on the node.
+Pretrained Qwen, Cosmos VAE and SigLIP assets download to node-local cache by default.
 
 Usage: bash setup_libero_qwen3vl.sh [installer options] -- [verifier options]
   --env-prefix PATH       Isolated Conda prefix (default: ~/.conda/envs/libero_qwen3vl_cluster)
@@ -23,7 +24,7 @@ Usage: bash setup_libero_qwen3vl.sh [installer options] -- [verifier options]
   --verify-only          Do not install or modify dependencies/source; verify existing prefix
   --help                 Show this help
 
-Verifier options include --checkpoint, --dataset-root, --qwen3vl-dir,
+Verifier options include --checkpoint, --model-cache-dir, --offline, --dataset-root, --qwen3vl-dir,
 --cosmos3-dir, --stage1-text-dir, --fp8-training-config, --output-dir,
 --device, --render-gpu-device-id, --precisions bf16 fp8, and --environment-only.
 The default verification compares BF16 and native FP8 using the saved FP8 recipe.
@@ -32,7 +33,9 @@ Use --precisions bf16 on GPUs without native FP8 support.
 Requires Conda for installation, git for cloning, and host NVIDIA EGL drivers
 inside the container. The GPU container must expose graphics capability as well
 as compute/utility (NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics).
-No sudo, host-driver changes, model downloads, or shared ~/.libero writes occur.
+Use --offline after -- to prohibit downloads, including with --verify-only.
+Bundled normalization avoids needing the original training dataset on the node.
+No sudo, host-driver changes, fine-tuned weight downloads, or shared ~/.libero writes occur.
 EOF
 }
 
@@ -76,18 +79,24 @@ if [[ "$VERIFY_ONLY" = false ]]; then
     "$PYTHON" -m pip install --disable-pip-version-check \
         -r "$REPO_ROOT/lerobot/evaluation/requirements_libero_qwen3vl_fp8.txt"
     "$PYTHON" -m pip check
-    if [[ ! -e "$LIBERO_ROOT/.git" ]]; then
+    if [[ ! -d "$LIBERO_ROOT/libero/libero" ]]; then
         git clone --quiet --no-checkout https://github.com/Lifelong-Robot-Learning/LIBERO.git "$LIBERO_ROOT"
         git -C "$LIBERO_ROOT" checkout --quiet --detach "$LIBERO_REF"
     fi
 fi
 [[ -x "$PYTHON" ]] || die "Environment Python not found: $PYTHON"
-[[ -e "$LIBERO_ROOT/.git" ]] || die "LIBERO checkout not found: $LIBERO_ROOT"
-[[ "$(git -C "$LIBERO_ROOT" rev-parse HEAD)" = "$LIBERO_REF" ]] \
-    || die "LIBERO revision differs from --libero-ref; refusing to checkout/reset an existing repository."
+for ASSET_DIR in assets bddl_files init_files; do
+    [[ -d "$LIBERO_ROOT/libero/libero/$ASSET_DIR" ]] || die "Incomplete LIBERO source: missing $ASSET_DIR"
+done
+if [[ -e "$LIBERO_ROOT/.git" ]]; then
+    [[ "$(git -C "$LIBERO_ROOT" rev-parse HEAD)" = "$LIBERO_REF" ]] \
+        || die "LIBERO revision differs from --libero-ref; refusing to checkout/reset an existing repository."
+else
+    printf 'Using existing LIBERO source without Git metadata; revision is unverified: %s\n' "$LIBERO_ROOT" >&2
+fi
 
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
+export TOKENIZERS_PARALLELISM=false
 cd "$REPO_ROOT"
 exec "$PYTHON" -m lerobot.evaluation.scripts.verify_libero_qwen3vl \
     --libero-root "$LIBERO_ROOT" "$@"

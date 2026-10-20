@@ -37,6 +37,121 @@ def test_default_precision_is_bf16_without_torchao():
     assert inference_fp8_config("bf16", None, torch.device("cpu")) is None
 
 
+def test_cluster_defaults_need_no_training_machine_asset_or_dataset_paths():
+    args = verification.build_parser().parse_args(
+        [
+            "--libero-root",
+            "/local/LIBERO",
+            "--checkpoint",
+            "/cluster/step40k",
+            "--render-gpu-device-id",
+            "0",
+            "--output-dir",
+            "/local/result",
+        ]
+    )
+    assert args.dataset_root is None
+    assert (args.qwen3vl_dir, args.cosmos3_dir, args.stage1_text_dir) == (None, None, None)
+    assert not args.offline
+
+
+@pytest.mark.parametrize("suite", tuple(verification.SUITE_DATASETS))
+def test_bundled_suite_metadata_is_valid_and_preserves_exact_snapshot(tmp_path, suite):
+    args = SimpleNamespace(dataset_root=None, task_suite=suite)
+    root, provenance = verification.prepare_dataset_metadata(args, tmp_path)
+    snapshot = json.loads(verification.NORMALIZATION_SNAPSHOT.read_text())
+    path = root / verification.SUITE_DATASETS[suite]
+    assert json.loads((path / "meta/stats.json").read_text()) == snapshot["suites"][suite]["stats"]
+    adapter = verification.LiberoAdapter.from_dataset(path)
+    assert adapter.fps == 20
+    assert provenance["source"] == "bundled_libero_ort6d_v30"
+    assert len(provenance["snapshot_sha256"]) == 64
+    chosen, explicit = verification.prepare_dataset_metadata(
+        SimpleNamespace(dataset_root=root, task_suite=suite), tmp_path
+    )
+    assert chosen == root and explicit["source"] == "explicit_dataset_root"
+
+
+def test_explicit_missing_normalization_never_falls_back_to_snapshot(tmp_path):
+    args = SimpleNamespace(dataset_root=tmp_path / "missing", task_suite="libero_goal")
+    with pytest.raises(FileNotFoundError):
+        verification.prepare_dataset_metadata(args, tmp_path)
+
+
+@pytest.mark.parametrize("offline", [False, True])
+def test_verifier_resolves_default_assets_and_persists_download_failure(tmp_path, monkeypatch, offline):
+    from lerobot.common.utils import stage2_model_cache
+
+    calls = []
+
+    def unavailable(*paths, **options):
+        calls.append((paths, options))
+        raise ConnectionError("Hub unavailable")
+
+    monkeypatch.setattr(verification, "check_environment", lambda *args: {})
+    monkeypatch.setattr(verification, "checkpoint_paths", lambda *args: None)
+    monkeypatch.setattr(stage2_model_cache, "resolve_evaluation_model_paths", unavailable)
+    output = tmp_path / "output"
+    command = [
+        "--libero-root",
+        str(tmp_path),
+        "--checkpoint",
+        "/cluster/step40k",
+        "--render-gpu-device-id",
+        "0",
+        "--precisions",
+        "bf16",
+        "--output-dir",
+        str(output),
+        "--model-cache-dir",
+        str(tmp_path / "cache"),
+    ]
+    with pytest.raises(ConnectionError, match="Hub unavailable"):
+        verification.main(command + (["--offline"] if offline else []))
+    assert calls[0][0][:3] == (None, None, None)
+    assert calls[0][1]["auto_download"] is not offline
+    report = json.loads((output / "verification.json").read_text())
+    assert report["status"] == "failed" and report["normalization"]["source"] == "bundled_libero_ort6d_v30"
+    assert not (output / "bf16").exists()
+
+
+def test_verifier_runs_only_fine_tuned_checkpoint_with_resolved_offline_assets(tmp_path, monkeypatch):
+    from lerobot.common.utils import stage2_model_cache
+
+    paths = tuple(str(tmp_path / key) for key in ("qwen", "vae", "text"))
+    monkeypatch.setattr(verification, "check_environment", lambda *args: {})
+    monkeypatch.setattr(verification, "checkpoint_paths", lambda *args: None)
+    monkeypatch.setattr(stage2_model_cache, "resolve_evaluation_model_paths", lambda *args, **kwargs: paths)
+    calls = []
+
+    def stop(command, **options):
+        calls.append((command, options))
+        raise RuntimeError("inspected child command")
+
+    monkeypatch.setattr(verification.subprocess, "run", stop)
+    with pytest.raises(RuntimeError, match="inspected child command"):
+        verification.main(
+            [
+                "--libero-root",
+                str(tmp_path),
+                "--checkpoint",
+                "/cluster/step40k",
+                "--render-gpu-device-id",
+                "0",
+                "--precisions",
+                "bf16",
+                "--output-dir",
+                str(tmp_path / "output"),
+            ]
+        )
+    command, options = calls[0]
+    assert command[command.index("--checkpoint") + 1] == "/cluster/step40k"
+    assert command[command.index("--qwen3vl-dir") + 1] == paths[0]
+    assert command[command.index("--cosmos3-dir") + 1] == paths[1]
+    assert command[command.index("--stage1-text-dir") + 1] == paths[2]
+    assert options["env"]["HF_HUB_OFFLINE"] == options["env"]["TRANSFORMERS_OFFLINE"] == "1"
+
+
 def test_fp8_rejects_missing_recipe_emulation_and_unsupported_hardware(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="saved train_config"):
         inference_fp8_config("fp8", None, torch.device("cpu"))
@@ -245,3 +360,33 @@ def test_installer_shell_syntax_help_and_explicit_unknown_option_failure():
 def test_installer_invalid_arguments_fail_before_installation(arguments, message):
     result = subprocess.run(["bash", str(SCRIPT), *arguments], capture_output=True, text=True)
     assert result.returncode != 0 and message in result.stderr
+
+
+def test_installer_reuses_extracted_libero_and_keeps_preparation_online(tmp_path, monkeypatch):
+    prefix = tmp_path / "environment"
+    python = prefix / "bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text('#!/usr/bin/env bash\nprintf "offline=%s\\n" "${HF_HUB_OFFLINE:-unset}"\n')
+    python.chmod(0o755)
+    root = tmp_path / "LIBERO"
+    for directory in ("assets", "bddl_files", "init_files"):
+        (root / "libero/libero" / directory).mkdir(parents=True)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--verify-only",
+            "--env-prefix",
+            str(prefix),
+            "--libero-root",
+            str(root),
+            "--",
+            "--environment-only",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "revision is unverified" in result.stderr and "offline=unset" in result.stdout
+    assert not (root / ".git").exists()

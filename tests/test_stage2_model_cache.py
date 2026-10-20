@@ -16,6 +16,11 @@ from lerobot.common.utils import stage2_model_cache as cache_module
 
 def _write_model(root, component):
     root.mkdir(parents=True, exist_ok=True)
+    if component == "text":
+        for name in ("config", "tokenizer_config", "tokenizer"):
+            (root / f"{name}.json").write_text("{}")
+        save_file({"weight": np.ones(1, dtype=np.float32)}, str(root / "model.safetensors"))
+        return
     if component == "qwen":
         for name in ("config", "preprocessor_config", "tokenizer_config", "tokenizer", "chat_template"):
             (root / f"{name}.json").write_text("{}")
@@ -67,6 +72,56 @@ def test_complete_mounted_models_need_no_network_or_cache(tmp_path, downloads, m
     assert paths[2] == str(tmp_path / "blob/Cosmos3-Nano")
     assert downloads == []
     assert not (tmp_path / "local").exists()
+
+
+def test_evaluation_defaults_download_only_base_qwen_vae_and_text_then_reuse(tmp_path, downloads):
+    cache = tmp_path / "local"
+    paths = cache_module.resolve_evaluation_model_paths(None, None, None, cache)
+    assert [call[:2] for call in downloads] == [
+        ("Qwen3-VL-4B-Instruct", "qwen"),
+        ("Cosmos3-Edge", "vae"),
+        ("siglip2-base-patch16-224", "text"),
+    ]
+    assert all(Path(path).is_relative_to(cache) for path in paths)
+    assert cache_module.resolve_evaluation_model_paths(None, None, None, cache) == paths
+    assert len(downloads) == 3
+    assert not (cache / "Cosmos3-Edge/transformer").exists()
+
+
+def test_evaluation_explicit_assets_are_strict_and_need_no_download_cache(tmp_path, downloads, monkeypatch):
+    paths = [tmp_path / name for name in ("qwen", "vae", "text")]
+    for path, component in zip(paths, ("qwen", "vae", "text"), strict=True):
+        _write_model(path, component)
+    monkeypatch.setattr(
+        cache_module,
+        "_require_local_disk",
+        lambda _: pytest.fail("Explicit complete assets must not access a download cache"),
+    )
+    assert cache_module.resolve_evaluation_model_paths(*paths, tmp_path / "cache") == tuple(map(str, paths))
+    assert not downloads
+    (paths[0] / "config.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        cache_module.resolve_evaluation_model_paths(*paths, tmp_path / "cache")
+    assert not downloads
+
+
+def test_evaluation_offline_requires_complete_cache_without_network(tmp_path, downloads):
+    with pytest.raises(FileNotFoundError, match="prohibits downloading"):
+        cache_module.resolve_evaluation_model_paths(None, None, None, tmp_path / "cache", auto_download=False)
+    assert not downloads
+
+
+def test_siglip_requires_tokenizer_and_complete_safetensors(tmp_path):
+    _write_model(tmp_path, "text")
+    cache_module.check_model_directory(tmp_path, "text")
+    (tmp_path / "tokenizer.json").unlink()
+    with pytest.raises(FileNotFoundError, match="tokenizer"):
+        cache_module.check_model_directory(tmp_path, "text")
+    (tmp_path / "tokenizer.model").write_bytes(b"tokenizer")
+    cache_module.check_model_directory(tmp_path, "text")
+    (tmp_path / "model.safetensors").write_bytes(b"incomplete")
+    with pytest.raises(ValueError, match="incomplete"):
+        cache_module.check_model_directory(tmp_path, "text")
 
 
 def test_missing_models_download_only_to_node_local_disk_and_are_reused(tmp_path, downloads):

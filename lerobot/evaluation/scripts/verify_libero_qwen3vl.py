@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
+import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -17,10 +20,47 @@ from lerobot.evaluation.eval_qwen3vl_mot_libero import (
     CANONICAL_DIM,
     DUMMY_ACTION,
     SUITE_DATASETS,
+    LiberoAdapter,
+    checkpoint_paths,
     configure_libero,
     inference_fp8_config,
     load_libero_initial_states,
 )
+
+NORMALIZATION_SNAPSHOT = Path(__file__).resolve().parents[1] / "assets/libero_ort6d_normalization.json"
+
+
+def prepare_dataset_metadata(args, output: Path) -> tuple[Path, dict]:
+    if args.dataset_root is not None:
+        root = args.dataset_root.expanduser().resolve()
+        LiberoAdapter.from_dataset(root / SUITE_DATASETS[args.task_suite])
+        return root, {"source": "explicit_dataset_root", "path": str(root)}
+    payload = NORMALIZATION_SNAPSHOT.read_bytes()
+    snapshot = json.loads(payload)
+    if (
+        snapshot["format_version"] != 1
+        or snapshot["layout"] != "xyz_interleaved_ort6d_gripper"
+        or snapshot["feature_dim"] != 10
+    ):
+        raise ValueError("Unsupported bundled LIBERO normalization metadata.")
+    suite = snapshot["suites"][args.task_suite]
+    if suite["dataset"] != SUITE_DATASETS[args.task_suite]:
+        raise ValueError("Bundled LIBERO normalization suite/dataset mismatch.")
+    root = output / "dataset_metadata"
+    meta = root / suite["dataset"] / "meta"
+    meta.mkdir(parents=True, exist_ok=False)
+    info = {
+        "fps": snapshot["fps"],
+        "features": {key: {"shape": [snapshot["feature_dim"]]} for key in ("observation.state", "action")},
+    }
+    (meta / "info.json").write_text(json.dumps(info) + "\n")
+    (meta / "stats.json").write_text(json.dumps(suite["stats"], allow_nan=False) + "\n")
+    LiberoAdapter.from_dataset(root / suite["dataset"])
+    return root, {
+        "source": "bundled_libero_ort6d_v30",
+        "snapshot_sha256": hashlib.sha256(payload).hexdigest(),
+        "original_metadata_sha256": suite["source_sha256"],
+    }
 
 
 def check_environment(args, output: Path) -> dict:
@@ -190,7 +230,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--policy-config", type=Path)
     parser.add_argument("--fp8-training-config", type=Path)
-    parser.add_argument("--dataset-root", type=Path)
+    parser.add_argument("--dataset-root", type=Path, help="Override the bundled LIBERO v3 normalization.")
+    parser.add_argument(
+        "--model-cache-dir",
+        type=Path,
+        default=Path(os.environ.get("MODEL_LOCAL_CACHE", "/tmp/libero_qwen3vl_models")),
+        help="Node-local SSD/scratch cache for pretrained model downloads.",
+    )
+    parser.add_argument("--offline", action="store_true", help="Require existing complete local assets.")
     parser.add_argument("--qwen3vl-dir", type=Path)
     parser.add_argument("--cosmos3-dir", type=Path)
     parser.add_argument("--stage1-text-dir", type=Path)
@@ -205,11 +252,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.seed < 0 or args.render_gpu_device_id < 0 or len(set(args.precisions)) != len(args.precisions):
         parser.error("Use a nonnegative seed/physical EGL device and unique precision modes.")
-    required = ("checkpoint", "dataset_root", "qwen3vl_dir", "cosmos3_dir", "stage1_text_dir")
-    if not args.environment_only and any(getattr(args, key) is None for key in required):
-        parser.error(
-            "Model validation requires --checkpoint, --dataset-root, and all three asset directories."
-        )
+    if not args.environment_only and args.checkpoint is None:
+        parser.error("Model validation requires --checkpoint pointing to cluster-local fine-tuned weights.")
     if "fp8" in args.precisions and args.fp8_training_config is None:
         parser.error("FP8 validation requires --fp8-training-config from the same training run.")
     output = args.output_dir.resolve()
@@ -224,6 +268,27 @@ def main(argv: list[str] | None = None) -> None:
     try:
         report["environment"] = check_environment(args, output)
         if not args.environment_only:
+            from lerobot.common.utils.stage2_model_cache import resolve_evaluation_model_paths
+
+            checkpoint_paths(args.checkpoint, args.policy_config)
+            args.dataset_root, report["normalization"] = prepare_dataset_metadata(args, output)
+            logging.basicConfig(level=logging.INFO, format="evaluation setup: %(message)s")
+            paths = resolve_evaluation_model_paths(
+                args.qwen3vl_dir,
+                args.cosmos3_dir,
+                args.stage1_text_dir,
+                args.model_cache_dir.expanduser().resolve(),
+                auto_download=not args.offline,
+            )
+            args.qwen3vl_dir, args.cosmos3_dir, args.stage1_text_dir = map(Path, paths)
+            report["pretrained_assets"] = dict(
+                zip(
+                    ("qwen3vl", "cosmos3_vae", "stage1_text"),
+                    paths,
+                    strict=True,
+                )
+            )
+            child_env = dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
             report["runs"] = {}
             for precision in args.precisions:
                 command = [
@@ -279,7 +344,7 @@ def main(argv: list[str] | None = None) -> None:
                     )
                 with (output / f"{precision}.log").open("x") as log:
                     print(f"Running {precision} smoke; log: {log.name}", flush=True)
-                    subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
+                    subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, env=child_env)
                 result, _, _ = read_smoke_run(output, precision, args.task_id)
                 report["runs"][precision] = {
                     "steps": result["episodes"][0]["steps"],
