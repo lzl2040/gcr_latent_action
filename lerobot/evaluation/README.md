@@ -126,9 +126,11 @@ an unwritable environment fails rather than installing into `~/.local`.
 There is no `--env-prefix` option. Installation updates dependencies
 inside `lerobot` to the pinned evaluation stack, including TorchAO 0.15.0; use
 `--verify-only` if dependencies have already been installed by your AMLT setup.
-The shared environment is reconciled to NumPy 1.26.4, Zarr `>=2.17,<3`, and
-Numcodecs `>=0.10,<0.16`: Zarr 3 requires NumPy 2, and Numcodecs 0.16 removed
-Blosc helpers used by Zarr 2. Existing incompatible versions are downgraded during
+The shared environment is reconciled to NumPy 1.26.4, Zarr `>=2.17,<3`,
+Numcodecs `>=0.10,<0.16`, and Rerun SDK `>=0.21,<0.23`. Zarr 3 and Rerun SDK
+0.39 require NumPy 2; Numcodecs 0.16 removed Blosc helpers used by Zarr 2.
+The selected Rerun versions also preserve the existing dataset visualization API.
+Existing incompatible versions are downgraded during
 normal installation. If an earlier setup stopped at this dependency conflict,
 rerun it **without `--verify-only`** so the updated requirements can repair it;
 `pip check` still rejects any remaining dependency conflicts.

@@ -5,6 +5,7 @@ numpy==1.26.4
 zarr>=2.17,<3
 # Zarr 2 uses Blosc helpers removed in Numcodecs 0.16.
 numcodecs>=0.10,<0.16
+rerun-sdk>=0.21,<0.23
 scipy>=1.14,<2
 transformers==4.57.4
 diffusers==0.36.0

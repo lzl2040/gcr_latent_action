@@ -356,9 +356,10 @@ def test_installer_shell_syntax_help_and_explicit_unknown_option_failure():
         ("numpy", ["1.26.4"], ["2.0.0", "2.3.0"]),
         ("zarr", ["2.17.0", "2.18.3", "2.18.7"], ["2.16.0", "3.0.0", "3.1.6"]),
         ("numcodecs", ["0.10.0", "0.15.1"], ["0.9.0", "0.16.0", "0.16.3"]),
+        ("rerun-sdk", ["0.21.0", "0.22.0", "0.22.1"], ["0.20.0", "0.23.4", "0.39.0"]),
     ],
 )
-def test_installer_requirements_keep_numpy_zarr_and_numcodecs_compatible(name, compatible, incompatible):
+def test_installer_requirements_keep_shared_numpy_runtime_compatible(name, compatible, incompatible):
     manifest = SCRIPT.parent.parent / "requirements_libero_qwen3vl.txt"
     requirements = [
         Requirement(line)
