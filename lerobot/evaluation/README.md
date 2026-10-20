@@ -67,10 +67,14 @@ node-local LIBERO source. It does not submit any cluster jobs. Installation requ
 Conda, git, package-index access, and GitHub access if LIBERO is not already present.
 Pretrained assets download from Hugging Face to node-local disk by default; you do
 not need to mount the training machine's pretrained-weight or dataset directories.
+Use the same existing Conda environment **`lerobot`** for installation and execution,
+matching `conda run --name lerobot bash train.sh` in your cluster job. Configure
+Python **3.10, 3.11 or 3.12** in that environment beforehand. The script does not
+create another environment, switch to a private prefix, or upgrade Python.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash lerobot/evaluation/scripts/setup_libero_qwen3vl.sh \
-  --env-prefix /mnt/work/envs/libero_qwen3vl \
+CUDA_VISIBLE_DEVICES=0 conda run --name lerobot \
+  bash lerobot/evaluation/scripts/setup_libero_qwen3vl.sh \
   --libero-root /mnt/work/LIBERO \
   -- \
   --checkpoint /mnt/weights/1014_v1_8gpu/step40k \
@@ -114,8 +118,15 @@ for the current LIBERO-converted training data, not arbitrary retraining dataset
 use `--dataset-root /path/to/your/dataset/root` to supply different suite-specific
 `meta/info.json` / `meta/stats.json`. `verification.json` records the chosen source.
 
-The installer creates a separate Python 3.12 Conda prefix, installs the existing
-minimal evaluation requirements plus TorchAO 0.15.0, and reuses your local LIBERO.
+The installer uses `CONDA_PREFIX/bin/python` from the selected `lerobot` environment
+for dependency installation and verification; the verifier uses that same
+interpreter for both model subprocesses. Running outside `lerobot` fails before
+installation. User-site imports and pip's user-install fallback are disabled, so
+an unwritable environment fails rather than installing into `~/.local`.
+There is no `--env-prefix` option. Installation updates dependencies
+inside `lerobot` to the pinned evaluation stack, including TorchAO 0.15.0; use
+`--verify-only` if dependencies have already been installed by your AMLT setup.
+The installer reuses your local LIBERO.
 If the source is absent, it clones official LIBERO at
 `8f1084e3132a39270c3a13ebe37270a43ece2a01`. It does **not** install LIBERO's obsolete
 requirements or the entire LeRobot hardware/training stack. Existing LIBERO trees
@@ -162,8 +173,8 @@ pretrained assets can still download unless `--offline` is set. To check
 only CUDA/EGL without loading a checkpoint, use:
 
 ```bash
-bash lerobot/evaluation/scripts/setup_libero_qwen3vl.sh \
-  --verify-only --env-prefix /path/to/existing/env --libero-root /path/to/LIBERO \
+conda run --name lerobot bash lerobot/evaluation/scripts/setup_libero_qwen3vl.sh \
+  --verify-only --libero-root /path/to/LIBERO \
   -- --environment-only --precisions bf16 --render-gpu-device-id 0 \
   --output-dir /mnt/results/libero_egl_smoke
 ```

@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from dataclasses import asdict
@@ -351,9 +352,9 @@ def test_installer_shell_syntax_help_and_explicit_unknown_option_failure():
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        (["--env-prefix"], "Missing value"),
+        (["--torch-index-url"], "Missing value"),
         (["--libero-root", "--verify-only"], "Missing value"),
-        (["--env-prefix", "/"], "dedicated environment"),
+        (["--env-prefix", "/"], "Unknown installer option"),
         (["--libero-ref", "main"], "full commit SHA"),
     ],
 )
@@ -362,23 +363,41 @@ def test_installer_invalid_arguments_fail_before_installation(arguments, message
     assert result.returncode != 0 and message in result.stderr
 
 
-def test_installer_reuses_extracted_libero_and_keeps_preparation_online(tmp_path, monkeypatch):
-    prefix = tmp_path / "environment"
+@pytest.fixture
+def selected_lerobot(tmp_path, monkeypatch):
+    prefix = tmp_path / "lerobot"
     python = prefix / "bin/python"
     python.parent.mkdir(parents=True)
-    python.write_text('#!/usr/bin/env bash\nprintf "offline=%s\\n" "${HF_HUB_OFFLINE:-unset}"\n')
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "with open(os.environ['SETUP_CALL_LOG'], 'a') as log:\n"
+        "    log.write(json.dumps({'python': sys.argv[0], 'args': sys.argv[1:], "
+        "'offline': os.environ.get('HF_HUB_OFFLINE'), "
+        "'user_site': os.environ.get('PYTHONNOUSERSITE')}) + '\\n')\n"
+    )
     python.chmod(0o755)
+    (prefix / "conda-meta").mkdir()
+    (prefix / "conda-meta/history").touch()
+    monkeypatch.setenv("CONDA_DEFAULT_ENV", "lerobot")
+    monkeypatch.setenv("CONDA_PREFIX", str(prefix))
+    monkeypatch.setenv("CONDA_EXE", str(tmp_path / "must-not-create-another-environment"))
+    calls = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("SETUP_CALL_LOG", str(calls))
     root = tmp_path / "LIBERO"
     for directory in ("assets", "bddl_files", "init_files"):
         (root / "libero/libero" / directory).mkdir(parents=True)
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    return prefix, root, calls
+
+
+def test_installer_reuses_extracted_libero_and_keeps_preparation_online(selected_lerobot):
+    prefix, root, calls = selected_lerobot
     result = subprocess.run(
         [
             "bash",
             str(SCRIPT),
             "--verify-only",
-            "--env-prefix",
-            str(prefix),
             "--libero-root",
             str(root),
             "--",
@@ -388,5 +407,86 @@ def test_installer_reuses_extracted_libero_and_keeps_preparation_online(tmp_path
         text=True,
         check=True,
     )
-    assert "revision is unverified" in result.stderr and "offline=unset" in result.stdout
+    assert "revision is unverified" in result.stderr
+    records = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert len(records) == 2
+    assert records[0]["args"] == ["-"]
+    assert records[1]["args"][:2] == ["-m", "lerobot.evaluation.scripts.verify_libero_qwen3vl"]
+    assert all(record["offline"] is None for record in records)
+    assert all(record["user_site"] == "1" for record in records)
+    assert all(record["python"] == str(prefix / "bin/python") for record in records)
     assert not (root / ".git").exists()
+
+
+def test_installer_installs_and_verifies_with_only_existing_lerobot_python(selected_lerobot):
+    prefix, root, calls = selected_lerobot
+    subprocess.run(["bash", str(SCRIPT), "--libero-root", str(root), "--", "--environment-only"], check=True)
+    records = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert len(records) == 5
+    assert records[0]["args"] == ["-"]
+    assert records[1]["args"][:3] == ["-m", "pip", "install"]
+    assert "torch==2.9.1" in records[1]["args"]
+    assert records[2]["args"][:3] == ["-m", "pip", "install"]
+    assert all("--no-user" in record["args"] for record in records[1:3])
+    assert records[3]["args"] == ["-m", "pip", "check"]
+    assert records[4]["args"][:2] == ["-m", "lerobot.evaluation.scripts.verify_libero_qwen3vl"]
+    assert all(record["python"] == str(prefix / "bin/python") for record in records)
+
+
+@pytest.mark.parametrize("name", [None, "base", "other"])
+def test_installer_rejects_other_environments_before_installation(selected_lerobot, monkeypatch, name):
+    _, root, calls = selected_lerobot
+    if name is None:
+        monkeypatch.delenv("CONDA_DEFAULT_ENV", raising=False)
+    else:
+        monkeypatch.setenv("CONDA_DEFAULT_ENV", name)
+    result = subprocess.run(["bash", str(SCRIPT), "--libero-root", str(root)], capture_output=True, text=True)
+    assert result.returncode != 0 and "conda run --name lerobot" in result.stderr
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize(
+    "invalid", ["missing-prefix", "relative-prefix", "missing-history", "missing-python"]
+)
+def test_installer_rejects_invalid_active_conda_prefix_before_python(selected_lerobot, monkeypatch, invalid):
+    prefix, root, calls = selected_lerobot
+    if invalid == "missing-prefix":
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    elif invalid == "relative-prefix":
+        monkeypatch.setenv("CONDA_PREFIX", "lerobot")
+    elif invalid == "missing-history":
+        (prefix / "conda-meta/history").unlink()
+    else:
+        (prefix / "bin/python").unlink()
+    result = subprocess.run(["bash", str(SCRIPT), "--libero-root", str(root)], capture_output=True, text=True)
+    message = "conda run --name lerobot" if invalid == "missing-prefix" else "not a valid Conda environment"
+    assert result.returncode != 0 and message in result.stderr
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize(
+    ("version", "supported"),
+    [((3, 9), False), ((3, 10), True), ((3, 11), True), ((3, 12), True), ((3, 13), False)],
+)
+def test_installer_checks_current_python_without_replacing_interpreter(version, supported):
+    probe = SCRIPT.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    result = subprocess.run(
+        [sys.executable, "-c", f"import sys; sys.version_info = {version!r}\n{probe}"],
+        env=dict(os.environ, CONDA_PREFIX=sys.prefix),
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is supported
+    if not supported:
+        assert "Python 3.10-3.12" in result.stderr
+
+
+def test_installer_rejects_python_from_a_different_conda_prefix(tmp_path):
+    probe = SCRIPT.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        env=dict(os.environ, CONDA_PREFIX=str(tmp_path / "wrong")),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 and "does not belong" in result.stderr
