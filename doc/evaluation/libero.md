@@ -2,12 +2,14 @@
 
 更新日期：2026-10-20。
 
-本文汇总已完成的正式评测，共 42 份结果、8,400 次 rollout。数据来自对应的
+本文汇总已完成的正式评测，共 45 份结果、9,000 次 rollout。
+其中旧协议 42 份、8,400 次，单次初始化 RNG 的新协议 3 份、600 次，分开记录。
+数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查或尚未完成的评测。
 
 ## 历史评测设置
 
-下表及本文已完成结果使用旧协议：每个 episode 前按
+下表及“旧协议结果汇总”使用旧协议：每个 episode 前按
 `args.seed + task_id * 1000 + trial` 重设随机种子。
 当前评测代码已改为仅在启动时用 `args.seed` 初始化一次 RNG，
 后续任务、episode 和 replanning 连续推进随机状态，不再重设种子；
@@ -33,7 +35,7 @@
 `libero_object_no_noops_lerobot`、`libero_spatial_no_noops_lerobot` 和
 `libero_goal_no_noops_lerobot` 的统计量。
 
-## 结果汇总
+## 旧协议结果汇总
 
 每个单元格格式为 **成功率（成功次数 / 总次数）**。
 `—` 表示没有已完成的正式评测记录，不代表成功率为 0。
@@ -117,6 +119,33 @@ Goal 任务 0（打开中层抽屉）从 9/20 提高到 11/20（55.0%），
 `1014_v0` 与 `1014_v1_8gpu` 的训练步数、输入视角和训练配置不同；
 虽然使用相同评测协议，但这些结果不是仅增加 wrist 视角的受控消融实验。
 
+## 单次初始化 RNG 协议结果
+
+本轮使用 `1014_v1_8gpu` 的同一份 48k 权重，BF16、`primary` + `wrist`，
+每套 10 个任务、每任务前 20 个固定初态，其余模型配置与控制设置不变。
+仅在评测进程启动时用 `args.seed=0` 初始化 Python、NumPy、Torch RNG；
+任务、episode 和 replanning 之间不再重设种子，
+结果标记为 `sampling_rng="run_seeded_continuous"`。
+权重、模型配置快照和评测代码指纹在本轮完成后均保持不变。
+
+| Suite | 旧协议 | 新协议 | 变化 |
+| --- | --- | --- | --- |
+| Object | 97.5%（195/200） | 98.0%（196/200） | +0.5 个百分点 |
+| Spatial | 90.0%（180/200） | 88.0%（176/200） | -2.0 个百分点 |
+| Goal | 87.0%（174/200） | 90.5%（181/200） | +3.5 个百分点 |
+| 合计 | 91.50%（549/600） | 92.17%（553/600） | +0.67 个百分点 |
+
+Goal 任务 0（打开中层抽屉）从旧协议的 11/20 提高到 16/20（80.0%），
+任务 3（打开上层抽屉并将碗放入）从 13/20 提高到 14/20（70.0%），
+任务 9（将酒瓶放上酒架）从 13/20 降至 12/20（60.0%）。
+这三个任务贡献新协议 Goal 的 18/19 次失败，
+另一次来自任务 7（开炉灶，19/20）。
+
+这是单个全局种子的随机流协议对照，不是模型权重改进；
+不能据此断言单次初始化 RNG 在其他种子上也一定提高成功率。
+由于 RNG 连续推进，改变任务顺序、任务子集或前序 rollout 长度，
+也会改变后续 episode 的采样随机状态。
+
 ## 权重位置
 
 | 训练版本 | 评测时使用的 checkpoint 路径 |
@@ -133,6 +162,8 @@ Goal 任务 0（打开中层抽屉）从 9/20 提高到 11/20（55.0%），
 
 16k Goal 首次尝试在模型加载阶段因显存不足退出，未开始 rollout；
 下表记录的是随后重试完成的 200 次评测，未合并失败尝试。
+
+### 旧协议
 
 | 训练版本 | Checkpoint | Suite | `results.json` |
 | --- | --- | --- | --- |
@@ -178,6 +209,14 @@ Goal 任务 0（打开中层抽屉）从 9/20 提高到 11/20（55.0%），
 | `1014_v1_8gpu` | 48k | Object | `outputs/evaluation/libero/v1_8gpu_step48k_object_20trials_20261020/results.json` |
 | `1014_v1_8gpu` | 48k | Spatial | `outputs/evaluation/libero/v1_8gpu_step48k_spatial_20trials_20261020/results.json` |
 | `1014_v1_8gpu` | 48k | Goal | `outputs/evaluation/libero/v1_8gpu_step48k_goal_20trials_20261020/results.json` |
+
+### 单次初始化 RNG 协议
+
+| 训练版本 | Checkpoint | Suite | `results.json` |
+| --- | --- | --- | --- |
+| `1014_v1_8gpu` | 48k | Object | `outputs/evaluation/libero/v1_8gpu_step48k_run_seeded_object_20trials_20261020/results.json` |
+| `1014_v1_8gpu` | 48k | Spatial | `outputs/evaluation/libero/v1_8gpu_step48k_run_seeded_spatial_20trials_20261020/results.json` |
+| `1014_v1_8gpu` | 48k | Goal | `outputs/evaluation/libero/v1_8gpu_step48k_run_seeded_goal_20trials_20261020/results.json` |
 
 各结果目录同时保留 `evaluation.log`、逐次 rollout 的 `*_actions.npy`，
 以及失败 rollout 的 `*_failure.mp4`。任务级成功次数和成功率见
