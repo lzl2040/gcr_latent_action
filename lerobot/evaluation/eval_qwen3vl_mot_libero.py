@@ -270,8 +270,8 @@ class PredictionVideoWriter:
             "replan_index": replan_index,
             "control_step": control_step,
             "control_time_s": control_step / self.source_fps,
-            "episode_seed": seed,
-            "sampling_rng": "episode_seeded_continuous",
+            "run_seed": seed,
+            "sampling_rng": "run_seeded_continuous",
             "video_frames": frames_expected,
             "includes_current_frame": True,
             "video_fps": fps,
@@ -475,16 +475,11 @@ def rollout_episode(
     initial_state,
     plan,
     *,
-    seed: int,
     max_steps: int,
     wait_steps: int,
     replan_steps: int,
     save_video: bool,
 ) -> tuple[dict, list]:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    env.seed(seed)
     env.reset()
     observation = env.set_init_state(initial_state)
     success, done = bool(env.check_success()), False
@@ -615,7 +610,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=-1,
         help="Physical EGL device index, independent of CUDA_VISIBLE_DEVICES.",
     )
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Initialize RNGs once per run; do not reseed between tasks, episodes, or replans.",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -698,6 +698,7 @@ def main(argv: list[str] | None = None) -> None:
         rotation_encoding="Euler XYZ -> matrix[:, :2].reshape(6)",
         state_gripper="second finger",
         action_gripper="0=close, 1=open; native=-sign(2*x-1)",
+        sampling_rng="run_seeded_continuous",
         precision_details=policy.libero_precision_details,
     )
     episodes: list[dict] = []
@@ -716,7 +717,6 @@ def main(argv: list[str] | None = None) -> None:
             for trial in range(args.trials_per_task):
                 policy.reset()
                 stem = f"task_{task_id:02d}_trial_{trial:03d}"
-                episode_seed = args.seed + task_id * 1000 + trial
                 prediction_root = output_dir / "predictions" / stem
                 prediction_records = []
                 plan_timings = []
@@ -727,7 +727,7 @@ def main(argv: list[str] | None = None) -> None:
                     control_step,
                     replan_index,
                     instruction=task.language,
-                    seed=episode_seed,
+                    seed=args.seed,
                     root=prediction_root,
                     records=prediction_records,
                     timings=plan_timings,
@@ -798,7 +798,6 @@ def main(argv: list[str] | None = None) -> None:
                     env,
                     initial_states[task_id][trial],
                     plan,
-                    seed=episode_seed,
                     max_steps=settings["max_steps"],
                     wait_steps=args.wait_steps,
                     replan_steps=args.replan_steps,
@@ -816,7 +815,7 @@ def main(argv: list[str] | None = None) -> None:
                     instruction=task.language,
                     trial=trial,
                     init_state_index=trial,
-                    seed=args.seed + task_id * 1000 + trial,
+                    seed=args.seed,
                     actions_path=str(actions_path.resolve()),
                 )
                 if frames and (not args.save_failed_videos_only or not episode["success"]):

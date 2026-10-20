@@ -5,7 +5,14 @@
 本文汇总已完成的正式评测，共 39 份结果、7,800 次 rollout。数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查或尚未完成的评测。
 
-## 评测设置
+## 历史评测设置
+
+下表及本文已完成结果使用旧协议：每个 episode 前按
+`args.seed + task_id * 1000 + trial` 重设随机种子。
+当前评测代码已改为仅在启动时用 `args.seed` 初始化一次 RNG，
+后续任务、episode 和 replanning 连续推进随机状态，不再重设种子；
+固定 benchmark 初态的选择不变。新结果记录
+`sampling_rng="run_seeded_continuous"`，应与旧协议结果分开标注。
 
 | 项目 | 设置 |
 | --- | --- |

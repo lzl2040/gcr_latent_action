@@ -105,7 +105,7 @@ def check_environment(args, output: Path) -> dict:
         render_gpu_device_id=args.render_gpu_device_id,
     )
     try:
-        env.seed(args.seed + args.task_id * 1000)
+        env.seed(args.seed)
         env.reset()
         observation = env.set_init_state(states[0])
         observation, _, _, _ = env.step(DUMMY_ACTION)

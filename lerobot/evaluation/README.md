@@ -38,6 +38,14 @@ not a complete benchmark evaluation.
 
 For a short plumbing check, add `--task-ids 0 --trials-per-task 1 --max-steps 16`.
 A shortened horizon is **not a benchmark success-rate evaluation**.
+`--seed` initializes Python, NumPy and Torch (CPU/CUDA) RNGs once per run, before
+loading the policy. Tasks, episode resets and replans do not reseed them; LIBERO
+uses the ambient NumPy RNG. Each task still uses the first fixed benchmark
+initial states in trial order. Changing task order, selecting a subset of tasks,
+or changing earlier rollout lengths can change later sampled actions because
+the RNG stream advances continuously. Results identify this protocol with
+`sampling_rng: "run_seeded_continuous"`; older episode-reseeded results use a
+different protocol.
 The default flow integration count comes from the saved configuration (20 for
 this checkpoint); `--inference-steps` explicitly overrides it for ablations.
 `--replan-steps` defaults to 10 and executes the first N consecutive actions of
@@ -216,7 +224,7 @@ execution; that part must pass on the cluster's supported GPU.
   trained. With future-video export enabled (default), the runner uses
   `generate_validation` once per replan: the saved video and executed actions
   come from the same joint sample, not from a second video-generation pass.
-  Ambient episode-seeded RNG is preserved, so exporting a video does not
+  Ambient run-seeded RNG is preserved, so exporting a video does not
   reseed each replan or change this checkpoint's sampled actions.
   A separate frozen VAE decoder is loaded once, without changing the strict
   inference checkpoint's encoder-only model layout.
@@ -251,7 +259,7 @@ Each invocation creates a fresh directory under `outputs/evaluation/libero/`,
 or the **new, nonexistent** directory specified by `--output-dir`:
 
 - `results.json`: settings, completed episodes, per-task and overall success
-  rates, horizons, seeds, initial-state indices, and timing.
+  rates, horizons, the run seed/RNG mode, initial-state indices, and timing.
 - `evaluation.log`: checkpoint restoration and episode results.
 - `task_XX_trial_YYY_actions.npy`: the executed native 7D action sequence.
 - `task_XX_trial_YYY_success.mp4` / `_failure.mp4`: primary-camera rollout at
@@ -262,7 +270,7 @@ or the **new, nonexistent** directory specified by `--output-dir`:
   models when that camera is available. Missing views are skipped.
 - Each replan directory also contains `action_chunk.npy` (the complete predicted
   native action chunk) and `metadata.json` (replan index, rollout control step,
-  episode seed/RNG mode, per-view paths, and source-frame timestamps). These are
+  run seed/RNG mode, per-view paths, and source-frame timestamps). These are
   referenced by `episodes[*].prediction_videos` in `results.json`.
 
 Future-video saving is on by default. `--no-save-predicted-video` disables only

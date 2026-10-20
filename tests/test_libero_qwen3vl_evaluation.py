@@ -1,7 +1,9 @@
 import json
+import random
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -222,7 +224,7 @@ class FakeEnv:
         self.history = []
 
     def seed(self, seed):
-        self.saved_seed = seed
+        raise AssertionError("Episode resets must not reseed the environment.")
 
     def reset(self):
         self.history = []
@@ -244,7 +246,6 @@ def rollout(env, plan, **kwargs):
         env,
         "fixed-state",
         plan,
-        seed=123,
         max_steps=5,
         wait_steps=2,
         replan_steps=3,
@@ -262,7 +263,7 @@ def test_episode_settling_replan_and_timeout():
         return np.arange(28).reshape(4, 7) / 100
 
     result, frames = rollout(env, plan)
-    assert env.initial_state == "fixed-state" and env.saved_seed == 123
+    assert env.initial_state == "fixed-state"
     assert env.history[:2] == [DUMMY_ACTION, DUMMY_ACTION]
     assert result["policy_calls"] == len(calls) == 2
     assert calls == [
@@ -275,6 +276,40 @@ def test_episode_settling_replan_and_timeout():
     np.testing.assert_array_equal(frames[0], observation()["agentview_image"][::-1, ::-1])
     rollout(env, plan)
     assert env.history[2] == result["actions"][0]
+
+
+@pytest.mark.parametrize("seed", [0, 123])
+def test_episode_rng_continues_across_replans_and_episodes(seed):
+    python_state, numpy_state = random.getstate(), np.random.get_state()
+    runs = []
+    try:
+        with torch.random.fork_rng(devices=[]):
+            for _ in range(2):
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
+                draws = []
+
+                def plan(obs, *, draws=draws, **context):
+                    draws.append((random.random(), np.random.random(), torch.rand(()).item()))
+                    return np.zeros((3, 7))
+
+                env = FakeEnv()
+                for _ in range(2):
+                    rollout(env, plan)
+                runs.append(draws)
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+    python_rng = random.Random(seed)
+    numpy_rng = np.random.RandomState(seed)
+    torch_rng = torch.Generator().manual_seed(seed)
+    expected = [
+        (python_rng.random(), numpy_rng.random(), torch.rand((), generator=torch_rng).item())
+        for _ in range(4)
+    ]
+    assert runs == [expected, expected]
+    assert expected[:2] != expected[2:]
 
 
 def test_default_replanning_executes_ten_of_thirty_two_actions():
@@ -292,7 +327,6 @@ def test_default_replanning_executes_ten_of_thirty_two_actions():
         FakeEnv(),
         "fixed-state",
         plan,
-        seed=123,
         max_steps=25,
         wait_steps=0,
         replan_steps=args.replan_steps,
@@ -403,8 +437,8 @@ def test_prediction_videos_per_replan_multiview_timing_and_output_directory(tmp_
             prediction, actions, directory, control_step=step, replan_index=index, seed=index
         )
         assert metadata["replan_index"] == index and metadata["control_step"] == step
-        assert metadata["episode_seed"] == index
-        assert metadata["sampling_rng"] == "episode_seeded_continuous"
+        assert metadata["run_seed"] == index
+        assert metadata["sampling_rng"] == "run_seeded_continuous"
         assert metadata["video_frame_times_s"] == [0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.15, 1.35, 1.55]
         assert metadata["video_fps"] == pytest.approx(160 / 31)
         assert metadata["includes_current_frame"] and metadata["video_frames"] == 9
@@ -517,8 +551,19 @@ def test_actual_video_modes_are_mutually_exclusive():
 @pytest.mark.parametrize(
     ("video_flags", "saved_names"),
     [
-        ([], ["task_00_trial_000_success.mp4", "task_00_trial_001_failure.mp4"]),
-        (["--save-failed-videos-only"], ["task_00_trial_001_failure.mp4"]),
+        (
+            [],
+            [
+                "task_00_trial_000_success.mp4",
+                "task_00_trial_001_failure.mp4",
+                "task_01_trial_000_success.mp4",
+                "task_01_trial_001_failure.mp4",
+            ],
+        ),
+        (
+            ["--save-failed-videos-only"],
+            ["task_00_trial_001_failure.mp4", "task_01_trial_001_failure.mp4"],
+        ),
         (["--no-save-video"], []),
     ],
 )
@@ -527,9 +572,9 @@ def test_main_actual_video_saving_modes(tmp_path, monkeypatch, video_flags, save
 
     import lerobot.evaluation.eval_qwen3vl_mot_libero as evaluation
 
-    closed, saved = [], []
+    closed, saved, draws = [], [], []
     suite = SimpleNamespace(
-        n_tasks=1,
+        n_tasks=2,
         get_task_init_states=lambda _: [0, 1],
         get_task=lambda _: SimpleNamespace(name="toy", language="toy task"),
         get_task_bddl_file_path=lambda _: "/unused/task.bddl",
@@ -565,6 +610,8 @@ def test_main_actual_video_saving_modes(tmp_path, monkeypatch, video_flags, save
     monkeypatch.setattr(evaluation.LiberoAdapter, "from_dataset", lambda path: SimpleNamespace(fps=20))
 
     def fake_rollout(env, initial_state, plan, **kwargs):
+        assert "seed" not in kwargs
+        draws.append((random.random(), np.random.random(), torch.rand(()).item()))
         return {
             "success": initial_state == 0,
             "steps": 1,
@@ -575,6 +622,12 @@ def test_main_actual_video_saving_modes(tmp_path, monkeypatch, video_flags, save
 
     monkeypatch.setattr(evaluation, "rollout_episode", fake_rollout)
     monkeypatch.setattr(imageio, "mimsave", lambda path, frames, **kwargs: saved.append(path))
+    seeders = [
+        (module, Mock(wraps=module.seed if module is not torch else module.manual_seed))
+        for module in (random, np.random, torch)
+    ]
+    for module, seeder in seeders:
+        monkeypatch.setattr(module, "manual_seed" if module is torch else "seed", seeder)
     output = tmp_path / "evaluation"
     evaluation.main(
         [
@@ -582,17 +635,33 @@ def test_main_actual_video_saving_modes(tmp_path, monkeypatch, video_flags, save
             "/weights/step18k",
             "--trials-per-task",
             "2",
+            "--seed",
+            "123",
             "--no-save-predicted-video",
             "--output-dir",
             str(output),
             *video_flags,
         ]
     )
-    assert closed == [True]
+    assert closed == [True, True]
     assert [path.name for path in saved] == saved_names
     result = json.loads((output / "results.json").read_text())
-    assert result["evaluation_complete"] and result["episodes_completed"] == 2
-    assert result["successes"] == 1
+    assert result["evaluation_complete"] and result["episodes_completed"] == 4
+    assert result["successes"] == 2
+    assert result["settings"]["sampling_rng"] == "run_seeded_continuous"
+    assert [episode["seed"] for episode in result["episodes"]] == [123] * 4
+    assert [
+        (episode["task_id"], episode["trial"], episode["init_state_index"]) for episode in result["episodes"]
+    ] == [(0, 0, 0), (0, 1, 1), (1, 0, 0), (1, 1, 1)]
+    for _, seeder in seeders:
+        seeder.assert_called_once_with(123)
+    python_rng = random.Random(123)
+    numpy_rng = np.random.RandomState(123)
+    torch_rng = torch.Generator().manual_seed(123)
+    assert draws == [
+        (python_rng.random(), numpy_rng.random(), torch.rand((), generator=torch_rng).item())
+        for _ in range(4)
+    ]
     assert [
         Path(episode["video_path"]).name for episode in result["episodes"] if "video_path" in episode
     ] == saved_names
