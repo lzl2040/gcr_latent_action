@@ -139,6 +139,14 @@ Existing incompatible versions are downgraded during
 normal installation. If an earlier setup stopped at this dependency conflict,
 rerun it **without `--verify-only`** so the updated requirements can repair it;
 `pip check` still rejects any remaining dependency conflicts.
+After selecting PyTorch, installation also probes any preinstalled `flash-attn`.
+Only an undefined-symbol binary import failure in the selected environment
+triggers removal; importable packages and packages outside that environment are
+preserved. Unrelated import errors stop setup.
+The model uses native PyTorch SDPA and does not require the external extension.
+The installer then imports Diffusers' `AutoencoderKLWan` before any model-weight
+downloads/loading, so optional-extension failures are reported early rather than
+hidden in the model subprocess. `--verify-only` does not perform these repairs.
 The installer reuses your local LIBERO.
 If the source is absent, it clones official LIBERO at
 `8f1084e3132a39270c3a13ebe37270a43ece2a01`. It does **not** install LIBERO's obsolete

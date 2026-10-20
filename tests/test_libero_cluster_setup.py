@@ -541,7 +541,7 @@ def test_installer_installs_and_verifies_with_only_existing_lerobot_python(selec
     prefix, root, calls = selected_lerobot
     subprocess.run(["bash", str(SCRIPT), "--libero-root", str(root), "--", "--environment-only"], check=True)
     records = [json.loads(line) for line in calls.read_text().splitlines()]
-    assert len(records) == 5
+    assert len(records) == 6
     assert records[0]["args"] == ["-"]
     assert records[1]["args"][:3] == ["-m", "pip", "install"]
     assert "torch==2.9.1" in records[1]["args"]
@@ -551,9 +551,112 @@ def test_installer_installs_and_verifies_with_only_existing_lerobot_python(selec
         str(SCRIPT.parent.parent / "requirements_libero_qwen3vl_fp8.txt"),
     ]
     assert all("--no-user" in record["args"] for record in records[1:3])
-    assert records[3]["args"] == ["-m", "pip", "check"]
-    assert records[4]["args"][:2] == ["-m", "lerobot.evaluation.scripts.verify_libero_qwen3vl"]
+    assert records[3]["args"] == ["-"]
+    assert records[4]["args"] == ["-m", "pip", "check"]
+    assert records[5]["args"][:2] == ["-m", "lerobot.evaluation.scripts.verify_libero_qwen3vl"]
     assert all(record["python"] == str(prefix / "bin/python") for record in records)
+
+
+@pytest.mark.parametrize(
+    "condition", ["absent", "compatible", "abi_error", "external_error", "other_error", "signal"]
+)
+def test_installer_runtime_repairs_only_flash_attn_binary_mismatch(monkeypatch, capsys, condition):
+    fake_diffusers = ModuleType("diffusers")
+    fake_diffusers.AutoencoderKLWan = type("AutoencoderKLWan", (), {})
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    def version(name):
+        assert name == "flash-attn"
+        if condition == "absent":
+            raise verification.importlib.metadata.PackageNotFoundError(name)
+        return "2.7.0"
+
+    monkeypatch.setattr(verification.importlib.metadata, "version", version)
+    package_root = Path(sys.prefix).parent / "other" if condition == "external_error" else Path(sys.prefix)
+    monkeypatch.setattr(
+        verification.importlib.metadata,
+        "distribution",
+        lambda name: SimpleNamespace(locate_file=lambda path: package_root),
+    )
+    calls = []
+    errors = {
+        "abi_error": "ImportError: /env/flash_attn_2_cuda.so: undefined symbol: _ZNK3c106SymInt6sym_neERKS0_",
+        "external_error": "ImportError: /other/flash_attn_2_cuda.so: undefined symbol: broken_torch_abi",
+        "other_error": "ModuleNotFoundError: No module named 'some_other_dependency'",
+        "signal": "",
+    }
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[1:3] == ["-m", "pip"]:
+            return SimpleNamespace(returncode=0)
+        return SimpleNamespace(
+            returncode=-9 if condition == "signal" else int(condition != "compatible"),
+            stdout="",
+            stderr=errors.get(condition, ""),
+        )
+
+    monkeypatch.setattr(verification.subprocess, "run", run)
+    source = SCRIPT.read_text().split("<<'RUNTIME_PY'\n", 1)[1].split("\nRUNTIME_PY\n", 1)[0]
+    if condition in ("external_error", "other_error", "signal"):
+        with pytest.raises(RuntimeError, match="refusing automatic removal"):
+            exec(compile(source, str(SCRIPT), "exec"), {})
+        assert len(calls) == 1
+    else:
+        exec(compile(source, str(SCRIPT), "exec"), {})
+        assert len(calls) == {"absent": 0, "compatible": 1, "abi_error": 2}[condition]
+        captured = capsys.readouterr()
+        assert "Diffusers runtime import verified: AutoencoderKLWan" in captured.out
+    if condition == "abi_error":
+        assert "Removing incompatible optional flash-attn" in captured.err
+        assert errors["abi_error"] in captured.err
+        assert calls[-1] == (
+            [sys.executable, "-m", "pip", "uninstall", "--yes", "flash-attn"],
+            {"check": True},
+        )
+    assert all(command[0] == sys.executable for command, _ in calls)
+
+
+def test_installer_runtime_propagates_failed_uninstall(monkeypatch):
+    monkeypatch.setattr(verification.importlib.metadata, "version", lambda name: "2.7.0")
+    monkeypatch.setattr(
+        verification.importlib.metadata,
+        "distribution",
+        lambda name: SimpleNamespace(locate_file=lambda path: Path(sys.prefix)),
+    )
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="ImportError: flash_attn_2_cuda.so: undefined symbol: broken_torch_abi",
+            )
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(verification.subprocess, "run", run)
+    source = SCRIPT.read_text().split("<<'RUNTIME_PY'\n", 1)[1].split("\nRUNTIME_PY\n", 1)[0]
+    with pytest.raises(subprocess.CalledProcessError):
+        exec(compile(source, str(SCRIPT), "exec"), {})
+    assert len(calls) == 2
+
+
+def test_installer_runtime_propagates_diffusers_import_failure(monkeypatch):
+    def absent(name):
+        raise verification.importlib.metadata.PackageNotFoundError(name)
+
+    def unavailable(name):
+        raise ImportError("broken Cosmos VAE runtime")
+
+    fake_diffusers = ModuleType("diffusers")
+    fake_diffusers.__getattr__ = unavailable
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+    monkeypatch.setattr(verification.importlib.metadata, "version", absent)
+    source = SCRIPT.read_text().split("<<'RUNTIME_PY'\n", 1)[1].split("\nRUNTIME_PY\n", 1)[0]
+    with pytest.raises(ImportError, match="broken Cosmos VAE runtime"):
+        exec(compile(source, str(SCRIPT), "exec"), {})
 
 
 @pytest.mark.parametrize("name", [None, "base", "other"])

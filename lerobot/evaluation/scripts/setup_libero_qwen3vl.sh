@@ -29,6 +29,7 @@ Verifier options include --checkpoint, --model-cache-dir, --offline, --dataset-r
 The default verification compares BF16 and native FP8 using the saved FP8 recipe.
 Use --precisions bf16 on GPUs without native FP8 support.
 Existing output directories are kept; reruns use a fresh timestamped run subdirectory.
+Installation removes optional flash-attn only if its binary has undefined-symbol import errors.
 
 Requires an existing lerobot environment with Python 3.10-3.12, git for cloning, and host NVIDIA EGL drivers
 inside the container. The GPU container must expose graphics capability as well
@@ -82,6 +83,51 @@ if [[ "$VERIFY_ONLY" = false ]]; then
         --index-url "$TORCH_INDEX_URL"
     "$PYTHON" -m pip install --no-user --disable-pip-version-check \
         -r "$REPO_ROOT/lerobot/evaluation/requirements_libero_qwen3vl_fp8.txt"
+    "$PYTHON" - <<'RUNTIME_PY'
+import subprocess
+import sys
+from importlib.metadata import PackageNotFoundError, distribution, version
+from pathlib import Path
+
+try:
+    flash_version = version("flash-attn")
+except PackageNotFoundError:
+    print("No pip-managed flash-attn package installed.", flush=True)
+else:
+    probe = subprocess.run(
+        [sys.executable, "-c", "import torch; from flash_attn import flash_attn_func, flash_attn_varlen_func"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode:
+        if not (
+            probe.returncode > 0
+            and "ImportError:" in probe.stderr
+            and "flash_attn" in probe.stderr
+            and "undefined symbol:" in probe.stderr
+        ):
+            raise RuntimeError(
+                f"flash-attn import failed with exit code {probe.returncode}; "
+                f"refusing automatic removal:\n{probe.stdout}\n{probe.stderr}"
+            )
+        package_root = Path(distribution("flash-attn").locate_file("")).resolve()
+        if not package_root.is_relative_to(Path(sys.prefix).resolve()):
+            raise RuntimeError(
+                f"flash-attn is outside the selected environment ({package_root}); "
+                "refusing automatic removal."
+            )
+        print(
+            f"Removing incompatible optional flash-attn {flash_version}; "
+            "this evaluation uses native PyTorch SDPA.\n" + probe.stderr,
+            file=sys.stderr, flush=True,
+        )
+        subprocess.run([sys.executable, "-m", "pip", "uninstall", "--yes", "flash-attn"], check=True)
+    else:
+        print(f"Keeping importable flash-attn {flash_version}.", flush=True)
+
+from diffusers import AutoencoderKLWan
+
+print(f"Diffusers runtime import verified: {AutoencoderKLWan.__name__}.", flush=True)
+RUNTIME_PY
     "$PYTHON" -m pip check
     if [[ ! -d "$LIBERO_ROOT/libero/libero" ]]; then
         git clone --quiet --no-checkout https://github.com/Lifelong-Robot-Learning/LIBERO.git "$LIBERO_ROOT"
