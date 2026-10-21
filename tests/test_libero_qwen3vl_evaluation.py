@@ -20,6 +20,7 @@ from lerobot.evaluation.eval_qwen3vl_mot_libero import (
     libero_image,
     load_dcp_model,
     ort6d_to_controls,
+    prepare_output_directory,
     rollout_episode,
     state_to_ort6d,
     write_results,
@@ -515,6 +516,158 @@ def test_prediction_png_frames_are_exact_and_filmstrip_preserves_order(tmp_path)
     assert metadata == json.loads((tmp_path / "prediction/metadata.json").read_text())
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_output_directory_creates_missing_or_empty_directory(tmp_path, existing):
+    output = tmp_path / "results/run"
+    if existing:
+        output.mkdir(parents=True)
+    assert prepare_output_directory(output) == output.resolve()
+    assert output.is_dir() and not list(output.iterdir())
+
+
+def test_output_directory_overwrite_clears_all_old_artifacts_only_in_target(tmp_path, caplog):
+    output = tmp_path / "results/run"
+    output.mkdir(parents=True)
+    sibling = tmp_path / "results/other_run"
+    sibling.mkdir()
+    (sibling / "results.json").write_text("keep")
+    for name in (
+        "results.json",
+        "results.json.tmp",
+        "evaluation.log",
+        "task_09_trial_019_actions.npy",
+        "task_09_trial_019_failure.mp4",
+        "old-file.txt",
+        "predictions/task_09_trial_019/replan_0000_step_0000/primary.mp4",
+        "first_plans/task_09_trial_019.npz",
+        "libero_config/config.yaml",
+    ):
+        path = output / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("old")
+    assert prepare_output_directory(output) == output.resolve()
+    assert not list(output.iterdir())
+    assert (sibling / "results.json").read_text() == "keep"
+    assert "Overwriting evaluation output directory" in caplog.text
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_output_directory_refuses_symlinks(tmp_path, dangling):
+    target = tmp_path / "original"
+    if not dangling:
+        target.mkdir()
+        (target / "keep.txt").write_text("keep")
+    output = tmp_path / "symlink"
+    output.symlink_to(target, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        prepare_output_directory(output)
+    assert output.is_symlink()
+    if dangling:
+        assert not target.exists()
+    else:
+        assert (target / "keep.txt").read_text() == "keep"
+
+
+def test_output_directory_protects_input_symlinks_inside_output(tmp_path):
+    checkpoint = tmp_path / "weights/model"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "keep.txt").write_text("keep")
+    output = tmp_path / "evaluation"
+    output.mkdir()
+    reference = output / "checkpoint"
+    reference.symlink_to(checkpoint, target_is_directory=True)
+    with pytest.raises(ValueError, match="evaluation inputs"):
+        prepare_output_directory(output, protected_paths=(reference,))
+    assert reference.is_symlink()
+    assert (checkpoint / "keep.txt").read_text() == "keep"
+
+
+def test_output_directory_refuses_mount_points(tmp_path, monkeypatch):
+    output = tmp_path / "mount"
+    output.mkdir()
+    (output / "keep.txt").write_text("keep")
+    monkeypatch.setattr(Path, "is_mount", lambda self: self == output)
+    with pytest.raises(ValueError, match="protected"):
+        prepare_output_directory(output)
+    assert (output / "keep.txt").read_text() == "keep"
+
+
+@pytest.mark.parametrize("kind", ["root", "top-level", "home", "cwd", "repository", "input", "input-parent"])
+def test_output_directory_refuses_protected_paths_before_deleting(tmp_path, monkeypatch, kind):
+    import lerobot.evaluation.eval_qwen3vl_mot_libero as evaluation
+
+    checkpoint = tmp_path / "weights/checkpoint"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "keep.txt").write_text("keep")
+    paths = {
+        "root": Path("/"),
+        "top-level": Path("/tmp"),
+        "home": Path.home(),
+        "cwd": Path.cwd(),
+        "repository": Path(evaluation.__file__).resolve().parents[2],
+        "input": checkpoint,
+        "input-parent": checkpoint.parent,
+    }
+    remove = Mock(side_effect=AssertionError("Protected paths must never be deleted."))
+    monkeypatch.setattr(evaluation.shutil, "rmtree", remove)
+    with pytest.raises(ValueError, match="protected"):
+        prepare_output_directory(paths[kind], protected_paths=(checkpoint,))
+    remove.assert_not_called()
+    assert (checkpoint / "keep.txt").read_text() == "keep"
+
+
+def test_output_directory_refuses_existing_file_and_preserves_cleanup_errors(tmp_path, monkeypatch):
+    import lerobot.evaluation.eval_qwen3vl_mot_libero as evaluation
+
+    output = tmp_path / "result"
+    output.write_text("keep")
+    with pytest.raises(FileExistsError, match="not a directory"):
+        prepare_output_directory(output)
+    assert output.read_text() == "keep"
+    output.unlink()
+    output.mkdir()
+    (output / "keep.txt").write_text("keep")
+    monkeypatch.setattr(evaluation.shutil, "rmtree", Mock(side_effect=PermissionError("cleanup denied")))
+    with pytest.raises(PermissionError, match="cleanup denied"):
+        prepare_output_directory(output)
+    assert (output / "keep.txt").read_text() == "keep"
+
+
+@pytest.mark.parametrize(
+    "input_flag",
+    [
+        "--checkpoint",
+        "--policy-config",
+        "--dataset-root",
+        "--libero-root",
+        "--qwen3vl-dir",
+        "--cosmos3-dir",
+        "--stage1-text-dir",
+        "--fp8-training-config",
+    ],
+)
+def test_main_protects_all_input_paths_from_output_overwrite(tmp_path, monkeypatch, input_flag):
+    import lerobot.evaluation.eval_qwen3vl_mot_libero as evaluation
+
+    output = tmp_path / "evaluation"
+    output.mkdir()
+    (output / "keep.txt").write_text("keep")
+    monkeypatch.setattr(evaluation.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(evaluation.torch.cuda, "set_device", lambda device: None)
+    monkeypatch.setattr(evaluation.torch, "set_num_threads", lambda count: None)
+    monkeypatch.setattr(
+        evaluation.torch.backends.cuda.matmul,
+        "allow_tf32",
+        evaluation.torch.backends.cuda.matmul.allow_tf32,
+    )
+    command = ["--output-dir", str(output), input_flag, str(output / "input")]
+    if input_flag != "--checkpoint":
+        command.extend(["--checkpoint", "/safe/checkpoint"])
+    with pytest.raises(ValueError, match="evaluation inputs"):
+        evaluation.main(command)
+    assert (output / "keep.txt").read_text() == "keep"
+
+
 def test_output_directory_and_independent_video_switches():
     args = build_parser().parse_args(
         [
@@ -629,21 +782,30 @@ def test_main_actual_video_saving_modes(tmp_path, monkeypatch, video_flags, save
     for module, seeder in seeders:
         monkeypatch.setattr(module, "manual_seed" if module is torch else "seed", seeder)
     output = tmp_path / "evaluation"
-    evaluation.main(
-        [
-            "--checkpoint",
-            "/weights/step18k",
-            "--trials-per-task",
-            "2",
-            "--seed",
-            "123",
-            "--no-save-predicted-video",
-            "--output-dir",
-            str(output),
-            *video_flags,
-        ]
-    )
+    output.mkdir()
+    (output / "results.json").write_text('{"old": true}')
+    (output / "evaluation.log").write_text("old evaluation log")
+    stale = output / "predictions/task_09_trial_019/old.mp4"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("old")
+    (output / "task_09_trial_019_actions.npy").write_text("old")
+    command = [
+        "--checkpoint",
+        "/weights/step18k",
+        "--trials-per-task",
+        "2",
+        "--seed",
+        "123",
+        "--no-save-predicted-video",
+        "--output-dir",
+        str(output),
+        *video_flags,
+    ]
+    evaluation.main(command)
     assert closed == [True, True]
+    assert not (output / "predictions").exists()
+    assert not (output / "task_09_trial_019_actions.npy").exists()
+    assert "old evaluation log" not in (output / "evaluation.log").read_text()
     assert [path.name for path in saved] == saved_names
     result = json.loads((output / "results.json").read_text())
     assert result["evaluation_complete"] and result["episodes_completed"] == 4
@@ -658,10 +820,25 @@ def test_main_actual_video_saving_modes(tmp_path, monkeypatch, video_flags, save
     python_rng = random.Random(123)
     numpy_rng = np.random.RandomState(123)
     torch_rng = torch.Generator().manual_seed(123)
-    assert draws == [
+    expected = [
         (python_rng.random(), numpy_rng.random(), torch.rand((), generator=torch_rng).item())
         for _ in range(4)
     ]
+    assert draws == expected
     assert [
         Path(episode["video_path"]).name for episode in result["episodes"] if "video_path" in episode
     ] == saved_names
+    rerun = command.copy()
+    rerun[rerun.index("--trials-per-task") + 1] = "1"
+    evaluation.main(rerun)
+    replacement = json.loads((output / "results.json").read_text())
+    assert replacement["evaluation_complete"] and replacement["episodes_completed"] == 2
+    assert replacement["successes"] == 2
+    assert all(episode["trial"] == 0 for episode in replacement["episodes"])
+    assert not (output / "task_00_trial_001_actions.npy").exists()
+    assert not (output / "task_01_trial_001_actions.npy").exists()
+    assert draws[4:] == expected[:2]
+    assert closed == [True] * 4
+    for _, seeder in seeders:
+        assert seeder.call_count == 2
+        seeder.assert_called_with(123)

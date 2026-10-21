@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import sys
 import time
 from collections import deque
@@ -553,6 +554,31 @@ def write_results(path: Path, settings: dict, episodes: list[dict]) -> dict:
     return result
 
 
+def prepare_output_directory(directory: Path, *, protected_paths: tuple[Path, ...] = ()) -> Path:
+    directory = directory.expanduser()
+    if directory.is_symlink():
+        raise ValueError(f"Refusing to overwrite a symlink output directory: {directory}")
+    directory = directory.resolve()
+    protected = (Path.home(), Path.cwd(), Path(__file__).resolve().parents[2], *protected_paths)
+    if (
+        len(directory.parents) < 2
+        or directory.is_mount()
+        or any(
+            path.expanduser().absolute().is_relative_to(directory)
+            or path.expanduser().resolve().is_relative_to(directory)
+            for path in protected
+        )
+    ):
+        raise ValueError(f"Refusing to overwrite a protected directory or evaluation inputs: {directory}")
+    if directory.exists():
+        if not directory.is_dir():
+            raise FileExistsError(f"Evaluation output path exists but is not a directory: {directory}")
+        logger.warning("Overwriting evaluation output directory; deleting previous contents: %s", directory)
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True, exist_ok=False)
+    return directory
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -619,7 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="New directory for results, rollout videos, and per-replan future videos.",
+        help="Output directory; if it exists, delete its previous contents and start a fresh evaluation.",
     )
     rollout_video = parser.add_mutually_exclusive_group()
     rollout_video.add_argument("--no-save-video", action="store_true")
@@ -658,7 +684,12 @@ def main(argv: list[str] | None = None) -> None:
     output_dir = args.output_dir or Path("outputs/evaluation/libero") / datetime.now().strftime(
         "%Y%m%d_%H%M%S_%f"
     )
-    output_dir.mkdir(parents=True, exist_ok=False)
+    output_dir = prepare_output_directory(
+        output_dir,
+        protected_paths=tuple(
+            value for name, value in vars(args).items() if name != "output_dir" and isinstance(value, Path)
+        ),
+    )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

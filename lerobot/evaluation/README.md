@@ -255,8 +255,15 @@ execution; that part must pass on the cluster's supported GPU.
 
 ## Outputs
 
-Each invocation creates a fresh directory under `outputs/evaluation/libero/`,
-or the **new, nonexistent** directory specified by `--output-dir`:
+Each invocation creates a timestamped directory under `outputs/evaluation/libero/`,
+or uses the directory specified by `--output-dir`. **An existing output directory
+is cleared and overwritten**, including old results, logs, actions, videos and
+generated configuration; this starts over rather than resuming. Use a different
+directory to preserve an earlier run. Filesystem roots, top-level directories,
+mount points, home/current/repository directories, directories containing
+evaluation inputs, and symlink output directories are rejected before cleanup.
+The cluster setup/verifier still uses a fresh `run_*` subdirectory on repeated
+verification; this overwrite behavior applies to the formal evaluator.
 
 - `results.json`: settings, completed episodes, per-task and overall success
   rates, horizons, the run seed/RNG mode, initial-state indices, and timing.
@@ -280,8 +287,9 @@ checkpoint still requires joint sampling to produce its actions);
 For 20 trials per goal task without future decoding, keeping only failed
 rollout videos, use `--trials-per-task 20 --no-save-predicted-video
 --save-failed-videos-only` and do not pass `--stop-on-success`.
-`--output-dir` controls all outputs, including future videos, and must name a
-new directory so an earlier run cannot be overwritten.
+`--output-dir` controls all outputs, including future videos. Reusing it
+overwrites the previous evaluation, including artifacts for tasks or trials
+not included in the new run.
 
 This checkpoint predicts 9 sparse video frames over its 32-action window:
 one current conditioning frame and 8 future frames, spanning 1.55 seconds at
