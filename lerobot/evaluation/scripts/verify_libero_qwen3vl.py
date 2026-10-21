@@ -31,7 +31,7 @@ from lerobot.evaluation.eval_qwen3vl_mot_libero import (
 NORMALIZATION_SNAPSHOT = Path(__file__).resolve().parents[1] / "assets/libero_ort6d_normalization.json"
 
 
-def prepare_dataset_metadata(args, output: Path) -> tuple[Path, dict]:
+def prepare_dataset_metadata(args, output: Path, *, exist_ok: bool = False) -> tuple[Path, dict]:
     if args.dataset_root is not None:
         root = args.dataset_root.expanduser().resolve()
         LiberoAdapter.from_dataset(root / SUITE_DATASETS[args.task_suite])
@@ -49,13 +49,16 @@ def prepare_dataset_metadata(args, output: Path) -> tuple[Path, dict]:
         raise ValueError("Bundled LIBERO normalization suite/dataset mismatch.")
     root = output / "dataset_metadata"
     meta = root / suite["dataset"] / "meta"
-    meta.mkdir(parents=True, exist_ok=False)
+    meta.mkdir(parents=True, exist_ok=exist_ok)
     info = {
         "fps": snapshot["fps"],
         "features": {key: {"shape": [snapshot["feature_dim"]]} for key in ("observation.state", "action")},
     }
-    (meta / "info.json").write_text(json.dumps(info) + "\n")
-    (meta / "stats.json").write_text(json.dumps(suite["stats"], allow_nan=False) + "\n")
+    with tempfile.TemporaryDirectory(prefix=".normalization-", dir=meta) as temporary:
+        for filename, content in (("info.json", info), ("stats.json", suite["stats"])):
+            path = Path(temporary) / filename
+            path.write_text(json.dumps(content, allow_nan=False) + "\n")
+            path.replace(meta / filename)
     LiberoAdapter.from_dataset(root / suite["dataset"])
     return root, {
         "source": "bundled_libero_ort6d_v30",

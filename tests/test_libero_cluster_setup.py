@@ -440,7 +440,8 @@ def test_verifier_rejects_output_file_without_modifying_it(tmp_path, monkeypatch
 def test_installer_shell_syntax_help_and_explicit_unknown_option_failure():
     subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
     result = subprocess.run(["bash", str(SCRIPT), "--help"], capture_output=True, text=True, check=True)
-    assert "--verify-only" in result.stdout and "No cluster jobs are submitted" in result.stdout
+    assert "--skip-install" in result.stdout and "No cluster jobs are submitted" in result.stdout
+    assert "never loads the policy or runs model tests" in result.stdout
     result = subprocess.run(["bash", str(SCRIPT), "--unknown"], capture_output=True, text=True)
     assert result.returncode != 0 and "Unknown installer option" in result.stderr
 
@@ -473,6 +474,8 @@ def test_installer_requirements_keep_shared_numpy_runtime_compatible(name, compa
     [
         (["--torch-index-url"], "Missing value"),
         (["--libero-root", "--verify-only"], "Missing value"),
+        (["--model-cache-dir", "--offline"], "Missing value"),
+        (["--", "--checkpoint", "/weights"], "Model testing is separate"),
         (["--env-prefix", "/"], "Unknown installer option"),
         (["--libero-ref", "main"], "full commit SHA"),
     ],
@@ -516,11 +519,11 @@ def test_installer_reuses_extracted_libero_and_keeps_preparation_online(selected
         [
             "bash",
             str(SCRIPT),
-            "--verify-only",
+            "--skip-install",
             "--libero-root",
             str(root),
-            "--",
-            "--environment-only",
+            "--model-cache-dir",
+            str(prefix / "model-cache"),
         ],
         capture_output=True,
         text=True,
@@ -530,16 +533,27 @@ def test_installer_reuses_extracted_libero_and_keeps_preparation_online(selected
     records = [json.loads(line) for line in calls.read_text().splitlines()]
     assert len(records) == 2
     assert records[0]["args"] == ["-"]
-    assert records[1]["args"][:2] == ["-m", "lerobot.evaluation.scripts.verify_libero_qwen3vl"]
+    assert records[1]["args"] == ["-", "--model-cache-dir", str(prefix / "model-cache")]
     assert all(record["offline"] is None for record in records)
     assert all(record["user_site"] == "1" for record in records)
     assert all(record["python"] == str(prefix / "bin/python") for record in records)
     assert not (root / ".git").exists()
 
 
-def test_installer_installs_and_verifies_with_only_existing_lerobot_python(selected_lerobot):
+def test_installer_prepares_resources_with_only_existing_lerobot_python(selected_lerobot):
     prefix, root, calls = selected_lerobot
-    subprocess.run(["bash", str(SCRIPT), "--libero-root", str(root), "--", "--environment-only"], check=True)
+    subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--libero-root",
+            str(root),
+            "--model-cache-dir",
+            str(prefix / "cache"),
+            "--offline",
+        ],
+        check=True,
+    )
     records = [json.loads(line) for line in calls.read_text().splitlines()]
     assert len(records) == 6
     assert records[0]["args"] == ["-"]
@@ -553,8 +567,80 @@ def test_installer_installs_and_verifies_with_only_existing_lerobot_python(selec
     assert all("--no-user" in record["args"] for record in records[1:3])
     assert records[3]["args"] == ["-"]
     assert records[4]["args"] == ["-m", "pip", "check"]
-    assert records[5]["args"][:2] == ["-m", "lerobot.evaluation.scripts.verify_libero_qwen3vl"]
+    assert records[5]["args"] == ["-", "--model-cache-dir", str(prefix / "cache"), "--offline"]
     assert all(record["python"] == str(prefix / "bin/python") for record in records)
+
+
+def test_installer_deprecated_verify_only_does_not_run_verification(selected_lerobot):
+    _, root, calls = selected_lerobot
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--verify-only", "--libero-root", str(root)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--verify-only is deprecated" in result.stderr
+    records = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert [record["args"] for record in records] == [["-"], ["-"]]
+
+
+@pytest.mark.parametrize("offline", [False, True])
+def test_installer_assets_prepare_all_metadata_without_model_or_gpu_tests(
+    tmp_path, monkeypatch, capsys, offline
+):
+    from unittest.mock import Mock
+
+    from lerobot.common.utils import stage2_model_cache
+    from lerobot.evaluation import eval_qwen3vl_mot_libero as evaluation
+
+    cache = tmp_path / "cache"
+    paths = tuple(str(tmp_path / name) for name in ("qwen", "cosmos", "text"))
+    resolver = Mock(return_value=paths)
+    monkeypatch.setattr(stage2_model_cache, "resolve_evaluation_model_paths", resolver)
+    forbidden = Mock(side_effect=AssertionError("Setup must not test or load the policy."))
+    monkeypatch.setattr(verification, "main", forbidden)
+    monkeypatch.setattr(verification, "check_environment", forbidden)
+    monkeypatch.setattr(evaluation, "load_policy", forbidden)
+    monkeypatch.setattr(torch.cuda, "is_available", forbidden)
+    command = ["setup", "--model-cache-dir", str(cache)]
+    for option, path in zip(("--qwen3vl-dir", "--cosmos3-dir", "--stage1-text-dir"), paths, strict=True):
+        command.extend([option, path])
+    if offline:
+        command.append("--offline")
+    monkeypatch.setattr(sys, "argv", command)
+    source = SCRIPT.read_text().split("<<'ASSETS_PY'\n", 1)[1].split("\nASSETS_PY\n", 1)[0]
+    for _ in range(2):
+        exec(compile(source, str(SCRIPT), "exec"), {"__name__": "__main__"})
+    assert resolver.call_count == 2
+    for call in resolver.call_args_list:
+        assert call.args == (*map(Path, paths), cache)
+        assert call.kwargs == {"auto_download": not offline}
+    forbidden.assert_not_called()
+    snapshot = json.loads(verification.NORMALIZATION_SNAPSHOT.read_text())
+    for suite, dataset in verification.SUITE_DATASETS.items():
+        directory = cache / "dataset_metadata" / dataset
+        assert json.loads((directory / "meta/stats.json").read_text()) == snapshot["suites"][suite]["stats"]
+        assert verification.LiberoAdapter.from_dataset(directory).fps == 20
+        assert sorted(path.name for path in (directory / "meta").iterdir()) == ["info.json", "stats.json"]
+    assert f"Dataset metadata (--dataset-root): {cache / 'dataset_metadata'}" in capsys.readouterr().out
+
+
+def test_installer_asset_download_errors_propagate_before_metadata_export(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from lerobot.common.utils import stage2_model_cache
+
+    monkeypatch.setattr(
+        stage2_model_cache,
+        "resolve_evaluation_model_paths",
+        Mock(side_effect=FileNotFoundError("Offline model cache is incomplete")),
+    )
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(sys, "argv", ["setup", "--model-cache-dir", str(cache), "--offline"])
+    source = SCRIPT.read_text().split("<<'ASSETS_PY'\n", 1)[1].split("\nASSETS_PY\n", 1)[0]
+    with pytest.raises(FileNotFoundError, match="Offline model cache is incomplete"):
+        exec(compile(source, str(SCRIPT), "exec"), {"__name__": "__main__"})
+    assert not (cache / "dataset_metadata").exists()
 
 
 @pytest.mark.parametrize(

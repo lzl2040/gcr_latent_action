@@ -67,10 +67,10 @@ EGL device index**, not the remapped CUDA index. The runner creates its own LIBE
 configuration inside the output directory and does not modify `~/.libero` or the
 external LIBERO repository.
 
-## Cluster installation and BF16/FP8 validation
+## Cluster installation and optional BF16/FP8 validation
 
-Run this **inside the allocated GPU node/container**, with the repository and
-fine-tuned checkpoint mounted, and `--libero-root` pointing to your downloaded
+Run setup **inside the cluster node/container**, with the repository mounted
+and `--libero-root` pointing to your downloaded
 node-local LIBERO source. It does not submit any cluster jobs. Installation requires
 Conda, git, package-index access, and GitHub access if LIBERO is not already present.
 Pretrained assets download from Hugging Face to node-local disk by default; you do
@@ -81,33 +81,27 @@ Python **3.10, 3.11 or 3.12** in that environment beforehand. The script does no
 create another environment, switch to a private prefix, or upgrade Python.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 conda run --name lerobot \
+conda run --name lerobot \
   bash lerobot/evaluation/scripts/setup_libero_qwen3vl.sh \
-  --libero-root /mnt/work/LIBERO \
-  -- \
-  --checkpoint /mnt/weights/1014_v1_8gpu/step40k \
-  --fp8-training-config /mnt/weights/1014_v1_8gpu/train_config.json \
-  --model-cache-dir /tmp/libero_qwen3vl_models \
-  --render-gpu-device-id 0 \
-  --output-dir /mnt/results/libero_precision_smoke
+  --libero-root /scratch/LIBERO \
+  --model-cache-dir /scratch/libero_qwen3vl_models
 ```
 
-The standalone `--` separates installer options (before it) from verifier options
-(after it). The trailing `\` is Bash line continuation, not part of an option;
-it must be the last character on the line. A one-line command needs no backslashes
-but still needs the `--` separator.
+**Setup does not load the policy, read a fine-tuned checkpoint, run CUDA/EGL
+smoke checks, or run BF16/FP8 model inference.** It installs/checks dependencies,
+prepares LIBERO, downloads or reuses pretrained assets, and exports normalization
+metadata. No checkpoint, FP8 recipe, GPU index or verification output is required.
+The script prints all prepared model paths and the `--dataset-root` path for
+formal evaluation; in this example it is
+`/scratch/libero_qwen3vl_models/dataset_metadata`.
 
-Replace `/mnt/...` with actual cluster mounts. The fine-tuned checkpoint must retain
-its adjacent saved `config.json`, or supply `--policy-config`; native FP8 also needs
-the same run's saved `train_config.json`. These are never downloaded or replaced.
-The evaluator still restores every model tensor strictly from this fine-tuned DCP
-checkpoint; downloading base assets does not switch evaluation to a base model.
-You can reuse the verifier's `--output-dir`: a new path is used directly, while
-an existing directory receives a fresh `run_<UTC timestamp>_<unique suffix>`
-subdirectory. Old results are never overwritten or resumed. The printed output
-path and `verification.json`'s `output_dir` identify the actual run directory;
-`requested_output_dir` records the original path. Logs, environment configuration,
-normalization metadata and BF16/FP8 outputs all remain inside that run directory.
+Use `--skip-install` to reuse installed dependencies and the existing LIBERO
+source while preparing resources. The old `--verify-only` is a deprecated alias
+for `--skip-install`, with a warning; it no longer runs verification.
+There is no required `--` separator. Old checkpoint/precision/testing arguments
+are rejected before installation rather than silently ignored; use the standalone
+verifier below when those checks are wanted. The trailing `\` in examples is
+Bash line continuation, not part of an option.
 
 Default pretrained downloads use fixed revisions of `Qwen/Qwen3-VL-4B-Instruct`,
 `nvidia/Cosmos3-Edge` (**VAE only**, not its large original generation transformer),
@@ -119,33 +113,40 @@ cached assets. Use Hugging Face's normal environment-based authentication or
 `hf auth login` if a repository requires access; do not put credentials in scripts.
 Explicit `--qwen3vl-dir`, `--cosmos3-dir`, and `--stage1-text-dir` paths override
 individual downloads; invalid explicit paths fail instead of silently downloading
-replacements. `--offline` prohibits all pretrained downloads. Only the preparation
-phase accesses the Hub; both model subprocesses run offline using resolved paths.
+replacements. `--offline` prohibits all pretrained downloads, but does not make
+dependency installation or LIBERO cloning offline; combine it with `--skip-install`
+to reuse an already installed environment. Only resource preparation accesses the
+Hub; optional verification's model subprocesses run offline using resolved paths.
 
 The repository includes the exact per-suite 10D state/action mean/std and 20 Hz
 metadata from the existing LIBERO ort6d v3 evaluation protocol in
 `lerobot/evaluation/assets/libero_ort6d_normalization.json`, with original metadata
-SHA256s. The verifier exports only the selected suite's tiny metadata under its
-output directory, so no original training dataset is required. This snapshot is
+SHA256s. Setup exports all bundled suites under
+`MODEL_CACHE/dataset_metadata/*_no_noops_lerobot/meta/{info,stats}.json`,
+and repeated setup refreshes these small managed files atomically. The standalone
+verifier exports only the selected suite's metadata under its output directory,
+so no original training dataset is required. This snapshot is
 for the current LIBERO-converted training data, not arbitrary retraining datasets:
-use `--dataset-root /path/to/your/dataset/root` to supply different suite-specific
-`meta/info.json` / `meta/stats.json`. `verification.json` records the chosen source.
+pass `--dataset-root /path/to/your/dataset/root` to the evaluator or standalone
+verifier (not setup) to supply different suite-specific `meta/info.json` /
+`meta/stats.json`. `verification.json` records the chosen source.
 
 The installer uses `CONDA_PREFIX/bin/python` from the selected `lerobot` environment
-for dependency installation and verification; the verifier uses that same
-interpreter for both model subprocesses. Running outside `lerobot` fails before
-installation. User-site imports and pip's user-install fallback are disabled, so
+for dependency installation and resource preparation; the standalone verifier
+uses its own selected interpreter for both model subprocesses. Running setup
+outside `lerobot` fails before installation. User-site imports and pip's
+user-install fallback are disabled, so
 an unwritable environment fails rather than installing into `~/.local`.
 There is no `--env-prefix` option. Installation updates dependencies
 inside `lerobot` to the pinned evaluation stack, including TorchAO 0.15.0; use
-`--verify-only` if dependencies have already been installed by your AMLT setup.
+`--skip-install` if dependencies have already been installed by your AMLT setup.
 The shared environment is reconciled to NumPy 1.26.4, Zarr `>=2.17,<3`,
 Numcodecs `>=0.10,<0.16`, and Rerun SDK `>=0.21,<0.23`. Zarr 3 and Rerun SDK
 0.39 require NumPy 2; Numcodecs 0.16 removed Blosc helpers used by Zarr 2.
 The selected Rerun versions also preserve the existing dataset visualization API.
 Existing incompatible versions are downgraded during
 normal installation. If an earlier setup stopped at this dependency conflict,
-rerun it **without `--verify-only`** so the updated requirements can repair it;
+rerun it **without `--skip-install`** so the updated requirements can repair it;
 `pip check` still rejects any remaining dependency conflicts.
 After selecting PyTorch, installation also probes any preinstalled `flash-attn`.
 Only an undefined-symbol binary import failure in the selected environment
@@ -154,7 +155,7 @@ preserved. Unrelated import errors stop setup.
 The model uses native PyTorch SDPA and does not require the external extension.
 The installer then imports Diffusers' `AutoencoderKLWan` before any model-weight
 downloads/loading, so optional-extension failures are reported early rather than
-hidden in the model subprocess. `--verify-only` does not perform these repairs.
+hidden in a later model subprocess. `--skip-install` does not perform these repairs.
 The installer reuses your local LIBERO.
 If the source is absent, it clones official LIBERO at
 `8f1084e3132a39270c3a13ebe37270a43ece2a01`. It does **not** install LIBERO's obsolete
@@ -172,6 +173,35 @@ graphics libraries exposed to the container, e.g.
 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics` **when launching the container**;
 setting it after container creation cannot mount missing driver libraries.
 There is no silent software-rendering fallback.
+
+### Optional precision/environment validation
+
+Run this separately only when model or GPU environment validation is needed:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run --name lerobot \
+  python -u -m lerobot.evaluation.scripts.verify_libero_qwen3vl \
+  --libero-root /scratch/LIBERO \
+  --checkpoint /mnt/weights/1014_v1_8gpu/step40k \
+  --fp8-training-config /mnt/weights/1014_v1_8gpu/train_config.json \
+  --model-cache-dir /scratch/libero_qwen3vl_models \
+  --render-gpu-device-id 0 \
+  --output-dir /mnt/results/libero_precision_smoke
+```
+
+Replace `/mnt/...` with actual cluster mounts. The fine-tuned checkpoint must
+retain its adjacent saved `config.json`, or supply `--policy-config`; native FP8
+also needs the same run's saved `train_config.json`. These are never downloaded
+or replaced. Every model tensor is restored strictly from this fine-tuned DCP
+checkpoint; preparing base assets does not switch evaluation to a base model.
+The standalone verifier never installs packages.
+
+You can reuse the verifier's `--output-dir`: an existing directory receives a
+fresh `run_<UTC timestamp>_<unique suffix>` subdirectory. Old results are never
+overwritten or resumed. The printed path and `verification.json`'s `output_dir`
+identify the actual run directory; `requested_output_dir` records the original
+path. All logs, environment configuration, normalization and precision outputs
+remain inside that run directory.
 
 By default the verifier checks CUDA and real NVIDIA EGL rendering for both
 cameras, then runs BF16 and native FP8 sequentially in separate processes. Both
@@ -196,15 +226,15 @@ rollout protocol with `--precision bf16` versus
 Native FP8 requires the training implementation's compute capability **>= 9.0**,
 e.g. H100/H200/B200. A6000 cannot validate it; an explicitly requested unsupported
 FP8 run fails rather than falling back to BF16 or emulation. For BF16-only checking,
-append `--precisions bf16` after `--`. Add installer flag `--verify-only` before `--`
-to reuse an existing environment/source without changing dependencies; missing
-pretrained assets can still download unless `--offline` is set. To check
-only CUDA/EGL without loading a checkpoint, use:
+add `--precisions bf16` to the standalone verifier command. Missing pretrained
+assets can still download unless `--offline` is set. To check only CUDA/EGL
+without loading a checkpoint, use:
 
 ```bash
-conda run --name lerobot bash lerobot/evaluation/scripts/setup_libero_qwen3vl.sh \
-  --verify-only --libero-root /path/to/LIBERO \
-  -- --environment-only --precisions bf16 --render-gpu-device-id 0 \
+conda run --name lerobot \
+  python -m lerobot.evaluation.scripts.verify_libero_qwen3vl \
+  --libero-root /path/to/LIBERO \
+  --environment-only --precisions bf16 --render-gpu-device-id 0 \
   --output-dir /mnt/results/libero_egl_smoke
 ```
 
