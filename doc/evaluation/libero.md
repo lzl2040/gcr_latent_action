@@ -2,8 +2,8 @@
 
 更新日期：2026-10-23。
 
-本文汇总已完成的正式评测，共 54 份结果、10,800 次 rollout。
-其中旧协议 42 份、8,400 次，单次初始化 RNG 的新协议 12 份、2,400 次，分开记录。
+本文汇总已完成的正式评测，共 57 份结果、11,400 次 rollout。
+其中旧协议 42 份、8,400 次，单次初始化 RNG 的新协议 15 份、3,000 次，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查或尚未完成的评测。
 
@@ -290,12 +290,70 @@ Object 的 2 次失败分别来自任务 5（tomato sauce）和任务 7（牛奶
 64k 在此次评测中比 60k 少成功 3 次；Object、Goal 的小幅上升未抵消 Spatial 的回落。
 尚未进行多随机种子重复，不能仅据此认定模型出现稳定退化。
 
+### 1023_v2_4nodes_8gpu：4k
+
+本轮使用新训练版本 `1023_v2_4nodes_8gpu` 的 4k 权重，
+实际 checkpoint 位于 `step4k/checkpoint_00004000`。
+训练 metadata 记录 `world_size=32`、`update_step=4000`，
+每卡 batch size 为 32、梯度累积为 1，对应 global batch size 1024。
+32 个模型分片在单个评测进程中恢复，不需要 32 张评测 GPU。
+
+Object 在物理 GPU 2、Spatial 在物理 GPU 3 并行评测；
+Spatial 完成后，Goal 复用 GPU 3。
+沿用 BF16、`primary` + `wrist`、每任务前 20 个固定初态、
+预测 32 步、执行 10 步、Flow 20 步及各 suite 的控制步数上限。
+每套独立进程仅在启动时设置一次 `seed=0`，
+不在任务、episode 或 replanning 内重设种子。
+全部 600 次 rollout 的任务/初态覆盖、动作数组、失败视频及统计一致性均已核验；
+权重、配置、运行时代码、归一化统计量及训练 metadata 的指纹在评测前后保持不变。
+
+使用本版本自己保存的配置，不替换为 v1 配置。
+相较 v1 64k，`understanding_lr_scale` 从 0.2 改为 0.01，
+`action_prediction_reconstruction_loss_weight` 从 5.0 改为 10.0，
+`task_weights` 从 `[0.15, 0.15, 0.7]` 改为 `[0.1, 0.1, 0.8]`。
+训练版本、步数及训练规模均不同，以下结果不能视为仅更换 checkpoint 的受控对照。
+
+| Suite | v2 4k（新协议） |
+| --- | --- |
+| Object | 88.0%（176/200） |
+| Spatial | 76.5%（153/200） |
+| Goal | 67.0%（134/200） |
+| 合计 | 77.17%（463/600） |
+
+全部任务成绩如下，各 suite 的任务编号独立，均为 0–9：
+
+| 任务编号 | Object | Spatial | Goal |
+| --- | --- | --- | --- |
+| 0 | 85.0%（17/20） | 100.0%（20/20） | 5.0%（1/20） |
+| 1 | 100.0%（20/20） | 70.0%（14/20） | 100.0%（20/20） |
+| 2 | 100.0%（20/20） | 100.0%（20/20） | 95.0%（19/20） |
+| 3 | 95.0%（19/20） | 100.0%（20/20） | 5.0%（1/20） |
+| 4 | 85.0%（17/20） | 5.0%（1/20） | 95.0%（19/20） |
+| 5 | 90.0%（18/20） | 90.0%（18/20） | 20.0%（4/20） |
+| 6 | 100.0%（20/20） | 90.0%（18/20） | 80.0%（16/20） |
+| 7 | 55.0%（11/20） | 85.0%（17/20） | 100.0%（20/20） |
+| 8 | 75.0%（15/20） | 95.0%（19/20） | 100.0%（20/20） |
+| 9 | 95.0%（19/20） | 30.0%（6/20） | 70.0%（14/20） |
+
+Spatial 的主要失败集中在任务 4（从上层抽屉取碗，1/20）、
+任务 9（从木柜上取碗，6/20）和任务 1（取 ramekin 旁的碗，14/20），
+合计贡献 39/47 次失败。
+Goal 的任务 0（打开中层抽屉，1/20）、任务 3（打开上层抽屉并将碗放入，1/20）
+和任务 5（将盘子推到炉灶前方，4/20）合计贡献 54/66 次失败。
+Object 的任务 7（牛奶，11/20）和任务 8（chocolate pudding，15/20）
+合计贡献 14/24 次失败。
+
+作为跨训练版本的参考，v1 64k 为 556/600（92.67%），
+本轮 v2 4k 少成功 93 次、低 15.50 个百分点。
+这不是相同步数或相同训练配置下的受控比较，也没有多随机种子重复。
+
 ## 权重位置
 
 | 训练版本 | 评测时使用的 checkpoint 路径 |
 | --- | --- |
 | `1014_v0` | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1014_v0/step{18,24,32,40,48}k/model` |
 | `1014_v1_8gpu` | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1014_v1_8gpu/step{10,16,20,24,28,32,36,40,44,48,54,60,64}k/model` |
+| `1023_v2_4nodes_8gpu` | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1023_v2_4nodes_8gpu/step4k/checkpoint_00004000/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -370,6 +428,9 @@ Object 的 2 次失败分别来自任务 5（tomato sauce）和任务 7（牛奶
 | `1014_v1_8gpu` | 64k | Object | `outputs/evaluation/libero/v1_8gpu_step64k_run_seeded_object_20trials_20261023/results.json` |
 | `1014_v1_8gpu` | 64k | Spatial | `outputs/evaluation/libero/v1_8gpu_step64k_run_seeded_spatial_20trials_20261023/results.json` |
 | `1014_v1_8gpu` | 64k | Goal | `outputs/evaluation/libero/v1_8gpu_step64k_run_seeded_goal_20trials_20261023/results.json` |
+| `1023_v2_4nodes_8gpu` | 4k | Object | `outputs/evaluation/libero/v2_4nodes_8gpu_step4k_run_seeded_object_20trials_20261023/results.json` |
+| `1023_v2_4nodes_8gpu` | 4k | Spatial | `outputs/evaluation/libero/v2_4nodes_8gpu_step4k_run_seeded_spatial_20trials_20261023/results.json` |
+| `1023_v2_4nodes_8gpu` | 4k | Goal | `outputs/evaluation/libero/v2_4nodes_8gpu_step4k_run_seeded_goal_20trials_20261023/results.json` |
 
 各结果目录同时保留 `evaluation.log`、逐次 rollout 的 `*_actions.npy`，
 以及失败 rollout 的 `*_failure.mp4`。任务级成功次数和成功率见
