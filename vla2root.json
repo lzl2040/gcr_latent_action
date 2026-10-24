@@ -110,5 +110,6 @@
     "open_neo_ur": "OpenNeoData/ur",
     "open_neo_umi": "OpenNeoData/umi",
     "open_neo_umi_single": "OpenNeoData/umi_single",
-    "robodojo": "RoboDojo/data/RoboDojo_ee_lerobot_v30_video"
+    "robodojo": "RoboDojo/data/RoboDojo_ee_lerobot_v30_video",
+    "delta_robodojo_stack_bowl": "RoboDojo/data/stack_bowls_delta"
 }
