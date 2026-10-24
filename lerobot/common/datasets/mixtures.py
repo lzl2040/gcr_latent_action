@@ -768,6 +768,9 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
      "robodojo":[
          ("robodojo", 1.0)
      ],
+     "delta_robodojo_stack_bowl":[
+         ("delta_robodojo_stack_bowl", 1.0)
+     ],
      "libero": [
          ("libero_goal_no_noops", 1.0), 
          ("libero_object_no_noops", 1.0), 
