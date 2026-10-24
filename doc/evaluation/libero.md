@@ -2,8 +2,8 @@
 
 更新日期：2026-10-24。
 
-本文汇总已完成的有效正式评测，共 63 份结果、12,600 次 rollout。
-其中旧协议 42 份、8,400 次，单次初始化 RNG 的新协议 21 份、4,200 次，分开记录。
+本文汇总已完成的有效正式评测，共 66 份结果、13,200 次 rollout。
+其中旧协议 42 份、8,400 次，单次初始化 RNG 的新协议 24 份、4,800 次，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -467,6 +467,63 @@ Object 的任务 0（alphabet soup）从 13/20 提高到 19/20，
 贡献 6/14 次失败。
 12k 三套均高于正确 8k，合计多成功 48 次；尚未进行多随机种子重复。
 
+### 1023_v2_4nodes_8gpu：16k，与 12k 同协议对照
+
+本轮使用上传的 `step16k/model`，32 个 DCP 分片的 tensor schema 完整匹配；
+三项选定可训练参数的 SHA256 均与 12k 不同。
+实际策略配置、运行时代码、归一化统计量及 RNG 协议与 12k 相同。
+16k 仍为仅模型上传，缺少训练 metadata，实际 `update_step` 和训练 `world_size`
+未独立核验，步数按用户提供的目录标注。
+
+Object 在物理 GPU 2、Spatial 在物理 GPU 3 并行评测；
+Spatial 完成后，Goal 复用 GPU 3。
+沿用 BF16、`primary` + `wrist`、每任务前 20 个固定初态、
+预测 32 步、执行 10 步、Flow 20 步及各 suite 的控制步数上限。
+每套进程只在启动时设置一次 `seed=0`，后续不重设 RNG。
+全部 600 次 rollout 的唯一任务/初态覆盖、有限 7D 动作、失败视频、
+逐任务统计及实际评测设置均已核验；
+权重、配置、运行时代码、归一化统计量等输入指纹在评测前后保持不变。
+
+| Suite | v2 12k（新协议） | v2 16k（新协议） | 变化 |
+| --- | --- | --- | --- |
+| Object | 93.0%（186/200） | 95.5%（191/200） | +2.5 个百分点 |
+| Spatial | 87.0%（174/200） | 89.0%（178/200） | +2.0 个百分点 |
+| Goal | 88.0%（176/200） | 82.5%（165/200） | -5.5 个百分点 |
+| 合计 | 89.33%（536/600） | 89.00%（534/600） | -0.33 个百分点 |
+
+16k 的全部任务成绩如下，各 suite 的任务编号独立，均为 0–9：
+
+| 任务编号 | Object | Spatial | Goal |
+| --- | --- | --- | --- |
+| 0 | 85.0%（17/20） | 100.0%（20/20） | 40.0%（8/20） |
+| 1 | 100.0%（20/20） | 100.0%（20/20） | 95.0%（19/20） |
+| 2 | 100.0%（20/20） | 100.0%（20/20） | 100.0%（20/20） |
+| 3 | 90.0%（18/20） | 85.0%（17/20） | 55.0%（11/20） |
+| 4 | 95.0%（19/20） | 40.0%（8/20） | 95.0%（19/20） |
+| 5 | 90.0%（18/20） | 95.0%（19/20） | 100.0%（20/20） |
+| 6 | 100.0%（20/20） | 90.0%（18/20） | 100.0%（20/20） |
+| 7 | 95.0%（19/20） | 100.0%（20/20） | 90.0%（18/20） |
+| 8 | 100.0%（20/20） | 100.0%（20/20） | 100.0%（20/20） |
+| 9 | 100.0%（20/20） | 80.0%（16/20） | 50.0%（10/20） |
+
+Object 的任务 5（tomato sauce）从 14/20 提高到 18/20，
+任务 7（milk）从 17/20 提高到 19/20；
+任务 0（alphabet soup）从 19/20 降至 17/20。
+Spatial 的任务 9（从木柜上取碗）从 10/20 提高到 16/20，
+任务 1（取 ramekin 旁的碗）从 17/20 提高到 20/20；
+任务 4（从上层抽屉取碗）从 10/20 降至 8/20，贡献 12/22 次失败。
+
+Goal 的主要下降来自任务 0（打开中层抽屉），从 17/20 降至 8/20，
+以及任务 9（将酒瓶放上酒架），从 16/20 降至 10/20；
+两项合计少成功 15 次。
+任务 3（打开上层抽屉并将碗放入）从 7/20 提高到 11/20，
+任务 5（将盘子推到炉灶前方）从 17/20 提高到 20/20，部分抵消了下降。
+两个抽屉任务和酒架任务合计贡献本套 31/35 次失败。
+
+16k 的 Object、Spatial 分别多成功 5、4 次，Goal 少成功 11 次，
+总计比 12k 少成功 2 次。尚未进行多随机种子重复，
+不能仅凭总成功率下降 0.33 个百分点断言模型整体发生训练退化。
+
 ### 误拷权重评测：曾标作 8k（不计入正式结果）
 
 **2026-10-24 用户确认 `step8k/model` 拷贝了错误权重。**
@@ -533,6 +590,7 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1023_v2_4nodes_8gpu` | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1023_v2_4nodes_8gpu/step4k/checkpoint_00004000/model` |
 | `1023_v2_4nodes_8gpu`（更正后的 8k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1023_v2_4nodes_8gpu/step8k/model` |
 | `1023_v2_4nodes_8gpu`（12k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1023_v2_4nodes_8gpu/step12k/model` |
+| `1023_v2_4nodes_8gpu`（16k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1023_v2_4nodes_8gpu/step16k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -616,6 +674,9 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1023_v2_4nodes_8gpu` | 12k | Object | `outputs/evaluation/libero/v2_4nodes_8gpu_step12k_run_seeded_object_20trials_20261024/results.json` |
 | `1023_v2_4nodes_8gpu` | 12k | Spatial | `outputs/evaluation/libero/v2_4nodes_8gpu_step12k_run_seeded_spatial_20trials_20261024/results.json` |
 | `1023_v2_4nodes_8gpu` | 12k | Goal | `outputs/evaluation/libero/v2_4nodes_8gpu_step12k_run_seeded_goal_20trials_20261024/results.json` |
+| `1023_v2_4nodes_8gpu` | 16k | Object | `outputs/evaluation/libero/v2_4nodes_8gpu_step16k_run_seeded_object_20trials_20261024/results.json` |
+| `1023_v2_4nodes_8gpu` | 16k | Spatial | `outputs/evaluation/libero/v2_4nodes_8gpu_step16k_run_seeded_spatial_20trials_20261024/results.json` |
+| `1023_v2_4nodes_8gpu` | 16k | Goal | `outputs/evaluation/libero/v2_4nodes_8gpu_step16k_run_seeded_goal_20trials_20261024/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 
