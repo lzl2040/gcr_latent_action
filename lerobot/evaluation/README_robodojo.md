@@ -687,3 +687,52 @@ track current-input-only free-running action/physical errors separately
 from sigma/task-stratified denoising losses, validate held-out episodes
 including stack bowls, and reproduce sampling in the exact training FP8
 runtime before attributing the failure solely to model quality.
+
+### Four-node step8k checkpoint setup (2026-10-24)
+
+The new experiment is
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_4nodes_8gpu`,
+not the earlier `1016_ft_on_robodojo` experiment. The user describes this
+checkpoint as trained for approximately four epochs.
+Its `step8k/model` contains 32 DCP shards; all 32 files referenced by DCP
+metadata are present. The saved standalone `config.json` exactly matches
+`train_config.json`'s policy section.
+
+The new experiment is cached separately under
+`outputs/evaluation/robodojo/runtime_assets/robodojo_4nodes_8gpu/`.
+All **35 files** (32 shards, DCP metadata and two configuration files)
+were SHA256-verified against the source, totaling 25,227,532,685 bytes.
+`checkpoint_provenance.json` in that cache records every hash and the
+original source path. The new metadata hash is
+`7900d88d239084a92cde00515e9cc34db034c9e3c8bada699213723ac40c50ce`;
+the older step8k checkpoint's metadata hash is different.
+
+Unlike the previous experiment, the new saved training config explicitly
+sets `fsdp.fp8=false`, so standard BF16 inference matches its configured
+training precision. It also changes the action reconstruction loss weight
+from 5 to 10 and task weights from `[0.15,0.15,0.7]` to `[0.1,0.1,0.8]`.
+Thus this is not an epoch-only controlled comparison. Architecture,
+three-camera roles, 20D xyz/ort6d/gripper contract, 32-action horizon and
+20 integration steps are unchanged.
+
+To test three consecutive native stack-bowls layouts, without
+success-seeking retries or physics changes:
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo eval \
+  --checkpoint "$CACHE/robodojo_4nodes_8gpu/step8k" \
+  --policy-config "$CACHE/robodojo_4nodes_8gpu/config.json" \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 0 --seed 0 --replan-steps 10 \
+  --save-predicted-video --timeout 10800 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_4nodes_8gpu_step8k_20261024_v1
+```
+
+Use a fresh output directory when reproducing. Only a validated native
+result with `evaluation_complete=true` counts as a completed evaluation.
