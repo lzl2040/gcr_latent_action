@@ -258,6 +258,7 @@ editing the saved policy snapshot.
 ```bash
 CUDA_VISIBLE_DEVICES=1 python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo diagnose \
   --checkpoint outputs/evaluation/robodojo/runtime_assets/checkpoint/step8k \
+  --training-config /data2/lizuolei/weights/qwen3vl_mot_weights/1016_ft_on_robodojo/train_config.json \
   --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
   --diagnostic-episodes 3000 3001 3002 --diagnostic-frames 0 64 \
   --output-dir outputs/evaluation/robodojo/step8k_training_diagnostics
@@ -918,3 +919,140 @@ diffusion noise. `actions.npz` includes `current_state_raw` and
 `decoded_ground_truth_embedding`. This separates decoder reconstruction
 error from free-running sampling error; it is a ground-truth-assisted
 diagnostic, not a deployable policy or a bound on achievable accuracy.
+
+### Four-node first-action and official WAM audit (2026-10-24)
+
+This audit concerns **`robodojo_4nodes_8gpu/step8k`**, not the earlier
+`1016_ft_on_robodojo/step8k`. It addresses the observation that initial
+predicted actions differ sharply from the demonstrations. Small simulator
+tracking errors only validate following the requested target; they do
+**not** validate whether that target was inferred correctly.
+
+**Saved training contract.** The parent `config.json` equals the policy
+snapshot inside `train_config.json`. The actual RoboDojo spec selects
+`action.ee_ort6d_pos` and `observation.ee_ort6d_pos`: absolute dual-arm
+20D xyz/interleaved-ort6d/gripper, first 20 slots of the 40D canonical
+space. Training and inference use mean/std normalization, three ordered
+RGB cameras, 256-pixel resizing, and a 32-action window spanning offsets
+0 through 31 at 25 Hz. Nine video frames span that window. Although the
+saved config contains `use_amp=false`, the FSDP trainer explicitly moves
+the policy to BF16; this checkpoint has `fsdp.fp8=false`. BF16 inference
+therefore matches the configured model precision.
+
+The task mixture is forward dynamics 0.1, inverse dynamics 0.1, and joint
+prediction 0.8, with no trained `action_prediction` task. Deployment
+correctly selects joint sampling rather than switching to an untrained
+action-only task. The physical encoder is frozen; its action decoder is
+learned. Reconstruction weights are action 10 and state 5.
+`initialize_from_stage1=false` in a saved, self-contained configuration
+is not evidence that training skipped initialization: the constructor
+updates that flag for subsequent restoration.
+
+**Official WAM comparison.** Sources were checked at XPolicyLab revision
+`e08ba78888b233b77ed2bb2d92886a52360a1081`:
+
+- [X-WAM adapter](https://github.com/XPolicyLab/XPolicyLab/blob/e08ba78888b233b77ed2bb2d92886a52360a1081/policy/X_WAM/model.py)
+  and [inner inference wrapper](https://github.com/XPolicyLab/XPolicyLab/blob/e08ba78888b233b77ed2bb2d92886a52360a1081/policy/X_WAM/X-WAM/evaluation/deploy_policy.py):
+  its 14D delta actions, quantile normalization, and fixed orientation
+  reframe belong to its own training representation. Its adapter
+  accumulates those deltas into native absolute targets. Applying that
+  reframe or delta accumulation to our already-absolute 20D labels would
+  change the meaning of the learned targets.
+- [FastWAM adapter](https://github.com/XPolicyLab/XPolicyLab/blob/e08ba78888b233b77ed2bb2d92886a52360a1081/policy/FastWAM/model.py)
+  and [relative-action transforms](https://github.com/XPolicyLab/XPolicyLab/blob/e08ba78888b233b77ed2bb2d92886a52360a1081/policy/FastWAM/FastWAM/src/fastwam/datasets/lerobot/transforms/relative_action.py):
+  preprocessing and normalization are tied to its saved processor/config.
+  Relative-pose and relative-joint transforms, where configured, have
+  paired training/inverse transformations; they are not generic WAM
+  requirements. Its configured execution prefix is taken from the
+  beginning of the generated chunk.
+
+Our control loop also executes actions starting at chunk index zero,
+then replans on a fresh observation. No extra first-action offset,
+left/right swap, orientation reframe, relative conversion, normalization
+change, or arbitrary action rescaling was justified by this comparison.
+
+**Real-label transport positive control.** The first 32 true commands
+from episode 3000 were passed through the authentic loader,
+normalization, and the exact deployment `native_actions` conversion,
+then compared against the dataset's original 16D xyz/wxyz/gripper
+commands. Maximum xyz component error was 1.50e-8 m, rotation error
+1.04e-5 degrees, and gripper error zero. These commands approximately
+match the following recorded states (maximum raw component difference
+1.19e-4), consistent with absolute next-state targets, not deltas.
+This control does not replay contacts or establish simulator task success.
+
+**Controlled first-window sampling.** Complete, unaugmented training
+inputs from episodes 3000, 3001 and 3002 at offset zero were sampled with
+seeds 0 and 1, using the new checkpoint, BF16 and the saved 20 flow steps.
+There are no padded targets in these initial windows.
+
+| Episode | Free-running action MSE, seed 0 | Seed 1 | Clean action embedding -> decoder MSE |
+|---|---:|---:|---:|
+| 3000 | 1.27542 | 1.18505 | 0.07233 |
+| 3001 | 1.20145 | 0.89352 | 0.08895 |
+| 3002 | 0.64350 | 0.30611 | 0.06623 |
+
+All MSEs cover the 20 active normalized dimensions over 32 actions.
+Across these six samples, first-10-action position discrepancy against
+the demonstrations averages 4.67 cm for the left arm and 7.24 cm for the
+right. On episode 3000, seed zero, the **first command's displacement
+from the current state** is:
+
+| Arm | Demonstration delta xyz, mm | Predicted delta xyz, mm |
+|---|---|---|
+| Left | `(0.029, -0.0001, -0.0001)` | `(12.418, 33.128, -4.953)` |
+| Right | `(0.286, -0.447, 0.624)` | `(-22.695, 20.176, -3.146)` |
+
+This discrepancy is present **before simulator execution**, even with
+the same training images/state as the demonstration. At the same episode
+and seed, joint reconstruction loss is 0.006747 at sigma 0.5, versus
+1.27542 for free-running actions; inverse reconstruction at sigma 0.9
+is 0.010767. These are different conditioning problems, not interchangeable
+measures of policy accuracy. Even decoding clean ground-truth physical
+embeddings is imperfect, so the discrepancy should not be attributed
+exclusively to the flow integrator.
+
+The current visual conditioning tokens from encoding the full training
+video versus just its first frames are **exactly equal** on all three
+windows. Current-state embeddings from the training and deployment
+physical batches are also exactly equal after sharing the separately
+checked normalized current state. Reloading the checkpoint and supplying
+the saved native rollout's first conditioning images/state reproduces
+that rollout's complete first normalized action tensor with **zero
+maximum error**.
+
+Evidence is under:
+
+```text
+outputs/evaluation/robodojo/four_node_first_action_audit_20261024_v1/
+  report.json
+  native_initial_reproduction.npz
+  action_padding_before.json
+  action_padding_after.json
+  episode_3000/{conditioning_*.png,actions.npz,metrics.json}
+  episode_3001/
+  episode_3002/
+```
+
+`report.json` identifies the checkpoint/training config, seeds, input
+parity, current visual/state embedding comparisons, conditional losses,
+and first/chunk-end action directions. `action_padding_after.json` also
+records the real-label transport control. The controlled two-seed probe
+used explicit seeds per episode; the standard `diagnose` CLI additionally
+includes the two configured validation windows and uses `seed + index`.
+
+**Bounded conclusion.** The absolute-target padding and diagnostic
+configuration-selection errors were fixed separately. Neither correction
+changes the existing model's sampled first actions. The initial
+training-input discrepancies do not require simulator execution or
+different object layouts to appear; however, offline deviation can also
+reflect a different valid plan, and these measurements alone are not a
+task-success criterion. No root cause of all three native failures, and
+no successful corrected rollout, has been established.
+
+The reconstructed configured validation still selects two training
+windows, neither from stack bowls. Original training initialization
+logs/code revision, original remote-dataset normalization metadata, VAE
+configuration identity, capture runtime, and exact scene overlap remain
+unverified. Accordingly, this audit does not certify the entire training
+setup or rule out every sampler/runtime issue.
