@@ -11,6 +11,11 @@ This integration targets RoboDojo's XPolicyLab WebSocket interface
 LIBERO/Gym interface. Upstream reference:
 <https://github.com/robodojo-benchmark/RoboDojo>.
 
+The standard RoboDojo loader explicitly restores BF16, including the
+precision arguments required by the shared LIBERO policy loader. The
+optional `diagnose --diagnostic-fp8` probe is separate from native rollout
+precision.
+
 Local inputs:
 
 | Input | Path |
@@ -242,11 +247,18 @@ python -m pip install 'polars>=1,<2' 'qwen-vl-utils>=0.0.14,<0.1' torchcodec==0.
 ```
 
 Run with the cached backbone options documented below, a new output
-directory, and the checkpoint being investigated:
+directory, and the checkpoint being investigated. Unless explicitly
+overridden, `--training-config` selects `train_config.json` beside the
+selected saved policy `config.json`, rather than the original experiment's
+training configuration. The saved policy snapshots must agree exactly;
+a mismatch is rejected before loading model weights. Runtime asset paths
+and inference-step overrides should be supplied as CLI options, not by
+editing the saved policy snapshot.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo diagnose \
   --checkpoint outputs/evaluation/robodojo/runtime_assets/checkpoint/step8k \
+  --training-config /data2/lizuolei/weights/qwen3vl_mot_weights/1016_ft_on_robodojo/train_config.json \
   --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
   --diagnostic-episodes 3000 3001 3002 --diagnostic-frames 0 64 \
   --output-dir outputs/evaluation/robodojo/step8k_training_diagnostics
@@ -682,3 +694,534 @@ track current-input-only free-running action/physical errors separately
 from sigma/task-stratified denoising losses, validate held-out episodes
 including stack bowls, and reproduce sampling in the exact training FP8
 runtime before attributing the failure solely to model quality.
+
+### Four-node step8k checkpoint setup (2026-10-24)
+
+The new experiment is
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_4nodes_8gpu`,
+not the earlier `1016_ft_on_robodojo` experiment. The user describes this
+checkpoint as trained for approximately four epochs.
+Its `step8k/model` contains 32 DCP shards; all 32 files referenced by DCP
+metadata are present. The saved standalone `config.json` exactly matches
+`train_config.json`'s policy section.
+
+The new experiment is cached separately under
+`outputs/evaluation/robodojo/runtime_assets/robodojo_4nodes_8gpu/`.
+All **35 files** (32 shards, DCP metadata and two configuration files)
+were SHA256-verified against the source, totaling 25,227,532,685 bytes.
+`checkpoint_provenance.json` in that cache records every hash and the
+original source path. The new metadata hash is
+`7900d88d239084a92cde00515e9cc34db034c9e3c8bada699213723ac40c50ce`;
+the older step8k checkpoint's metadata hash is different.
+
+Unlike the previous experiment, the new saved training config explicitly
+sets `fsdp.fp8=false`, so standard BF16 inference matches its configured
+training precision. It also changes the action reconstruction loss weight
+from 5 to 10 and task weights from `[0.15,0.15,0.7]` to `[0.1,0.1,0.8]`.
+Thus this is not an epoch-only controlled comparison. Architecture,
+three-camera roles, 20D xyz/ort6d/gripper contract, 32-action horizon and
+20 integration steps are unchanged.
+
+To test three consecutive native stack-bowls layouts, without
+success-seeking retries or physics changes:
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo eval \
+  --checkpoint "$CACHE/robodojo_4nodes_8gpu/step8k" \
+  --policy-config "$CACHE/robodojo_4nodes_8gpu/config.json" \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 0 --seed 0 --replan-steps 10 \
+  --save-predicted-video --timeout 10800 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_4nodes_8gpu_step8k_20261024_v1
+```
+
+Use a fresh output directory when reproducing. Only a validated native
+result with `evaluation_complete=true` counts as a completed evaluation.
+
+### Completed four-node step8k results (2026-10-24, 18:54-20:03)
+
+The three-layout run above completed with validated native results:
+**0 successful episodes out of 3**, mean partial score **0.0**.
+No layouts were skipped/replaced, and the native simulator reported zero
+unstable episodes. All three reached the native 800-step horizon.
+This is three layouts of **one task**, not a full RoboDojo benchmark or
+evidence that the checkpoint cannot succeed on other tasks/layouts.
+
+| Native layout | Success | Partial score | Control steps | Policy calls |
+|---|---|---|---|---|
+| 0 | false | 0.0 | 800 | 80 |
+| 1 | false | 0.0 | 800 | 80 |
+| 2 | false | 0.0 | 800 | 80 |
+
+The completed run has `status="completed"` and
+`evaluation_complete=true` in `summary.json`. It used the separately
+verified new checkpoint/config, BF16, seed 0, 20 flow integration steps,
+10-action replanning and the supplied training dataset statistics.
+In contrast to the earlier experiment, this checkpoint's saved training
+config disables FP8, removing that particular configured-precision
+mismatch. No training-set diagnostic losses were measured for this new
+checkpoint; the older experiment's offline loss numbers must not be
+attributed to it.
+
+Across all three episodes, **240 policy calls** produced **720 predicted
+MP4s and 6480 lossless predicted PNGs**. Every saved normalized/native
+output was finite, and every exported native action chunk exactly matched
+the corresponding adapter output. All **nine actual rollout videos**
+were decoded and checked: 640x480, 25 FPS, 801 frames each.
+Mean model inference was 7.75 seconds and mean future export was
+5.81 seconds per chunk; total wall time including startup was
+4132.42 seconds (68.87 minutes) on the shared machine.
+
+At the 79 saved replan boundaries per episode, actual end-effectors
+continued to track the preceding executed target closely:
+
+| Layout | Median xyz error, left / right | Median rotation error, left / right |
+|---|---|---|
+| 0 | 1.66 / 1.58 mm | 0.37 / 0.44 degrees |
+| 1 | 1.64 / 1.64 mm | 0.41 / 0.38 degrees |
+| 2 | 1.56 / 1.53 mm | 0.39 / 0.35 degrees |
+
+Visual inspection of all three rollout contact sheets shows arms reaching
+toward and sometimes displacing bowls, but no completed stack. Some first
+sample predicted futures also show deformed/blurred arms; their motion
+does not accurately match the actual execution. Predictions beyond the
+first 0.4 seconds describe an unexecuted original action suffix, so those
+later differences are not a controlled open-loop error measurement.
+The tracking results argue against gross pose/coordinate export errors,
+but do not establish the remaining failure's root cause.
+
+All artifacts are under:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_4nodes_8gpu_step8k_20261024_v1/
+  summary.json
+  checkpoint_provenance.json
+  policy/chunks/inference.jsonl
+  policy/predictions/
+  diagnostics/inference_audit.json
+  diagnostics/layout_00_native_primary_contact_sheet.png
+  diagnostics/layout_00_primary_first_prediction_vs_actual.png
+  diagnostics/layout_00_primary_first_prediction_vs_actual.mp4
+```
+
+Analogous comparisons/contact sheets exist for layouts `01` and `02`,
+and prediction comparisons include all three camera views. Native videos
+and `_result.json` are under:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/
+0_action_type=ee,simulator=isaacsim6/stack_bowls_4nodes_8gpu_step8k_20261024_v1/
+```
+
+Primary actual video names are `episode_0000000_cam_head_fail.mp4`
+through `episode_0000002_cam_head_fail.mp4`; left/right wrist videos
+are alongside them. Prediction reset IDs `0002`, `0004`, `0006` correspond
+to these three episodes, not seven evaluated episodes.
+The evaluator-owned processes exited and GPU memory was released;
+unrelated jobs and shared simulator/assets were not modified.
+
+### Complete training demonstrations for comparison (2026-10-24)
+
+The supplied dataset
+`/data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video`
+contains **100 stack-bowls episodes**, indices **3000-3099**, with task
+index **30** and instruction **"Stack the three bowls together."**
+The first three complete episodes were extracted directly from its
+original videos, not generated by the policy:
+
+| Episode | Full frames | Duration at 25 FPS |
+|---|---|---|
+| 3000 | 240 | 9.60 seconds |
+| 3001 | 366 | 14.64 seconds |
+| 3002 | 341 | 13.64 seconds |
+
+Exports are under:
+
+```text
+outputs/evaluation/robodojo/training_stack_bowls_20261024_v1/
+  manifest.json
+  episode_3000/
+    three_views.mp4
+    cam_high.mp4
+    cam_left_wrist.mp4
+    cam_right_wrist.mp4
+    cam_high_contact_sheet.png
+  episode_3001/
+  episode_3002/
+```
+
+Each episode directory has the same files. `three_views.mp4` synchronizes
+the original head, left-wrist and right-wrist cameras in that left-to-right
+order. Individual views retain their original resolution and frame rate.
+The contact sheet samples six points including the first and last frame;
+the MP4s contain the entire episodes, not just those six frames or the
+model's nine-frame prediction horizon.
+
+Extraction uses each camera's own source file and `from_timestamp` in
+`meta/episodes/chunk-000/file-000.parquet`, with exactly the episode's
+`length` frames and an exclusive ending timestamp. Camera file boundaries
+can differ: episode 3002's right-wrist video starts in a different source
+file from the preceding two episodes. All nine individual camera clips
+were encoded as lossless H264 and verified against their source segments
+using decoded YUV hashes for **every frame**. All three synchronized clips
+were checked for their full frame count, 25 FPS and exact duration.
+`manifest.json` records source files, boundaries, frame counts, original
+task/episode identities, output paths and extraction commands. Original
+dataset videos were not modified; exported videos remain untracked.
+
+### Absolute-action episode-tail correction (2026-10-24)
+
+The first-action audit found a concrete error in the **current training
+loader**, not a demonstrated simulator action-conversion error. Although
+RoboDojo actions are absolute xyz/ort6d/gripper targets, canonical action
+padding replaced positions with zero and rotations with identity, while
+holding grippers. These synthetic timesteps remained active in the
+physical reconstruction and flow targets.
+
+On the supplied dataset's episode 3000, global frame 1627169 has one real
+action and 31 padded actions. The real left target is approximately
+`(-0.2994535, -0.3522613, 0.9217325)`; before correction, every padded left
+target was approximately `(0, 0, 0)` with identity rotation. The same
+problem affects the right arm. With all source frames used as anchors,
+there are 1,736,000 padded action timesteps out of 59,395,264, or 2.923%.
+That is not a measurement of this bug's contribution to checkpoint loss
+or task failure.
+
+RoboDojo's physical spec now explicitly selects
+`action_padding="repeat_last"`, retaining the complete last real absolute
+pose and grippers. Other datasets retain their existing `zero_control`
+default. Both v2.1 and v3.0 window paths are covered, including short
+episodes and terminal anchors. On the same real terminal sample, all 31
+padded targets now match the last real command within 9.38e-9 after
+normalization and denormalization.
+
+Before/after evidence is saved in
+`outputs/evaluation/robodojo/four_node_first_action_audit_20261024_v1/`
+as `action_padding_before.json` and `action_padding_after.json`. This
+changes future training targets, **not existing checkpoint weights or
+deployment actions**. The original training checkout/logs were not
+provided, so whether this checkpoint was trained with exactly this
+padding implementation is not independently established. It is not
+proof of the cause of its initial-action error; the separate initial
+training-window probes contain no padded timesteps.
+
+The `diagnose` output now also reports each arm's first predicted and
+target xyz, first position/rotation errors, and (for embedding-flow
+policies) `clean_action_autoencoding`: ground-truth action embeddings
+passed directly through the physical decoder, without generation or
+diffusion noise. `actions.npz` includes `current_state_raw` and
+`decoded_ground_truth_embedding`. This separates decoder reconstruction
+error from free-running sampling error; it is a ground-truth-assisted
+diagnostic, not a deployable policy or a bound on achievable accuracy.
+
+### Four-node first-action and official WAM audit (2026-10-24)
+
+This audit concerns **`robodojo_4nodes_8gpu/step8k`**, not the earlier
+`1016_ft_on_robodojo/step8k`. It addresses the observation that initial
+predicted actions differ sharply from the demonstrations. Small simulator
+tracking errors only validate following the requested target; they do
+**not** validate whether that target was inferred correctly.
+
+**Saved training contract.** The parent `config.json` equals the policy
+snapshot inside `train_config.json`. The actual RoboDojo spec selects
+`action.ee_ort6d_pos` and `observation.ee_ort6d_pos`: absolute dual-arm
+20D xyz/interleaved-ort6d/gripper, first 20 slots of the 40D canonical
+space. Training and inference use mean/std normalization, three ordered
+RGB cameras, 256-pixel resizing, and a 32-action window spanning offsets
+0 through 31 at 25 Hz. Nine video frames span that window. Although the
+saved config contains `use_amp=false`, the FSDP trainer explicitly moves
+the policy to BF16; this checkpoint has `fsdp.fp8=false`. BF16 inference
+therefore matches the configured model precision.
+
+The task mixture is forward dynamics 0.1, inverse dynamics 0.1, and joint
+prediction 0.8, with no trained `action_prediction` task. Deployment
+correctly selects joint sampling rather than switching to an untrained
+action-only task. The physical encoder is frozen; its action decoder is
+learned. Reconstruction weights are action 10 and state 5.
+`initialize_from_stage1=false` in a saved, self-contained configuration
+is not evidence that training skipped initialization: the constructor
+updates that flag for subsequent restoration.
+
+**Official WAM comparison.** Sources were checked at XPolicyLab revision
+`e08ba78888b233b77ed2bb2d92886a52360a1081`:
+
+- [X-WAM adapter](https://github.com/XPolicyLab/XPolicyLab/blob/e08ba78888b233b77ed2bb2d92886a52360a1081/policy/X_WAM/model.py)
+  and [inner inference wrapper](https://github.com/XPolicyLab/XPolicyLab/blob/e08ba78888b233b77ed2bb2d92886a52360a1081/policy/X_WAM/X-WAM/evaluation/deploy_policy.py):
+  its 14D delta actions, quantile normalization, and fixed orientation
+  reframe belong to its own training representation. Its adapter
+  accumulates those deltas into native absolute targets. Applying that
+  reframe or delta accumulation to our already-absolute 20D labels would
+  change the meaning of the learned targets.
+- [FastWAM adapter](https://github.com/XPolicyLab/XPolicyLab/blob/e08ba78888b233b77ed2bb2d92886a52360a1081/policy/FastWAM/model.py)
+  and [relative-action transforms](https://github.com/XPolicyLab/XPolicyLab/blob/e08ba78888b233b77ed2bb2d92886a52360a1081/policy/FastWAM/FastWAM/src/fastwam/datasets/lerobot/transforms/relative_action.py):
+  preprocessing and normalization are tied to its saved processor/config.
+  Relative-pose and relative-joint transforms, where configured, have
+  paired training/inverse transformations; they are not generic WAM
+  requirements. Its configured execution prefix is taken from the
+  beginning of the generated chunk.
+
+Our control loop also executes actions starting at chunk index zero,
+then replans on a fresh observation. No extra first-action offset,
+left/right swap, orientation reframe, relative conversion, normalization
+change, or arbitrary action rescaling was justified by this comparison.
+
+**Real-label transport positive control.** The first 32 true commands
+from episode 3000 were passed through the authentic loader,
+normalization, and the exact deployment `native_actions` conversion,
+then compared against the dataset's original 16D xyz/wxyz/gripper
+commands. Maximum xyz component error was 1.50e-8 m, rotation error
+1.04e-5 degrees, and gripper error zero. These commands approximately
+match the following recorded states (maximum raw component difference
+1.19e-4), consistent with absolute next-state targets, not deltas.
+This control does not replay contacts or establish simulator task success.
+
+**Controlled first-window sampling.** Complete, unaugmented training
+inputs from episodes 3000, 3001 and 3002 at offset zero were sampled with
+seeds 0 and 1, using the new checkpoint, BF16 and the saved 20 flow steps.
+There are no padded targets in these initial windows.
+
+| Episode | Free-running action MSE, seed 0 | Seed 1 | Clean action embedding -> decoder MSE |
+|---|---:|---:|---:|
+| 3000 | 1.27542 | 1.18505 | 0.07233 |
+| 3001 | 1.20145 | 0.89352 | 0.08895 |
+| 3002 | 0.64350 | 0.30611 | 0.06623 |
+
+All MSEs cover the 20 active normalized dimensions over 32 actions.
+Across these six samples, first-10-action position discrepancy against
+the demonstrations averages 4.67 cm for the left arm and 7.24 cm for the
+right. On episode 3000, seed zero, the **first command's displacement
+from the current state** is:
+
+| Arm | Demonstration delta xyz, mm | Predicted delta xyz, mm |
+|---|---|---|
+| Left | `(0.029, -0.0001, -0.0001)` | `(12.418, 33.128, -4.953)` |
+| Right | `(0.286, -0.447, 0.624)` | `(-22.695, 20.176, -3.146)` |
+
+This discrepancy is present **before simulator execution**, even with
+the same training images/state as the demonstration. At the same episode
+and seed, joint reconstruction loss is 0.006747 at sigma 0.5, versus
+1.27542 for free-running actions; inverse reconstruction at sigma 0.9
+is 0.010767. These are different conditioning problems, not interchangeable
+measures of policy accuracy. Even decoding clean ground-truth physical
+embeddings is imperfect, so the discrepancy should not be attributed
+exclusively to the flow integrator.
+
+The current visual conditioning tokens from encoding the full training
+video versus just its first frames are **exactly equal** on all three
+windows. Current-state embeddings from the training and deployment
+physical batches are also exactly equal after sharing the separately
+checked normalized current state. Reloading the checkpoint and supplying
+the saved native rollout's first conditioning images/state reproduces
+that rollout's complete first normalized action tensor with **zero
+maximum error**.
+
+Evidence is under:
+
+```text
+outputs/evaluation/robodojo/four_node_first_action_audit_20261024_v1/
+  report.json
+  native_initial_reproduction.npz
+  action_padding_before.json
+  action_padding_after.json
+  episode_3000/{conditioning_*.png,actions.npz,metrics.json}
+  episode_3001/
+  episode_3002/
+```
+
+`report.json` identifies the checkpoint/training config, seeds, input
+parity, current visual/state embedding comparisons, conditional losses,
+and first/chunk-end action directions. `action_padding_after.json` also
+records the real-label transport control. The controlled two-seed probe
+used explicit seeds per episode; the standard `diagnose` CLI additionally
+includes the two configured validation windows and uses `seed + index`.
+
+**Bounded conclusion.** The absolute-target padding and diagnostic
+configuration-selection errors were fixed separately. Neither correction
+changes the existing model's sampled first actions. The initial
+training-input discrepancies do not require simulator execution or
+different object layouts to appear; however, offline deviation can also
+reflect a different valid plan, and these measurements alone are not a
+task-success criterion. No root cause of all three native failures, and
+no successful corrected rollout, has been established.
+
+The reconstructed configured validation still selects two training
+windows, neither from stack bowls. Original training initialization
+logs/code revision, original remote-dataset normalization metadata, VAE
+configuration identity, capture runtime, and exact scene overlap remain
+unverified. Accordingly, this audit does not certify the entire training
+setup or rule out every sampler/runtime issue.
+
+## Non-destructive delta-action dataset export
+
+Run from the repository root in `conda activate wam`:
+
+```bash
+python -m lerobot.evaluation.scripts.add_robodojo_delta_actions \
+  --source /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --output outputs/evaluation/robodojo/dataset_tools_20261024_v1/RoboDojo_ee_lerobot_v30_delta
+```
+
+The output must not exist and must be separate from the source. The tool builds
+in a sibling staging directory and publishes only a complete dataset. It never
+overwrites the original `action`, `action.ee_ort6d_pos`, or state columns.
+Instead, it appends `delta_action` (16D) and `delta_action.ee_ort6d_pos` (20D),
+registers both in `meta/info.json`, and computes their own global/per-episode
+statistics, including exact numeric quantiles. Existing absolute statistics
+are preserved. `meta/delta_action_manifest.json` records the conversion contract.
+
+The final chosen contract matches X-WAM's RoboDojo **measured-state increments**
+at `action_skip=1`, not differences between consecutive raw action targets:
+
+```text
+delta_position[t] = state_position[t+1] - state_position[t]
+delta_rotation[t] = R_state[t+1] @ R_state[t].T
+delta_gripper[t]  = state_gripper[t+1] - state_gripper[t]
+```
+
+Positions use world axes. Each 16D arm block is
+`[dx,dy,dz,dqw,dqx,dqy,dqz,dgripper]`; quaternion order is wxyz. Each 20D arm
+block replaces the quaternion with the interleaved first two rotation-matrix
+columns `[R00,R01,R10,R11,R20,R21]`. Quaternion/ort6d components are **not**
+subtracted. Episode ends retain one zero-motion target: zero translation,
+identity rotation, and zero gripper increment, including single-frame episodes.
+This preserves the original row count; X-WAM's own transformed action sequence
+instead has length `T-1`.
+
+The reference is XPolicyLab revision
+`e08ba78888b233b77ed2bb2d92886a52360a1081`,
+`policy/X_WAM/transform_robodojo_to_xwam.py` and
+`policy/X_WAM/X-WAM/data/robot_dataset.py::_build_delta_action_tensor`.
+Its fixed right-side orientation reframe cancels from
+`(R_next @ P) @ (R_current @ P).T`, so these relative rotations need no extra
+reframe. X-WAM itself stores axis-angle deltas in a 14D action; these new
+16D/20D columns share its increment semantics, not its feature representation
+or released normalization statistics.
+
+**Exporting does not switch model training or evaluation to delta actions.**
+Current canonical feature selection and the native evaluation adapter remain
+absolute-action based. A delta-trained model must explicitly select the new
+feature/statistics and use a matching evaluator: cumulatively add translation
+and gripper increments, left-multiply rotations (`R = delta_R @ R`), clip the
+integrated gripper to its valid range, and restart integration from the current
+observed state at each replan. Do not run delta predictions through the existing
+absolute-action adapter.
+
+By default videos are symlinked to avoid copying approximately 65 GB. Use
+`--video-mode copy` for an independent export. Encoded files and original
+camera timestamps are preserved, without re-encoding. Existing source video
+intervals that differ from the data length are explicitly logged and recorded
+in the manifest, not silently repaired. The full source contains 26
+camera/episode intervals one frame shorter than its tabular length; this is a
+separate source-video metadata issue, not an ort6d conversion error.
+
+The command above has completed for all 3,500 episodes / 1,856,102 rows.
+`outputs/evaluation/robodojo/dataset_tools_20261024_v1/delta_verification.json`
+records an independent full-row check: original columns are unchanged, source
+parquet SHA256 hashes still match the pre-export audit, both delta
+representations match measured-state increments, and new global moments match
+the generated rows. Maximum relative-rotation matrix error was `1.24e-8`.
+
+## Task-based v3 subsets
+
+List IDs, available task-name aliases, and exact instruction strings:
+
+```bash
+python -m lerobot.evaluation.scripts.subset_robodojo_tasks --list-tasks
+```
+
+Select one or several tasks with `--task` / `--tasks`. Each argument can be a
+task name, a source task ID, or an exact quoted instruction:
+
+```bash
+# Standalone bowls subset, retaining both absolute and new delta columns.
+python -m lerobot.evaluation.scripts.subset_robodojo_tasks \
+  --source outputs/evaluation/robodojo/dataset_tools_20261024_v1/RoboDojo_ee_lerobot_v30_delta \
+  --output outputs/evaluation/robodojo/dataset_tools_20261024_v1/stack_bowls_delta \
+  --tasks stack_bowls
+
+# Multiple tasks from the original absolute-action dataset.
+python -m lerobot.evaluation.scripts.subset_robodojo_tasks \
+  --output /path/to/new_bowls_and_blocks_subset \
+  --tasks stack_bowls stack_blocks
+```
+
+The default source is the original full dataset. Task-name aliases are read
+from literal instruction templates in the local RoboDojo checkout, without
+importing simulator code; override its location using `--robodojo-root`.
+Numeric IDs and quoted instructions do not require the simulator checkout.
+`stack_bowls` and `stack_bowls_random` share instruction/task ID 30 in this
+dataset: they select the same 100 episodes, not separately identifiable layout
+variants. Mixed-task episodes are rejected rather than silently truncated.
+
+The output contains complete selected episodes with contiguous episode, task,
+and global row indices. Per-episode frame indices, timestamps, original
+action/state values, and any delta columns are preserved. `meta/info.json`,
+tasks, episode metadata, and numeric statistics/quantiles are rebuilt for the
+selected rows; `train` covers the complete subset. Image statistics are
+aggregated from selected source episode statistics using the repository's
+existing weighted-moment/approximate-quantile convention, not recomputed by
+decoding every video. `meta/subset_manifest.json` records source-to-output
+episode/task mappings and any source video-interval warnings.
+
+Videos are **copied by default**, including when the source uses symlinks, so
+the subset is standalone. `--video-mode symlink` explicitly opts into sharing
+source video storage. Both modes preserve original video files and per-camera
+offsets without re-encoding; shared encoded files can retain unused frames
+from episodes not selected in the tabular subset. They are not exposed as
+extra dataset rows. Existing outputs are never overwritten.
+
+The bowls command above has completed: **100 episodes, 44,774 rows**, original
+episodes 3000 through 3099, with 2,261,418,695 bytes of copied video. Video
+SHA256 hashes match the source. The repository's native v3 `LeRobotDataset`
+successfully loaded both delta fields and decoded first/last rows of subset
+episodes 0, 50, and 99 across all three cameras; decoded pixels match the
+original videos using the loader's nearest-frame timestamp convention.
+Evidence: `outputs/evaluation/robodojo/dataset_tools_20261024_v1/subset_verification.json`.
+
+## Full quaternion-to-ort6d audit
+
+```bash
+python -m lerobot.evaluation.scripts.audit_robodojo_ort6d \
+  --source /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --report /path/to/new_ort6d_audit.json
+```
+
+Reports must not already exist. The audit reads every physical row, validates
+global/episode/frame indexing, and compares all 20 converted dimensions with
+an independent SciPy quaternion-to-matrix conversion of each original 16D
+action/state. It checks finite values, nonzero/unit quaternions, rotation-column
+norms and orthogonality, records per-dimension maximum errors and source file
+SHA256 hashes, and exits nonzero on failure. Quaternion sign equivalence is
+handled through rotation matrices. Default conversion/rotation tolerance is
+`2e-6`; source quaternion norm deviations greater than `1e-4` also fail.
+
+The complete original dataset audit passed: **3,500 episodes, 1,856,102 rows**
+for each feature pair, across all three physical parquet files.
+
+| Original -> converted feature | Invalid rows | Conversion mismatch rows | Maximum absolute error |
+|---|---:|---:|---:|
+| `action` -> `action.ee_ort6d_pos` | 0 | 0 | `2.980232238769531e-7` |
+| `observation.state` -> `observation.ee_ort6d_pos` | 0 | 0 | `7.152557373046875e-7` |
+
+Both arms use the correct interleaved rotation-column ordering; positions and
+grippers were included in the comparison. No ort6d repair was needed or made.
+The full report is
+`outputs/evaluation/robodojo/dataset_tools_20261024_v1/ort6d_audit.json`.
+Subsequent full delta-export verification confirmed that all three original
+parquet SHA256 hashes still match this report.
+
+Focused regression checks for the three tools:
+
+```bash
+OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
+  python -m pytest --noconftest -q tests/test_robodojo_dataset_scripts.py
+```
+
+`--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
+conftest; the dataset tools do not require robot hardware or a simulator.

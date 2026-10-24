@@ -5,7 +5,7 @@ import pytest
 import torch
 from datasets import Dataset
 
-from lerobot.common.datasets.canonical_space import CANON_DIM, MAX_TACTILE_SIGNAL_DIM
+from lerobot.common.datasets.canonical_space import CANON_DIM, MAX_TACTILE_SIGNAL_DIM, get_spec
 from lerobot.common.datasets.contrastive_dataset import (
     MultiModalContrastiveDataset,
     contrastive_collate_fn,
@@ -63,8 +63,12 @@ def _canonical_dataset():
 @pytest.mark.parametrize("version", ["v2.1", "v3.0"])
 @pytest.mark.parametrize("frame_idx", [0, 8, 9, 38, 39, 40, 42])
 @pytest.mark.parametrize("eef_action", [False, True])
-def test_episode_windows_repeat_observations_and_pad_zero_controls(version, frame_idx, eef_action):
+@pytest.mark.parametrize("action_padding", [None, "repeat_last"])
+def test_episode_windows_apply_dataset_action_padding(version, frame_idx, eef_action, action_padding):
     dataset = _canonical_dataset()
+    if action_padding is not None:
+        dataset.specs[0]["action_padding"] = get_spec("robodojo")["action_padding"]
+        assert dataset.specs[0]["action_padding"] == action_padding
     if eef_action:
         dataset.specs[0]["action"] = [("action", 0, 10, 0)]
         dataset.norm_stats[0]["action"] = _norm(
@@ -132,10 +136,11 @@ def test_episode_windows_repeat_observations_and_pad_zero_controls(version, fram
     result = dataset._to_canonical(item, 0, frame_idx)
 
     expected_action = source_action[query_indices["action"]].clone()
-    expected_action[padding["action_is_pad"]] = 0
-    if eef_action:
-        expected_action[padding["action_is_pad"], 3:9] = torch.eye(3)[:, :2].reshape(6)
-        expected_action[padding["action_is_pad"], 9] = source_action[episode_end - 1, 9]
+    if action_padding is None:
+        expected_action[padding["action_is_pad"]] = 0
+        if eef_action:
+            expected_action[padding["action_is_pad"], 3:9] = torch.eye(3)[:, :2].reshape(6)
+            expected_action[padding["action_is_pad"], 9] = source_action[episode_end - 1, 9]
     norm = dataset.norm_stats[0]
     action_width = 10 if eef_action else 2
     torch.testing.assert_close(
@@ -175,6 +180,13 @@ def test_episode_windows_repeat_observations_and_pad_zero_controls(version, fram
         for task in ("joint_prediction", "forward_dynamics", "inverse_dynamics"):
             valid = Qwen3VLMoTPolicy._task_valid_rows(policy, TASK_SPECS[task], batch, torch.device("cpu"))
             assert valid.tolist() == [True]
+
+
+def test_unknown_action_padding_fails_explicitly():
+    dataset = _canonical_dataset()
+    dataset.specs[0]["action_padding"] = "invalid"
+    with pytest.raises(ValueError, match="Unsupported action padding"):
+        dataset._to_canonical({}, 0, 0)
 
 
 @pytest.mark.parametrize("action", [torch.tensor([7.0, 8.0]), torch.tensor([[5.0, 6.0], [7.0, 8.0]])])

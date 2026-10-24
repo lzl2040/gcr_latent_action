@@ -1662,10 +1662,14 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         spec = self.specs[ds_idx]
         norm = self.norm_stats[ds_idx]
         primary_key = self.image_key_maps[ds_idx]["primary"]
+        action_padding = spec.get("action_padding", "zero_control")
+        if action_padding not in ("zero_control", "repeat_last"):
+            raise ValueError(f"Unsupported action padding mode: {action_padding!r}.")
 
         image_t0, image_t1, pair_valid = self._extract_frames(item, primary_key)
         action, action_mask = self._build_canonical_vector(
-            item, spec.get("action", []), norm["action"], True, zero_pad=True
+            item, spec.get("action", []), norm["action"], True,
+            zero_pad=action_padding == "zero_control",
         )
         state, state_mask = self._build_canonical_vector(item, spec.get("state", []), norm["state"], True)
         tactile_signal, tactile_signal_mask = self._build_tactile_signal(item, spec, norm["tactile_signal"])
