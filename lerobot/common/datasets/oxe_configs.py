@@ -1050,6 +1050,13 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.EEF_R6,
         "action_encoding": ActionEncoding.EEF_R6,
     },
+    "delta_robodojo_stack_bowl": {
+        "image_obs_keys": {"primary": "cam_high", "secondary": "cam_left_wrist", "wrist": "cam_right_wrist"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
+    },
     # Pizza
     "pizza": {
         "image_obs_keys": {"primary": "primary", "secondary": None, "wrist": None},
