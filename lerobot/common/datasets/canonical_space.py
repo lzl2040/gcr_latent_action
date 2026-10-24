@@ -84,6 +84,7 @@ def _seg(src_key: str, src_from: int, src_to: int, dst_from: int) -> tuple[str, 
 # Each spec is a dict with the optional entries:
 #   "action"          : list of copy instructions for the action chunk
 #   "state"           : list of copy instructions for the proprioceptive state
+#   "action_padding"  : "zero_control" (default) or "repeat_last" for absolute targets
 #   "tactile_signal"  : list of low-dimensional tactile keys (concatenated)
 #   "tactile_image"   : list of tactile camera keys (at most MAX_TACTILE_VIEWS used)
 #   "perception_only" : whether the dataset has no physical-side supervision
@@ -688,6 +689,7 @@ PHYSICAL_SPECS: dict[str, dict] = {
         # TO DO: 20-50 is 10 finger xyz
         "action": [_seg("action.ee_ort6d_pos", 0, 20, 0)],
         "state": [_seg("observation.ee_ort6d_pos", 0, 20, 0)],
+        "action_padding": "repeat_last",
     },
 }
 

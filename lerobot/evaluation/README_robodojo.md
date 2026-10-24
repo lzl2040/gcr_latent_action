@@ -867,3 +867,39 @@ were checked for their full frame count, 25 FPS and exact duration.
 `manifest.json` records source files, boundaries, frame counts, original
 task/episode identities, output paths and extraction commands. Original
 dataset videos were not modified; exported videos remain untracked.
+
+### Absolute-action episode-tail correction (2026-10-24)
+
+The first-action audit found a concrete error in the **current training
+loader**, not a demonstrated simulator action-conversion error. Although
+RoboDojo actions are absolute xyz/ort6d/gripper targets, canonical action
+padding replaced positions with zero and rotations with identity, while
+holding grippers. These synthetic timesteps remained active in the
+physical reconstruction and flow targets.
+
+On the supplied dataset's episode 3000, global frame 1627169 has one real
+action and 31 padded actions. The real left target is approximately
+`(-0.2994535, -0.3522613, 0.9217325)`; before correction, every padded left
+target was approximately `(0, 0, 0)` with identity rotation. The same
+problem affects the right arm. With all source frames used as anchors,
+there are 1,736,000 padded action timesteps out of 59,395,264, or 2.923%.
+That is not a measurement of this bug's contribution to checkpoint loss
+or task failure.
+
+RoboDojo's physical spec now explicitly selects
+`action_padding="repeat_last"`, retaining the complete last real absolute
+pose and grippers. Other datasets retain their existing `zero_control`
+default. Both v2.1 and v3.0 window paths are covered, including short
+episodes and terminal anchors. On the same real terminal sample, all 31
+padded targets now match the last real command within 9.38e-9 after
+normalization and denormalization.
+
+Before/after evidence is saved in
+`outputs/evaluation/robodojo/four_node_first_action_audit_20261024_v1/`
+as `action_padding_before.json` and `action_padding_after.json`. This
+changes future training targets, **not existing checkpoint weights or
+deployment actions**. The original training checkout/logs were not
+provided, so whether this checkpoint was trained with exactly this
+padding implementation is not independently established. It is not
+proof of the cause of its initial-action error; the separate initial
+training-window probes contain no padded timesteps.
