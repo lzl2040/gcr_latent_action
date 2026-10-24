@@ -1183,3 +1183,45 @@ successfully loaded both delta fields and decoded first/last rows of subset
 episodes 0, 50, and 99 across all three cameras; decoded pixels match the
 original videos using the loader's nearest-frame timestamp convention.
 Evidence: `outputs/evaluation/robodojo/dataset_tools_20261024_v1/subset_verification.json`.
+
+## Full quaternion-to-ort6d audit
+
+```bash
+python -m lerobot.evaluation.scripts.audit_robodojo_ort6d \
+  --source /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --report /path/to/new_ort6d_audit.json
+```
+
+Reports must not already exist. The audit reads every physical row, validates
+global/episode/frame indexing, and compares all 20 converted dimensions with
+an independent SciPy quaternion-to-matrix conversion of each original 16D
+action/state. It checks finite values, nonzero/unit quaternions, rotation-column
+norms and orthogonality, records per-dimension maximum errors and source file
+SHA256 hashes, and exits nonzero on failure. Quaternion sign equivalence is
+handled through rotation matrices. Default conversion/rotation tolerance is
+`2e-6`; source quaternion norm deviations greater than `1e-4` also fail.
+
+The complete original dataset audit passed: **3,500 episodes, 1,856,102 rows**
+for each feature pair, across all three physical parquet files.
+
+| Original -> converted feature | Invalid rows | Conversion mismatch rows | Maximum absolute error |
+|---|---:|---:|---:|
+| `action` -> `action.ee_ort6d_pos` | 0 | 0 | `2.980232238769531e-7` |
+| `observation.state` -> `observation.ee_ort6d_pos` | 0 | 0 | `7.152557373046875e-7` |
+
+Both arms use the correct interleaved rotation-column ordering; positions and
+grippers were included in the comparison. No ort6d repair was needed or made.
+The full report is
+`outputs/evaluation/robodojo/dataset_tools_20261024_v1/ort6d_audit.json`.
+Subsequent full delta-export verification confirmed that all three original
+parquet SHA256 hashes still match this report.
+
+Focused regression checks for the three tools:
+
+```bash
+OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
+  python -m pytest --noconftest -q tests/test_robodojo_dataset_scripts.py
+```
+
+`--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
+conftest; the dataset tools do not require robot hardware or a simulator.

@@ -328,3 +328,78 @@ def test_subset_reindexes_selected_nonzero_task_id_and_shards(dataset, tmp_path)
     result = V30Source(tmp_path / "task1")
     assert result.tasks == {0: "Build a block tower."}
     assert matrix(pq.read_table(result.files)["task_index"])[:, 0].tolist() == [0, 0, 0]
+
+
+def test_ort6d_known_rotation_uses_interleaved_columns_and_wxyz():
+    values = np.array([[1, 2, 3, 1, 0, 0, 1, 0.5] * 2], dtype=np.float32)
+    expected = np.array([[1, 2, 3, 0, -1, 1, 0, 0, 0, 0.5] * 2], dtype=np.float32)
+    np.testing.assert_allclose(pose_to_ort6d(values), expected, atol=1e-7)
+    values[:, 3:7] *= -1
+    np.testing.assert_allclose(pose_to_ort6d(values), expected, atol=1e-7)
+
+
+def test_complete_ort6d_audit_reports_all_rows_and_refuses_report_overwrite(dataset, tmp_path):
+    from lerobot.evaluation.scripts.audit_robodojo_ort6d import audit
+
+    report = tmp_path / "audit.json"
+    result = audit(dataset, report)
+    assert result["passed"] and result["complete"] and result["total_frames"] == 8
+    assert len(result["files"]) == 3
+    for key in ("action", "observation.state"):
+        entry = result["features"][key]
+        assert entry["checked_rows"] == 8 and entry["invalid_rows"] == entry["mismatch_rows"] == 0
+        assert entry["max_abs_error"] == 0
+    assert json.loads(report.read_text()) == result
+    with pytest.raises(FileExistsError):
+        audit(dataset, report)
+
+
+@pytest.mark.parametrize("corruption", ["ort6d", "nan", "zero_quaternion", "nonunit_quaternion", "index"])
+def test_ort6d_audit_detects_corrupted_rows(dataset, tmp_path, corruption):
+    from lerobot.evaluation.scripts.audit_robodojo_ort6d import audit
+
+    path = dataset / "data/chunk-000/file-001.parquet"
+    table = pq.read_table(path)
+    key = "action.ee_ort6d_pos" if corruption in ("ort6d", "nan") else "action"
+    if corruption == "index":
+        table = table.set_column(
+            table.schema.get_field_index("index"), "index", pa.array([999] * len(table), type=pa.int64())
+        )
+    else:
+        values = matrix(table[key]).copy()
+        if corruption == "ort6d":
+            values[0, 5] += 0.2
+        elif corruption == "nan":
+            values[0, 5] = np.nan
+        elif corruption == "zero_quaternion":
+            values[0, 3:7] = 0
+        else:
+            values[0, 3:7] *= 2
+        table = table.set_column(table.schema.get_field_index(key), key, vector_array(values))
+    pq.write_table(table, path)
+    report = tmp_path / "audit.json"
+    if corruption == "index":
+        with pytest.raises(ValueError, match="Inconsistent index"):
+            audit(dataset, report)
+        assert not report.exists()
+        return
+    result = audit(dataset, report)
+    assert not result["passed"]
+    assert result["features"]["observation.state"]["mismatch_rows"] == 0
+    entry = result["features"]["action"]
+    if corruption == "ort6d":
+        assert entry["mismatch_rows"] == 1
+    elif corruption == "nonunit_quaternion":
+        assert entry["nonunit_quaternion_rows"] == 1
+    else:
+        assert entry["invalid_rows"] == 1
+    if corruption != "nonunit_quaternion":
+        assert entry["examples"][0]["index"] == 2
+
+
+@pytest.mark.parametrize("tolerance", [0, -1, float("nan"), float("inf")])
+def test_ort6d_audit_rejects_invalid_tolerance(dataset, tmp_path, tolerance):
+    from lerobot.evaluation.scripts.audit_robodojo_ort6d import audit
+
+    with pytest.raises(ValueError, match="Tolerance"):
+        audit(dataset, tmp_path / "audit.json", tolerance)
