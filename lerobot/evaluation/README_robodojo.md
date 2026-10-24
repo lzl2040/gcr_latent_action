@@ -1126,3 +1126,60 @@ records an independent full-row check: original columns are unchanged, source
 parquet SHA256 hashes still match the pre-export audit, both delta
 representations match measured-state increments, and new global moments match
 the generated rows. Maximum relative-rotation matrix error was `1.24e-8`.
+
+## Task-based v3 subsets
+
+List IDs, available task-name aliases, and exact instruction strings:
+
+```bash
+python -m lerobot.evaluation.scripts.subset_robodojo_tasks --list-tasks
+```
+
+Select one or several tasks with `--task` / `--tasks`. Each argument can be a
+task name, a source task ID, or an exact quoted instruction:
+
+```bash
+# Standalone bowls subset, retaining both absolute and new delta columns.
+python -m lerobot.evaluation.scripts.subset_robodojo_tasks \
+  --source outputs/evaluation/robodojo/dataset_tools_20261024_v1/RoboDojo_ee_lerobot_v30_delta \
+  --output outputs/evaluation/robodojo/dataset_tools_20261024_v1/stack_bowls_delta \
+  --tasks stack_bowls
+
+# Multiple tasks from the original absolute-action dataset.
+python -m lerobot.evaluation.scripts.subset_robodojo_tasks \
+  --output /path/to/new_bowls_and_blocks_subset \
+  --tasks stack_bowls stack_blocks
+```
+
+The default source is the original full dataset. Task-name aliases are read
+from literal instruction templates in the local RoboDojo checkout, without
+importing simulator code; override its location using `--robodojo-root`.
+Numeric IDs and quoted instructions do not require the simulator checkout.
+`stack_bowls` and `stack_bowls_random` share instruction/task ID 30 in this
+dataset: they select the same 100 episodes, not separately identifiable layout
+variants. Mixed-task episodes are rejected rather than silently truncated.
+
+The output contains complete selected episodes with contiguous episode, task,
+and global row indices. Per-episode frame indices, timestamps, original
+action/state values, and any delta columns are preserved. `meta/info.json`,
+tasks, episode metadata, and numeric statistics/quantiles are rebuilt for the
+selected rows; `train` covers the complete subset. Image statistics are
+aggregated from selected source episode statistics using the repository's
+existing weighted-moment/approximate-quantile convention, not recomputed by
+decoding every video. `meta/subset_manifest.json` records source-to-output
+episode/task mappings and any source video-interval warnings.
+
+Videos are **copied by default**, including when the source uses symlinks, so
+the subset is standalone. `--video-mode symlink` explicitly opts into sharing
+source video storage. Both modes preserve original video files and per-camera
+offsets without re-encoding; shared encoded files can retain unused frames
+from episodes not selected in the tabular subset. They are not exposed as
+extra dataset rows. Existing outputs are never overwritten.
+
+The bowls command above has completed: **100 episodes, 44,774 rows**, original
+episodes 3000 through 3099, with 2,261,418,695 bytes of copied video. Video
+SHA256 hashes match the source. The repository's native v3 `LeRobotDataset`
+successfully loaded both delta fields and decoded first/last rows of subset
+episodes 0, 50, and 99 across all three cameras; decoded pixels match the
+original videos using the loader's nearest-frame timestamp convention.
+Evidence: `outputs/evaluation/robodojo/dataset_tools_20261024_v1/subset_verification.json`.

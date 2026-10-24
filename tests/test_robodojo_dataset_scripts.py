@@ -237,3 +237,94 @@ def test_delta_preserves_and_reports_source_video_interval_discrepancies(dataset
     ]
     assert V30Source(tmp_path / "delta").episodes[0][key] == episodes[0][key]
     assert "mismatched source video interval" in caplog.text
+
+
+def test_subset_reindexes_noncontiguous_episodes_and_preserves_video_offsets(dataset, tmp_path):
+    from lerobot.evaluation.scripts.subset_robodojo_tasks import subset
+
+    output = tmp_path / "bowls"
+    manifest = subset(dataset, output, ["0"], robodojo_root=None)
+    result = V30Source(output)
+    assert manifest["episode_map"] == [{"source": 0, "subset": 0}, {"source": 2, "subset": 1}]
+    assert manifest["total_frames"] == 5
+    assert result.info["splits"] == {"train": "0:2"}
+    assert result.info["total_tasks"] == 1
+    assert result.tasks == {0: "Stack the three bowls together."}
+    data = pq.read_table(result.files)
+    assert matrix(data["index"])[:, 0].tolist() == list(range(5))
+    assert matrix(data["episode_index"])[:, 0].tolist() == [0, 0, 0, 0, 1]
+    assert matrix(data["frame_index"])[:, 0].tolist() == [0, 1, 2, 3, 0]
+    assert matrix(data["task_index"])[:, 0].tolist() == [0] * 5
+    old = pq.read_table(V30Source(dataset).files).take(pa.array([0, 1, 2, 3, 7]))
+    for key in ("action", "observation.state", "action.ee_ort6d_pos", "timestamp"):
+        assert old[key].equals(data[key])
+    stats = json.loads((output / "meta/stats.json").read_text())
+    for key in data.column_names:
+        assert stats[key] == numeric_stats(matrix(data[key]))
+    for original_id, episode in zip((0, 2), result.episodes, strict=True):
+        original = V30Source(dataset).episodes[original_id]
+        for key in original:
+            if key.startswith("videos/"):
+                assert episode[key] == original[key]
+    for video in (output / "videos").rglob("*.mp4"):
+        assert not video.is_symlink()
+        assert video.read_bytes() == (dataset / video.relative_to(output)).read_bytes()
+    assert pd.read_parquet(output / "meta/tasks.parquet").index.tolist() == [
+        "Stack the three bowls together."
+    ]
+    with pytest.raises(FileExistsError):
+        subset(dataset, output, ["0"], robodojo_root=None)
+
+
+def test_subset_selects_aliases_multiple_tasks_and_composes_with_delta_export(dataset, tmp_path):
+    from lerobot.evaluation.scripts.subset_robodojo_tasks import resolve_tasks, subset
+
+    robodojo = tmp_path / "RoboDojo"
+    tasks = robodojo / "task/RoboDojo/tasks"
+    tasks.mkdir(parents=True)
+    (tasks / "stack_bowls.py").write_text(
+        "raise RuntimeError('Task files must never be imported')\n"
+        "def gen_instruction(self):\n"
+        "    return ['Stack the three bowls together.']\n"
+    )
+    source = V30Source(dataset)
+    assert resolve_tasks(source, ["stack_bowls", "1"], robodojo) == {0, 1}
+    with pytest.raises(ValueError, match="Unknown task"):
+        resolve_tasks(source, ["not_a_task"], robodojo)
+    convert(dataset, tmp_path / "delta")
+    output = tmp_path / "subset"
+    manifest = subset(
+        tmp_path / "delta",
+        output,
+        ["stack_bowls", "Build a block tower."],
+        robodojo_root=robodojo,
+        video_mode="symlink",
+    )
+    assert manifest["total_episodes"] == 3 and manifest["total_frames"] == 8
+    result = V30Source(output)
+    assert result.info["delta_action_contract"]["reference"] == "next_measured_state"
+    assert (output / "meta/delta_action_manifest.json").is_file()
+    expected = pq.read_table(V30Source(tmp_path / "delta").files)
+    actual = pq.read_table(result.files)
+    for key in DELTA_COLUMNS:
+        assert expected[key].equals(actual[key])
+    assert all(path.is_symlink() for path in (output / "videos").rglob("*.mp4"))
+
+
+def test_subset_reindexes_selected_nonzero_task_id_and_shards(dataset, tmp_path):
+    from lerobot.evaluation.scripts.subset_robodojo_tasks import subset
+
+    info_path = dataset / "meta/info.json"
+    info = json.loads(info_path.read_text())
+    info["data_files_size_in_mb"] = 0.0001
+    write_json(info_path, info)
+    output = tmp_path / "all"
+    subset(dataset, output, ["0", "1"], robodojo_root=None)
+    result = V30Source(output)
+    assert len(result.files) == 3
+    for index, episode in enumerate(result.episodes):
+        assert episode["data/file_index"] == index
+    subset(dataset, tmp_path / "task1", ["1"], robodojo_root=None)
+    result = V30Source(tmp_path / "task1")
+    assert result.tasks == {0: "Build a block tower."}
+    assert matrix(pq.read_table(result.files)["task_index"])[:, 0].tolist() == [0, 0, 0]
