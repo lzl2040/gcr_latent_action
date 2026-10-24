@@ -1056,3 +1056,73 @@ logs/code revision, original remote-dataset normalization metadata, VAE
 configuration identity, capture runtime, and exact scene overlap remain
 unverified. Accordingly, this audit does not certify the entire training
 setup or rule out every sampler/runtime issue.
+
+## Non-destructive delta-action dataset export
+
+Run from the repository root in `conda activate wam`:
+
+```bash
+python -m lerobot.evaluation.scripts.add_robodojo_delta_actions \
+  --source /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --output outputs/evaluation/robodojo/dataset_tools_20261024_v1/RoboDojo_ee_lerobot_v30_delta
+```
+
+The output must not exist and must be separate from the source. The tool builds
+in a sibling staging directory and publishes only a complete dataset. It never
+overwrites the original `action`, `action.ee_ort6d_pos`, or state columns.
+Instead, it appends `delta_action` (16D) and `delta_action.ee_ort6d_pos` (20D),
+registers both in `meta/info.json`, and computes their own global/per-episode
+statistics, including exact numeric quantiles. Existing absolute statistics
+are preserved. `meta/delta_action_manifest.json` records the conversion contract.
+
+The final chosen contract matches X-WAM's RoboDojo **measured-state increments**
+at `action_skip=1`, not differences between consecutive raw action targets:
+
+```text
+delta_position[t] = state_position[t+1] - state_position[t]
+delta_rotation[t] = R_state[t+1] @ R_state[t].T
+delta_gripper[t]  = state_gripper[t+1] - state_gripper[t]
+```
+
+Positions use world axes. Each 16D arm block is
+`[dx,dy,dz,dqw,dqx,dqy,dqz,dgripper]`; quaternion order is wxyz. Each 20D arm
+block replaces the quaternion with the interleaved first two rotation-matrix
+columns `[R00,R01,R10,R11,R20,R21]`. Quaternion/ort6d components are **not**
+subtracted. Episode ends retain one zero-motion target: zero translation,
+identity rotation, and zero gripper increment, including single-frame episodes.
+This preserves the original row count; X-WAM's own transformed action sequence
+instead has length `T-1`.
+
+The reference is XPolicyLab revision
+`e08ba78888b233b77ed2bb2d92886a52360a1081`,
+`policy/X_WAM/transform_robodojo_to_xwam.py` and
+`policy/X_WAM/X-WAM/data/robot_dataset.py::_build_delta_action_tensor`.
+Its fixed right-side orientation reframe cancels from
+`(R_next @ P) @ (R_current @ P).T`, so these relative rotations need no extra
+reframe. X-WAM itself stores axis-angle deltas in a 14D action; these new
+16D/20D columns share its increment semantics, not its feature representation
+or released normalization statistics.
+
+**Exporting does not switch model training or evaluation to delta actions.**
+Current canonical feature selection and the native evaluation adapter remain
+absolute-action based. A delta-trained model must explicitly select the new
+feature/statistics and use a matching evaluator: cumulatively add translation
+and gripper increments, left-multiply rotations (`R = delta_R @ R`), clip the
+integrated gripper to its valid range, and restart integration from the current
+observed state at each replan. Do not run delta predictions through the existing
+absolute-action adapter.
+
+By default videos are symlinked to avoid copying approximately 65 GB. Use
+`--video-mode copy` for an independent export. Encoded files and original
+camera timestamps are preserved, without re-encoding. Existing source video
+intervals that differ from the data length are explicitly logged and recorded
+in the manifest, not silently repaired. The full source contains 26
+camera/episode intervals one frame shorter than its tabular length; this is a
+separate source-video metadata issue, not an ort6d conversion error.
+
+The command above has completed for all 3,500 episodes / 1,856,102 rows.
+`outputs/evaluation/robodojo/dataset_tools_20261024_v1/delta_verification.json`
+records an independent full-row check: original columns are unchanged, source
+parquet SHA256 hashes still match the pre-export audit, both delta
+representations match measured-state increments, and new global moments match
+the generated rows. Maximum relative-rotation matrix error was `1.24e-8`.
