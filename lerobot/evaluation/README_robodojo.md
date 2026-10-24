@@ -736,3 +736,85 @@ OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo 
 
 Use a fresh output directory when reproducing. Only a validated native
 result with `evaluation_complete=true` counts as a completed evaluation.
+
+### Completed four-node step8k results (2026-10-24, 18:54-20:03)
+
+The three-layout run above completed with validated native results:
+**0 successful episodes out of 3**, mean partial score **0.0**.
+No layouts were skipped/replaced, and the native simulator reported zero
+unstable episodes. All three reached the native 800-step horizon.
+This is three layouts of **one task**, not a full RoboDojo benchmark or
+evidence that the checkpoint cannot succeed on other tasks/layouts.
+
+| Native layout | Success | Partial score | Control steps | Policy calls |
+|---|---|---|---|---|
+| 0 | false | 0.0 | 800 | 80 |
+| 1 | false | 0.0 | 800 | 80 |
+| 2 | false | 0.0 | 800 | 80 |
+
+The completed run has `status="completed"` and
+`evaluation_complete=true` in `summary.json`. It used the separately
+verified new checkpoint/config, BF16, seed 0, 20 flow integration steps,
+10-action replanning and the supplied training dataset statistics.
+In contrast to the earlier experiment, this checkpoint's saved training
+config disables FP8, removing that particular configured-precision
+mismatch. No training-set diagnostic losses were measured for this new
+checkpoint; the older experiment's offline loss numbers must not be
+attributed to it.
+
+Across all three episodes, **240 policy calls** produced **720 predicted
+MP4s and 6480 lossless predicted PNGs**. Every saved normalized/native
+output was finite, and every exported native action chunk exactly matched
+the corresponding adapter output. All **nine actual rollout videos**
+were decoded and checked: 640x480, 25 FPS, 801 frames each.
+Mean model inference was 7.75 seconds and mean future export was
+5.81 seconds per chunk; total wall time including startup was
+4132.42 seconds (68.87 minutes) on the shared machine.
+
+At the 79 saved replan boundaries per episode, actual end-effectors
+continued to track the preceding executed target closely:
+
+| Layout | Median xyz error, left / right | Median rotation error, left / right |
+|---|---|---|
+| 0 | 1.66 / 1.58 mm | 0.37 / 0.44 degrees |
+| 1 | 1.64 / 1.64 mm | 0.41 / 0.38 degrees |
+| 2 | 1.56 / 1.53 mm | 0.39 / 0.35 degrees |
+
+Visual inspection of all three rollout contact sheets shows arms reaching
+toward and sometimes displacing bowls, but no completed stack. Some first
+sample predicted futures also show deformed/blurred arms; their motion
+does not accurately match the actual execution. Predictions beyond the
+first 0.4 seconds describe an unexecuted original action suffix, so those
+later differences are not a controlled open-loop error measurement.
+The tracking results argue against gross pose/coordinate export errors,
+but do not establish the remaining failure's root cause.
+
+All artifacts are under:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_4nodes_8gpu_step8k_20261024_v1/
+  summary.json
+  checkpoint_provenance.json
+  policy/chunks/inference.jsonl
+  policy/predictions/
+  diagnostics/inference_audit.json
+  diagnostics/layout_00_native_primary_contact_sheet.png
+  diagnostics/layout_00_primary_first_prediction_vs_actual.png
+  diagnostics/layout_00_primary_first_prediction_vs_actual.mp4
+```
+
+Analogous comparisons/contact sheets exist for layouts `01` and `02`,
+and prediction comparisons include all three camera views. Native videos
+and `_result.json` are under:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/
+0_action_type=ee,simulator=isaacsim6/stack_bowls_4nodes_8gpu_step8k_20261024_v1/
+```
+
+Primary actual video names are `episode_0000000_cam_head_fail.mp4`
+through `episode_0000002_cam_head_fail.mp4`; left/right wrist videos
+are alongside them. Prediction reset IDs `0002`, `0004`, `0006` correspond
+to these three episodes, not seven evaluated episodes.
+The evaluator-owned processes exited and GPU memory was released;
+unrelated jobs and shared simulator/assets were not modified.
