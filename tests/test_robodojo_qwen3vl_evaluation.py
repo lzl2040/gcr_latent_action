@@ -76,6 +76,12 @@ def config():
     )
 
 
+def test_shared_policy_loader_precision_defaults():
+    args = build_parser().parse_args(["eval"])
+    assert args.precision == "bf16"
+    assert args.fp8_training_config is None
+
+
 def test_state_uses_world_wxyz_and_interleaved_columns():
     canonical = state_to_canonical(observation())
     expected = Rotation.from_euler("xyz", [0.3, -0.2, 0.9]).as_matrix()[:, :2].reshape(6)

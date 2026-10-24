@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.set_defaults(precision="bf16", fp8_training_config=None)
     parser.add_argument("mode", choices=("offline", "serve", "eval", "diagnose"))
     parser.add_argument("--checkpoint", type=Path, default=EXPERIMENT / "step4k")
     parser.add_argument("--policy-config", type=Path)

@@ -11,6 +11,11 @@ This integration targets RoboDojo's XPolicyLab WebSocket interface
 LIBERO/Gym interface. Upstream reference:
 <https://github.com/robodojo-benchmark/RoboDojo>.
 
+The standard RoboDojo loader explicitly restores BF16, including the
+precision arguments required by the shared LIBERO policy loader. The
+optional `diagnose --diagnostic-fp8` probe is separate from native rollout
+precision.
+
 Local inputs:
 
 | Input | Path |
