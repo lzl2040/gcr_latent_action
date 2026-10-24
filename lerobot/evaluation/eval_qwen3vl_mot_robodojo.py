@@ -49,7 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export matching joint-sample future RGB and PNG frames.",
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--training-config", type=Path, default=EXPERIMENT / "train_config.json")
+    parser.add_argument(
+        "--training-config", type=Path, help="Defaults to train_config.json beside the saved policy config."
+    )
     parser.add_argument("--diagnostic-episodes", type=int, nargs="+", default=[3000, 3001, 3002])
     parser.add_argument("--diagnostic-frames", type=int, nargs="+", default=[0, 64])
     parser.add_argument("--diagnostic-inference-steps", type=int, nargs="+", default=[20, 50])

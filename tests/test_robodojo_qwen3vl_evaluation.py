@@ -533,8 +533,33 @@ def test_default_checkpoint_and_cli():
     diagnostic = build_parser().parse_args(["diagnose"])
     assert diagnostic.diagnostic_episodes == [3000, 3001, 3002]
     assert diagnostic.diagnostic_inference_steps == [20, 50]
+    assert diagnostic.training_config is None
     assert not diagnostic.diagnostic_fp8
     assert build_parser().parse_args(["diagnose", "--diagnostic-fp8"]).diagnostic_fp8
+
+
+def test_diagnostics_select_matching_training_config_and_reject_another_experiment(tmp_path, monkeypatch):
+    from lerobot.evaluation.robodojo_diagnostics import diagnose, matching_training_config
+
+    model = tmp_path / "step8k/model"
+    model.mkdir(parents=True)
+    (model / ".metadata").touch()
+    payload = {"type": "qwen3vl_mot", "task_weights": [0.1, 0.1, 0.8]}
+    (tmp_path / "config.json").write_text(json.dumps(payload))
+    training = tmp_path / "train_config.json"
+    training.write_text(json.dumps({"policy": payload}))
+    args = build_parser().parse_args(["diagnose", "--checkpoint", str(model.parent)])
+    assert matching_training_config(args) == training.resolve()
+    other = tmp_path / "other_train_config.json"
+    other.write_text(json.dumps({"policy": {**payload, "task_weights": [0.15, 0.15, 0.7]}}))
+    args.training_config = other
+
+    def unexpected_load(_args):
+        pytest.fail("Mismatched diagnostics must fail before allocating the model.")
+
+    monkeypatch.setattr("lerobot.evaluation.eval_qwen3vl_mot_robodojo.load_model", unexpected_load)
+    with pytest.raises(ValueError, match="does not match"):
+        diagnose(args)
 
 
 def test_training_sample_roundtrip_and_input_parity(adapter):
@@ -569,9 +594,38 @@ def test_diagnostic_action_metrics_use_physical_units_and_executed_prefix(adapte
     assert metrics["left"]["prefix_xyz_mean_l2_m"] == 0
     assert metrics["left"]["rotation_mean_deg"] == pytest.approx(0, abs=1e-6)
     assert metrics["right"]["xyz_mean_l2_m"] == 0
+    assert metrics["left"]["first_xyz_l2_m"] == 0
+    predicted[0, 0, 0] += 0.25
+    metrics = action_metrics(predicted, target, adapter, 10)
+    assert metrics["left"]["first_xyz_l2_m"] == pytest.approx(0.5)
+    assert metrics["left"]["first_predicted_xyz_m"] == pytest.approx([0.6, 0.2, 0.3])
+    assert metrics["left"]["first_target_xyz_m"] == pytest.approx([0.1, 0.2, 0.3])
+    assert metrics["left"]["first_rotation_deg"] == pytest.approx(0, abs=1e-6)
     predicted[0, 0, 0] = torch.nan
     with pytest.raises(ValueError, match="finite"):
         action_metrics(predicted, target, adapter, 10)
+
+
+def test_clean_action_autoencoding_uses_real_targets_and_canonical_masks():
+    from lerobot.evaluation.robodojo_diagnostics import clean_action_autoencoding
+
+    target = torch.randn(1, 32, 40)
+    mask = torch.tensor([[1.0] * 20 + [0.0] * 20])
+    batch = {"action": target, "action_mask": mask, "state_mask": mask.clone()}
+
+    def encode(received, name, valid):
+        assert received is batch
+        assert name == "action"
+        torch.testing.assert_close(valid, torch.tensor([True]))
+        return target.reshape(1, 8, -1), None, None, None
+
+    policy = SimpleNamespace(
+        _clean_physical_embedding=encode,
+        _decode_physical_embedding=lambda name, clean: clean,
+    )
+    decoded = clean_action_autoencoding(policy, batch)
+    torch.testing.assert_close(decoded[..., :20], target[..., :20])
+    assert not decoded[..., 20:].any()
 
 
 def test_diagnostic_samples_include_configured_validation_and_check_episode_bounds():

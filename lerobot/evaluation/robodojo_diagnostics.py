@@ -12,10 +12,21 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from lerobot.evaluation.eval_qwen3vl_mot_libero import ort6d_to_controls
+from lerobot.evaluation.eval_qwen3vl_mot_libero import checkpoint_paths, ort6d_to_controls
 from lerobot.evaluation.robodojo_qwen3vl import ARMS, CAMERAS, RoboDojoAdapter
 
 logger = logging.getLogger(__name__)
+
+
+def matching_training_config(args) -> Path:
+    _, policy_path = checkpoint_paths(args.checkpoint, args.policy_config)
+    path = args.training_config or policy_path.with_name("train_config.json")
+    saved = json.loads(path.read_text())
+    if saved["policy"] != json.loads(policy_path.read_text()):
+        raise ValueError(
+            f"Training config {path} does not match the selected saved policy config {policy_path}."
+        )
+    return path.resolve()
 
 
 def training_dataset(args, policy_config):
@@ -111,6 +122,10 @@ def action_metrics(
             - np.stack([a[f"{arm}_ee_joint_state"] for a in target_native])
         )
         result[arm] = {
+            "first_predicted_xyz_m": p[0, :3].tolist(),
+            "first_target_xyz_m": t[0, :3].tolist(),
+            "first_xyz_l2_m": float(np.linalg.norm(p[0, :3] - t[0, :3])),
+            "first_rotation_deg": float(angle[0]),
             "xyz_mean_l2_m": float(np.linalg.norm(p[:, :3] - t[:, :3], axis=1).mean()),
             "prefix_xyz_mean_l2_m": float(np.linalg.norm(p[:prefix, :3] - t[:prefix, :3], axis=1).mean()),
             "rotation_mean_deg": float(angle.mean()),
@@ -118,6 +133,14 @@ def action_metrics(
             "gripper_mae_clipped": float(grip.mean()),
         }
     return result
+
+
+def clean_action_autoencoding(policy, batch: dict) -> torch.Tensor:
+    """Isolate frozen-encoder/decoder reconstruction from the generation sampler."""
+    valid = batch["state_mask"].bool().any(-1) & batch["action_mask"].bool().any(-1)
+    clean, _, _, _ = policy._clean_physical_embedding(batch, "action", valid)
+    decoded = policy._decode_physical_embedding("action", clean).reshape_as(batch["action"])
+    return decoded.float() * batch["action_mask"][:, None]
 
 
 @torch.inference_mode()
@@ -179,6 +202,7 @@ def diagnose(args) -> None:
 
     if any(step <= 0 for step in args.diagnostic_inference_steps):
         raise ValueError("Diagnostic inference steps must be positive.")
+    args.training_config = matching_training_config(args)
     model = load_model(args)
     policy, adapter, device = model.policy, model.adapter, model.device
     precision = "bfloat16; training FP8 transformation is not enabled"
@@ -232,6 +256,11 @@ def diagnose(args) -> None:
         target = batch["action"][:, : policy.config.n_action_steps]
         entry["free_running"] = {}
         predictions = {"ground_truth": target.float().cpu().numpy()}
+        if policy.physical_embedding_flow:
+            with torch.autocast(device.type, dtype=torch.bfloat16):
+                decoded = clean_action_autoencoding(policy, batch)[:, : policy.config.n_action_steps]
+            entry["clean_action_autoencoding"] = action_metrics(decoded, target, adapter, args.replan_steps)
+            predictions["decoded_ground_truth_embedding"] = decoded.float().cpu().numpy()
         for steps in dict.fromkeys([saved_steps, *args.diagnostic_inference_steps]):
             policy.config.inference_steps = steps
             if steps == saved_steps:
@@ -245,6 +274,7 @@ def diagnose(args) -> None:
         current_raw = (
             batch["observation.state"][:, 0, :20].float().cpu() * adapter.state_std + adapter.state_mean
         )
+        predictions["current_state_raw"] = current_raw.numpy()
         hold = torch.zeros_like(target)
         hold[..., :20] = ((current_raw - adapter.action_mean) / adapter.action_std).to(device)[:, None]
         entry["hold_current_baseline"] = action_metrics(hold, target, adapter, args.replan_steps)

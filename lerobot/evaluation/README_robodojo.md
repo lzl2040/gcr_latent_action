@@ -247,7 +247,13 @@ python -m pip install 'polars>=1,<2' 'qwen-vl-utils>=0.0.14,<0.1' torchcodec==0.
 ```
 
 Run with the cached backbone options documented below, a new output
-directory, and the checkpoint being investigated:
+directory, and the checkpoint being investigated. Unless explicitly
+overridden, `--training-config` selects `train_config.json` beside the
+selected saved policy `config.json`, rather than the original experiment's
+training configuration. The saved policy snapshots must agree exactly;
+a mismatch is rejected before loading model weights. Runtime asset paths
+and inference-step overrides should be supplied as CLI options, not by
+editing the saved policy snapshot.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo diagnose \
@@ -903,3 +909,12 @@ provided, so whether this checkpoint was trained with exactly this
 padding implementation is not independently established. It is not
 proof of the cause of its initial-action error; the separate initial
 training-window probes contain no padded timesteps.
+
+The `diagnose` output now also reports each arm's first predicted and
+target xyz, first position/rotation errors, and (for embedding-flow
+policies) `clean_action_autoencoding`: ground-truth action embeddings
+passed directly through the physical decoder, without generation or
+diffusion noise. `actions.npz` includes `current_state_raw` and
+`decoded_ground_truth_embedding`. This separates decoder reconstruction
+error from free-running sampling error; it is a ground-truth-assisted
+diagnostic, not a deployable policy or a bound on achievable accuracy.
