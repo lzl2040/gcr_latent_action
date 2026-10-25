@@ -1342,3 +1342,71 @@ The native layout-0 and training episode-0 initial camera comparison is saved
 in the native run as `training_vs_native_initial.jpg`. Bowl positions,
 appearance, and apparent size differ; therefore direct native-versus-training
 action MSE is not used to attribute errors to the adapter or sampler.
+
+### Delta checkpoint: native stack-bowls result
+
+The supplied experiment's `step8k` was evaluated on native layouts 0, 1, and 2
+with one environment, seed 0, 20 denoising steps, a 32-action prediction chunk,
+and replanning every 10 actions. All three completed layouts failed: **0/3
+successes, mean score 0**. Each ran 800 control steps; the native physics
+profiles report no unstable episodes. This uses the same local Isaac Sim 6
+compatibility runtime as the earlier absolute-action evaluation, with CPU
+physics/tensor view, no fabric/GPU dynamics, physics dt 0.004 and rendering
+every 10 physics steps.
+
+| Layout | Native success | Native score | Completed control steps |
+|---|---|---:|---:|
+| 0 | false | 0 | 800 |
+| 1 | false | 0 | 800 |
+| 2 | false | 0 | 800 |
+
+**Timeout/restart provenance matters.** The first attempt explicitly used
+`--timeout 3600`, before the default was increased. Layouts 0 and 1 completed,
+but the coordinator timed out during layout 2. Its original `summary.json`
+correctly remains `failed`, `evaluation_complete=false`; it has not been
+rewritten as a completed run. A separate policy process on port 19040 reused
+the official native layout-resume manifest and the original isolated simulator
+workspace/run ID. It retained layouts 0 and 1 and restarted only incomplete
+layout 2, with policy seed 0 again. There were no abandoned/replacement layouts.
+This is **not an uninterrupted three-layout sampling RNG stream**.
+
+Artifacts are rooted at
+`outputs/evaluation/robodojo/stack_bowls_delta_step8k_20261025_v1/`:
+
+- `summary.json`: original timeout, wall time 3657.61 seconds.
+- `resume_attempt1/stack_bowls_delta_step8k_20261025_v1/summary.json`:
+  completed native evaluation, wall time 1356.25 seconds, including startup.
+- `resume_attempt1/stack_bowls_delta_step8k_20261025_v1/resume_provenance.json`:
+  original native manifest snapshot and explicit policy RNG restart.
+- `simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_step8k_20261025_v1/`:
+  final `_result.json`, `_physics_profile.json`, and all nine native camera MP4s.
+- `diagnostics/episode_000000{0,1,2}_cam_head_fail_contact_sheet.jpg`:
+  head-camera frames 0, 100, 200, 400, 600, and 800 for each completed layout.
+- `final_adapter_audit.json`: independent target integration, tracking, and
+  decoded native-video checks across both attempts.
+
+Every native MP4 decodes to 801 RGB frames at 640x480, 25 FPS (32.04 seconds).
+Video names are `episode_0000000_cam_head_fail.mp4`, with episode numbers
+0/1/2 and camera names `cam_head`, `cam_left_wrist`, and `cam_right_wrist`.
+The head-camera sheets show approach/contact and bowl movement but no completed
+three-bowl stack in these layouts.
+
+All logged chunks and futures were preserved separately: the original attempt
+has 220 chunks (80 layout-0, 80 layout-1, and 60 from incomplete layout-2),
+660 predicted-camera MP4s and 7260 PNGs; the resumed attempt has 80 layout-2
+chunks, 240 predicted-camera MP4s and 2640 PNGs. Thus the artifact totals include
+one incomplete attempt and must not be described as just 240 uninterrupted
+chunks. Futures are in each attempt's own `policy/predictions/` directory.
+
+Independent NumPy integration checked all 300 logged chunks, grouped by
+attempt/reset/environment so anchors from different attempts never mix.
+Inverse normalization agrees exactly. Maximum differences from the saved
+native targets are `5.96e-8 m` in translation, `1.05e-7` in rotation-matrix
+entries, and `2.99e-8` in gripper. Across 296 within-group replan transitions,
+median previous-target-to-next-measured position differences are 0.095 mm
+left and 0.215 mm right, but maxima are 5.11 mm and 128.20 mm respectively.
+Small median tracking error is not proof of good action targets, and the
+large right-arm deviation must not be hidden. These numerical/input checks
+rule out the tested transport/normalization discrepancies, not every possible
+evaluation issue or the training failure's root cause. Three failed layouts
+also do not establish a task-wide success rate.
