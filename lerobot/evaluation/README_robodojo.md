@@ -1243,13 +1243,16 @@ OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_
   --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
   --task stack_bowls --eval-num 3 --num-envs 1 \
   --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
-  --save-predicted-video --port 19039 \
+  --save-predicted-video --port 19039 --timeout 7200 \
   --output-dir outputs/evaluation/robodojo/stack_bowls_delta_step8k_20261025_v1
 ```
 
 The cache is a separately copied checkpoint, not an alias to another
 experiment. `checkpoint_provenance.json` verifies all 19 source files,
 including 16 DCP shards, by SHA256. The policy is restored strictly.
+The delta entry defaults to a two-hour simulator timeout: exporting futures
+at every replan and sharing GPUs can make three full 800-step layouts exceed
+one hour. The ordinary absolute entry keeps its existing timeout.
 To use the source weights directly, omit `--checkpoint`; the supplied source
 experiment is the delta entry's default. Use a new output directory for every run.
 

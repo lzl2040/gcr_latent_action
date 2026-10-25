@@ -749,6 +749,7 @@ def test_delta_entrypoint_defaults_and_training_action_mode_guard(tmp_path):
 
     args = delta_parser().parse_args(["eval"])
     assert args.action_mode == "delta" and args.checkpoint.name == "step8k"
+    assert args.timeout == 7200
     assert args.dataset_root.name == "stack_bowls_delta" and args.diagnostic_episodes == [0, 1, 2]
     assert build_parser().parse_args(["eval"]).action_mode == "absolute"
     checkpoint = tmp_path / "step8k/model"

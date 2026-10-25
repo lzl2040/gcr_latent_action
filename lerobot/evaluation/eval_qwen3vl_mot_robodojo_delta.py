@@ -17,6 +17,7 @@ def build_parser():
         checkpoint=EXPERIMENT / "step8k",
         dataset_root=DATASET,
         diagnostic_episodes=[0, 1, 2],
+        timeout=7200,
     )
     return parser
 
