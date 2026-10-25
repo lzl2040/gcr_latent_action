@@ -1,9 +1,9 @@
 # LIBERO 评测记录
 
-更新日期：2026-10-24。
+更新日期：2026-10-25。
 
-本文汇总已完成的有效正式评测，共 66 份结果、13,200 次 rollout。
-其中旧协议 42 份、8,400 次，单次初始化 RNG 的新协议 24 份、4,800 次，分开记录。
+本文汇总已完成的有效正式评测，共 69 份结果、13,800 次 rollout。
+其中旧协议 42 份、8,400 次，单次初始化 RNG 的新协议 27 份、5,400 次，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -524,6 +524,68 @@ Goal 的主要下降来自任务 0（打开中层抽屉），从 17/20 降至 8/
 总计比 12k 少成功 2 次。尚未进行多随机种子重复，
 不能仅凭总成功率下降 0.33 个百分点断言模型整体发生训练退化。
 
+### 1023_v2_4nodes_8gpu：20k，与 16k 同协议对照
+
+本轮使用上传的 `step20k/model`，32 个 DCP 分片的 tensor schema 完整匹配；
+三项选定可训练参数的 SHA256 均与 16k 不同。
+实际策略配置、运行时代码、归一化统计量及 RNG 协议与 16k 相同。
+20k 仍为仅模型上传，缺少训练 metadata，实际 `update_step` 和训练 `world_size`
+未独立核验，步数按用户提供的目录标注。
+
+最初按用户要求以 Goal、Spatial、Object 的顺序串行启动；
+用户随后改为并行，因此保留已在物理 GPU 3 运行的 Goal 进程及其连续 RNG，
+不重启或重复已有 rollout，另在物理 GPU 2 启动 Spatial。
+Spatial 完成后，Object 复用 GPU 2。
+旧串行调度器在三套结果全部核验后被主动终止，退出码为 143；
+这只是已被替代的调度器退出，不是评测失败，三个 suite worker 均正常退出。
+
+沿用 BF16、`primary` + `wrist`、每任务前 20 个固定初态、
+预测 32 步、执行 10 步、Flow 20 步及各 suite 的控制步数上限。
+每套进程只在启动时设置一次 `seed=0`，后续不重设 RNG。
+全部 600 次 rollout 的唯一任务/初态覆盖、有限 7D 动作、失败视频、
+逐任务统计及实际评测设置均已核验；
+权重、策略配置、运行时代码、归一化统计量等输入指纹在评测前后保持不变，
+并核验了 Object 在 Spatial 释放 GPU 后才启动。
+
+| Suite | v2 16k（新协议） | v2 20k（新协议） | 变化 |
+| --- | --- | --- | --- |
+| Object | 95.5%（191/200） | 95.0%（190/200） | -0.5 个百分点 |
+| Spatial | 89.0%（178/200） | 88.0%（176/200） | -1.0 个百分点 |
+| Goal | 82.5%（165/200） | 88.0%（176/200） | +5.5 个百分点 |
+| 合计 | 89.00%（534/600） | 90.33%（542/600） | +1.33 个百分点 |
+
+20k 的全部任务成绩如下，各 suite 的任务编号独立，均为 0–9：
+
+| 任务编号 | Object | Spatial | Goal |
+| --- | --- | --- | --- |
+| 0 | 95.0%（19/20） | 100.0%（20/20） | 70.0%（14/20） |
+| 1 | 100.0%（20/20） | 100.0%（20/20） | 100.0%（20/20） |
+| 2 | 95.0%（19/20） | 100.0%（20/20） | 100.0%（20/20） |
+| 3 | 100.0%（20/20） | 95.0%（19/20） | 80.0%（16/20） |
+| 4 | 100.0%（20/20） | 40.0%（8/20） | 90.0%（18/20） |
+| 5 | 75.0%（15/20） | 95.0%（19/20） | 100.0%（20/20） |
+| 6 | 95.0%（19/20） | 85.0%（17/20） | 90.0%（18/20） |
+| 7 | 90.0%（18/20） | 100.0%（20/20） | 100.0%（20/20） |
+| 8 | 100.0%（20/20） | 100.0%（20/20） | 95.0%（19/20） |
+| 9 | 100.0%（20/20） | 65.0%（13/20） | 55.0%（11/20） |
+
+Goal 的主要改善来自任务 0（打开中层抽屉），从 8/20 提高到 14/20，
+以及任务 3（打开上层抽屉并将碗放入），从 11/20 提高到 16/20；
+两项合计多成功 11 次，与本套净增加的成功次数相同。
+任务 9（将酒瓶放上酒架）仅从 10/20 提高到 11/20，
+两个抽屉任务和酒架任务合计贡献本套 19/24 次失败。
+
+Spatial 的任务 4（从上层抽屉取碗）仍为 8/20，
+任务 9（从木柜上取碗）从 16/20 降至 13/20；
+两项合计贡献本套 19/24 次失败。
+任务 3（取 cookie box 上的碗）从 17/20 提高到 19/20，
+任务 6（取 cookie box 旁的碗）从 18/20 降至 17/20。
+Object 的任务 5（tomato sauce）从 18/20 降至 15/20，贡献 5/10 次失败；
+任务 0（alphabet soup）和任务 3（BBQ sauce）分别从 17/20、18/20 提高到 19/20、20/20。
+
+20k 相比 16k 合计多成功 8 次，改善来自 Goal；
+尚未进行多随机种子重复，不能据此断言后续 checkpoint 会持续提升。
+
 ### 误拷权重评测：曾标作 8k（不计入正式结果）
 
 **2026-10-24 用户确认 `step8k/model` 拷贝了错误权重。**
@@ -591,6 +653,7 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1023_v2_4nodes_8gpu`（更正后的 8k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1023_v2_4nodes_8gpu/step8k/model` |
 | `1023_v2_4nodes_8gpu`（12k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1023_v2_4nodes_8gpu/step12k/model` |
 | `1023_v2_4nodes_8gpu`（16k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1023_v2_4nodes_8gpu/step16k/model` |
+| `1023_v2_4nodes_8gpu`（20k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1023_v2_4nodes_8gpu/step20k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -677,6 +740,9 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1023_v2_4nodes_8gpu` | 16k | Object | `outputs/evaluation/libero/v2_4nodes_8gpu_step16k_run_seeded_object_20trials_20261024/results.json` |
 | `1023_v2_4nodes_8gpu` | 16k | Spatial | `outputs/evaluation/libero/v2_4nodes_8gpu_step16k_run_seeded_spatial_20trials_20261024/results.json` |
 | `1023_v2_4nodes_8gpu` | 16k | Goal | `outputs/evaluation/libero/v2_4nodes_8gpu_step16k_run_seeded_goal_20trials_20261024/results.json` |
+| `1023_v2_4nodes_8gpu` | 20k | Object | `outputs/evaluation/libero/v2_4nodes_8gpu_step20k_run_seeded_object_20trials_20261025/results.json` |
+| `1023_v2_4nodes_8gpu` | 20k | Spatial | `outputs/evaluation/libero/v2_4nodes_8gpu_step20k_run_seeded_spatial_20trials_20261025/results.json` |
+| `1023_v2_4nodes_8gpu` | 20k | Goal | `outputs/evaluation/libero/v2_4nodes_8gpu_step20k_run_seeded_goal_20trials_20261025/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 
