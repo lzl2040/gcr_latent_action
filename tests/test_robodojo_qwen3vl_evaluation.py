@@ -628,6 +628,171 @@ def test_clean_action_autoencoding_uses_real_targets_and_canonical_masks():
     assert not decoded[..., 20:].any()
 
 
+@pytest.fixture
+def delta_adapter(tmp_path):
+    from lerobot.evaluation.scripts.add_robodojo_delta_actions import DELTA_CONTRACT
+
+    meta = tmp_path / "delta/meta"
+    meta.mkdir(parents=True)
+    mean = np.zeros(20)
+    mean[[3, 6, 13, 16]] = 1
+    (meta / "info.json").write_text(
+        json.dumps(
+            {
+                "fps": 25,
+                "features": {"delta_action.ee_ort6d_pos": {"shape": [20]}},
+                "delta_action_contract": DELTA_CONTRACT,
+            }
+        )
+    )
+    std = np.full(20, 0.1)
+    std[[3, 6, 13, 16]] = 0.0001
+    (meta / "stats.json").write_text(
+        json.dumps(
+            {
+                "observation.ee_ort6d_pos": {"mean": [0.1] * 20, "std": [2] * 20},
+                "action.ee_ort6d_pos": {"mean": [123] * 20, "std": [42] * 20},
+                "delta_action.ee_ort6d_pos": {"mean": mean.tolist(), "std": std.tolist()},
+            }
+        )
+    )
+    return RoboDojoAdapter.from_dataset(meta.parent, action_mode="delta")
+
+
+def normalized_delta(adapter, raw):
+    values = torch.zeros(1, len(raw), 40)
+    values[0, :, :20] = (torch.as_tensor(raw, dtype=torch.float32) - adapter.action_mean) / adapter.action_std
+    return values
+
+
+def test_delta_statistics_and_zero_motion_hold_current_pose(delta_adapter):
+    assert delta_adapter.action_feature == "delta_action.ee_ort6d_pos"
+    assert delta_adapter.action_std[3].item() == pytest.approx(1e-3)
+    values = torch.zeros(1, 32, 40)
+    obs = observation()
+    for action in delta_adapter.native_actions(values, obs):
+        for arm in ("left", "right"):
+            np.testing.assert_allclose(action[f"{arm}_ee_pose"], obs["state"][f"{arm}_ee_pose"], atol=1e-7)
+            np.testing.assert_allclose(
+                action[f"{arm}_ee_joint_state"], obs["state"][f"{arm}_ee_joint_state"], atol=1e-7
+            )
+    with pytest.raises(ValueError, match="current observation"):
+        delta_adapter.native_actions(values)
+    obs["state"]["left_ee_pose"][3:] = 0
+    with pytest.raises(ValueError, match="unit norm"):
+        delta_adapter.native_actions(values, obs)
+
+
+def test_delta_uses_world_translation_left_rotations_and_stepwise_gripper_clipping(delta_adapter, caplog):
+    raw = delta_adapter.action_mean.repeat(2, 1).numpy()
+    increments = Rotation.from_euler("xyz", [[0.1, -0.2, 0.3], [-0.15, 0.2, 0.1]])
+    for offset in (0, 10):
+        raw[:, offset : offset + 3] = [[0.01, -0.02, 0.03], [0.04, 0.05, -0.01]]
+        raw[:, offset + 3 : offset + 9] = increments.as_matrix()[:, :, :2].reshape(2, 6)
+        raw[:, offset + 9] = [1, -0.3]
+    actions = delta_adapter.native_actions(normalized_delta(delta_adapter, raw), observation())
+    for arm in ("left", "right"):
+        initial = observation()["state"][f"{arm}_ee_pose"]
+        rotation = Rotation.from_quat(initial[[4, 5, 6, 3]])
+        for index, action in enumerate(actions):
+            rotation = increments[index] * rotation
+            np.testing.assert_allclose(
+                action[f"{arm}_ee_pose"][:3],
+                initial[:3] + raw[: index + 1, :3].sum(0),
+                atol=1e-7,
+            )
+            np.testing.assert_allclose(
+                Rotation.from_quat(action[f"{arm}_ee_pose"][[4, 5, 6, 3]]).as_matrix(),
+                rotation.as_matrix(),
+                atol=2e-7,
+            )
+        assert actions[0][f"{arm}_ee_joint_state"][0] == 1
+        assert actions[1][f"{arm}_ee_joint_state"][0] == pytest.approx(0.7)
+    assert "Clipping left" in caplog.text and "Clipping right" in caplog.text
+
+
+def test_delta_model_reanchors_each_replan_and_keeps_environments_independent(delta_adapter, tmp_path):
+    raw = delta_adapter.action_mean.repeat(32, 1)
+    raw[:, 0] = 0.01
+    normalized = normalized_delta(delta_adapter, raw)
+    policy = SimpleNamespace(
+        config=config(), reset=lambda: None, sample_canonical_action=lambda batch: normalized
+    )
+    model = RoboDojoModel(policy, delta_adapter, device="cpu", replan_steps=2, output_dir=tmp_path / "chunks")
+    model.reset()
+    model.update_obs(observation(3))
+    first = model.get_action()
+    np.testing.assert_allclose([row["left_ee_pose"][0] for row in first], [0.11, 0.12], atol=1e-7)
+    changed = observation(3)
+    changed["state"]["left_ee_pose"][0] = 2
+    other = observation(7)
+    other["state"]["left_ee_pose"][0] = -2
+    model.update_obs_batch([changed, other])
+    second, third = model.get_action_batch([7, 3])
+    assert second[0]["left_ee_pose"][0] == pytest.approx(-1.99)
+    assert third[0]["left_ee_pose"][0] == pytest.approx(2.01)
+    record = np.load(tmp_path / "chunks/chunk_000002_env_003.npz")
+    assert record["action_mode"].item() == "delta"
+    np.testing.assert_allclose(record["unnormalized_actions"][:, 0], 0.01, atol=1e-8)
+    assert (
+        json.loads((tmp_path / "chunks/inference.jsonl").read_text().splitlines()[0])["action_mode"]
+        == "delta"
+    )
+    model.reset()
+    with pytest.raises(RuntimeError, match="update_obs"):
+        model.get_action()
+
+
+def test_delta_entrypoint_defaults_and_training_action_mode_guard(tmp_path):
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo import validate_training_action_mode
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta import build_parser as delta_parser
+
+    args = delta_parser().parse_args(["eval"])
+    assert args.action_mode == "delta" and args.checkpoint.name == "step8k"
+    assert args.dataset_root.name == "stack_bowls_delta" and args.diagnostic_episodes == [0, 1, 2]
+    assert build_parser().parse_args(["eval"]).action_mode == "absolute"
+    checkpoint = tmp_path / "step8k/model"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / ".metadata").touch()
+    (tmp_path / "config.json").write_text('{"type":"qwen3vl_mot"}')
+    (tmp_path / "train_config.json").write_text(
+        json.dumps(
+            {"policy": {"type": "qwen3vl_mot"}, "data_mix": "delta_robodojo_stack_bowl", "stage": "finetune"}
+        )
+    )
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "meta/stats.json").write_text("{}")
+    args.checkpoint, args.dataset_root = checkpoint.parent, tmp_path
+    assert validate_training_action_mode(args)["training_configuration_verified"]
+    args.action_mode = "absolute"
+    with pytest.raises(ValueError, match="Action mode"):
+        validate_training_action_mode(args)
+
+
+def test_delta_contract_is_required_and_not_replaced_by_absolute_statistics(delta_adapter, tmp_path):
+    root = tmp_path / "delta"
+    path = root / "meta/info.json"
+    payload = json.loads(path.read_text())
+    payload["delta_action_contract"]["reference"] = "consecutive_action_target"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="contract"):
+        RoboDojoAdapter.from_dataset(root, action_mode="delta")
+    with pytest.raises(ValueError, match="Unsupported"):
+        RoboDojoAdapter.from_dataset(root, action_mode="other")
+
+
+def test_delta_diagnostics_measure_integrated_targets_not_isolated_increments(delta_adapter):
+    from lerobot.evaluation.robodojo_diagnostics import action_metrics
+
+    target = torch.zeros(1, 32, 40)
+    predicted = target.clone()
+    predicted[:, :, 0] = 0.1  # std=0.1, so each step adds one centimeter.
+    metrics = action_metrics(predicted, target, delta_adapter, 10, observation())
+    assert metrics["left"]["first_xyz_l2_m"] == pytest.approx(0.01, abs=1e-7)
+    assert metrics["left"]["prefix_xyz_mean_l2_m"] == pytest.approx(0.055, abs=1e-7)
+    assert metrics["left"]["xyz_mean_l2_m"] == pytest.approx(0.165, abs=1e-7)
+
+
 def test_diagnostic_samples_include_configured_validation_and_check_episode_bounds():
     from lerobot.evaluation.robodojo_diagnostics import diagnostic_samples
 

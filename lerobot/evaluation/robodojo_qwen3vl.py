@@ -55,13 +55,33 @@ class RoboDojoAdapter:
     action_mean: torch.Tensor
     action_std: torch.Tensor
     fps: int
+    action_mode: str = "absolute"
+
+    @property
+    def action_feature(self) -> str:
+        if self.action_mode not in ("absolute", "delta"):
+            raise ValueError(f"Unsupported action mode: {self.action_mode}")
+        return "delta_action.ee_ort6d_pos" if self.action_mode == "delta" else "action.ee_ort6d_pos"
 
     @classmethod
-    def from_dataset(cls, root: Path) -> RoboDojoAdapter:
+    def from_dataset(cls, root: Path, *, action_mode: str = "absolute") -> RoboDojoAdapter:
+        if action_mode not in ("absolute", "delta"):
+            raise ValueError(f"Unsupported action mode: {action_mode}")
         info = json.loads((root / "meta/info.json").read_text())
         stats = json.loads((root / "meta/stats.json").read_text())
+        action_key = "action.ee_ort6d_pos"
+        if action_mode == "delta":
+            from lerobot.evaluation.scripts.add_robodojo_delta_actions import DELTA_CONTRACT
+
+            if info.get("delta_action_contract") != DELTA_CONTRACT:
+                raise ValueError(
+                    "Delta evaluation requires the verified X-WAM measured-state increment contract."
+                )
+            action_key = "delta_action.ee_ort6d_pos"
+            if info["features"][action_key]["shape"] != [20]:
+                raise ValueError("Delta evaluation requires the saved 20D ort6d feature.")
         values = []
-        for key in ("observation.ee_ort6d_pos", "action.ee_ort6d_pos"):
+        for key in ("observation.ee_ort6d_pos", action_key):
             mean = _finite_array(stats[key]["mean"], (20,), f"{key} mean")
             std = _finite_array(stats[key]["std"], (20,), f"{key} std")
             if np.any(std < 0):
@@ -72,7 +92,7 @@ class RoboDojoAdapter:
         fps = info["fps"]
         if not isinstance(fps, int) or isinstance(fps, bool) or fps <= 0:
             raise ValueError("Training metadata must declare a positive integer source fps.")
-        return cls(*values, fps=fps)
+        return cls(*values, fps=fps, action_mode=action_mode)
 
     def observation_batch(self, observation: dict, config, device: torch.device) -> dict:
         if config.max_state_dim != 40 or config.max_action_dim != 40:
@@ -109,7 +129,7 @@ class RoboDojoAdapter:
             for key, value in batch.items()
         }
 
-    def native_actions(self, normalized: torch.Tensor) -> list[dict]:
+    def denormalize_actions(self, normalized: torch.Tensor) -> np.ndarray:
         if normalized.ndim != 3 or normalized.shape[0] != 1 or normalized.shape[2] != 40:
             raise ValueError("Expected one canonical action chunk with shape (1,T,40).")
         if normalized.shape[1] == 0 or not torch.isfinite(normalized).all():
@@ -117,15 +137,43 @@ class RoboDojoAdapter:
         raw = normalized[0, :, :20].detach().float().cpu() * self.action_std + self.action_mean
         if not torch.isfinite(raw).all():
             raise ValueError("Inverse-normalized actions contain nonfinite values.")
-        raw = raw.numpy()
+        return raw.numpy()
+
+    def native_actions(self, normalized: torch.Tensor, observation: dict | None = None) -> list[dict]:
+        raw = self.denormalize_actions(normalized)
+        anchor = None
+        if self.action_mode == "delta":
+            if observation is None:
+                raise ValueError("Delta integration requires the current observation at every replan.")
+            anchor = state_to_canonical(observation)
         chunks = [{} for _ in raw]
         for arm, offset in zip(ARMS, (0, 10), strict=True):
             # Reuse the existing interleaved-column Gram-Schmidt projection.
             rotation = Rotation.from_euler("xyz", ort6d_to_controls(raw[:, offset + 3 : offset + 9]))
+            positions = raw[:, offset : offset + 3].astype(np.float64)
+            grip = raw[:, offset + 9 : offset + 10].astype(np.float64)
+            clipped = False
+            if anchor is not None:
+                current_position = anchor[offset : offset + 3].astype(np.float64).copy()
+                pose = np.asarray(observation["state"][f"{arm}_ee_pose"])
+                current_rotation = Rotation.from_quat(pose[[4, 5, 6, 3]])
+                current_gripper = float(anchor[offset + 9])
+                integrated_rotations = []
+                for index in range(len(raw)):
+                    current_position += positions[index]
+                    current_rotation = rotation[index] * current_rotation
+                    candidate = current_gripper + float(grip[index, 0])
+                    clipped |= not 0 <= candidate <= 1
+                    current_gripper = float(np.clip(candidate, 0, 1))
+                    positions[index] = current_position
+                    grip[index, 0] = current_gripper
+                    integrated_rotations.append(current_rotation)
+                rotation = Rotation.concatenate(integrated_rotations)
             xyzw = rotation.as_quat()
-            poses = np.concatenate((raw[:, offset : offset + 3], xyzw[:, [3, 0, 1, 2]]), axis=-1)
-            grip = raw[:, offset + 9 : offset + 10]
-            if np.any((grip < 0) | (grip > 1)):
+            poses = np.concatenate((positions, xyzw[:, [3, 0, 1, 2]]), axis=-1).astype(np.float32)
+            if not np.isfinite(poses).all():
+                raise ValueError("Decoded absolute targets contain nonfinite values.")
+            if clipped or np.any((grip < 0) | (grip > 1)):
                 logger.warning("Clipping %s gripper predictions to RoboDojo's native [0,1] range.", arm)
             for action, pose, gripper in zip(chunks, poses, grip.clip(0, 1), strict=True):
                 action[f"{arm}_ee_pose"] = pose.astype(np.float32)
@@ -200,7 +248,7 @@ class RoboDojoModel:
             else:
                 prediction = self.policy.generate_validation(batch, seed=None)
                 predicted = prediction["action_normalized"]
-        actions = self.adapter.native_actions(predicted)
+        actions = self.adapter.native_actions(predicted, observation)
         if len(actions) < self.replan_steps:
             raise ValueError("The sampled chunk is shorter than replan_steps.")
         seconds = time.perf_counter() - started
@@ -213,6 +261,8 @@ class RoboDojoModel:
         np.savez_compressed(
             path,
             normalized_actions=predicted.detach().float().cpu().numpy(),
+            unnormalized_actions=self.adapter.denormalize_actions(predicted),
+            action_mode=np.array(self.adapter.action_mode),
             normalized_current_state=batch["observation.state"].float().cpu().numpy(),
             current_state=state_to_canonical(observation),
             **state_arrays,
@@ -263,6 +313,8 @@ class RoboDojoModel:
             "reset_index": self.reset_index,
             "env_idx": index,
             "instruction": observation["instruction"],
+            "action_mode": self.adapter.action_mode,
+            "action_feature": self.adapter.action_feature,
             "inference_seconds": seconds,
             "prediction_export_seconds": export_seconds,
             "control_step": control_step,

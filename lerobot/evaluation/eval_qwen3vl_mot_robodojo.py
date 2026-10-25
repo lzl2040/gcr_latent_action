@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -33,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path, default=EXPERIMENT / "step4k")
     parser.add_argument("--policy-config", type=Path)
     parser.add_argument("--dataset-root", type=Path, default=DATASET)
+    parser.add_argument(
+        "--action-mode",
+        choices=("absolute", "delta"),
+        default="absolute",
+        help="Delta mode cumulatively integrates measured-state increments from each current observation.",
+    )
     parser.add_argument("--qwen3vl-dir", type=Path, default=PRETRAINED / "Qwen3-VL-4B-Instruct")
     parser.add_argument("--cosmos3-dir", type=Path, default=PRETRAINED / "Cosmos3-Edge")
     parser.add_argument("--stage1-text-dir", type=Path, default=PRETRAINED / "siglip2-base-patch16-224")
@@ -119,6 +126,40 @@ def create_workspace(root: Path, assets: Path, workspace: Path) -> None:
     (integration / "deploy.yml").write_text("eval_batch: true\naction_type: ee\n")
 
 
+def validate_training_action_mode(args) -> dict:
+    from lerobot.evaluation.eval_qwen3vl_mot_libero import checkpoint_paths
+    from lerobot.evaluation.robodojo_diagnostics import matching_training_config
+
+    _, policy_path = checkpoint_paths(args.checkpoint, args.policy_config)
+    training_path = args.training_config or policy_path.with_name("train_config.json")
+    if not training_path.is_file():
+        if args.action_mode == "delta" or args.training_config is not None:
+            raise FileNotFoundError(f"Missing training configuration: {training_path}")
+        logger.warning("No saved training configuration; absolute action semantics cannot be cross-checked.")
+        return {"action_mode": args.action_mode, "training_configuration_verified": False}
+    training_path = matching_training_config(args)
+    saved = json.loads(training_path.read_text())
+    expected = {"absolute": "robodojo", "delta": "delta_robodojo_stack_bowl"}[args.action_mode]
+    if saved["data_mix"] != expected or saved["stage"] != "finetune":
+        raise ValueError(
+            f"Action mode {args.action_mode!r} requires finetuning data_mix={expected!r}; "
+            f"checkpoint declares {saved['data_mix']!r}/{saved['stage']!r}."
+        )
+    stats_path = args.dataset_root / "meta/stats.json"
+    return {
+        "action_mode": args.action_mode,
+        "training_configuration_verified": True,
+        "training_config": str(training_path),
+        "data_mix": saved["data_mix"],
+        "dataset_root": str(args.dataset_root.resolve()),
+        "stats_sha256": hashlib.sha256(stats_path.read_bytes()).hexdigest(),
+        "normalization": "per-feature mean/std with std floor 1e-3",
+        "integration_anchor": "current measured observation at each replan"
+        if args.action_mode == "delta"
+        else None,
+    }
+
+
 def load_model(args):
     import numpy as np
     import torch
@@ -126,11 +167,14 @@ def load_model(args):
     from lerobot.evaluation.eval_qwen3vl_mot_libero import PredictionVideoWriter, load_policy
     from lerobot.evaluation.robodojo_qwen3vl import RoboDojoAdapter, RoboDojoModel
 
+    contract = validate_training_action_mode(args)
+    adapter = RoboDojoAdapter.from_dataset(args.dataset_root, action_mode=args.action_mode)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "evaluation_contract.json").write_text(json.dumps(contract, indent=2) + "\n")
     if not args.device.startswith("cuda") or not torch.cuda.is_available():
         raise RuntimeError("Qwen3-VL MoT evaluation requires a CUDA GPU.")
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    adapter = RoboDojoAdapter.from_dataset(args.dataset_root)
     policy = load_policy(args)
     model = RoboDojoModel(
         policy,
@@ -298,6 +342,8 @@ def evaluate(args) -> None:
         str(args.checkpoint.resolve()),
         "--dataset-root",
         str(args.dataset_root.resolve()),
+        "--action-mode",
+        args.action_mode,
         "--qwen3vl-dir",
         str(args.qwen3vl_dir.resolve()),
         "--cosmos3-dir",
@@ -321,6 +367,8 @@ def evaluate(args) -> None:
     ]
     if args.policy_config:
         policy_command.extend(("--policy-config", str(args.policy_config.resolve())))
+    if args.training_config:
+        policy_command.extend(("--training-config", str(args.training_config.resolve())))
     if args.inference_steps is not None:
         policy_command.extend(("--inference-steps", str(args.inference_steps)))
     if args.save_predicted_video:
@@ -408,6 +456,7 @@ def evaluate(args) -> None:
         "replan_steps": args.replan_steps,
         "save_predicted_video": args.save_predicted_video,
         "checkpoint": str(args.checkpoint.resolve()),
+        "action_mode": args.action_mode,
         "dataset_root": str(args.dataset_root.resolve()),
         "assets": str(args.assets.resolve()),
         "simulator": "Isaac Sim 6 (local compatibility runtime)",
@@ -467,8 +516,8 @@ def evaluate(args) -> None:
     logger.info("Completed native RoboDojo evaluation: %s", summary_path)
 
 
-def main() -> None:
-    parser = build_parser()
+def main(parser: argparse.ArgumentParser | None = None) -> None:
+    parser = build_parser() if parser is None else parser
     args = parser.parse_args()
     for name in ("replan_steps", "repeat", "num_envs", "startup_timeout", "timeout"):
         if getattr(args, name) <= 0:

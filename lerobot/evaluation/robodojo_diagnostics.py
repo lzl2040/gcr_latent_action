@@ -33,7 +33,8 @@ def training_dataset(args, policy_config):
     from lerobot.common.datasets.contrastive_dataset import MultiModalContrastiveDataset
 
     saved = json.loads(args.training_config.read_text())
-    if saved["data_mix"] != "robodojo" or saved["stage"] != "finetune":
+    mix = saved["data_mix"]
+    if mix not in ("robodojo", "delta_robodojo_stack_bowl") or saved["stage"] != "finetune":
         raise ValueError("This diagnostic requires the saved RoboDojo finetuning configuration.")
     data = dict(saved["dataset"])
     data["image_transforms"] = SimpleNamespace(**data["image_transforms"])
@@ -47,11 +48,11 @@ def training_dataset(args, policy_config):
         data_mix=saved["data_mix"],
         vla2root_json=str(Path(__file__).resolve().parents[2] / "vla2root.json"),
         dataset_size_one_epoch=data["dataset_size_one_epoch"],
-        heldout_eval_dataset_names=("robodojo",),
+        heldout_eval_dataset_names=(mix,),
         heldout_eval_episodes_per_dataset=generation["episodes_per_dataset"],
         heldout_eval_seed=generation["seed"],
     )
-    if dataset.dataset_names != ["robodojo"]:
+    if dataset.dataset_names != [mix]:
         raise ValueError("Expected exactly the supplied RoboDojo dataset.")
     if Path(dataset.datasets[0].root).resolve() != args.dataset_root.resolve():
         raise ValueError("Training loader resolved a different dataset root.")
@@ -98,7 +99,11 @@ def input_parity(validation: dict, deployment: dict) -> dict:
 
 
 def action_metrics(
-    prediction: torch.Tensor, target: torch.Tensor, adapter: RoboDojoAdapter, prefix: int
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    adapter: RoboDojoAdapter,
+    prefix: int,
+    observation: dict | None = None,
 ) -> dict:
     if prediction.shape != target.shape or prediction.ndim != 3 or prediction.shape[-1] != 40:
         raise ValueError("Prediction and ground truth must have matching (1,T,40) shapes.")
@@ -107,7 +112,8 @@ def action_metrics(
     if not torch.isfinite(prediction).all() or not torch.isfinite(target).all():
         raise ValueError("Diagnostic actions must be finite.")
     error = (prediction[..., :20].float() - target[..., :20].float()).square()
-    predicted_native, target_native = adapter.native_actions(prediction), adapter.native_actions(target)
+    predicted_native = adapter.native_actions(prediction, observation)
+    target_native = adapter.native_actions(target, observation)
     result = {"normalized_mse": error.mean().item(), "prefix_normalized_mse": error[:, :prefix].mean().item()}
     for arm in ARMS:
         p = np.stack([a[f"{arm}_ee_pose"] for a in predicted_native])
@@ -222,6 +228,8 @@ def diagnose(args) -> None:
         "checkpoint": str(args.checkpoint.resolve()),
         "training_config": str(args.training_config.resolve()),
         "dataset_root": str(args.dataset_root.resolve()),
+        "action_mode": adapter.action_mode,
+        "action_feature": adapter.action_feature,
         "validation_split": dataset.validation_split,
         "saved_inference_steps": policy.config.inference_steps,
         "window_mode": dataset.window_mode,
@@ -259,7 +267,9 @@ def diagnose(args) -> None:
         if policy.physical_embedding_flow:
             with torch.autocast(device.type, dtype=torch.bfloat16):
                 decoded = clean_action_autoencoding(policy, batch)[:, : policy.config.n_action_steps]
-            entry["clean_action_autoencoding"] = action_metrics(decoded, target, adapter, args.replan_steps)
+            entry["clean_action_autoencoding"] = action_metrics(
+                decoded, target, adapter, args.replan_steps, observation
+            )
             predictions["decoded_ground_truth_embedding"] = decoded.float().cpu().numpy()
         for steps in dict.fromkeys([saved_steps, *args.diagnostic_inference_steps]):
             policy.config.inference_steps = steps
@@ -268,16 +278,22 @@ def diagnose(args) -> None:
             else:
                 with torch.autocast(device.type, dtype=torch.bfloat16):
                     predicted = policy.generate_validation(deployment, seed=seed)["action_normalized"]
-            entry["free_running"][str(steps)] = action_metrics(predicted, target, adapter, args.replan_steps)
+            entry["free_running"][str(steps)] = action_metrics(
+                predicted, target, adapter, args.replan_steps, observation
+            )
             predictions[f"prediction_steps_{steps}"] = predicted.float().cpu().numpy()
         policy.config.inference_steps = saved_steps
         current_raw = (
             batch["observation.state"][:, 0, :20].float().cpu() * adapter.state_std + adapter.state_mean
         )
         predictions["current_state_raw"] = current_raw.numpy()
+        hold_raw = current_raw
+        if adapter.action_mode == "delta":
+            hold_raw = torch.zeros_like(current_raw)
+            hold_raw[:, [3, 6, 13, 16]] = 1
         hold = torch.zeros_like(target)
-        hold[..., :20] = ((current_raw - adapter.action_mean) / adapter.action_std).to(device)[:, None]
-        entry["hold_current_baseline"] = action_metrics(hold, target, adapter, args.replan_steps)
+        hold[..., :20] = ((hold_raw - adapter.action_mean) / adapter.action_std).to(device)[:, None]
+        entry["hold_current_baseline"] = action_metrics(hold, target, adapter, args.replan_steps, observation)
         entry["ground_truth_conditioned_losses"] = conditional_losses(policy, batch, seed, device)
         directory = (
             args.output_dir

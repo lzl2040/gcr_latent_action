@@ -1104,13 +1104,13 @@ reframe. X-WAM itself stores axis-angle deltas in a 14D action; these new
 or released normalization statistics.
 
 **Exporting does not switch model training or evaluation to delta actions.**
-Current canonical feature selection and the native evaluation adapter remain
-absolute-action based. A delta-trained model must explicitly select the new
-feature/statistics and use a matching evaluator: cumulatively add translation
-and gripper increments, left-multiply rotations (`R = delta_R @ R`), clip the
-integrated gripper to its valid range, and restart integration from the current
-observed state at each replan. Do not run delta predictions through the existing
-absolute-action adapter.
+The `delta_robodojo_stack_bowl` training mix explicitly selects the new feature;
+the ordinary evaluation entry still defaults to absolute actions. For a model
+trained with that mix, use the delta evaluation entry documented below. It
+cumulatively adds translation and gripper increments, left-multiplies rotations
+(`R = delta_R @ R`), clips the integrated gripper at every step, and restarts
+integration from the current observed state at each replan. Do not run delta
+predictions through an absolute-action adapter.
 
 By default videos are symlinked to avoid copying approximately 65 GB. Use
 `--video-mode copy` for an independent export. Encoded files and original
@@ -1225,3 +1225,66 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 
 `--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
 conftest; the dataset tools do not require robot hardware or a simulator.
+
+## Evaluating a delta-trained stack-bowls checkpoint
+
+Use the dedicated entry, which defaults to the supplied
+`robodojo_stack_bowl_2nodes_8gpu/step8k` checkpoint and the local
+`/data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/stack_bowls_delta`
+subset. The existing absolute-action entry keeps its previous defaults.
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint "$CACHE/robodojo_stack_bowl_2nodes_8gpu/step8k" \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --save-predicted-video --port 19039 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_step8k_20261025_v1
+```
+
+The cache is a separately copied checkpoint, not an alias to another
+experiment. `checkpoint_provenance.json` verifies all 19 source files,
+including 16 DCP shards, by SHA256. The policy is restored strictly.
+To use the source weights directly, omit `--checkpoint`; the supplied source
+experiment is the delta entry's default. Use a new output directory for every run.
+
+The evaluator checks that `train_config.json` exactly matches the saved policy
+snapshot and declares `data_mix=delta_robodojo_stack_bowl`, then verifies the
+dataset's measured-state increment contract. It uses
+`delta_action.ee_ort6d_pos` mean/std, including the training loader's `1e-3`
+std floor, while states retain their own absolute
+`observation.ee_ort6d_pos` statistics. Neither absolute-action statistics nor
+X-WAM's released 14D quantile statistics are substituted.
+
+Integration follows `policy/X_WAM/model.py::_integrate_deltas`: world-axis
+translation accumulation, left-multiplied rotation accumulation, and stepwise
+clipped gripper accumulation. Our 20D relative rotations are projected from
+interleaved ort6d columns; they are not Euler-angle increments. Anchors are
+each environment's latest measured state, not the preceding predicted endpoint.
+No X-WAM absolute-frame reframe is needed because this dataset's states and
+targets use the native environment frame.
+
+The policy writes `evaluation_contract.json` with the normalization metadata
+hash. Every chunk saves its action mode, unnormalized increments, observed
+state, normalized prediction, and integrated absolute native targets. Native
+videos are under the run's `simulator/eval_result/` tree; matching model futures
+are under `policy/predictions/`. Native success remains the benchmark criterion;
+small prediction loss or offline reconstruction error is not task success.
+
+Before model rollouts, all **44,774 real labels across 100 episodes** were
+round-tripped through the deployment adapter in chunks of up to 32, reanchoring
+also in the middle of episodes. Integrated outputs match the next measured
+state, with maximum errors `7.46e-9 m` in position, `5.87e-6 degrees` in rotation,
+and `2.99e-8` in gripper. The evidence is
+`outputs/evaluation/robodojo/stack_bowls_delta_step8k_20261025_preflight/ground_truth_transport.json`.
+
+The same entry supports `offline`, `serve`, and `diagnose`. Diagnostic episode
+IDs refer to the **subset** (defaults 0, 1, 2), not original IDs 3000, 3001, 3002.
+Its physical action errors compare cumulatively integrated targets from the
+same anchor; the hold-current baseline uses zero-motion deltas. As before,
+`diagnose` uses authentic training windows, not a held-out task-success test.
