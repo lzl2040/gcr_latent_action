@@ -1283,6 +1283,15 @@ state, with maximum errors `7.46e-9 m` in position, `5.87e-6 degrees` in rotatio
 and `2.99e-8` in gripper. The evidence is
 `outputs/evaluation/robodojo/stack_bowls_delta_step8k_20261025_preflight/ground_truth_transport.json`.
 
+The actual training loader was also checked using the saved policy configuration
+on subset episodes 0, 1, and 6. All three current camera tensors, masks, and
+sample rates agree exactly with deployment; maximum normalized current-state
+roundtrip error is `7.75e-7`. Normalized delta targets agree exactly with the
+adapter's own-feature mean/std calculation, including the `1e-3` floor. See
+`outputs/evaluation/robodojo/stack_bowls_delta_step8k_20261025_preflight/training_loader_parity.json`.
+These checks establish local label transport and input parity, not identity of
+unavailable remote training dataset/statistics snapshots or native task success.
+
 The same entry supports `offline`, `serve`, and `diagnose`. Diagnostic episode
 IDs refer to the **subset** (defaults 0, 1, 2), not original IDs 3000, 3001, 3002.
 Its physical action errors compare cumulatively integrated targets from the
