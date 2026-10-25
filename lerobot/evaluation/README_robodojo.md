@@ -1297,3 +1297,45 @@ IDs refer to the **subset** (defaults 0, 1, 2), not original IDs 3000, 3001, 300
 Its physical action errors compare cumulatively integrated targets from the
 same anchor; the hold-current baseline uses zero-motion deltas. As before,
 `diagnose` uses authentic training windows, not a held-out task-success test.
+
+### Delta checkpoint: authentic training-window diagnostics
+
+The new checkpoint was independently restored for a diagnostic run at
+`outputs/evaluation/robodojo/stack_bowls_delta_step8k_20261025_diagnostics_v1/`.
+It used the same cached weights/backbones and subset as the native command,
+`--diagnostic-episodes 0 6 --diagnostic-frames 0
+--diagnostic-inference-steps 20 --seed 0`, on physical GPU 1 in a separate
+process. It includes the two saved configured validation windows and two
+additional initial windows. Seeds are 0, 1, 2, and 3 in sample order.
+
+| Subset episode | Global frame | Sample type | Free-running normalized action MSE | Joint conditioned reconstruction loss at sigma 0.5 |
+|---|---:|---|---:|---:|
+| 6 | 2299 | Configured validation | 0.861748 | 0.024446 |
+| 85 | 39103 | Configured validation | 0.211980 | 0.008558 |
+| 0 | 0 | Additional initial window | 1.298735 | 0.055249 |
+| 6 | 1884 | Additional initial window | 1.339103 | 0.023299 |
+
+In each case, generation using the authentic training batch and deployment
+conditioning produced **exactly the same entire normalized action tensor**
+after sharing the exact current normalized state (max difference 0). These
+are real training images/states, with no simulator, layout, or visual-domain
+change needed to observe the free-running errors. The compared task, masks,
+cameras, sample rate, and target normalization match the verified loader.
+
+Mean first-10 integrated position errors against demonstrations were,
+respectively, left/right **0.31/0.72 cm**, **0.20/1.18 cm**, **0.13/2.30 cm**,
+and **1.83/4.76 cm**. Integration of predicted deltas is included in these
+physical errors; this is not merely a per-step increment comparison.
+
+Low reconstruction loss at an intermediate ground-truth-conditioned noise
+level is not free-running accuracy. Clean frozen physical-codec action
+autoencoding also had nonzero normalized MSEs (0.210356, 0.037166, 0.457732,
+0.105241), but these are not a proven irreducible loss floor or a complete
+explanation for rollout behavior. A different valid plan can differ from a
+demonstration, so offline deviation alone does not establish native failure.
+The full measurements are in `diagnostics.json` and per-sample `metrics.json`.
+
+The native layout-0 and training episode-0 initial camera comparison is saved
+in the native run as `training_vs_native_initial.jpg`. Bowl positions,
+appearance, and apparent size differ; therefore direct native-versus-training
+action MSE is not used to attribute errors to the adapter or sampler.
