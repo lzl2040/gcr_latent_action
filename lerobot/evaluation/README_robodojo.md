@@ -1410,3 +1410,38 @@ large right-arm deviation must not be hidden. These numerical/input checks
 rule out the tested transport/normalization discrepancies, not every possible
 evaluation issue or the training failure's root cause. Three failed layouts
 also do not establish a task-wide success rate.
+
+### Delta checkpoint: step10k comparison
+
+The next checkpoint from the same `robodojo_stack_bowl_2nodes_8gpu`
+experiment is cached separately under
+`outputs/evaluation/robodojo/runtime_assets/robodojo_stack_bowl_2nodes_8gpu/step10k/`.
+Its policy/training configurations are byte-identical to the verified step8k
+configuration. All 19 files (25,200,797,460 bytes, including 16 DCP shards)
+were SHA256-verified against the supplied source. All 16 model shard hashes
+differ from step8k; the DCP metadata contains 2560 state-dict entries and all
+16910 storage references fit within their referenced files. The evidence is
+`checkpoint_provenance_step10k.json` alongside the cache's original, unchanged
+step8k provenance.
+
+The matched native command retains seed 0, layouts 0/1/2, one environment,
+replan 10, the saved 20 denoising steps, delta normalization/integration,
+three cameras, and predicted-future export. It explicitly permits two hours:
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint "$CACHE/robodojo_stack_bowl_2nodes_8gpu/step10k" \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --save-predicted-video --port 19041 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_step10k_20261026_v1
+```
+
+Use a fresh output directory when repeating this command. The earlier step8k
+layout-2 policy RNG was restarted after timeout, as documented above; that
+caveat must remain explicit when comparing it against an uninterrupted run.
