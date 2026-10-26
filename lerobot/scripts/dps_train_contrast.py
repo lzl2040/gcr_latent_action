@@ -325,6 +325,7 @@ def _load_stage2_resume_policy_config(
         "action_prediction_reconstruction_loss_weight",
         "state_prediction_reconstruction_loss_weight",
         "time_sampling_distribution",
+        "time_sampling_shift",
         "time_sampling_beta_alpha",
         "time_sampling_beta_beta",
         "time_sampling_beta_probability",

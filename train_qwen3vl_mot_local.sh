@@ -41,6 +41,7 @@ PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
 STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
 TIME_SAMPLING_DISTRIBUTION="${TIME_SAMPLING_DISTRIBUTION:-}"
+TIME_SAMPLING_SHIFT="${TIME_SAMPLING_SHIFT:-}"
 TIME_SAMPLING_BETA_ALPHA="${TIME_SAMPLING_BETA_ALPHA:-}"
 TIME_SAMPLING_BETA_BETA="${TIME_SAMPLING_BETA_BETA:-}"
 TIME_SAMPLING_BETA_PROBABILITY="${TIME_SAMPLING_BETA_PROBABILITY:-}"
@@ -99,10 +100,13 @@ if [[ -n "$STATE_PRED_RECON_WEIGHT" ]]; then
 fi
 if [[ -n "$TIME_SAMPLING_DISTRIBUTION" ]]; then
     case "$TIME_SAMPLING_DISTRIBUTION" in
-        uniform|beta|mixed) ;;
-        *) echo "Error: TIME_SAMPLING_DISTRIBUTION must be uniform, beta or mixed" >&2; exit 1 ;;
+        uniform|beta|mixed|shifted_uniform) ;;
+        *) echo "Error: TIME_SAMPLING_DISTRIBUTION must be uniform, beta, mixed or shifted_uniform" >&2; exit 1 ;;
     esac
     PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_distribution="${TIME_SAMPLING_DISTRIBUTION}")
+fi
+if [[ -n "$TIME_SAMPLING_SHIFT" ]]; then
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_shift="${TIME_SAMPLING_SHIFT}")
 fi
 if [[ -n "$TIME_SAMPLING_BETA_ALPHA" ]]; then
     PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_beta_alpha="${TIME_SAMPLING_BETA_ALPHA}")

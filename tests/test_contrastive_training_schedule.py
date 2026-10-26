@@ -387,6 +387,9 @@ def test_stage2_resume_preserves_or_explicitly_overrides_prediction_reconstructi
 @pytest.mark.parametrize("name,saved_value,runtime_value", [
     ("state_prediction_reconstruction_loss_weight", 0.2, 0.0),
     ("time_sampling_distribution", "mixed", "beta"),
+    ("time_sampling_distribution", "shifted_uniform", "mixed"),
+    ("time_sampling_distribution", "mixed", "shifted_uniform"),
+    ("time_sampling_shift", 3.0, 2.0),
     ("time_sampling_beta_alpha", 2.0, 1.5),
     ("time_sampling_beta_beta", 2.0, 1.0),
     ("time_sampling_beta_probability", 0.3, 0.5),
@@ -417,7 +420,7 @@ def test_old_embedding_config_defaults_missing_time_and_state_controls(tmp_path)
     path = tmp_path / "config.json"
     payload = json.loads(path.read_text())
     for name in (
-        "state_prediction_reconstruction_loss_weight", "time_sampling_distribution",
+        "state_prediction_reconstruction_loss_weight", "time_sampling_distribution", "time_sampling_shift",
         "time_sampling_beta_alpha", "time_sampling_beta_beta", "time_sampling_beta_probability",
     ):
         del payload[name]
@@ -429,23 +432,26 @@ def test_old_embedding_config_defaults_missing_time_and_state_controls(tmp_path)
     _load_stage2_resume_policy_config(cfg, args=[])
     assert cfg.policy.state_prediction_reconstruction_loss_weight == 0.1
     assert cfg.policy.time_sampling_distribution == "uniform"
+    assert cfg.policy.time_sampling_shift == 1.0
     assert cfg.policy.time_sampling_beta_alpha == 1.5
     assert cfg.policy.time_sampling_beta_beta == 1.0
     assert cfg.policy.time_sampling_beta_probability == 0.5
 
 
-@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed"])
+@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed", "shifted_uniform"])
 def test_stage2_cli_decodes_time_and_prediction_reconstruction_controls(distribution):
     cfg = draccus.parse(FSDPTrainPipelineConfig, args=[
         "--dataset.repo_id=whatever", "--policy.type=qwen3vl_mot",
         "--policy.physical_flow_space=embedding",
         f"--policy.time_sampling_distribution={distribution}",
+        "--policy.time_sampling_shift=3",
         "--policy.time_sampling_beta_alpha=2", "--policy.time_sampling_beta_beta=1.25",
         "--policy.time_sampling_beta_probability=0.4",
         "--policy.action_prediction_reconstruction_loss_weight=0",
         "--policy.state_prediction_reconstruction_loss_weight=0.2",
     ])
     assert cfg.policy.time_sampling_distribution == distribution
+    assert cfg.policy.time_sampling_shift == 3.0
     assert cfg.policy.time_sampling_beta_alpha == 2.0
     assert cfg.policy.time_sampling_beta_beta == 1.25
     assert cfg.policy.time_sampling_beta_probability == 0.4
@@ -466,7 +472,7 @@ def test_stage2_launchers_reject_invalid_time_distribution(tmp_path, launcher):
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode != 0
-    assert "TIME_SAMPLING_DISTRIBUTION must be uniform, beta or mixed" in result.stderr
+    assert "TIME_SAMPLING_DISTRIBUTION must be uniform, beta, mixed or shifted_uniform" in result.stderr
 
 
 @pytest.mark.parametrize("name", ["action", "state"])
@@ -503,7 +509,7 @@ def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedd
         "OUTPUT_DIR": str(run_dir), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
         "PHYSICAL_FLOW_SPACE": explicit_mode, "PYTHON_BIN": sys.executable,
         "ACTION_PRED_RECON_WEIGHT": "",
-        "STATE_PRED_RECON_WEIGHT": "", "TIME_SAMPLING_DISTRIBUTION": "",
+        "STATE_PRED_RECON_WEIGHT": "", "TIME_SAMPLING_DISTRIBUTION": "", "TIME_SAMPLING_SHIFT": "",
         "NPROC_PER_NODE": "1", "NNODES": "1", "MASTER_PORT": "29599",
     }
     root = Path(__file__).resolve().parents[1]
@@ -522,10 +528,11 @@ def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedd
     else:
         assert "--policy.action_prediction_reconstruction_loss_weight=" not in result.stdout
         assert "--policy.state_prediction_reconstruction_loss_weight=" not in result.stdout
+    assert "--policy.time_sampling_shift=" not in result.stdout
 
 
 @pytest.mark.parametrize("resume,weight", [(False, "0"), (False, "0.2"), (True, "0.1")])
-@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed"])
+@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed", "shifted_uniform"])
 def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path, resume, weight, distribution):
     run_dir = tmp_path / "run"
     if resume:
@@ -538,6 +545,7 @@ def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path,
         "OUTPUT_DIR": str(run_dir), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
         "PHYSICAL_FLOW_SPACE": "", "ACTION_PRED_RECON_WEIGHT": weight,
         "STATE_PRED_RECON_WEIGHT": weight, "TIME_SAMPLING_DISTRIBUTION": distribution,
+        "TIME_SAMPLING_SHIFT": "3",
         "TIME_SAMPLING_BETA_ALPHA": "2", "TIME_SAMPLING_BETA_BETA": "1.25",
         "TIME_SAMPLING_BETA_PROBABILITY": "0.4",
         "PYTHON_BIN": sys.executable, "NPROC_PER_NODE": "1", "NNODES": "1",
@@ -551,6 +559,7 @@ def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path,
     assert f"--policy.action_prediction_reconstruction_loss_weight={weight}" in result.stdout
     assert f"--policy.state_prediction_reconstruction_loss_weight={weight}" in result.stdout
     assert f"--policy.time_sampling_distribution={distribution}" in result.stdout
+    assert "--policy.time_sampling_shift=3" in result.stdout
     assert "--policy.time_sampling_beta_alpha=2" in result.stdout
     assert "--policy.time_sampling_beta_beta=1.25" in result.stdout
     assert "--policy.time_sampling_beta_probability=0.4" in result.stdout
@@ -561,7 +570,7 @@ def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path,
     (True, "", "", None), (True, "embedding", "", None),
     (False, "", "0", "0"), (True, "", "0", "0"), (True, "", "0.2", "0.2"),
 ])
-@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed"])
+@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed", "shifted_uniform"])
 def test_local_launcher_wires_prediction_reconstruction_weight(
     tmp_path, resume, mode, weight, expected, distribution
 ):
@@ -580,6 +589,7 @@ def test_local_launcher_wires_prediction_reconstruction_weight(
         "WEIGHT_RESUME": str(resume).lower(), "PHYSICAL_FLOW_SPACE": mode,
         "ACTION_PRED_RECON_WEIGHT": weight, "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
         "STATE_PRED_RECON_WEIGHT": weight, "TIME_SAMPLING_DISTRIBUTION": distribution,
+        "TIME_SAMPLING_SHIFT": "3",
         "TIME_SAMPLING_BETA_ALPHA": "2", "TIME_SAMPLING_BETA_BETA": "1.25",
         "TIME_SAMPLING_BETA_PROBABILITY": "0.4",
         "OUTPUT_DIR": str(tmp_path / "run"), "MASTER_PORT": "29599",
@@ -596,6 +606,7 @@ def test_local_launcher_wires_prediction_reconstruction_weight(
         assert f"--policy.action_prediction_reconstruction_loss_weight={expected}" in result.stdout
         assert f"--policy.state_prediction_reconstruction_loss_weight={expected}" in result.stdout
     assert f"--policy.time_sampling_distribution={distribution}" in result.stdout
+    assert "--policy.time_sampling_shift=3" in result.stdout
     assert "--policy.time_sampling_beta_alpha=2" in result.stdout
     assert "--policy.time_sampling_beta_beta=1.25" in result.stdout
     assert "--policy.time_sampling_beta_probability=0.4" in result.stdout

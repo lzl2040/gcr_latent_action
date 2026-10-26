@@ -73,6 +73,49 @@ z_sigma - velocity_target
 一般不等于 `z0`。只有 `sigma=1` 等特殊情况下，两种写法才一致。
 当 `sigma` 很小时，输入已经接近干净 embedding，减去完整速度反而会过度修正。
 
+### 可选训练分布：`shifted_uniform`
+
+为了对照高噪声训练样本是否不足，可以保持加噪公式、速度目标和推理流程不变，
+只调整训练时抽取 `sigma` 的分布：
+
+```python
+u = uniform(0, 1)
+q = shift * u / (1 + (shift - 1) * u)
+sigma = sigma_min + (sigma_max - sigma_min) * q
+```
+
+`time_sampling_shift` 必须为有限正数，默认 `1`。
+`shift>1` 偏高噪声，`shift=1` 等价于均匀分布，`0<shift<1` 偏低噪声。
+代码采用等价的 `sigmoid(logit(u) + log(shift))`，避免极大有限 shift 导致溢出。
+
+| shift | 归一化噪声比例 `q>0.8` 的理论概率 |
+| --- | --- |
+| 1 | 20.00% |
+| 2 | 33.33% |
+| 3 | 42.86% |
+| 5 | 55.56% |
+
+在现有训练命令前增加：
+
+```bash
+TIME_SAMPLING_DISTRIBUTION=shifted_uniform \
+TIME_SAMPLING_SHIFT=3 \
+  bash train_qwen3vl_mot_fsdp.sh
+```
+
+本地 launcher 同样支持这两个变量。直接 Python CLI 为
+`--policy.time_sampling_distribution=shifted_uniform --policy.time_sampling_shift=3`。
+分布及 shift 会保存到训练配置，resume 默认沿用保存值；显式参数可覆盖。
+旧配置缺少 shift 时默认为 `1`。
+只设置 shift 不会切换分布，也不会改变现有 `uniform`、`beta`、`mixed` 的行为。
+
+这是训练分布，不是推理 scheduler 的 shift；
+不改变推理步数、`1 -> 0` 积分网格、速度参数化或原始高斯噪声的分布。
+`joint_prediction` 的 video/action/state 目标仍共享同一个 sigma，
+因此这个开关不只影响 Action；已知条件继续保持干净。
+比较实验时应保持 batch、任务混合、损失权重、训练样本曝光量和评测协议一致。
+提高高噪声占比本身并不能证明或保证 Action 精度提升。
+
 ## 3. 当前实现：推理时从高斯 embedding 开始积分
 
 推理时没有未来 Action/State 的干净 embedding。
@@ -195,12 +238,12 @@ z_t = z_t + dt * velocity_pred
 
 | 环节 | 代码位置 |
 | --- | --- |
-| 噪声强度采样 | `lerobot/common/policies/qwen3vl_mot/modeling_qwen3vl_mot.py`，`_sample_sigma()`，927 行起 |
-| 加噪与速度目标 | 同上，`_flow_corrupt()`，946 行起 |
-| 干净物理 embedding | 同上，`_clean_physical_embedding()`，1471 行起 |
-| embedding 加噪接入 | 同上，`_prepare_embedding_physical_streams()`，1512 行起 |
-| Flow 与重建监督 | 同上，2046–2075 行 |
-| 联合推理采样 | 同上，`_sample_joint_prediction()`，1290 行起 |
+| 噪声强度采样 | `lerobot/common/policies/qwen3vl_mot/modeling_qwen3vl_mot.py`，`_sample_sigma()` |
+| 加噪与速度目标 | 同上，`_flow_corrupt()` |
+| 干净物理 embedding | 同上，`_clean_physical_embedding()` |
+| embedding 加噪接入 | 同上，`_prepare_embedding_physical_streams()` |
+| Flow 与重建监督 | 同上，`forward()` 中的 Flow loss 和 `physical_reconstructions` 重建循环 |
+| 联合推理采样 | 同上，`_sample_joint_prediction()` |
 | 原生视频输出头映射 | `lerobot/common/policies/qwen3vl_mot/cosmos3_pretrained.py`，127–128 行 |
 
 本机调度器：

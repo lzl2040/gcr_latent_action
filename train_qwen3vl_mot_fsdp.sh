@@ -47,6 +47,7 @@ PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
 STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
 TIME_SAMPLING_DISTRIBUTION="${TIME_SAMPLING_DISTRIBUTION:-}"
+TIME_SAMPLING_SHIFT="${TIME_SAMPLING_SHIFT:-}"
 TIME_SAMPLING_BETA_ALPHA="${TIME_SAMPLING_BETA_ALPHA:-}"
 TIME_SAMPLING_BETA_BETA="${TIME_SAMPLING_BETA_BETA:-}"
 TIME_SAMPLING_BETA_PROBABILITY="${TIME_SAMPLING_BETA_PROBABILITY:-}"
@@ -277,10 +278,13 @@ if [[ -n "$STATE_PRED_RECON_WEIGHT" ]]; then
 fi
 if [[ -n "$TIME_SAMPLING_DISTRIBUTION" ]]; then
     case "$TIME_SAMPLING_DISTRIBUTION" in
-        uniform|beta|mixed) ;;
-        *) die "TIME_SAMPLING_DISTRIBUTION must be uniform, beta or mixed" ;;
+        uniform|beta|mixed|shifted_uniform) ;;
+        *) die "TIME_SAMPLING_DISTRIBUTION must be uniform, beta, mixed or shifted_uniform" ;;
     esac
     PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_distribution="${TIME_SAMPLING_DISTRIBUTION}")
+fi
+if [[ -n "$TIME_SAMPLING_SHIFT" ]]; then
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_shift="${TIME_SAMPLING_SHIFT}")
 fi
 if [[ -n "$TIME_SAMPLING_BETA_ALPHA" ]]; then
     PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_beta_alpha="${TIME_SAMPLING_BETA_ALPHA}")
@@ -422,7 +426,7 @@ echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "  rgb_augmentation=${RGB_AUG_ENABLED} (training only; crop 90-100%, mild color jitter; no rotation)"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
 echo "  predicted_recon_weights: action=${ACTION_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} state=${STATE_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} (no clean codec loss)"
-echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"
+echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} shift=${TIME_SAMPLING_SHIFT:-<saved config; default 1>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"
 echo "  generation_backbone=${GENERATION_BACKBONE:-<from checkpoint>} pretrained=${GENERATION_PRETRAINED_DIR:-<not required on resume>}"
 echo "  generation_tuning=${GENERATION_TUNING_MODE:-saved config on resume; full on fresh run}"
 echo "  training_stage=${TRAINING_STAGE} (auto: LIBERO=finetune, other mixtures=pretrain)"

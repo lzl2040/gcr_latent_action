@@ -829,10 +829,19 @@ flow loss。canonical 维度 mask 用于 encoder 输入和 decoder 重建，不�
 | `uniform`（默认） | `u ~ Uniform(0,1)` |
 | `beta` | `u ~ Beta(alpha,beta)`，默认 `alpha=1.5, beta=1` |
 | `mixed` | 每个样本随机选 Uniform 或 Beta，再从选中的分布采样；默认各占 50% |
+| `shifted_uniform` | `r ~ Uniform(0,1)`，`u = shift*r / (1 + (shift-1)*r)` |
 
 统一映射为 `sigma = sigma_min + (sigma_max - sigma_min) * u`。
 `time_sampling_beta_probability` 控制 mixed 中选 Beta 的概率，默认 `0.5`；
 不是将两个采样值求平均。`0` 和 `1` 分别退化成纯 Uniform、纯 Beta。
+
+`time_sampling_shift` 为有限正数，默认 `1`，只影响显式选择的 `shifted_uniform`：
+`shift>1` 增加高噪声采样占比，`shift=1` 等价于均匀分布，`0<shift<1` 偏低噪声。
+实现采用等价的 `sigmoid(logit(r) + log(shift))`，避免极大有限 shift 的乘法溢出。
+例如 `shift=3` 时归一化噪声比例 `u>0.8` 的概率约为 `42.86%`，
+均匀分布为 `20%`。这仅重分配训练噪声强度，不改变高斯噪声的均值/方差、
+Flow 速度目标或推理采样时间表。新分布默认不启用；
+resume 保留保存值，显式 CLI 参数可以覆盖，旧配置缺字段时 shift 为 `1`。
 
 `joint_prediction` 每个样本只采一次 sigma，video/action/state 的目标共用该值，
 但每个模态各自生成独立高斯噪声；所有 RGB 视角也共用同一 sigma。

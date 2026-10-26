@@ -263,7 +263,7 @@ forward 不引入 state，也不重建干净 action 条件。flow loss 和多步
 
 ### 训练噪声时间分布
 
-两个 launcher 都支持 `TIME_SAMPLING_DISTRIBUTION=uniform|beta|mixed`：
+两个 launcher 都支持 `TIME_SAMPLING_DISTRIBUTION=uniform|beta|mixed|shifted_uniform`：
 
 ```bash
 TIME_SAMPLING_DISTRIBUTION=mixed \
@@ -278,8 +278,30 @@ TIME_SAMPLING_DISTRIBUTION=mixed \
 直接 Python CLI 等价选项是 `--policy.time_sampling_distribution=mixed`。
 resume 时显式设置这些参数可以覆盖保存的设置。
 
+需要增加高噪声训练样本占比时，显式选择 `shifted_uniform`：
+
+```bash
+TIME_SAMPLING_DISTRIBUTION=shifted_uniform \
+TIME_SAMPLING_SHIFT=3 \
+  bash train_qwen3vl_mot_fsdp.sh
+```
+
+`train_qwen3vl_mot_local.sh` 接受相同环境变量。
+先采样 `u ~ Uniform(0,1)`，再计算
+`q = shift*u / (1 + (shift-1)*u)`，
+最后映射 `sigma = sigma_min + (sigma_max-sigma_min)*q`。
+`TIME_SAMPLING_SHIFT` 必须为有限正数，默认 `1`；
+`shift=1` 等价于均匀分布，`shift>1` 偏高噪声，`0<shift<1` 偏低噪声。
+例如 `shift=3` 时归一化噪声比例 `q>0.8` 的概率约为 `42.86%`，
+均匀分布为 `20%`。
+直接 Python CLI 等价参数为
+`--policy.time_sampling_distribution=shifted_uniform --policy.time_sampling_shift=3`。
+resume 未显式设置时保留保存的分布及 shift；旧配置缺少 shift 时按 `1` 读取。
+只设置 shift 不会切换分布，它不改变 `uniform`、`beta`、`mixed` 的行为。
+
 `joint_prediction` 的 video/action/state 目标共享每个样本的 sigma，但高斯噪声各自独立；
-当前帧和 current-state 条件保持干净。推理仍用默认 20 步等间隔 Euler，不从 Beta 随机抽推理网格。
+当前帧和 current-state 条件保持干净。以上开关只改变训练分布；
+推理仍用默认 20 步等间隔 Euler，不从这些分布随机抽推理网格。
 
 首次运行或基础镜像更新后，安装 Stage 2 已验证的 FP8/8-bit optimizer 版本：
 
@@ -973,7 +995,8 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `RGB_AUG_ENABLED` | `false` | 可选训练 RGB 增强：90%-100% 裁剪和轻量颜色抖动，不含旋转；验证关闭 |
 | `ACTION_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码 action 的 masked MSE 权重；`0` 关闭，仅支持 embedding |
 | `STATE_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码未来 state 的 masked MSE 权重；不监督第 0 帧，`0` 关闭 |
-| `TIME_SAMPLING_DISTRIBUTION` | fresh `uniform`；resume 使用保存值 | 训练时间分布：`uniform` / `beta` / `mixed`；joint 三个目标共享 sigma |
+| `TIME_SAMPLING_DISTRIBUTION` | fresh `uniform`；resume 使用保存值 | 训练时间分布：`uniform` / `beta` / `mixed` / `shifted_uniform`；joint 三个目标共享 sigma |
+| `TIME_SAMPLING_SHIFT` | fresh `1.0`；resume 使用保存值 | 仅影响 `shifted_uniform`；有限正数，`>1` 偏高噪声，`=1` 均匀，`<1` 偏低噪声；不改变推理网格 |
 | `TIME_SAMPLING_BETA_ALPHA` | `1.5` | Beta 的 alpha 参数，必须为有限正数 |
 | `TIME_SAMPLING_BETA_BETA` | `1.0` | Beta 的 beta 参数，必须为有限正数 |
 | `TIME_SAMPLING_BETA_PROBABILITY` | `0.5` | mixed 中选 Beta 的概率，范围 `[0,1]` |
