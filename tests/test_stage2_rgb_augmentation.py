@@ -135,16 +135,11 @@ def test_disabling_rgb_augmentation_preserves_training_data_and_rng(multiview):
             assert result[key] == value
 
 
-def test_rgb_augmentation_has_only_mild_geometry_and_color_jitter():
-    crop, rotation, jitter = make_temporal_rgb_transform(32).transforms
+def test_rgb_augmentation_has_only_crop_and_color_jitter():
+    crop, jitter = make_temporal_rgb_transform(32).transforms
     assert isinstance(crop, v2.RandomResizedCrop)
     assert crop.scale == (0.9, 1.0)
     assert crop.ratio == (1.0, 1.0)
-    assert isinstance(rotation, v2.RandomRotation)
-    assert tuple(rotation.degrees) == (-5.0, 5.0)
-    angles = [rotation.get_params(rotation.degrees) for _ in range(256)]
-    assert all(-5 <= angle <= 5 for angle in angles)
-    assert any(abs(angle) > 1 for angle in angles)
     assert isinstance(jitter, v2.ColorJitter)
     assert jitter.brightness == (0.9, 1.1)
     assert jitter.contrast == (0.9, 1.1)
@@ -152,19 +147,17 @@ def test_rgb_augmentation_has_only_mild_geometry_and_color_jitter():
     assert jitter.hue is None
 
 
-def test_rgb_geometry_actually_crops_and_rotates_the_entire_window(monkeypatch):
+def test_rgb_geometry_only_crops_the_entire_window(monkeypatch):
     transform = make_temporal_rgb_transform(32)
-    crop, rotation, _ = transform.transforms
+    crop, _ = transform.transforms
     monkeypatch.setattr(crop, "make_params", lambda _: {"top": 1, "left": 0, "height": 31, "width": 31})
-    monkeypatch.setattr(rotation, "make_params", lambda _: {"angle": 3.0})
-    transform.transforms[2] = v2.Identity()
+    transform.transforms[1] = v2.Identity()
     original = _rgb_sample(False)["video"]
     augmented = transform(original)
     expected = F.resized_crop(
         original, 1, 0, 31, 31, size=[32, 32], interpolation=InterpolationMode.BILINEAR,
         antialias=True,
     )
-    expected = F.rotate(expected, 3.0, interpolation=InterpolationMode.BILINEAR, fill=0)
     torch.testing.assert_close(augmented, expected)
     assert not torch.equal(augmented, original)
     torch.testing.assert_close(augmented, augmented[0].expand_as(augmented))
@@ -280,3 +273,5 @@ def test_rgb_augmentation_launcher_flag(tmp_path, launcher, setting):
     else:
         assert result.returncode == 0, result.stderr
         assert f"--dataset.image_transforms.enable={setting or 'false'}" in result.stdout
+        if "fsdp" in launcher:
+            assert "crop 90-100%, mild color jitter; no rotation" in result.stdout
