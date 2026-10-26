@@ -1502,3 +1502,29 @@ are preserved in `worst_right_target_tracking.json`. Neither small medians nor
 correct delta integration justify hiding the large execution deviation or the
 visual-input anomaly. A trustworthy 8k/10k success comparison requires resolving
 the camera/scene/reset validity issue first.
+
+#### Camera-integrity follow-up: idle native reset control
+
+At the start of the follow-up inspection on 2026-10-26, the original
+`stack_bowls_delta_step10k_20261026_v1/` output directory was no longer
+present. The preceding section records historical findings, not a claim that
+those ignored artifacts remain available. No original files were removed by
+this investigation.
+
+A separate, no-policy diagnostic exercised the native layouts 0/1/2 and the
+same close/recreate/reset lifecycle, with 100 idle control intervals per
+layout (10 physics steps per interval). All three initial head/wrist views
+show the expected task table. Head-camera world transforms remained exactly
+unchanged in all nine snapshots; both wrist-camera transforms also remained
+unchanged while idle. Each capture manager had exactly three active views.
+The retained evidence is under
+`outputs/evaluation/robodojo/camera_integrity_idle_20261026_v1/`:
+`snapshots.json`, `initial_views.jpg`, `probe_summary.json`, and
+`simulator.log`. This diagnostic loads no model and is not a success-rate
+evaluation.
+
+The same `Stage opening or closing already in progress` errors occurred at
+all three teardown points despite correct subsequent initial views. They are
+therefore not, by themselves, evidence explaining the earlier floor-facing
+images. This idle control does not exclude a longer-duration, action-dependent,
+or renderer-buffer failure.
