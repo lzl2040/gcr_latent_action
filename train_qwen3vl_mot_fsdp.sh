@@ -419,7 +419,7 @@ else
 fi
 echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
-echo "  rgb_augmentation=${RGB_AUG_ENABLED} (training only; crop 90-100%, rotation +/-5 degrees)"
+echo "  rgb_augmentation=${RGB_AUG_ENABLED} (training only; crop 90-100%, mild color jitter; no rotation)"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
 echo "  predicted_recon_weights: action=${ACTION_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} state=${STATE_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} (no clean codec loss)"
 echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"

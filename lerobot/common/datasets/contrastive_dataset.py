@@ -169,8 +169,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         ):
             self.rgb_augmentation = make_temporal_rgb_transform(cfg.dataset.image_transforms.img_size)
             logger.info(
-                "RGB training augmentation enabled: crop area 90-100%, rotation +/-5 degrees, "
-                "mild color jitter; shared over each camera window, disabled for validation."
+                "RGB training augmentation enabled: crop area 90-100%, mild color jitter; "
+                "no rotation; shared over each camera window, disabled for validation."
             )
         self.full_training_coverage = False
         if getattr(policy_cfg, "type", None) == "qwen3vl_mot":

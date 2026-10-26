@@ -970,7 +970,7 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `GENERATION_EVAL_VIDEO_FPS` | `8` | 导出 MP4 的播放帧率 |
 | `STAGE2_TASK_NAMES` | 未设置 | 逗号分隔的任务列表；恢复时必须与 checkpoint 完全一致 |
 | `STAGE2_TASK_WEIGHTS` | 未设置 | 与任务列表等长的非负相对权重；global batch 内按可用监督重归一化 |
-| `RGB_AUG_ENABLED` | `false` | 可选训练 RGB 增强：轻量颜色抖动、90%-100% 裁剪和 +/-5 度旋转；验证关闭 |
+| `RGB_AUG_ENABLED` | `false` | 可选训练 RGB 增强：90%-100% 裁剪和轻量颜色抖动，不含旋转；验证关闭 |
 | `ACTION_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码 action 的 masked MSE 权重；`0` 关闭，仅支持 embedding |
 | `STATE_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码未来 state 的 masked MSE 权重；不监督第 0 帧，`0` 关闭 |
 | `TIME_SAMPLING_DISTRIBUTION` | fresh `uniform`；resume 使用保存值 | 训练时间分布：`uniform` / `beta` / `mixed`；joint 三个目标共享 sigma |

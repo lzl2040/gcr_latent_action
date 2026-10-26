@@ -356,7 +356,7 @@ def make_transform_from_config(cfg: ImageTransformConfig):
 
 
 def make_temporal_rgb_transform(image_size: int) -> v2.Compose:
-    """Sample one mild augmentation for an entire uint8 RGB window per call."""
+    """Sample crop and color jitter shared by an entire uint8 RGB window."""
     return v2.Compose([
         v2.RandomResizedCrop(
             size=(image_size, image_size),
@@ -365,7 +365,6 @@ def make_temporal_rgb_transform(image_size: int) -> v2.Compose:
             interpolation=InterpolationMode.BILINEAR,
             antialias=True,
         ),
-        v2.RandomRotation(degrees=5, interpolation=InterpolationMode.BILINEAR),
         v2.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05),
     ])
 
