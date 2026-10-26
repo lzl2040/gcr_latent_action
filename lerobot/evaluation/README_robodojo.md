@@ -1625,3 +1625,42 @@ Key artifacts relative to the v2 root:
 - `worst_right_target_tracking.json`: largest target/measurement discrepancy.
 - `simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_step10k_camera_audit_20261026_v2/`:
   native result, physics profile, and nine camera MP4s.
+
+### Delta checkpoint: step12k comparison
+
+The supplied `step12k` checkpoint from
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu`
+is cached under the same experiment's `runtime_assets` directory. All 19
+files (25,200,797,460 bytes) were SHA256-verified against the source, which
+remained unchanged during copying. Policy and training configurations are
+byte-identical to the verified 10k configuration; all 16 model shard hashes
+differ from 10k. The 2560 DCP state-dict entries have matching names, shapes,
+and dtypes, and all 16910 storage references fit within their files.
+The retained provenance is `checkpoint_provenance_step12k.json`.
+
+The comparison retains seed 0, native layouts 0/1/2, one environment, the
+saved 20 denoising steps, delta integration, 32-step predictions with 10
+executed steps per replan, and actual/predicted video export:
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint "$CACHE/robodojo_stack_bowl_2nodes_8gpu/step12k" \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --save-predicted-video --port 19049 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_step12k_20261026_v1
+```
+
+Use a fresh output directory for any repeat. The initial 12k attempt also
+uses the same session-local passive camera/scene-observation wrapper as the
+completed 10k v2 audit, without additional RGB accessors or rendering.
+The command above reproduces the supported policy/evaluation settings but
+does not itself install that diagnostic wrapper. This preparation records
+no success result; completion, native labels, and visual integrity must be
+verified separately. The earlier 8k layout-2 RNG-restart caveat still applies
+to comparisons against 8k.
