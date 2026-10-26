@@ -1664,3 +1664,76 @@ does not itself install that diagnostic wrapper. This preparation records
 no success result; completion, native labels, and visual integrity must be
 verified separately. The earlier 8k layout-2 RNG-restart caveat still applies
 to comparisons against 8k.
+
+#### Step12k native completion and matched 10k comparison
+
+The 12k run completed uninterrupted in **2467.87 seconds** (41.13 minutes,
+including startup). All three layouts ran 800 control steps, with zero
+native unstable-episode flags. Native success remains **0/3**, but layout 0
+receives partial task credit:
+
+| Layout | Success | Per-layout normalized score |
+| --- | --- | --- |
+| 0 | false | 0.15 |
+| 1 | false | 0.00 |
+| 2 | false | 0.00 |
+
+The native aggregate `score` is **5.0**, calculated as
+`mean([0.15, 0, 0]) * 100`; this is **not a 5% success rate**. In
+`task/RoboDojo/tasks/stack_bowls.py`, the 15-point partial stage requires
+open grippers and a valid two-bowl stack. Full success additionally requires
+the three-bowl stack with the required orientations and the robots returned
+to their initial poses. Thus the result shows partial two-bowl-stack progress,
+not a completed three-bowl task.
+
+The reference is the camera-audited 10k v2 run, not the missing original
+10k attempt:
+
+| Checkpoint | Native successes | Native aggregate score | Per-layout normalized scores |
+| --- | --- | --- | --- |
+| 10k v2 | 0/3 | 0.0 | 0 / 0 / 0 |
+| 12k | 0/3 | 5.0 | 0.15 / 0 / 0 |
+
+Both runs are uninterrupted, and initial canonical robot states match
+exactly for every layout. Checkpoint, output directory, and policy port are
+the only differing recorded settings. This small matched comparison shows
+additional partial credit, not a statistically established success-rate
+improvement or proof that undertraining alone explains the failures.
+
+All 240 actual policy-conditioning head images and native head-video samples
+were visually reviewed. Table framing remains normal across all layouts;
+the previous floor-facing anomaly was not observed. Across 51 passive
+snapshots, the head world matrix is exactly unchanged, tracked scene
+transforms remain fixed within each layout, and all camera render bindings
+match their intended prims. Maximum wrist-to-EE relative-position errors are
+`1.39e-7 m` left and `1.11e-7 m` right, with rotation-matrix errors below
+`3.73e-7`.
+
+All 240 prediction chunks pass inverse-normalization and delta-integration
+checks: maximum differences are `5.96e-8 m` in translation, `9.56e-8` in
+rotation-matrix entries, and `2.99e-8` in gripper; inverse normalization is
+exact. All nine native camera MP4s decode to 801 frames, 640x480, 25 FPS.
+The 720 predicted-camera videos and 7920 prediction PNGs are retained.
+
+Physical target tracking is not perfect. Across 237 within-layout replan
+transitions, median target-to-next-measured position differences are 0.077 mm
+left and 0.207 mm right; maxima are 4.30 mm and **155.02 mm**. The largest
+right-arm discrepancy occurs in layout 0, between the step-459 target and
+the step-460 measured anchor. Its cause remains unestablished; correct
+delta conversion and normal camera inputs do not eliminate this execution
+deviation or diagnose the training failure.
+
+Artifacts under
+`outputs/evaluation/robodojo/stack_bowls_delta_step12k_20261026_v1/`:
+
+- `summary.json`, `settings.json`, and `comparison_with_step10k.json`:
+  completion, native scores, matched settings, and scoring interpretation.
+- `final_adapter_audit.json` and
+  `camera_audit/camera_integrity_report.json`: numerical, video, geometry,
+  and completed visual-review evidence.
+- `diagnostics/layout_{0,1,2}_all_conditioning_heads.jpg` and native
+  head-video contact sheets: actual input and rollout image review.
+- `worst_target_tracking.json`: largest left/right target deviations.
+- `policy/predictions/`: predicted-camera videos and conditioning/future PNGs.
+- `simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_step12k_20261026_v1/`:
+  native result, physics profile, and all nine actual camera MP4s.
