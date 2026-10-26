@@ -1445,3 +1445,60 @@ OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_
 Use a fresh output directory when repeating this command. The earlier step8k
 layout-2 policy RNG was restarted after timeout, as documented above; that
 caveat must remain explicit when comparing it against an uninterrupted run.
+
+#### Step10k native completion and visual-input caveat
+
+The native run completed uninterrupted in **3286.71 seconds** (54.78 minutes,
+including startup), with no timeout or policy RNG restart. The native result
+records **0/3 successes, mean score 0**; layouts 0, 1, and 2 each ran 800
+control steps. The physics profiles record zero unstable episodes.
+
+**This is not a clean model-quality comparison.** Inspection of the actual
+native videos and saved policy-conditioning PNGs found a visual-input anomaly:
+the head-camera framing changes during layouts 0 and 1, and layout 2 starts
+with the head view pointed at the floor instead of the task table. Its initial
+wrist views are also displaced. This is present in
+`policy/predictions/reset_0006/env_000/replan_000160_step_0000/conditioning_primary.png`,
+so it is not just an exported-video/contact-sheet problem.
+
+All three initial canonical robot states exactly match their corresponding
+step8k initial states. Initial per-camera pixel MAEs against the original 8k
+attempt are only 0.29-0.40 for layout 0 and 0.58-0.77 for layout 1, but
+70.25-86.03 for layout 2 (uint8 units). The image evidence, not an arbitrary
+pixel-MAE threshold, establishes the bad framing. The cause of the changed
+camera/scene view and its persistence across reset is **unresolved**; no
+camera, scene, shared runtime, or asset repair was applied. The original
+native labels are preserved unchanged, but must not be used alone to conclude
+that 10k training is worse, insufficient, or otherwise responsible for all
+three failures. Zero native instability flags do not certify camera validity.
+
+The run root is
+`outputs/evaluation/robodojo/stack_bowls_delta_step10k_20261026_v1/`.
+Key artifacts:
+
+- `summary.json`: native completion and the unchanged native 0/3 result.
+- `simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_step10k_20261026_v1/`:
+  `_result.json`, `_physics_profile.json`, and nine native camera MP4s.
+- `diagnostics/episode_000000{0,1,2}_cam_head_fail_contact_sheet.jpg`:
+  head-camera frames 0/100/200/400/600/800.
+- `diagnostics/8k_vs_10k_initial_head.jpg` and `visual_input_audit.json`:
+  initial-view comparison and observed-state/pixel checks.
+- `final_adapter_audit.json`: `benchmark_complete=true` means native execution
+  completed, while `visual_input_sanity_passed=false` and
+  `clean_model_comparison=false` explicitly qualify interpretation.
+
+All nine native MP4s decode to 801 frames, 640x480, 25 FPS. There are 240
+logged/saved prediction chunks, 720 predicted-camera MP4s, and 7920 PNGs.
+Independent NumPy checks across every chunk confirm exact inverse
+normalization and maximum integration differences of `5.96e-8 m` in
+translation, `9.33e-8` in rotation-matrix entries, and `2.99e-8` in gripper.
+These numerical checks do not validate the camera inputs.
+
+Across 237 within-episode replan transitions, median target-to-next-measured
+position differences are 0.107 mm left and 0.210 mm right; maxima are 2.65 mm
+and 311.92 mm. The largest right-arm discrepancy is in layout 0, between the
+step-619 target and step-620 measured anchor; its exact chunk paths and poses
+are preserved in `worst_right_target_tracking.json`. Neither small medians nor
+correct delta integration justify hiding the large execution deviation or the
+visual-input anomaly. A trustworthy 8k/10k success comparison requires resolving
+the camera/scene/reset validity issue first.
