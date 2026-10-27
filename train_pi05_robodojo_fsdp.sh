@@ -2,13 +2,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-DATASET_ROOT="${DATASET_ROOT:-/data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/stack_bowls_delta}"
-PRETRAINED_PATH="${PRETRAINED_PATH:-/home/jianf/lzl_project/gcr_latent_action/outputs/evaluation/robodojo/runtime_assets/pretrained/pi05_base}"
+PARENT_DIR_V30="${PARENT_DIR_V30:-${DATA_ROOT_V30:-/mnt/wangxiaofa/robot_dataset/lerobot-format-v30-0710/}}"
+DATASET_ROOT="${DATASET_ROOT:-${PARENT_DIR_V30%/}/RoboDojo/data/stack_bowls_delta}"
+MODEL_AUTO_DOWNLOAD="${MODEL_AUTO_DOWNLOAD:-true}"
+MODEL_LOCAL_CACHE="${MODEL_LOCAL_CACHE:-${TMPDIR:-/tmp}/pi05_models}"
+PRETRAINED_PATH="${PRETRAINED_PATH:-${MODEL_LOCAL_CACHE}/pi05_base}"
 TOKENIZER_PATH="${TOKENIZER_PATH:-${PRETRAINED_PATH}/paligemma_tokenizer.model}"
 JOB_NAME="${JOB_NAME:-pi05_robodojo_delta_fsdp}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$PWD/outputs/pi05_robodojo}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/wangxiaofa/qwen3vl_mot_exp}"
 OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${JOB_NAME}}"
-LOG_DIR="${LOG_DIR:-$PWD/outputs/pi05_robodojo_logs}"
+LOG_DIR="${LOG_DIR:-/mnt/wangxiaofa/ace_logs}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 NNODES="${NNODES:-1}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
@@ -50,6 +53,7 @@ require_bool WEIGHT_RESUME "$WEIGHT_RESUME"
 require_bool EXPORT_FINAL "$EXPORT_FINAL"
 require_bool CHECK_PATHS "$CHECK_PATHS"
 require_bool DRY_RUN "$DRY_RUN"
+require_bool MODEL_AUTO_DOWNLOAD "$MODEL_AUTO_DOWNLOAD"
 [[ -z "$MAX_UPDATES_THIS_RUN" ]] || positive_int MAX_UPDATES_THIS_RUN "$MAX_UPDATES_THIS_RUN"
 (( NODE_RANK < NNODES )) || die "NODE_RANK must be smaller than NNODES"
 [[ "$VIDEO_BACKEND" == pyav || "$VIDEO_BACKEND" == torchcodec ]] || die "Unsupported VIDEO_BACKEND"
@@ -77,12 +81,22 @@ positive_int DISTRIBUTED_TIMEOUT_MINUTES "$DISTRIBUTED_TIMEOUT_MINUTES"
 
 if [[ "$CHECK_PATHS" == true ]]; then
     [[ -f "$DATASET_ROOT/meta/info.json" && -f "$DATASET_ROOT/meta/stats.json" ]] || die "Missing dataset metadata: $DATASET_ROOT"
-    [[ -f "$PRETRAINED_PATH" || -f "$PRETRAINED_PATH/model.safetensors" ]] || die "Missing base weights: $PRETRAINED_PATH"
-    [[ -f "$TOKENIZER_PATH" || -d "$TOKENIZER_PATH" ]] || die "TOKENIZER_PATH must be a local tokenizer file/directory"
     if [[ "$WEIGHT_RESUME" == true ]]; then
         [[ -f "$OUTPUT_DIR/latest_checkpoint" ]] || die "No latest_checkpoint in $OUTPUT_DIR"
     else
         [[ ! -e "$OUTPUT_DIR" ]] || die "OUTPUT_DIR already exists; choose a fresh directory or WEIGHT_RESUME=true"
+    fi
+    if [[ "$DRY_RUN" == false && ( "$MODEL_AUTO_DOWNLOAD" == true || "$CHECK_PATHS" == true ) ]]; then
+        RESOLVED_ASSETS="$("$PYTHON_BIN" -m lerobot.common.utils.pi05_model_cache \
+            --pretrained-path "$PRETRAINED_PATH" --tokenizer-path "$TOKENIZER_PATH" \
+            --cache-dir "$MODEL_LOCAL_CACHE" --auto-download "$MODEL_AUTO_DOWNLOAD")"
+        mapfile -t ASSET_PATHS <<< "$RESOLVED_ASSETS"
+        (( ${#ASSET_PATHS[@]} == 2 )) || die "Expected resolved weight and tokenizer paths"
+        PRETRAINED_PATH="${ASSET_PATHS[0]}"
+        TOKENIZER_PATH="${ASSET_PATHS[1]}"
+    elif [[ "$DRY_RUN" == true && "$CHECK_PATHS" == true && "$MODEL_AUTO_DOWNLOAD" == false ]]; then
+        [[ -f "$PRETRAINED_PATH" || -f "$PRETRAINED_PATH/model.safetensors" ]] || die "Missing base weights: $PRETRAINED_PATH"
+        [[ -f "$TOKENIZER_PATH" || -d "$TOKENIZER_PATH" ]] || die "TOKENIZER_PATH must be a local tokenizer file/directory"
     fi
 fi
 
@@ -102,6 +116,7 @@ COMMAND=(
 [[ -z "$MAX_UPDATES_THIS_RUN" ]] || COMMAND+=(--max-updates-this-run "$MAX_UPDATES_THIS_RUN")
 COMMAND+=("$@")
 printf 'Effective batch size: %s\n' "$((NNODES * NPROC_PER_NODE * BATCH_SIZE * GRAD_ACCUMULATION_STEPS))"
+printf 'Pretrained assets: auto_download=%s node_cache=%s\n' "$MODEL_AUTO_DOWNLOAD" "$MODEL_LOCAL_CACHE"
 printf 'Command: '; printf '%q ' "${COMMAND[@]}"; printf '\n'
 [[ "$DRY_RUN" == false ]] || exit 0
 mkdir -p "$LOG_DIR"

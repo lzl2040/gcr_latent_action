@@ -112,10 +112,18 @@ def wrap_pi05(policy, device):
 def check_resume_geometry(output_dir, geometry):
     checkpoint = resolve_latest_fsdp_checkpoint(output_dir)
     metadata = json.loads((checkpoint / "metadata.json").read_text())
-    if metadata["training_geometry"] != geometry:
+    saved = metadata["training_geometry"]
+    previous, current = dict(saved), dict(geometry)
+    if current.get("tokenizer_sha256") is not None and (
+        current["tokenizer_sha256"] == previous.get("tokenizer_sha256")
+    ):
+        previous.pop("tokenizer_path", None)
+        current.pop("tokenizer_path", None)
+    if previous != current:
         raise ValueError(
             "PI05 resume requires unchanged data, batching, optimizer, schedule and seed settings."
         )
+    return saved
 
 
 def export_policy(model, policy, output_dir, step):
@@ -145,7 +153,7 @@ def train(args, device, checkpoint_group):
         "dataset_root": str(args.dataset_root.resolve()),
         "dataset_stats_sha256": file_hash(args.dataset_root / "meta/stats.json"),
         "base_sha256": file_hash(base_file),
-        "tokenizer_path": args.tokenizer_path,
+        "tokenizer_path": None if Path(args.tokenizer_path).is_file() else args.tokenizer_path,
         "tokenizer_sha256": file_hash(args.tokenizer_path) if Path(args.tokenizer_path).is_file() else None,
         "dataset_frames": len(dataset),
         "steps_per_epoch": len(loader),
@@ -160,7 +168,7 @@ def train(args, device, checkpoint_group):
         "video_backend": args.video_backend,
     }
     if args.resume:
-        check_resume_geometry(args.output_dir, geometry)
+        geometry = check_resume_geometry(args.output_dir, geometry)
     elif rank == 0:
         args.output_dir.mkdir(parents=True, exist_ok=False)
     dist.barrier()

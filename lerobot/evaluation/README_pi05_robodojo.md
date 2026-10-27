@@ -135,9 +135,41 @@ CUDA_VISIBLE_DEVICES=0,1 NPROC_PER_NODE=2 \
   bash train_pi05_robodojo_fsdp.sh
 ```
 
-Default paths point at this machine's verified delta dataset, official
-base cache, and SentencePiece tokenizer. Override `DATASET_ROOT`,
-`PRETRAINED_PATH`, and `TOKENIZER_PATH` on other machines. Other controls
+Cluster defaults follow `train_qwen3vl_mot_fsdp.sh` for mounted training
+outputs and logs, while pretrained downloads use node-local disk:
+
+| Asset/output | Default |
+|---|---|
+| Dataset parent | `/mnt/wangxiaofa/robot_dataset/lerobot-format-v30-0710/` |
+| Dataset | `${PARENT_DIR_V30}/RoboDojo/data/stack_bowls_delta` |
+| Training output | `/mnt/wangxiaofa/qwen3vl_mot_exp/${JOB_NAME}` |
+| Console logs | `/mnt/wangxiaofa/ace_logs` |
+| Download cache | `${TMPDIR:-/tmp}/pi05_models` |
+| Pretrained model | `${MODEL_LOCAL_CACHE}/pi05_base/model.safetensors` |
+| Tokenizer | `${MODEL_LOCAL_CACHE}/pi05_base/paligemma_tokenizer.model` |
+
+`MODEL_AUTO_DOWNLOAD=true` is the default. Before `torchrun`, each node's
+launcher reuses valid existing `PRETRAINED_PATH`/`TOKENIZER_PATH` assets or
+downloads missing/invalid assets into `MODEL_LOCAL_CACHE`. It downloads
+only the pinned official `lerobot/pi05_base` weight file and the public
+PaliGemma SentencePiece vocabulary documented above. Managed downloads
+are SHA256-checked; incomplete/corrupt cached files are not accepted.
+A node-local file lock serializes concurrent launchers, and Hub/Xet
+download caches also stay on local disk. Download failures stop the
+launcher; they never fall back to random initialization.
+
+Missing paths under a mounted `PRETRAINED_PATH` are not created: replacement
+downloads always go to node-local cache. Existing mounted assets can still
+be reused read-only. Network filesystems, FUSE/Blob mounts, and RAM-backed
+filesystems are rejected as download destinations. Set `MODEL_LOCAL_CACHE`
+to a sufficiently large local SSD/scratch directory if `/tmp` is unsuitable
+or small; the base weight file alone is approximately 14.47 GB.
+`MODEL_AUTO_DOWNLOAD=false` allows existing explicit or complete cached
+assets only. `DRY_RUN=true` prints the planned paths without downloading,
+creating cache/output/log directories, or starting training.
+
+Override `DATASET_ROOT` (or `PARENT_DIR_V30`/`DATA_ROOT_V30`),
+`PRETRAINED_PATH`, and `TOKENIZER_PATH` as needed. Other controls
 include `OUTPUT_DIR` (or `OUTPUT_ROOT`/`JOB_NAME`), `LOG_DIR`, `PYTHON_BIN`,
 `LR`, `WARMUP_STEPS`, `SAVE_FREQ`, `CHUNK_SIZE`, `NUM_WORKERS`, `SEED`,
 and `VIDEO_BACKEND`. Defaults are 30000 optimizer updates, batch size 1 per
@@ -158,6 +190,12 @@ NNODES=2 NODE_RANK=0 NPROC_PER_NODE=2 CUDA_VISIBLE_DEVICES=0,1 \
   OUTPUT_DIR=/shared/experiments/pi05_stack_bowls_delta_v1 \
   bash train_pi05_robodojo_fsdp.sh
 ```
+
+Each node prepares its own local pretrained cache before joining torchrun.
+The model/tokenizer download cache is not shared and may have different
+absolute paths on different nodes. File-tokenizer content hashes, rather
+than node-local paths, determine resume identity. The dataset and training
+output remain shared mounted paths.
 
 The implementation uses a **root FULL_SHARD unit**, FP32 master parameters
 and optimizer states, BF16 autocast/parameter all-gathers, and activation
@@ -241,6 +279,7 @@ from lerobot.common.policies.pi05.modeling_pi05 import PI05Policy
 
 config = PreTrainedConfig.from_pretrained(export_directory)
 config.device = "cpu"
+# On another node, set config.tokenizer_path to that node's prepared vocabulary.
 policy = PI05Policy.from_pretrained(
     export_directory, config=config, map_location="cpu", strict=True
 )

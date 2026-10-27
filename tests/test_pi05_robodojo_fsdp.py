@@ -53,6 +53,8 @@ def launch_env(tmp_path):
         "MAX_UPDATES_THIS_RUN": "",
         "CHECK_PATHS": "true",
         "DRY_RUN": "true",
+        "MODEL_AUTO_DOWNLOAD": "false",
+        "MODEL_LOCAL_CACHE": str(tmp_path / "node cache"),
     }
 
 
@@ -120,7 +122,14 @@ def test_launcher_propagates_training_failure_through_tee(launch_env, tmp_path):
         '#!/usr/bin/env bash\nif [[ "$1" == "-m" ]]; then echo "training failed" >&2; exit 23; fi\n'
     )
     executable.chmod(0o755)
-    result = launch({**launch_env, "PYTHON_BIN": str(executable), "DRY_RUN": "false"})
+    result = launch(
+        {
+            **launch_env,
+            "PYTHON_BIN": str(executable),
+            "DRY_RUN": "false",
+            "CHECK_PATHS": "false",
+        }
+    )
     assert result.returncode == 23
     assert "training failed" in result.stdout
     assert len(list(Path(launch_env["LOG_DIR"]).glob("*.log"))) == 1
@@ -153,6 +162,44 @@ def test_resume_rejects_changed_geometry(tmp_path):
     training.check_resume_geometry(tmp_path, geometry)
     with pytest.raises(ValueError, match="unchanged"):
         training.check_resume_geometry(tmp_path, {**geometry, "batch_size": 2})
+
+
+def test_resume_accepts_identical_tokenizer_at_another_node_local_path(tmp_path):
+    checkpoint = tmp_path / "checkpoint_00000001"
+    checkpoint.mkdir()
+    geometry = {"tokenizer_path": "/scratch/node0/tokenizer.model", "tokenizer_sha256": "same-content"}
+    (tmp_path / "latest_checkpoint").write_text(checkpoint.name)
+    (checkpoint / "metadata.json").write_text(json.dumps({"training_geometry": geometry}))
+    current = {**geometry, "tokenizer_path": "/scratch/node1/tokenizer.model"}
+    assert training.check_resume_geometry(tmp_path, current) == geometry
+    with pytest.raises(ValueError, match="unchanged"):
+        training.check_resume_geometry(tmp_path, {**current, "tokenizer_sha256": "different-content"})
+
+
+def test_launcher_defaults_use_mounts_for_outputs_and_local_disk_for_assets(launch_env):
+    env = dict(launch_env)
+    for key in ("OUTPUT_DIR", "OUTPUT_ROOT", "LOG_DIR", "PRETRAINED_PATH", "TOKENIZER_PATH"):
+        env.pop(key, None)
+    env.update(DRY_RUN="true", CHECK_PATHS="false", MODEL_AUTO_DOWNLOAD="true")
+    result = launch(env)
+    assert result.returncode == 0, result.stderr
+    command = shlex.split(result.stdout.split("Command: ", 1)[1])
+    assert command[command.index("--output-dir") + 1].startswith("/mnt/wangxiaofa/qwen3vl_mot_exp/")
+    assert command[command.index("--pretrained-path") + 1] == f"{env['MODEL_LOCAL_CACHE']}/pi05_base"
+    assert not Path(env["MODEL_LOCAL_CACHE"]).exists()
+
+
+def test_launcher_dry_run_allows_missing_downloadable_assets(launch_env):
+    env = {
+        **launch_env,
+        "MODEL_AUTO_DOWNLOAD": "true",
+        "PRETRAINED_PATH": "/missing/mounted/pi05_base",
+        "TOKENIZER_PATH": "/missing/mounted/tokenizer.model",
+    }
+    result = launch(env)
+    assert result.returncode == 0, result.stderr
+    assert "auto_download=true" in result.stdout
+    assert not Path(env["MODEL_LOCAL_CACHE"]).exists()
 
 
 def test_root_wrapper_preserves_fp32_masters_and_normalization(monkeypatch):
