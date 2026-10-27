@@ -257,9 +257,9 @@ accepts:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 NPROC_PER_NODE=8 FSDP_WRAP_STRATEGY=layer \
-MASTER_DTYPE=bfloat16 OPTIMIZER=adamw8bit ATTENTION_BACKEND=sdpa \
+MASTER_DTYPE=float32 OPTIMIZER=adamw8bit ATTENTION_BACKEND=sdpa \
 BATCH_SIZE=16 GRAD_ACCUMULATION_STEPS=1 \
-JOB_NAME=pi05_robodojo_delta_bs16_memory_v1 \
+JOB_NAME=pi05_robodojo_delta_bs16_fp32_8bit_v1 \
 MAX_UPDATES_THIS_RUN=2 \
 bash train_pi05_robodojo_fsdp.sh
 ```
@@ -272,6 +272,11 @@ Keep `STEPS` at the intended total budget when stopping early.
 Use a fresh output directory when changing optimizer, parameter precision,
 attention backend, or batching; those settings are checked on resume.
 The bitsandbytes version is also recorded and checked for 8-bit runs.
+The FP32-master mode above is recommended first: it already fits comfortably
+below 40 GiB in the two-GPU local test below, without BF16 update rounding.
+Use `MASTER_DTYPE=bfloat16` with a different job/output name if more headroom
+is needed. After the bounded test, keep the same settings, set
+`WEIGHT_RESUME=true`, and omit `MAX_UPDATES_THIS_RUN` to continue.
 
 `MASTER_DTYPE=bfloat16` stores model master parameters and reduced gradients
 in BF16, while all normalization statistics remain exactly FP32. There is
@@ -296,6 +301,80 @@ The root strategy intentionally rejects these new modes. Training summaries
 record setup allocated peaks separately from post-setup training/save/export
 allocated and reserved peaks; actual device use includes CUDA/NCCL overhead
 and unrelated jobs beyond these PyTorch allocator counters.
+
+### Completed true-microbatch16 validation
+
+Both FP32-master and BF16-master modes completed real two-GPU official-base
+training with `BATCH_SIZE=16 GRAD_ACCUMULATION_STEPS=1`, fused SDPA and
+bitsandbytes 0.50.2 AdamW8bit. Each first invocation saved after update 1;
+each resumed invocation restored state, completed update 2, saved, and
+exported. No sample splitting, image-resolution change, camera removal,
+language shortening, or action-horizon change was used.
+
+| Master parameters | Training/save/export allocated peak/card | Reserved peak/card | Setup allocated peak/card |
+|---|---|---|---|
+| FP32 | 19.87 GiB | 27.72 GiB | 13.66 GiB |
+| BF16 | 13.56 GiB | 18.69 GiB | 6.83 GiB |
+
+These are **two RTX PRO 6000 Blackwell GPU measurements**, not A100 results.
+The allocator counters exclude CUDA/NCCL allocations outside PyTorch and
+unrelated jobs. More ranks further shard persistent state, but kernel and
+communication differences mean the exact eight-A100 peak is not measured.
+The table covers both updates and checkpoint/export phases, not just the
+first forward or the first update before moments are initialized.
+The first BF16 update alone reported 10.52 GiB allocated; that is not the
+complete resumed-run peak.
+
+The BF16 run's losses were 0.3871422410 then 0.3142255545; the FP32 run's
+were 0.3871422410 then 0.3113985062. These are different batches and only
+two updates, not a convergence or quality comparison. An uninterrupted
+BF16 control matches the resumed run **bitwise** for all 818 exported
+tensors, both ranks' quantized optimizer states, CPU/CUDA RNG states,
+losses, gradient norms, learning rates, and data positions.
+
+Both exports strictly reload into ordinary PI05, all tensors are finite,
+all six normalization quantiles remain exactly FP32 dataset values,
+and real three-camera ten-step inference returns finite `(1, 32, 20)` actions.
+The BF16 export contains 3616757520 BF16 model elements and 120 FP32
+normalizer elements. Each rank's quantized optimizer state uses approximately
+3.03 GiB, including FP32 small states and quantization metadata.
+Relative to the official action head cast to BF16, only 30.34% of its
+elements changed after the two updates, versus 100% in the FP32-master run.
+This illustrates update-rounding risk, not proof of convergence loss.
+FP32 masters are therefore preferable while memory permits.
+
+The 104 targeted tests include an actual CUDA fused-kernel profiler check,
+grouped-query attention output/gradient comparisons against eager with
+joint/padding masks, full-flow parity, exact FP32 quantile preservation,
+8-bit state roundtrip, launcher validation, and legacy checkpoint compatibility.
+No eight-A100, distinct-host, long training, or closed-loop quality run
+was performed.
+
+Evidence under
+`/home/jianf/lzl_project/gcr_latent_action/outputs/evaluation/robodojo/`:
+
+```text
+pi05_delta_fsdp_bs16_lowmem_20261028_v1/
+  training.jsonl
+  launch_step{0,1}.json
+  summary.json
+  reload_validation.json
+  continuous_resume_comparison.json
+  checkpoint_0000000{1,2}/
+  step2/{config.json,model.safetensors}
+pi05_delta_fsdp_bs16_lowmem_continuous_20261028_v1/
+  training.jsonl
+  summary.json
+  checkpoint_00000002/
+  step2/{config.json,model.safetensors}
+pi05_delta_fsdp_bs16_fp32_8bit_20261028_v1/
+  training.jsonl
+  launch_step{0,1}.json
+  summary.json
+  reload_validation.json
+  checkpoint_0000000{1,2}/
+  step{1,2}/{config.json,model.safetensors}
+```
 
 ### Completed layered-FSDP validation
 
