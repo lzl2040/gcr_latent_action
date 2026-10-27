@@ -164,9 +164,19 @@ def test_root_wrapper_preserves_fp32_masters_and_normalization(monkeypatch):
 
     monkeypatch.setattr(training, "FullyShardedDataParallel", fake_fsdp)
     policy = torch.nn.Linear(2, 2).bfloat16()
-    wrapped = training.wrap_pi05(policy, torch.device("cuda:0"))
+    for name in ("normalize_inputs", "normalize_targets", "unnormalize_outputs"):
+        normalizer = torch.nn.Linear(1, 1, bias=False).requires_grad_(False)
+        setattr(policy, name, normalizer)
+    wrapped = training.wrap_pi05(policy, torch.device("cpu"))
     assert wrapped.weight.dtype == torch.float32
     assert options["use_orig_params"] is True
     assert options["mixed_precision"].buffer_dtype is None
     assert options["mixed_precision"].param_dtype == torch.bfloat16
     assert options["mixed_precision"].reduce_dtype == torch.float32
+    expected = {
+        id(parameter)
+        for normalizer in (policy.normalize_inputs, policy.normalize_targets, policy.unnormalize_outputs)
+        for parameter in normalizer.parameters()
+    }
+    assert {id(parameter) for parameter in options["ignored_states"]} == expected
+    assert all(parameter.dtype == torch.float32 for parameter in options["ignored_states"])

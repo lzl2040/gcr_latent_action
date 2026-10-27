@@ -161,7 +161,11 @@ NNODES=2 NODE_RANK=0 NPROC_PER_NODE=2 CUDA_VISIBLE_DEVICES=0,1 \
 
 The implementation uses a **root FULL_SHARD unit**, FP32 master parameters
 and optimizer states, BF16 autocast/parameter all-gathers, and activation
-checkpointing. Dataset quantile buffers stay FP32. PI05 jointly computes
+checkpointing. Dataset statistics are stored as frozen parameters in this
+repository; they are explicitly excluded from mixed-precision sharding
+and replicated in FP32, not merely protected by a buffer-dtype setting.
+Resume reconstructs these normalizers from the hash-checked dataset.
+PI05 jointly computes
 prefix/expert attention by accessing child-layer weights directly; generic
 per-Gemma-layer wrapping would bypass FSDP forward hooks. A root unit
 avoids that error, but gathers the full model during forward/backward:

@@ -87,8 +87,15 @@ def epoch_iterator(loader, sampler, generator, seed, epoch, batch_in_epoch):
 def wrap_pi05(policy, device):
     # Joint prefix/expert attention accesses child weights without calling layer.forward.
     # A root unit keeps those weights gathered; wrapping Gemma layers would bypass FSDP hooks.
+    policy.float()
+    normalizers = (policy.normalize_inputs, policy.normalize_targets, policy.unnormalize_outputs)
+    normalizer_parameters = []
+    for normalizer in normalizers:
+        # Normalize stores statistics as frozen Parameters, not registered buffers.
+        normalizer.to(device)
+        normalizer_parameters.extend(normalizer.parameters())
     return FullyShardedDataParallel(
-        policy.float(),
+        policy,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         mixed_precision=MixedPrecision(
             param_dtype=torch.bfloat16,
@@ -98,6 +105,7 @@ def wrap_pi05(policy, device):
         use_orig_params=True,
         device_id=device,
         limit_all_gathers=True,
+        ignored_states=normalizer_parameters,
     )
 
 
@@ -133,7 +141,7 @@ def train(args, device, checkpoint_group):
     if base_file.is_dir():
         base_file = base_file / "model.safetensors"
     geometry = {
-        "wrap_strategy": "pi05_root_full_shard_fp32_master_bf16_compute",
+        "wrap_strategy": "pi05_root_full_shard_fp32_master_bf16_compute_fp32_normalizers",
         "dataset_root": str(args.dataset_root.resolve()),
         "dataset_stats_sha256": file_hash(args.dataset_root / "meta/stats.json"),
         "base_sha256": file_hash(base_file),
