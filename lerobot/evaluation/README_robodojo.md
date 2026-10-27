@@ -1774,3 +1774,35 @@ The initial run also uses the session-local passive camera wrapper used for
 10k v2 and 12k; the command above reproduces supported evaluation settings
 without installing that diagnostic wrapper. Use a fresh output directory
 for repeats. This preparation does not establish a success result.
+
+#### Step16k native completion and matched 12k comparison
+
+The run completed uninterrupted in 4313.25 seconds (71.89 minutes including
+startup), with 800 control steps per layout and no native unstable-episode
+flags. Full success is **0/3**, with normalized scores **0 / 0 / 0** and a
+native aggregate score of **0.0**, compared with 12k's 0/3 successes and
+aggregate partial-credit score of 5.0. This three-layout diagnostic does not
+establish a population-level checkpoint ranking.
+
+All 240 actual conditioning head images and native head-video contact sheets
+were reviewed: table framing is normal, with no floor-facing anomaly.
+The 51 passive snapshots preserve the head and within-layout scene matrices
+exactly, correct camera bindings, and wrist-to-EE errors below `4e-7`.
+Initial canonical states match 12k exactly. Recorded settings differ only in
+checkpoint, output directory, and port; policy sampling remains uninterrupted.
+
+All 240 chunks pass inverse-normalization and delta-integration checks
+(translation maximum `5.96e-8 m`, rotation-matrix maximum `9.82e-8`,
+gripper maximum `2.98e-8`). Nine native camera videos, 720 prediction videos,
+and 7920 prediction PNGs are retained. The maximum left-arm target-to-next-
+measured position discrepancy is **126.50 mm**, versus **1.26 mm** right;
+medians are 0.081 mm and 0.202 mm. The left-arm outlier's cause remains
+unestablished and is not explained by numerical conversion checks.
+
+Artifacts are under
+`outputs/evaluation/robodojo/stack_bowls_delta_step16k_20261027_v1/`:
+`summary.json`, `final_adapter_audit.json`, `comparison_with_step12k.json`,
+`camera_audit/camera_integrity_report.json`, `worst_target_tracking.json`,
+and `diagnostics/`. Actual videos are in the native
+`simulator/eval_result/` subtree; predicted videos remain in
+`policy/predictions/`.
