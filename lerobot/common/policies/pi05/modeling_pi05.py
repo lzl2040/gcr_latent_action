@@ -600,7 +600,12 @@ class PI05Policy(PreTrainedPolicy):
             tokens, masks = batch[OBS_LANGUAGE_TOKENS], batch[OBS_LANGUAGE_ATTENTION_MASK]
 
         # Sample actions using the model (no separate state needed for PI05)
-        actions = self.model.sample_actions(images, img_masks, tokens, masks)
+        with torch.autocast(
+            device_type=tokens.device.type,
+            dtype=torch.bfloat16,
+            enabled=tokens.device.type == "cuda" and self.config.dtype == "bfloat16",
+        ):
+            actions = self.model.sample_actions(images, img_masks, tokens, masks)
 
         # Unpad actions to actual action dimension
         original_action_dim = self.config.output_features[ACTION].shape[0]
@@ -650,7 +655,12 @@ class PI05Policy(PreTrainedPolicy):
         actions = self.prepare_action(batch)
 
         # Compute loss (no separate state needed for PI05)
-        losses = self.model.forward(images, img_masks, tokens, masks, actions)
+        with torch.autocast(
+            device_type=actions.device.type,
+            dtype=torch.bfloat16,
+            enabled=actions.device.type == "cuda" and self.config.dtype == "bfloat16",
+        ):
+            losses = self.model.forward(images, img_masks, tokens, masks, actions)
 
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
