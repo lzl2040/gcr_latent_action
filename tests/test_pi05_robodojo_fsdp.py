@@ -1,0 +1,172 @@
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+from torch.utils.data import TensorDataset
+
+from lerobot.scripts import train_pi05_robodojo_fsdp as training
+
+SCRIPT = Path(__file__).resolve().parents[1] / "train_pi05_robodojo_fsdp.sh"
+
+
+@pytest.fixture
+def launch_env(tmp_path):
+    data = tmp_path / "dataset with spaces"
+    (data / "meta").mkdir(parents=True)
+    for name in ("info.json", "stats.json"):
+        (data / "meta" / name).write_text("{}")
+    base = tmp_path / "base with spaces"
+    base.mkdir()
+    (base / "model.safetensors").touch()
+    (base / "paligemma_tokenizer.model").touch()
+    return {
+        **os.environ,
+        "PYTHON_BIN": sys.executable,
+        "DATASET_ROOT": str(data),
+        "PRETRAINED_PATH": str(base),
+        "TOKENIZER_PATH": str(base / "paligemma_tokenizer.model"),
+        "OUTPUT_DIR": str(tmp_path / "new run"),
+        "LOG_DIR": str(tmp_path / "logs"),
+        "NNODES": "1",
+        "NODE_RANK": "0",
+        "NPROC_PER_NODE": "2",
+        "MASTER_ADDR": "127.0.0.1",
+        "MASTER_PORT": "29517",
+        "STEPS": "2",
+        "BATCH_SIZE": "1",
+        "GRAD_ACCUMULATION_STEPS": "1",
+        "CHUNK_SIZE": "32",
+        "NUM_WORKERS": "0",
+        "SAVE_FREQ": "1",
+        "LR": "2.5e-5",
+        "WARMUP_STEPS": "1",
+        "SEED": "0",
+        "VIDEO_BACKEND": "pyav",
+        "WEIGHT_RESUME": "false",
+        "EXPORT_FINAL": "true",
+        "MAX_UPDATES_THIS_RUN": "",
+        "CHECK_PATHS": "true",
+        "DRY_RUN": "true",
+    }
+
+
+def launch(env):
+    return subprocess.run(["bash", str(SCRIPT)], env=env, text=True, capture_output=True, check=False)
+
+
+def test_launcher_dry_run_quotes_paths_and_has_no_side_effects(launch_env):
+    result = launch(launch_env)
+    assert result.returncode == 0, result.stderr
+    command = shlex.split(result.stdout.split("Command: ", 1)[1])
+    assert command[command.index("--dataset-root") + 1] == launch_env["DATASET_ROOT"]
+    assert command[command.index("--tokenizer-path") + 1] == launch_env["TOKENIZER_PATH"]
+    assert command[command.index("--nproc-per-node") + 1] == "2"
+    assert "--export-final" in command
+    assert not Path(launch_env["OUTPUT_DIR"]).exists()
+    assert not Path(launch_env["LOG_DIR"]).exists()
+
+
+def test_launcher_multinode_resume_and_accumulation(launch_env):
+    output = Path(launch_env["OUTPUT_DIR"])
+    output.mkdir()
+    (output / "latest_checkpoint").write_text("checkpoint_00000001")
+    result = launch(
+        {
+            **launch_env,
+            "NNODES": "2",
+            "NODE_RANK": "1",
+            "MASTER_ADDR": "training-node-0",
+            "BATCH_SIZE": "2",
+            "GRAD_ACCUMULATION_STEPS": "4",
+            "WEIGHT_RESUME": "true",
+            "MAX_UPDATES_THIS_RUN": "1",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Effective batch size: 32" in result.stdout
+    command = shlex.split(result.stdout.split("Command: ", 1)[1])
+    assert "--resume" in command
+    assert command[command.index("--node-rank") + 1] == "1"
+    assert command[command.index("--max-updates-this-run") + 1] == "1"
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("STEPS", "0", "positive integer"),
+        ("NODE_RANK", "1", "smaller than NNODES"),
+        ("WEIGHT_RESUME", "yes", "true or false"),
+        ("LR", "nan", "finite and positive"),
+        ("PRETRAINED_PATH", "/definitely/missing/pi05", "Missing base weights"),
+        ("WEIGHT_RESUME", "true", "No latest_checkpoint"),
+        ("NNODES", "2", "reachable from other nodes"),
+    ],
+)
+def test_launcher_rejects_invalid_settings(launch_env, key, value, message):
+    result = launch({**launch_env, key: value})
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+def test_launcher_propagates_training_failure_through_tee(launch_env, tmp_path):
+    executable = tmp_path / "failed-python"
+    executable.write_text(
+        '#!/usr/bin/env bash\nif [[ "$1" == "-m" ]]; then echo "training failed" >&2; exit 23; fi\n'
+    )
+    executable.chmod(0o755)
+    result = launch({**launch_env, "PYTHON_BIN": str(executable), "DRY_RUN": "false"})
+    assert result.returncode == 23
+    assert "training failed" in result.stdout
+    assert len(list(Path(launch_env["LOG_DIR"]).glob("*.log"))) == 1
+
+
+def test_distributed_sampler_and_resumed_epoch_order():
+    dataset = TensorDataset(torch.arange(16))
+    args = SimpleNamespace(seed=7, batch_size=2, num_workers=0)
+    loader, sampler, generator = training.make_loader(dataset, args, 0, 2)
+    full = list(training.epoch_iterator(loader, sampler, generator, 7, 0, 0))
+    resumed = list(training.epoch_iterator(loader, sampler, generator, 7, 0, 2))
+    assert len(full) == 4 and len(resumed) == 2
+    for expected, actual in zip(full[2:], resumed, strict=True):
+        torch.testing.assert_close(expected[0], actual[0])
+    other_loader, other_sampler, other_generator = training.make_loader(dataset, args, 1, 2)
+    other = list(training.epoch_iterator(other_loader, other_sampler, other_generator, 8, 0, 0))
+    assert set(torch.cat([row[0] for row in full]).tolist()).isdisjoint(
+        torch.cat([row[0] for row in other]).tolist()
+    )
+    with pytest.raises(ValueError, match="batch position"):
+        training.epoch_iterator(loader, sampler, generator, 7, 0, 5)
+
+
+def test_resume_rejects_changed_geometry(tmp_path):
+    checkpoint = tmp_path / "checkpoint_00000001"
+    checkpoint.mkdir()
+    geometry = {"batch_size": 1, "steps": 2}
+    (tmp_path / "latest_checkpoint").write_text(checkpoint.name)
+    (checkpoint / "metadata.json").write_text(json.dumps({"training_geometry": geometry}))
+    training.check_resume_geometry(tmp_path, geometry)
+    with pytest.raises(ValueError, match="unchanged"):
+        training.check_resume_geometry(tmp_path, {**geometry, "batch_size": 2})
+
+
+def test_root_wrapper_preserves_fp32_masters_and_normalization(monkeypatch):
+    options = {}
+
+    def fake_fsdp(policy, **kwargs):
+        options.update(kwargs)
+        return policy
+
+    monkeypatch.setattr(training, "FullyShardedDataParallel", fake_fsdp)
+    policy = torch.nn.Linear(2, 2).bfloat16()
+    wrapped = training.wrap_pi05(policy, torch.device("cuda:0"))
+    assert wrapped.weight.dtype == torch.float32
+    assert options["use_orig_params"] is True
+    assert options["mixed_precision"].buffer_dtype is None
+    assert options["mixed_precision"].param_dtype == torch.bfloat16
+    assert options["mixed_precision"].reduce_dtype == torch.float32

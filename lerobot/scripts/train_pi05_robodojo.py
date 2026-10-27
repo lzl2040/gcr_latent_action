@@ -103,7 +103,7 @@ class RoboDojoDeltaDataset(Dataset):
         return batch
 
 
-def parse_args():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--pretrained-path", type=Path)
@@ -120,6 +120,11 @@ def parse_args():
     parser.add_argument("--warmup-steps", type=int, default=1000)
     parser.add_argument("--video-backend", choices=("pyav", "torchcodec"), default="pyav")
     parser.add_argument("--validate-data-only", action="store_true")
+    return parser
+
+
+def parse_args(parser=None):
+    parser = build_parser() if parser is None else parser
     args = parser.parse_args()
     if min(args.steps, args.batch_size, args.chunk_size, args.save_freq) <= 0:
         parser.error("steps, batch-size, chunk-size, and save-freq must be positive.")

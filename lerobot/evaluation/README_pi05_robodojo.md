@@ -108,7 +108,87 @@ implement resume. A successful smoke check is not evidence of RoboDojo
 task success; closed-loop PI05 deployment must be connected and evaluated
 separately.
 
-## Completed smoke check
+## FSDP launcher
+
+`train_pi05_robodojo_fsdp.sh` launches the separate
+`lerobot.scripts.train_pi05_robodojo_fsdp` entry through `torchrun`.
+It supports single-node or multi-node CUDA training, distributed data
+sampling, gradient accumulation, rank-zero JSONL logging, and checkpoint
+resume. It does not change the existing single-device entry.
+
+```bash
+conda activate wam
+cd /home/jianf/lzl_project/gcr_latent_action_pi05_robodojo
+
+# Validate paths and print the command without starting training.
+DRY_RUN=true bash train_pi05_robodojo_fsdp.sh
+
+# Two GPUs, one sample per rank, effective batch size 8.
+CUDA_VISIBLE_DEVICES=0,1 NPROC_PER_NODE=2 \
+  BATCH_SIZE=1 GRAD_ACCUMULATION_STEPS=4 STEPS=30000 \
+  JOB_NAME=pi05_stack_bowls_delta_v1 bash train_pi05_robodojo_fsdp.sh
+
+# Resume the same job, with the same schedule and training geometry.
+CUDA_VISIBLE_DEVICES=0,1 NPROC_PER_NODE=2 \
+  BATCH_SIZE=1 GRAD_ACCUMULATION_STEPS=4 STEPS=30000 \
+  JOB_NAME=pi05_stack_bowls_delta_v1 WEIGHT_RESUME=true \
+  bash train_pi05_robodojo_fsdp.sh
+```
+
+Default paths point at this machine's verified delta dataset, official
+base cache, and SentencePiece tokenizer. Override `DATASET_ROOT`,
+`PRETRAINED_PATH`, and `TOKENIZER_PATH` on other machines. Other controls
+include `OUTPUT_DIR` (or `OUTPUT_ROOT`/`JOB_NAME`), `LOG_DIR`, `PYTHON_BIN`,
+`LR`, `WARMUP_STEPS`, `SAVE_FREQ`, `CHUNK_SIZE`, `NUM_WORKERS`, `SEED`,
+and `VIDEO_BACKEND`. Defaults are 30000 optimizer updates, batch size 1 per
+rank, accumulation 1, LR `2.5e-5`, warmup 1000, and checkpoint frequency
+1000. Effective batch size is
+`NNODES * NPROC_PER_NODE * BATCH_SIZE * GRAD_ACCUMULATION_STEPS`.
+Check GPU headroom before launching; no long run is started by adding this
+script. `CHECK_PATHS=false` is intended for command inspection, not as a
+replacement for valid assets.
+
+For two nodes, run this on both machines with the same shared output
+directory, base/tokenizer/data content, and arguments, changing only
+`NODE_RANK=0` to `NODE_RANK=1`:
+
+```bash
+NNODES=2 NODE_RANK=0 NPROC_PER_NODE=2 CUDA_VISIBLE_DEVICES=0,1 \
+  MASTER_ADDR=training-node-0 MASTER_PORT=29500 \
+  OUTPUT_DIR=/shared/experiments/pi05_stack_bowls_delta_v1 \
+  bash train_pi05_robodojo_fsdp.sh
+```
+
+The implementation uses a **root FULL_SHARD unit**, FP32 master parameters
+and optimizer states, BF16 autocast/parameter all-gathers, and activation
+checkpointing. Dataset quantile buffers stay FP32. PI05 jointly computes
+prefix/expert attention by accessing child-layer weights directly; generic
+per-Gemma-layer wrapping would bypass FSDP forward hooks. A root unit
+avoids that error, but gathers the full model during forward/backward:
+this is not layerwise FSDP's best possible memory scaling. FP8 and
+bitsandbytes are not enabled for this PI05 route.
+
+Periodic saves use the repository's existing DCP format:
+`checkpoint_XXXXXXXX/model/`, rank-local optimizer/RNG files, scheduler
+state, metadata, and the atomically published `latest_checkpoint` pointer.
+Resume requires the same world size, base/data/tokenizer, batch geometry,
+seed, learning rate, and total step budget. `STEPS` is the total target,
+not the number of additional updates. `MAX_UPDATES_THIS_RUN=1` can stop
+after one update and save progress without changing the configured
+schedule, for a bounded save/resume smoke check. Interrupted/incomplete
+checkpoint directories are never overwritten.
+
+`EXPORT_FINAL=true` (default) also exports the last update of this
+invocation as `stepN/{config.json,model.safetensors}`, including dataset
+normalization buffers, for ordinary `PI05Policy.from_pretrained` loading.
+`EXPORT_FINAL=false` skips the full-model gather/export, not the DCP save.
+Exports need sufficient rank-zero host RAM and disk space. Console logs
+are written to `LOG_DIR` with per-node names, `training.jsonl` contains
+globally averaged losses, and `launch_stepN.json` records provenance and
+training geometry. `summary.json` distinguishes a bounded stop from
+reaching the total training budget.
+
+## Completed single-device smoke check
 
 The official checkpoint was downloaded into the `BASE` directory above.
 Its `model.safetensors` SHA256 is
