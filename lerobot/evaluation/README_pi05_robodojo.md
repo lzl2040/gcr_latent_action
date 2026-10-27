@@ -293,6 +293,16 @@ and shared-checkpoint regressions pass. Multi-node argument construction
 is covered by dry-run tests; distinct physical hosts have not been tested.
 No long fine-tuning or closed-loop PI05 success-rate run was launched.
 
+Cluster asset preparation additionally passed 25 cache/launcher/resume
+tests, including mocked weight downloads and checksum/network failures.
+A live check downloaded and SHA256-verified the public tokenizer into a
+fresh node-local cache, then reused it with downloads disabled. The
+official pinned revision, 14467165872-byte weight size, and weight SHA256
+were checked against Hub metadata; the already available base weights
+were reused rather than downloading another 14.47 GB. The existing v2
+checkpoint metadata also accepts an unchanged tokenizer hash with a
+different node-local path.
+
 ## Completed single-device smoke check
 
 The official checkpoint was downloaded into the `BASE` directory above.
