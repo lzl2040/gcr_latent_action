@@ -1840,5 +1840,38 @@ The instrumented run started successfully and produced finite `(32, 20)`
 physical-action predictions with ten executed actions per replan. The saved
 coordinator settings differ from the 20-step baseline only in the sampling
 override, output directory, and port. Startup evidence is retained in
-`startup_comparison_with_sampling20.json`; the native evaluation is still
-running, so no success-rate comparison is available yet.
+`startup_comparison_with_sampling20.json`.
+
+The run completed uninterrupted with 800 control steps per layout and no
+native unstable-episode flags. Reducing sampling to ten steps did not
+improve success or partial-credit score on these three layouts:
+
+| Metric | 20 sampling steps | 10 sampling steps |
+|---|---|---|
+| Full success | 0/3 | 0/3 |
+| Layout 0/1/2 normalized scores | 0 / 0 / 0 | 0 / 0 / 0 |
+| Native aggregate score | 0.0 | 0.0 |
+| Mean model inference per chunk | 8.25 s | 7.16 s |
+| Mean prediction-video export per chunk | 5.86 s | 5.96 s |
+| Total wall time, including startup | 71.89 min | 68.43 min |
+
+Observed model inference time fell by 13.3%, while total wall time fell by
+4.8%; shared-machine load differs between runs, so these are not isolated
+kernel-speed measurements. The task videos still show reaching/contact
+without completing the bowl stack.
+
+All 240 saved chunks contain finite numeric arrays and pass delta-integration
+and inverse-normalization checks. Initial states match the 20-step baseline
+exactly. All 240 conditioning head images and the three native head-video
+contact sheets were reviewed: table framing is normal, with no floor-facing
+anomaly. The 51 passive snapshots preserve head/scene transforms and camera
+bindings; wrist-to-EE errors remain below `4e-7`. Target-to-next-measured
+position discrepancy reaches 160.03 mm on the left and 1.81 mm on the right;
+this tracking outlier's cause remains unestablished.
+
+The run retains nine actual camera videos, 720 prediction videos, and 7920
+prediction PNGs. See `comparison_with_sampling20.json`,
+`final_adapter_audit.json`, `camera_audit/camera_integrity_report.json`, and
+`diagnostics/` in the output directory. Actual videos are under
+`simulator/eval_result/`; predicted videos are under `policy/predictions/`.
+These three layouts do not establish equivalence across the full benchmark.
