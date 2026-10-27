@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import shlex
@@ -331,3 +332,35 @@ def test_8bit_optimizer_uses_pi05_hyperparameters(monkeypatch):
         "weight_decay": 0.01,
         "grad_clip_norm": 1.0,
     }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="8-bit optimizer validation requires CUDA")
+def test_real_bf16_8bit_optimizer_roundtrip_keeps_quantized_state():
+    pytest.importorskip("bitsandbytes")
+    config = training.PI05Config(optimizer_lr=1e-3)
+    model = torch.nn.Linear(64, 128, bias=False, device="cuda", dtype=torch.bfloat16)
+    optimizer = training.make_optimizer(config, model, "adamw8bit")
+    model.weight.grad = torch.full_like(model.weight, 0.1)
+    initial = model.weight.detach().clone()
+    optimizer.step()
+    assert not torch.equal(initial, model.weight)
+    stream = io.BytesIO()
+    torch.save(optimizer.state_dict(), stream)
+    stream.seek(0)
+    checkpoint = torch.load(stream, weights_only=True, map_location="cpu")
+    restored = torch.nn.Linear(64, 128, bias=False, device="cuda", dtype=torch.bfloat16)
+    restored.load_state_dict(model.state_dict())
+    resumed_optimizer = training.make_optimizer(config, restored, "adamw8bit")
+    resumed_optimizer.load_state_dict(checkpoint)
+    for candidate in (optimizer, resumed_optimizer):
+        state = next(iter(candidate.state.values()))
+        assert state["state1"].dtype == state["state2"].dtype == torch.uint8
+        assert state["absmax1"].dtype == state["absmax2"].dtype == torch.float32
+    for module, candidate in ((model, optimizer), (restored, resumed_optimizer)):
+        module.weight.grad = torch.full_like(module.weight, -0.2)
+        candidate.step()
+    torch.testing.assert_close(restored.weight, model.weight, rtol=0, atol=0)
+    expected = next(iter(optimizer.state.values()))
+    actual = next(iter(resumed_optimizer.state.values()))
+    for key in ("state1", "state2", "absmax1", "absmax2"):
+        torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
