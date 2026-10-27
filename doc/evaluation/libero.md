@@ -2,10 +2,10 @@
 
 更新日期：2026-10-27。
 
-本文汇总已完成的有效正式评测，共 91 份结果、17,160 次 rollout：
-83 份完整 suite 评测、16,600 次，以及 8 份已完成的任务子集评测、560 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 49 份、8,760 次，
-包括 41 份完整 suite 和 8 份任务子集，分开记录。
+本文汇总已完成的有效正式评测，共 93 份结果、17,420 次 rollout：
+83 份完整 suite 评测、16,600 次，以及 10 份已完成的任务子集评测、820 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 51 份、9,020 次，
+包括 41 份完整 suite 和 10 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -1123,8 +1123,8 @@ Object 的 8 次失败分布于任务 0/3/5/7，分别为 2/1/1/4 次。
 
 16k 完成后已自动接续 14k 剩余任务：Goal `[1, 2, 5, 6, 7, 8]`（120 次）、
 Spatial `[0, 1, 2, 3, 5, 7, 8]`（140 次），仍只使用 GPU 2/3。
-该 260 次补测尚未完成，不计入本文已完成统计；
-其结果须单独记录，不能与此前 14k 困难任务子集拼成一次连续 RNG 的完整 suite。
+该 260 次补测随后完成，作为独立任务子集计入下节；
+不能与此前 14k 困难任务子集拼成一次连续 RNG 的完整 suite。
 
 本轮原始结果文件的 SHA256：
 
@@ -1133,6 +1133,80 @@ Spatial `[0, 1, 2, 3, 5, 7, 8]`（140 次），仍只使用 GPU 2/3。
 | Object | `96d3ba434c84b1487d7c26662d3b949e0c3c376d372438e90d860d042ab14b1b` |
 | Spatial | `2e443314391c2c77ea0139a0cd7b23a8e1da467deb1c4521c96d0906d154788a` |
 | Goal | `06ff01b581b28a013e06688772c4f856758d88daf0a611b6d66c8a61484cc72e` |
+
+### 1027_v3_4nodes_8gpu_wo_rotate：14k，剩余 Goal/Spatial 任务补测
+
+本轮按用户要求，在 16k 三套共 600 次评测、两份汇总和调度进程全部完成后自动启动。
+队列于 `2026-10-27T20:15:40Z` 核验前序完成，
+只补测此前 14k 困难任务之外的 Goal `[1, 2, 5, 6, 7, 8]`（120 次）、
+Spatial `[0, 1, 2, 3, 5, 7, 8]`（140 次），每任务 20 个固定初态，
+共 13 个任务、260 次，不重跑 Object 或已测的困难任务。
+Goal 使用物理 GPU 3、Spatial 使用物理 GPU 2，两个 suite 独立进程并行，
+均仅在启动时设置一次 `seed=0`，后续任务、episode 和 replanning 不 reseed。
+两套均已有真实 rollout 的启动核验时间为 `2026-10-27T20:19:08Z`，
+最终完成汇总时间为 `2026-10-27T21:33:22Z`。
+
+仍使用原 `step14k/model` 的 32 个 BF16 DCP 分片，
+三个抽查的可训练参数 SHA256 与此前 14k 完全相同；
+保存的策略配置、运行时代码及所选 suite 的归一化指纹保持一致。
+沿用双视角、预测 32 步、执行 10 步、Flow 20 步，
+以及 Goal 300、Spatial 220 步控制上限。
+两套 worker 均正常退出，260 次唯一任务/固定初态覆盖、有限 7D 动作、
+失败视频、实际设置和输入指纹全部核验通过；两份结果仍标记为任务子集，
+不是两份新的完整 suite。
+
+| 剩余任务范围 | 本轮 14k | 16k 相同任务 | 14k − 16k |
+| --- | --- | --- | --- |
+| Goal，任务 1/2/5/6/7/8 | 96.67%（116/120） | 99.17%（119/120） | -2.50 个百分点 |
+| Spatial，任务 0/1/2/3/5/7/8 | 99.29%（139/140） | 98.57%（138/140） | +0.71 个百分点 |
+| 所选 13 任务合计 | **98.08%（255/260）** | 98.85%（257/260） | -0.77 个百分点 |
+
+该比较只使用 16k 中对应的 13 个任务，不使用其完整 400 次 Goal/Spatial
+或完整 600 次 benchmark 作为分母。两轮的任务起点和前序连续 RNG 历史不同，
+相同初态不能保证相同的采样噪声，因此不属于逐 trial 噪声配对实验。
+
+本轮逐任务结果如下，每项均为成功次数 / 20：
+
+| Suite | 任务编号 | 本轮 14k |
+| --- | --- | --- |
+| Goal | 1 | 19/20 |
+| Goal | 2 | 19/20 |
+| Goal | 5 | 18/20 |
+| Goal | 6 | 20/20 |
+| Goal | 7 | 20/20 |
+| Goal | 8 | 20/20 |
+| Spatial | 0 | 20/20 |
+| Spatial | 1 | 20/20 |
+| Spatial | 2 | 20/20 |
+| Spatial | 3 | 20/20 |
+| Spatial | 5 | 20/20 |
+| Spatial | 7 | 19/20 |
+| Spatial | 8 | 20/20 |
+
+Goal 的 4 次失败分别来自任务 1（碗放炉灶）1 次、任务 2（酒瓶放柜顶）1 次、
+任务 5（盘子推到炉灶前）2 次；Spatial 唯一失败来自任务 7（炉灶上取碗）。
+
+本轮与此前 14k 困难任务的编号完全不重叠，合起来覆盖 Goal/Spatial 各 10 个任务、
+每任务 20 个初态。仅按任务覆盖加总已有结果，并保留原 Object 成绩，可得：
+
+| 覆盖范围 | 14k 分批任务覆盖汇总 | 16k 单次完整 suite |
+| --- | --- | --- |
+| Object，原完整 suite | 97.0%（194/200） | 96.0%（192/200） |
+| Spatial，困难子集 + 本轮补集 | 94.0%（188/200） | 94.0%（188/200） |
+| Goal，困难子集 + 本轮补集 | 92.0%（184/200） | 91.0%（182/200） |
+| 三套任务覆盖合计 | **94.33%（566/600）** | 93.67%（562/600） |
+
+**14k 的 566/600 是分批评测的任务覆盖汇总，不是单次连续 RNG 的三套全量成绩。**
+Goal/Spatial 的两次子集进程各自初始化 RNG，不能称为一次完整 suite 的随机流；
+未生成拼接的 `results.json`，也不把这张覆盖表计作额外 rollout 或完整 suite。
+两轮相差 4 次成功，且没有多随机种子重复，不能据此认定 14k 稳定优于 16k。
+
+本轮原始结果文件的 SHA256：
+
+| Suite | `results.json` SHA256 |
+| --- | --- |
+| Goal | `35040ee9b74755b52c304e1fb77fe174ee1b8ea149f4f0236f7dbd73d9927229` |
+| Spatial | `3ad72e6b7dbfbed059b4a93ea3b8bc21e3105109bb284c85c2c38c632a712485` |
 
 ### 误拷权重评测：曾标作 8k（不计入正式结果）
 
@@ -1321,6 +1395,8 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1027_v3_4nodes_8gpu_wo_rotate` | 16k | Object（全套，200 次） | `outputs/evaluation/libero/v3_4nodes_8gpu_wo_rotate_step16k_full_suites_run_seeded_object_20trials_20261027/results.json` |
 | `1027_v3_4nodes_8gpu_wo_rotate` | 16k | Spatial（全套，200 次） | `outputs/evaluation/libero/v3_4nodes_8gpu_wo_rotate_step16k_full_suites_run_seeded_spatial_20trials_20261027/results.json` |
 | `1027_v3_4nodes_8gpu_wo_rotate` | 16k | Goal（全套，200 次） | `outputs/evaluation/libero/v3_4nodes_8gpu_wo_rotate_step16k_full_suites_run_seeded_goal_20trials_20261027/results.json` |
+| `1027_v3_4nodes_8gpu_wo_rotate` | 14k | Goal（补测任务 1/2/5/6/7/8，120 次） | `outputs/evaluation/libero/v3_4nodes_8gpu_wo_rotate_step14k_remaining_tasks_run_seeded_goal_20trials_20261027/results.json` |
+| `1027_v3_4nodes_8gpu_wo_rotate` | 14k | Spatial（补测任务 0/1/2/3/5/7/8，140 次） | `outputs/evaluation/libero/v3_4nodes_8gpu_wo_rotate_step14k_remaining_tasks_run_seeded_spatial_20trials_20261027/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 
