@@ -10,7 +10,16 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel, MixedPrecision, ShardingStrategy
+from safetensors.torch import save_file
+from torch.distributed.fsdp import (
+    BackwardPrefetch,
+    FullStateDictConfig,
+    FullyShardedDataParallel,
+    MixedPrecision,
+    ShardingStrategy,
+    StateDictType,
+)
+from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.utils.data import DataLoader, DistributedSampler
 
 from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
@@ -43,6 +52,7 @@ def distributed_args():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--export-final", action="store_true")
     parser.add_argument("--max-updates-this-run", type=int)
+    parser.add_argument("--fsdp-wrap-strategy", choices=("layer", "root"), default="layer")
     args = parse_args(parser)
     if args.device is not None or args.validate_data_only:
         parser.error("Use the single-device entry for --device or --validate-data-only.")
@@ -84,9 +94,7 @@ def epoch_iterator(loader, sampler, generator, seed, epoch, batch_in_epoch):
     return iterator
 
 
-def wrap_pi05(policy, device):
-    # Joint prefix/expert attention accesses child weights without calling layer.forward.
-    # A root unit keeps those weights gathered; wrapping Gemma layers would bypass FSDP hooks.
+def wrap_pi05(policy, device, strategy="layer"):
     policy.float()
     normalizers = (policy.normalize_inputs, policy.normalize_targets, policy.unnormalize_outputs)
     normalizer_parameters = []
@@ -94,8 +102,23 @@ def wrap_pi05(policy, device):
         # Normalize stores statistics as frozen Parameters, not registered buffers.
         normalizer.to(device)
         normalizer_parameters.extend(normalizer.parameters())
+    wrap_policy = None
+    if strategy == "layer":
+        from lerobot.common.policies.pi05.paligemma_with_expert import JointAttentionBlock
+
+        joint = policy.model.paligemma_with_expert
+        joint.enable_joint_blocks()
+        for block in joint.joint_blocks:
+            block.gradient_checkpointing = policy.config.gradient_checkpointing
+        # Prefix weights are called through these modules' forwards, not the decoder layers.
+        wrap_policy = ModuleWrapPolicy(
+            {JointAttentionBlock, type(joint.paligemma.vision_tower), torch.nn.Embedding}
+        )
+    elif strategy != "root":
+        raise ValueError(f"Unknown PI05 FSDP strategy: {strategy}")
     return FullyShardedDataParallel(
         policy,
+        auto_wrap_policy=wrap_policy,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         mixed_precision=MixedPrecision(
             param_dtype=torch.bfloat16,
@@ -106,6 +129,7 @@ def wrap_pi05(policy, device):
         device_id=device,
         limit_all_gathers=True,
         ignored_states=normalizer_parameters,
+        backward_prefetch=None if strategy == "layer" else BackwardPrefetch.BACKWARD_PRE,
     )
 
 
@@ -126,17 +150,40 @@ def check_resume_geometry(output_dir, geometry):
     return saved
 
 
+def canonical_pi05_state_dict(state):
+    canonical = {}
+    for name, value in state.items():
+        name = name.replace("_fsdp_wrapped_module.", "")
+        prefix, separator, suffix = name.partition(".joint_blocks.")
+        if separator:
+            layer, branch, parameter = suffix.split(".", 2)
+            if branch == "language_layer":
+                name = f"{prefix}.paligemma.model.language_model.layers.{layer}.{parameter}"
+            elif branch == "expert_layer":
+                name = f"{prefix}.gemma_expert.model.layers.{layer}.{parameter}"
+            else:
+                raise ValueError(f"Unknown joint block branch: {branch}")
+        if name in canonical:
+            raise ValueError(f"Duplicate exported PI05 parameter: {name}")
+        canonical[name] = value
+    return canonical
+
+
 def export_policy(model, policy, output_dir, step):
     destination = output_dir / f"step{step}"
     temporary = output_dir / f".step{step}.tmp"
     if destination.exists() or temporary.exists():
         raise FileExistsError(f"Refusing to overwrite export {destination} or {temporary}.")
-    with FullyShardedDataParallel.summon_full_params(
-        model, offload_to_cpu=True, rank0_only=True, writeback=False
+    # Gather one FSDP unit at a time instead of simultaneously unsharding the whole model.
+    with FullyShardedDataParallel.state_dict_type(
+        model, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
     ):
-        if dist.get_rank() == 0:
-            policy.save_pretrained(temporary)
-            temporary.rename(destination)
+        state = model.state_dict()
+    if dist.get_rank() == 0:
+        temporary.mkdir()
+        policy.config.save_pretrained(temporary)
+        save_file(canonical_pi05_state_dict(state), temporary / "model.safetensors")
+        temporary.rename(destination)
     dist.barrier()
 
 
@@ -149,7 +196,11 @@ def train(args, device, checkpoint_group):
     if base_file.is_dir():
         base_file = base_file / "model.safetensors"
     geometry = {
-        "wrap_strategy": "pi05_root_full_shard_fp32_master_bf16_compute_fp32_normalizers",
+        "wrap_strategy": (
+            "pi05_joint_blocks_full_shard_fp32_master_bf16_compute_fp32_normalizers_sync_each_microbatch_v1"
+            if args.fsdp_wrap_strategy == "layer"
+            else "pi05_root_full_shard_fp32_master_bf16_compute_fp32_normalizers"
+        ),
         "dataset_root": str(args.dataset_root.resolve()),
         "dataset_stats_sha256": file_hash(args.dataset_root / "meta/stats.json"),
         "base_sha256": file_hash(base_file),
@@ -190,7 +241,7 @@ def train(args, device, checkpoint_group):
     if not args.resume:
         policy.load_base_weights(base_file)
     policy.config.device = str(device)
-    model = wrap_pi05(policy, device)
+    model = wrap_pi05(policy, device, args.fsdp_wrap_strategy)
     model.train()
     optimizer = config.get_optimizer_preset().build(model.parameters())
     scheduler_config = config.get_scheduler_preset()
@@ -254,7 +305,9 @@ def train(args, device, checkpoint_group):
                     key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
                     for key, value in batch.items()
                 }
-                synchronize = accumulation == args.grad_accumulation_steps - 1
+                synchronize = (
+                    args.fsdp_wrap_strategy == "layer" or accumulation == args.grad_accumulation_steps - 1
+                )
                 with (
                     nullcontext() if synchronize else model.no_sync(),
                     torch.autocast("cuda", dtype=torch.bfloat16),
@@ -274,6 +327,8 @@ def train(args, device, checkpoint_group):
             scheduler.step()
             update_step += 1
             dist.all_reduce(total_loss)
+            memory_peak = torch.tensor(torch.cuda.max_memory_allocated(device), device=device)
+            dist.all_reduce(memory_peak, op=dist.ReduceOp.MAX)
             row = {
                 "step": update_step,
                 "micro_step": micro_step,
@@ -282,6 +337,7 @@ def train(args, device, checkpoint_group):
                 "lr": lr,
                 "epoch": epoch,
                 "batch_in_epoch": batch_in_epoch,
+                "peak_cuda_allocated_bytes_per_rank_max": memory_peak.item(),
             }
             if log is not None:
                 log.write(json.dumps(row) + "\n")
@@ -302,6 +358,8 @@ def train(args, device, checkpoint_group):
                     device=device,
                     checkpoint_process_group=checkpoint_group,
                 )
+        before_export_peak = torch.tensor(torch.cuda.max_memory_allocated(device), device=device)
+        dist.all_reduce(before_export_peak, op=dist.ReduceOp.MAX)
         if args.export_final:
             export_policy(model, policy, args.output_dir, update_step)
         peak = torch.tensor(torch.cuda.max_memory_allocated(device), device=device)
@@ -313,6 +371,9 @@ def train(args, device, checkpoint_group):
                 "target_steps": args.steps,
                 "final_loss": row["loss"],
                 "world_size": world_size,
+                "fsdp_wrap_strategy": args.fsdp_wrap_strategy,
+                "fsdp_units": len(FullyShardedDataParallel.fsdp_modules(model)),
+                "peak_cuda_allocated_bytes_before_export_per_rank_max": before_export_peak.item(),
                 "peak_cuda_allocated_bytes_per_rank_max": peak.item(),
             }
             (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

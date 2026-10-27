@@ -198,18 +198,35 @@ absolute paths on different nodes. File-tokenizer content hashes, rather
 than node-local paths, determine resume identity. The dataset and training
 output remain shared mounted paths.
 
-The implementation uses a **root FULL_SHARD unit**, FP32 master parameters
-and optimizer states, BF16 autocast/parameter all-gathers, and activation
-checkpointing. Dataset statistics are stored as frozen parameters in this
+The default `FSDP_WRAP_STRATEGY=layer` uses **paired joint-attention blocks**
+as FULL_SHARD units. Each block owns one language layer and its corresponding
+action-expert layer, and joint attention executes through the block's
+`forward()`. The language embedding and frozen vision tower are also separate
+units. Individual Q/K/V/MLP projections must not be independently auto-wrapped:
+the joint block accesses those weights internally.
+
+Parameters and optimizer states remain FP32; autocast/parameter all-gathers
+use BF16, and reductions use FP32. Activation checkpointing is inside each
+joint block, so backward recomputation runs while that block's weights are
+gathered. Layered training reduces gradients on every accumulation microbatch
+and accumulates shards, rather than retaining full-model gradients through
+`no_sync()`. This trades additional communication for lower memory.
+Backward prefetch is disabled to avoid gathering the next block early.
+Dataset statistics are stored as frozen parameters in this
 repository; they are explicitly excluded from mixed-precision sharding
 and replicated in FP32, not merely protected by a buffer-dtype setting.
 Resume reconstructs these normalizers from the hash-checked dataset.
-PI05 jointly computes
-prefix/expert attention by accessing child-layer weights directly; generic
-per-Gemma-layer wrapping would bypass FSDP forward hooks. A root unit
-avoids that error, but gathers the full model during forward/backward:
-this is not layerwise FSDP's best possible memory scaling. FP8 and
-bitsandbytes are not enabled for this PI05 route.
+
+`FSDP_WRAP_STRATEGY=root` retains the previous whole-model FULL_SHARD path,
+including its accumulation behavior, for existing checkpoints and comparisons.
+The wrap strategy is part of resume geometry: a root DCP checkpoint cannot
+be resumed as a layered DCP checkpoint. Use `root` to continue an old run,
+or start a new output directory for layered training. Ordinary exports keep
+the original PI05 parameter names and load into the unmodified inference
+layout; the paired training layout itself rejects cached inference.
+Exports gather one FSDP unit at a time into rank-zero CPU state, rather
+than simultaneously unsharding every unit on GPU. FP8 and bitsandbytes
+are not enabled for this PI05 route.
 
 Periodic saves use the repository's existing DCP format:
 `checkpoint_XXXXXXXX/model/`, rank-local optimizer/RNG files, scheduler
@@ -231,9 +248,10 @@ globally averaged losses, and `launch_stepN.json` records provenance and
 training geometry. `summary.json` distinguishes a bounded stop from
 reaching the total training budget.
 
-### Completed FSDP save/resume validation
+### Completed root-FSDP save/resume validation
 
-The official base completed a real two-GPU run with one sample per rank
+The previous `FSDP_WRAP_STRATEGY=root` implementation completed a real
+two-GPU official-base run with one sample per rank
 and two accumulation microbatches per optimizer update (effective batch 4).
 The first invocation used `STEPS=2 MAX_UPDATES_THIS_RUN=1 EXPORT_FINAL=false`,
 saved update 1, and exited. A second invocation with the same geometry and

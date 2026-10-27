@@ -23,12 +23,23 @@ def compute_layer_complete(
     layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond, paligemma, gemma_expert
 ):
     models = [paligemma.language_model, gemma_expert.model]
+    return compute_joint_layer(
+        [model.layers[layer_idx] for model in models],
+        paligemma.model.language_model.rotary_emb,
+        inputs_embeds,
+        attention_mask,
+        position_ids,
+        adarms_cond,
+    )
+
+
+def compute_joint_layer(layers, rotary_emb, inputs_embeds, attention_mask, position_ids, adarms_cond):
     query_states = []
     key_states = []
     value_states = []
     gates = []
     for i, hidden_states in enumerate(inputs_embeds):
-        layer = models[i].layers[layer_idx]
+        layer = layers[i]
         hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])  # noqa: PLW2901
         gates.append(gate)
         input_shape = hidden_states.shape[:-1]
@@ -50,15 +61,15 @@ def compute_layer_complete(
         device=query_states.device,
         dtype=query_states.dtype,
     )
-    cos, sin = paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
+    cos, sin = rotary_emb(dummy_tensor, position_ids)
     query_states, key_states = modeling_gemma.apply_rotary_pos_emb(
         query_states, key_states, cos, sin, unsqueeze_dim=1
     )
     batch_size = query_states.shape[0]
-    scaling = paligemma.language_model.layers[layer_idx].self_attn.scaling
+    scaling = layers[0].self_attn.scaling
     # Attention computation
     att_output, _ = modeling_gemma.eager_attention_forward(
-        paligemma.language_model.layers[layer_idx].self_attn,
+        layers[0].self_attn,
         query_states,
         key_states,
         value_states,
@@ -66,13 +77,13 @@ def compute_layer_complete(
         scaling,
     )
     # Get head_dim from the current layer, not from the model
-    head_dim = paligemma.language_model.layers[layer_idx].self_attn.head_dim
+    head_dim = layers[0].self_attn.head_dim
     att_output = att_output.reshape(batch_size, -1, query_states.shape[1] * head_dim)
     # Process layer outputs
     outputs_embeds = []
     start_pos = 0
     for i, hidden_states in enumerate(inputs_embeds):
-        layer = models[i].layers[layer_idx]
+        layer = layers[i]
         end_pos = start_pos + hidden_states.shape[1]
         if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
             att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
@@ -90,6 +101,40 @@ def compute_layer_complete(
         outputs_embeds.append(out_emb)
         start_pos = end_pos
     return outputs_embeds
+
+
+class JointAttentionBlock(nn.Module):
+    """Own both branches so FSDP gathers their weights around one joint forward."""
+
+    def __init__(self, language_layer, expert_layer):
+        super().__init__()
+        self.language_layer = language_layer
+        self.expert_layer = expert_layer
+        self.gradient_checkpointing = False
+
+    def forward(self, inputs_embeds, attention_mask, position_ids, adarms_cond, rotary_emb):
+        if self.gradient_checkpointing and self.training:
+            return torch.utils.checkpoint.checkpoint(
+                self._forward,
+                inputs_embeds,
+                attention_mask,
+                position_ids,
+                adarms_cond,
+                rotary_emb,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
+        return self._forward(inputs_embeds, attention_mask, position_ids, adarms_cond, rotary_emb)
+
+    def _forward(self, inputs_embeds, attention_mask, position_ids, adarms_cond, rotary_emb):
+        return compute_joint_layer(
+            (self.language_layer, self.expert_layer),
+            rotary_emb,
+            inputs_embeds,
+            attention_mask,
+            position_ids,
+            adarms_cond,
+        )
 
 
 class GemmaConfig:  # see openpi `gemma.py: Config`
@@ -185,6 +230,21 @@ class PaliGemmaWithExpertModel(
         # self.paligemma.model.language_model.embed_tokens = None
 
         self.to_bfloat16_for_selected_params(precision)
+        self.joint_blocks = None
+
+    def enable_joint_blocks(self):
+        """Reparent decoder layers for joint-training FSDP; ordinary inference stays unchanged."""
+        if self.joint_blocks is not None:
+            return
+        language = self.paligemma.language_model
+        expert = self.gemma_expert.model
+        blocks = nn.ModuleList(
+            JointAttentionBlock(language_layer, expert_layer)
+            for language_layer, expert_layer in zip(language.layers, expert.layers, strict=True)
+        )
+        language.layers = nn.ModuleList()
+        expert.layers = nn.ModuleList()
+        self.joint_blocks = blocks
 
     def to_bfloat16_for_selected_params(self, precision: Literal["bfloat16", "float32"] = "bfloat16"):
         if precision == "bfloat16":
@@ -225,6 +285,10 @@ class PaliGemmaWithExpertModel(
     ):
         if adarms_cond is None:
             adarms_cond = [None, None]
+        if self.joint_blocks is not None and (
+            inputs_embeds[0] is None or inputs_embeds[1] is None or use_cache or past_key_values is not None
+        ):
+            raise ValueError("Joint FSDP blocks support uncached joint training only; export for inference.")
         if inputs_embeds[1] is None:
             prefix_output = self.paligemma.language_model.forward(
                 inputs_embeds=inputs_embeds[0],
@@ -262,7 +326,15 @@ class PaliGemmaWithExpertModel(
 
             # Process all layers with gradient checkpointing if enabled
             for layer_idx in range(num_layers):
-                if use_gradient_checkpointing:
+                if self.joint_blocks is not None:
+                    inputs_embeds = self.joint_blocks[layer_idx](
+                        inputs_embeds,
+                        attention_mask,
+                        position_ids,
+                        adarms_cond,
+                        self.paligemma.model.language_model.rotary_emb,
+                    )
+                elif use_gradient_checkpointing:
                     inputs_embeds = torch.utils.checkpoint.checkpoint(
                         compute_layer_complete,
                         layer_idx,

@@ -41,6 +41,7 @@ def launch_env(tmp_path):
         "STEPS": "2",
         "BATCH_SIZE": "1",
         "GRAD_ACCUMULATION_STEPS": "1",
+        "FSDP_WRAP_STRATEGY": "layer",
         "CHUNK_SIZE": "32",
         "NUM_WORKERS": "0",
         "SAVE_FREQ": "1",
@@ -70,6 +71,7 @@ def test_launcher_dry_run_quotes_paths_and_has_no_side_effects(launch_env):
     assert command[command.index("--tokenizer-path") + 1] == launch_env["TOKENIZER_PATH"]
     assert command[command.index("--nproc-per-node") + 1] == "2"
     assert "--export-final" in command
+    assert command[command.index("--fsdp-wrap-strategy") + 1] == "layer"
     assert not Path(launch_env["OUTPUT_DIR"]).exists()
     assert not Path(launch_env["LOG_DIR"]).exists()
 
@@ -88,6 +90,7 @@ def test_launcher_multinode_resume_and_accumulation(launch_env):
             "GRAD_ACCUMULATION_STEPS": "4",
             "WEIGHT_RESUME": "true",
             "MAX_UPDATES_THIS_RUN": "1",
+            "FSDP_WRAP_STRATEGY": "root",
         }
     )
     assert result.returncode == 0, result.stderr
@@ -96,6 +99,7 @@ def test_launcher_multinode_resume_and_accumulation(launch_env):
     assert "--resume" in command
     assert command[command.index("--node-rank") + 1] == "1"
     assert command[command.index("--max-updates-this-run") + 1] == "1"
+    assert command[command.index("--fsdp-wrap-strategy") + 1] == "root"
 
 
 @pytest.mark.parametrize(
@@ -108,6 +112,7 @@ def test_launcher_multinode_resume_and_accumulation(launch_env):
         ("PRETRAINED_PATH", "/definitely/missing/pi05", "Missing base weights"),
         ("WEIGHT_RESUME", "true", "No latest_checkpoint"),
         ("NNODES", "2", "reachable from other nodes"),
+        ("FSDP_WRAP_STRATEGY", "decoder", "must be layer or root"),
     ],
 )
 def test_launcher_rejects_invalid_settings(launch_env, key, value, message):
@@ -223,7 +228,7 @@ def test_root_wrapper_preserves_fp32_masters_and_normalization(monkeypatch):
     for name in ("normalize_inputs", "normalize_targets", "unnormalize_outputs"):
         normalizer = torch.nn.Linear(1, 1, bias=False).requires_grad_(False)
         setattr(policy, name, normalizer)
-    wrapped = training.wrap_pi05(policy, torch.device("cpu"))
+    wrapped = training.wrap_pi05(policy, torch.device("cpu"), strategy="root")
     assert wrapped.weight.dtype == torch.float32
     assert options["use_orig_params"] is True
     assert options["mixed_precision"].buffer_dtype is None

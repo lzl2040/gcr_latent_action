@@ -786,7 +786,10 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
             def image_embed_func(img):
                 return self.paligemma_with_expert.embed_image(img)
 
-            img_emb = self._apply_checkpoint(image_embed_func, img)
+            if self.paligemma_with_expert.joint_blocks is not None:
+                img_emb = image_embed_func(img)
+            else:
+                img_emb = self._apply_checkpoint(image_embed_func, img)
             bsize, num_img_embs = img_emb.shape[:2]
 
             embs.append(img_emb)
@@ -800,7 +803,10 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
             lang_emb_dim = lang_emb.shape[-1]
             return lang_emb * math.sqrt(lang_emb_dim)
 
-        lang_emb = self._apply_checkpoint(lang_embed_func, tokens)
+        if self.paligemma_with_expert.joint_blocks is not None:
+            lang_emb = lang_embed_func(tokens)
+        else:
+            lang_emb = self._apply_checkpoint(lang_embed_func, tokens)
         embs.append(lang_emb)
         pad_masks.append(masks)
 
