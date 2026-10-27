@@ -192,6 +192,68 @@ globally averaged losses, and `launch_stepN.json` records provenance and
 training geometry. `summary.json` distinguishes a bounded stop from
 reaching the total training budget.
 
+### Completed FSDP save/resume validation
+
+The official base completed a real two-GPU run with one sample per rank
+and two accumulation microbatches per optimizer update (effective batch 4).
+The first invocation used `STEPS=2 MAX_UPDATES_THIS_RUN=1 EXPORT_FINAL=false`,
+saved update 1, and exited. A second invocation with the same geometry and
+`WEIGHT_RESUME=true EXPORT_FINAL=true` restored model shards, rank-local
+AdamW states, scheduler, RNG, and data position, then completed update 2.
+
+| Update | Global micro-step | Loss | Gradient norm | LR |
+|---|---|---|---|---|
+| 1 | 2 | 0.3649195 | 7.8396115 | 1.25e-5 |
+| 2, after resume | 4 | 0.3826021 | 7.1089067 | 2.5e-5 |
+
+These are different batches/noise samples, not evidence of convergence.
+Maximum allocated memory in the resumed/exporting invocation was
+57898332160 bytes (53.92 GiB) per rank; reserved memory and other jobs need
+additional headroom. Root-unit FSDP plus full-precision master parameters
+does not imply that this configuration fits small-memory GPUs.
+
+The resulting `step2` export has 818 tensors and reloads with
+`strict=True`. All state/action quantile statistics remain exactly equal
+to the dataset's FP32 values. Real three-camera inference produces finite
+`(1, 32, 20)` delta actions with ten denoising steps. The action-output
+weights differ from the official base, and saved data positions advance
+from batch 2 to batch 4 across resume. Evidence is retained at:
+
+```text
+/home/jianf/lzl_project/gcr_latent_action/outputs/evaluation/robodojo/pi05_delta_fsdp_smoke_20261027_v2/
+  training.jsonl
+  launch_step0.json
+  launch_step1.json
+  summary.json
+  reload_validation.json
+  checkpoint_00000001/
+  checkpoint_00000002/
+  latest_checkpoint
+  step2/{config.json,model.safetensors}
+```
+
+For CPU construction before moving to the inference GPU, load the exported
+configuration through the registered base configuration class:
+
+```python
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.common.policies.pi05.modeling_pi05 import PI05Policy
+
+config = PreTrainedConfig.from_pretrained(export_directory)
+config.device = "cpu"
+policy = PI05Policy.from_pretrained(
+    export_directory, config=config, map_location="cpu", strict=True
+)
+```
+
+The first distributed smoke exposed that normalization statistics are
+frozen parameters, so `buffer_dtype=None` alone did not protect their
+forward-pass precision. Explicitly ignoring these parameters fixed that
+issue before the v2 validation above. Seventy targeted PI05, launcher,
+and shared-checkpoint regressions pass. Multi-node argument construction
+is covered by dry-run tests; distinct physical hosts have not been tested.
+No long fine-tuning or closed-loop PI05 success-rate run was launched.
+
 ## Completed single-device smoke check
 
 The official checkpoint was downloaded into the `BASE` directory above.
