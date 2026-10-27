@@ -248,6 +248,71 @@ globally averaged losses, and `launch_stepN.json` records provenance and
 training geometry. `summary.json` distinguishes a bounded stop from
 reaching the total training budget.
 
+### Completed layered-FSDP validation
+
+The official base completed real two-GPU training with
+`FSDP_WRAP_STRATEGY=layer BATCH_SIZE=1 GRAD_ACCUMULATION_STEPS=2 STEPS=2`.
+The 22 FSDP units include 18 paired decoder blocks, the word embedding,
+vision position embedding, frozen vision tower, and residual root unit.
+The first invocation stopped and checkpointed after update 1; a separate
+invocation restored the checkpoint, completed update 2, and exported.
+
+| Update | Global micro-step | Loss | Gradient norm | LR |
+|---|---|---|---|---|
+| 1 | 2 | 0.3649195433 | 7.8395791054 | 1.25e-5 |
+| 2, after resume | 4 | 0.3805867732 | 5.9830603600 | 2.5e-5 |
+
+An independent uninterrupted two-update run produced **bitwise-identical
+818 exported tensors, both ranks' AdamW states, and CPU/CUDA RNG states**.
+Losses, gradient norms, learning rates, and data positions also match
+exactly between uninterrupted and resumed layered training.
+Tiny FP32/BF16 tests independently exercise the legacy and paired layouts,
+with and without activation checkpointing: outputs, input/condition
+gradients, and parameter gradients match exactly. A full three-camera
+flow-matching test also checks loss and gradient parity.
+
+Maximum allocated GPU memory across ranks was **32898247168 bytes
+(30.64 GiB/card)** for the resumed training/save/export invocation;
+the pre-export maximum was the same. The uninterrupted control differs
+by only 512 bytes. The earlier complete root-path run below peaked at
+53.92 GiB/card. These are measurements on two RTX PRO 6000 Blackwell GPUs,
+not eight A100s, and compare the complete old/new implementations, including
+their accumulation and export changes, rather than isolating wrapping alone.
+Reserved memory and other jobs require additional headroom.
+Root and layered distributed runs need not be bitwise identical because
+the accumulation/reduction order differs.
+
+The exported ordinary PI05 model reloads with `strict=True`, retains all
+six FP32 quantile tensors exactly, and produces finite `(1, 32, 20)` actions
+from real three-camera observations with ten denoising steps. Its tensor
+names match the old root export, with no training-only `joint_blocks` names.
+The action-output head changed from the official base by up to
+`3.7536025e-5`. Ninety-one targeted PI05, cache, launcher, and checkpoint
+tests pass; no eight-GPU A100 or distinct-host run has been tested.
+No long fine-tuning or closed-loop PI05 success-rate run was launched.
+
+Evidence:
+
+```text
+/home/jianf/lzl_project/gcr_latent_action/outputs/evaluation/robodojo/
+  pi05_delta_fsdp_layer_smoke_20261027_v2/
+    training.jsonl
+    launch_step0.json
+    launch_step1.json
+    summary.json
+    reload_validation.json
+    continuous_resume_comparison.json
+    checkpoint_00000001/
+    checkpoint_00000002/
+    latest_checkpoint
+    step2/{config.json,model.safetensors}
+  pi05_delta_fsdp_layer_continuous_20261027_v1/
+    training.jsonl
+    summary.json
+    checkpoint_00000002/
+    step2/{config.json,model.safetensors}
+```
+
 ### Completed root-FSDP save/resume validation
 
 The previous `FSDP_WRAP_STRATEGY=root` implementation completed a real
