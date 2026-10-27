@@ -50,3 +50,60 @@ For rollout deployment, delta predictions still require cumulative world
 translations, left-multiplied rotation increments, clipped gripper
 increments, and reanchoring at the next measured state. The Qwen-specific
 online evaluator does not automatically become a PI05 deployment adapter.
+
+## Fine-tuning entry point
+
+Use the isolated `pi05_robodojo_finetune` worktree. The single-device entry
+point reads the existing v3 dataset without rewriting its columns or stats:
+
+```bash
+conda activate wam
+cd /home/jianf/lzl_project/gcr_latent_action_pi05_robodojo
+DATA=/data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/stack_bowls_delta
+BASE=/home/jianf/lzl_project/gcr_latent_action/outputs/evaluation/robodojo/runtime_assets/pretrained/pi05_base
+
+# CPU-only metadata, three-camera decoding, and batched feature validation.
+python -m lerobot.scripts.train_pi05_robodojo \
+  --dataset-root "$DATA" --validate-data-only \
+  --output-dir outputs/pi05_robodojo/data_check
+
+# A bounded training smoke check; not a full fine-tuning experiment.
+python -m lerobot.scripts.train_pi05_robodojo \
+  --dataset-root "$DATA" \
+  --pretrained-path "$BASE" \
+  --tokenizer-path "$BASE/paligemma_tokenizer.model" \
+  --device cuda:0 --steps 2 --batch-size 1 --chunk-size 32 \
+  --output-dir outputs/pi05_robodojo/smoke
+```
+
+Output directories must be new. For a full run, choose the intended step
+budget and batch size explicitly, e.g. `--steps 30000 --batch-size 4`.
+This example is not a recommendation that 30000 steps is sufficient or
+optimal. Default LR is `2.5e-5`, warmup is 1000 updates (shortened for a
+shorter run), followed immediately by cosine decay to `2.5e-6` at the
+requested update budget. There is no implicit 20000-step plateau.
+The vision encoder is frozen; the language backbone and action expert are
+trainable. CUDA uses BF16 autocast and gradient checkpointing. Images are
+aspect-preserving resized/padded to 224x224; stochastic image augmentation
+is not enabled by this entry point.
+
+The loader maps `observation.ee_ort6d_pos` to the 20D state and
+`delta_action.ee_ort6d_pos` to action targets, **not** the original 16D
+`action`. Future actions start at the current row and never cross episode
+boundaries; repeated tail rows are masked out of the training loss.
+Camera order is head (`cam_high`), left wrist, right wrist. Numeric vectors
+are quantile-normalized before padding to the base model's 32 dimensions;
+only the 20 real action dimensions contribute to the loss. State prompts
+contain the padded 32D state. The action horizon is 32 and deployment
+configuration executes up to 10 actions per replan; PI05 retains its
+official 10 inference denoising steps.
+
+`data_contract.json` records feature semantics, normalization, input
+shapes, source/statistics/tokenizer hashes, launch arguments and Git
+revision. `training.jsonl` contains loss, gradient norm and LR per update.
+Each checkpoint includes policy configuration, full model/normalizer
+weights and `training_state.pt` (optimizer and scheduler). A completed run
+writes `summary.json`; the current entry point starts fresh and does not
+implement resume. A successful smoke check is not evidence of RoboDojo
+task success; closed-loop PI05 deployment must be connected and evaluated
+separately.

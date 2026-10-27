@@ -1,3 +1,4 @@
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -83,6 +84,15 @@ def test_three_cameras_and_missing_camera():
         policy._preprocess_images(batch)
 
 
+def test_non_square_camera_padding_remains_in_siglip_range():
+    policy = bare_policy()
+    batch = {key: torch.ones(1, 3, 48, 64) for key in policy.config.image_features}
+    images, _ = policy._preprocess_images(batch)
+    for image in images:
+        assert image.shape == (1, 3, 28, 28)
+        assert image.min() == -1 and image.max() == 1
+
+
 def test_state_prompt_padding_and_token_limit():
     policy = bare_policy()
     batch = {"observation.state": torch.zeros(1, 20), "task": ["Stack_the bowls.\n"]}
@@ -156,3 +166,90 @@ def test_official_tied_embedding_loading_and_missing_weight_rejection(tiny_flow)
     weights.pop("action_in_proj.weight")
     with pytest.raises(ValueError, match="missing=.*action_in_proj.weight"):
         policy.load_base_state_dict(weights)
+
+
+def test_robodojo_delta_feature_and_padding_mapping(tmp_path, monkeypatch):
+    from lerobot.scripts import train_pi05_robodojo as training
+
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    features = {key: {"shape": [20]} for key in (training.STATE_KEY, training.ACTION_KEY)}
+    features.update({key: {"dtype": "video"} for key in training.CAMERAS.values()})
+    (meta / "info.json").write_text(
+        json.dumps(
+            {
+                "codebase_version": "v3.0",
+                "fps": 25,
+                "features": features,
+            }
+        )
+    )
+    stats = {"mean": [0.0] * 20, "q01": [-1.0] * 20, "q99": [1.0] * 20}
+    (meta / "stats.json").write_text(
+        json.dumps(
+            {
+                training.STATE_KEY: stats,
+                training.ACTION_KEY: stats,
+            }
+        )
+    )
+    sample = {
+        training.STATE_KEY: torch.arange(20).float(),
+        training.ACTION_KEY: torch.arange(80).reshape(4, 20).float(),
+        f"{training.ACTION_KEY}_is_pad": torch.tensor([False, True, True, True]),
+        "action": torch.full((4, 16), -99.0),
+        "task": "Stack the three bowls together.",
+    }
+    sample.update({key: torch.zeros(3, 48, 64) for key in training.CAMERAS.values()})
+    source = Mock()
+    source.__getitem__ = Mock(return_value=sample)
+    factory = Mock(return_value=source)
+    monkeypatch.setattr(training, "LeRobotDataset", factory)
+    dataset = training.RoboDojoDeltaDataset(tmp_path, chunk_size=4)
+    result = dataset[0]
+    torch.testing.assert_close(result["action"], sample[training.ACTION_KEY])
+    torch.testing.assert_close(result["observation.state"], sample[training.STATE_KEY])
+    assert result["action_is_pad"].tolist() == [False, True, True, True]
+    assert len([key for key in result if key.startswith("observation.images.")]) == 3
+    assert factory.call_args.kwargs["delta_timestamps"] == {training.ACTION_KEY: [0.0, 0.04, 0.08, 0.12]}
+
+
+def test_full_policy_loss_and_raw_observation_prediction(tiny_flow):
+    policy = bare_policy()
+    policy.model = tiny_flow
+    policy.config.chunk_size = 4
+    policy.config.max_action_dim = 20
+    policy.config.output_features = {"action": PolicyFeature(FeatureType.ACTION, (20,))}
+    policy.config.input_features["observation.state"] = PolicyFeature(FeatureType.STATE, (20,))
+    stats = {
+        key: {"mean": torch.zeros(20), "q01": torch.full((20,), -2.0), "q99": torch.full((20,), 2.0)}
+        for key in ("observation.state", "action")
+    }
+    modes = {FeatureType.STATE: NormalizationMode.QUANTILES, FeatureType.ACTION: NormalizationMode.QUANTILES}
+    policy.normalize_inputs = Normalize(policy.config.input_features, modes, stats)
+    policy.normalize_targets = Normalize(policy.config.output_features, modes, stats)
+    policy.unnormalize_outputs = Unnormalize(policy.config.output_features, modes, stats)
+    policy.language_tokenizer = Mock(
+        return_value={
+            "input_ids": torch.tensor([[2, 3, 4]]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+    )
+    batch = {key: torch.rand(1, 3, 28, 28) for key in policy.config.image_features}
+    batch.update(
+        {
+            "observation.state": torch.zeros(1, 20),
+            "action": torch.ones(1, 4, 20),
+            "action_is_pad": torch.tensor([[False, False, True, True]]),
+            "task": ["Stack bowls."],
+        }
+    )
+    loss, _ = policy(batch)
+    assert torch.isfinite(loss)
+    loss.backward()
+    prediction = policy.predict_action_chunk(batch)
+    assert prediction.shape == (1, 4, 20) and torch.isfinite(prediction).all()
+    assert batch["task"] == ["Stack bowls."]
+    batch["action_is_pad"][:] = True
+    with pytest.raises(ValueError, match="no valid action targets"):
+        policy(batch)
