@@ -1806,3 +1806,32 @@ Artifacts are under
 and `diagnostics/`. Actual videos are in the native
 `simulator/eval_result/` subtree; predicted videos remain in
 `policy/predictions/`.
+
+#### Step16k ten-step sampling ablation (2026-10-27)
+
+The requested sampling ablation changes only the flow integration count
+from the saved 20 steps to **10 steps**. It retains the same step16k
+checkpoint, layouts 0/1/2, seed 0, one environment, 32 predicted actions,
+10 executed actions per replan, and actual/predicted video export.
+The checkpoint configuration is not modified; `--inference-steps 10`
+overrides sampling for this evaluation only. Ten sampling steps are
+distinct from the unchanged ten-action execution interval.
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint "$CACHE/robodojo_stack_bowl_2nodes_8gpu/step16k" \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19060 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_step16k_sampling10_20261027_v1
+```
+
+The instrumented run uses the same session-local passive camera wrapper
+as the 20-step baseline. Its settings, logs, native result, and videos are
+kept in the fresh output directory above. This is a three-layout
+diagnostic, not the full benchmark; preparation alone establishes no result.
