@@ -1875,3 +1875,33 @@ prediction PNGs. See `comparison_with_sampling20.json`,
 `diagnostics/` in the output directory. Actual videos are under
 `simulator/eval_result/`; predicted videos are under `policy/predictions/`.
 These three layouts do not establish equivalence across the full benchmark.
+
+#### Step16k noise-to-action diagnostic
+
+Closed-loop tracking error measures whether the robot follows its generated
+target, not whether that target matches a demonstration. To measure the
+latter, compare pure-noise generation at 10 and 20 sampling steps against
+real labels, using the existing training/deployment input-parity diagnostic:
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+CUDA_VISIBLE_DEVICES=0 python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta diagnose \
+  --checkpoint "$CACHE/robodojo_stack_bowl_2nodes_8gpu/step16k" \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --diagnostic-episodes 0 6 --diagnostic-frames 0 \
+  --diagnostic-inference-steps 10 20 --replan-steps 10 --seed 0 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_step16k_action_error_20261027_v1
+```
+
+This selects the two configured generation-validation windows plus the
+initial windows of episodes 0 and 6. The saved split is `training`, so these
+four windows do not estimate held-out generalization. Each window uses the
+same seed for both sampling counts. Metrics cover the 20 active normalized
+action dimensions and separately compare integrated native targets over
+the first 10 actions and full 32-action horizon. Clean ground-truth action
+embedding reconstruction and ground-truth-conditioned denoising losses are
+separate diagnostics, not substitutes for pure-noise sampling accuracy.
+Results are pending.
