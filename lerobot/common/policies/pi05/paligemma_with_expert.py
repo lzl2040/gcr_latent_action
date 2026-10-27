@@ -4,7 +4,7 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 from lerobot.common.utils.import_utils import _transformers_available
-from lerobot.common.policies.pi05.modeling_gemma import GemmaModel
+from lerobot.common.policies.pi05.modeling_gemma import GemmaModel, _gated_residual
 
 if TYPE_CHECKING or _transformers_available:
     from transformers.models.auto import CONFIG_MAPPING
@@ -67,7 +67,7 @@ def compute_layer_complete(
     )
     # Get head_dim from the current layer, not from the model
     head_dim = paligemma.language_model.layers[layer_idx].self_attn.head_dim
-    att_output = att_output.reshape(batch_size, -1, 1 * 8 * head_dim)
+    att_output = att_output.reshape(batch_size, -1, query_states.shape[1] * head_dim)
     # Process layer outputs
     outputs_embeds = []
     start_pos = 0
@@ -78,7 +78,7 @@ def compute_layer_complete(
             att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
         out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
         # first residual
-        out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])  # noqa: SLF001
+        out_emb = _gated_residual(hidden_states, out_emb, gates[i])
         after_first_residual = out_emb.clone()
         out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
         # Convert to bfloat16 if the next layer (mlp) uses bfloat16
@@ -86,7 +86,7 @@ def compute_layer_complete(
             out_emb = out_emb.to(dtype=torch.bfloat16)
         out_emb = layer.mlp(out_emb)
         # second residual
-        out_emb = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)  # noqa: SLF001
+        out_emb = _gated_residual(after_first_residual, out_emb, gate)
         outputs_embeds.append(out_emb)
         start_pos = end_pos
     return outputs_embeds
@@ -159,7 +159,7 @@ class PaliGemmaWithExpertModel(
         vlm_config_hf.text_config.use_adarms = use_adarms[0]
         vlm_config_hf.text_config.adarms_cond_dim = vlm_config.width if use_adarms[0] else None
         vlm_config_hf.vision_config.intermediate_size = 4304
-        vlm_config_hf.vision_config.projection_dim = 2048
+        vlm_config_hf.vision_config.projection_dim = vlm_config.width
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
         vlm_config_hf.vision_config.torch_dtype = "float32"
 
@@ -178,6 +178,7 @@ class PaliGemmaWithExpertModel(
         )
 
         self.paligemma = PaliGemmaForConditionalGeneration(config=vlm_config_hf)
+        self.paligemma.model.language_model = GemmaModel(config=vlm_config_hf.text_config)
         self.gemma_expert = GemmaForCausalLM(config=action_expert_config_hf)
         self.gemma_expert.model = GemmaModel(config=action_expert_config_hf)
         self.gemma_expert.model.embed_tokens = None

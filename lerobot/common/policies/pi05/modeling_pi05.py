@@ -7,6 +7,7 @@ import logging
 import math
 import numpy as np
 from collections import deque
+from pathlib import Path
 from lerobot.common.constants import (
     ACTION,
     OBS_LANGUAGE_ATTENTION_MASK,
@@ -18,7 +19,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.constants import COMPRESS_ACTION_TOKEN, COMPRESS_SC_TOKEN
 
-from transformers import AutoTokenizer, AutoProcessor
+from transformers import AutoProcessor, AutoTokenizer, GemmaTokenizer
 from torchvision import transforms
 to_pil = transforms.ToPILImage()
 from PIL import Image
@@ -211,13 +212,12 @@ class PI05Policy(PreTrainedPolicy):
             config.output_features, config.normalization_mapping, dataset_stats
         )
 
-        # Initialize the core PI05 model
-        self.model = PI05FlowMatching(config)
-
-        # tokenizer_path = "/home/v-zuoleili/Pretrain/pi0/paligemma-3b-pt-224/"
-        tokenizer_path = "/mnt/wangxiaofa/RDT_module_params/paligemma-3b-pt-224/"
-        self.language_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-        self.processor = AutoProcessor.from_pretrained(tokenizer_path)
+        if Path(config.tokenizer_path).is_file():
+            self.language_tokenizer = GemmaTokenizer(vocab_file=config.tokenizer_path)
+            self.processor = None
+        else:
+            self.language_tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path)
+            self.processor = AutoProcessor.from_pretrained(config.tokenizer_path)
 
         new_action_tokens = [f"[{COMPRESS_ACTION_TOKEN}]"]
         new_scene_tokens = [f"[{COMPRESS_SC_TOKEN}]"]
@@ -236,7 +236,7 @@ class PI05Policy(PreTrainedPolicy):
             self.model.gradient_checkpointing_enable()
 
         self.model.to(config.device)
-        self.dtype = torch.bfloat16
+        self.dtype = getattr(torch, config.dtype)
         self.COMPRESS_ACTION_TOKEN = COMPRESS_ACTION_TOKEN
         self.COMPRESS_SC_TOKEN = COMPRESS_SC_TOKEN
 
@@ -255,6 +255,43 @@ class PI05Policy(PreTrainedPolicy):
         # for warning: Vision embedding key might need handling, it can be ignored: https://github.com/huggingface/lerobot/issues/2307
         self.model.paligemma_with_expert.paligemma.language_model.resize_token_embeddings(len(self.language_tokenizer))
 
+    def load_base_weights(self, path):
+        from safetensors.torch import load_file
+
+        path = Path(path)
+        if path.is_dir():
+            path = path / "model.safetensors"
+        if path.suffix == ".safetensors":
+            weights = load_file(str(path))
+        else:
+            weights = torch.load(path, map_location="cpu", weights_only=True)
+            if "module" in weights:
+                weights = weights["module"]
+        return self.load_base_state_dict(weights)
+
+    def load_base_state_dict(self, weights):
+        weights = self._fix_pytorch_state_dict_keys(weights)
+        embedding = "model.paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+        tied_head = "model.paligemma_with_expert.paligemma.lm_head.weight"
+        if tied_head in weights:
+            if embedding in weights and not torch.equal(weights[embedding], weights[tied_head]):
+                raise ValueError("PaliGemma tied head and token embedding disagree.")
+            weights[embedding] = weights.pop(tied_head)
+        expected = {key: value for key, value in self.state_dict().items() if key.startswith("model.")}
+        missing = sorted(expected.keys() - weights.keys())
+        unexpected = sorted(weights.keys() - expected.keys())
+        mismatched = [
+            key for key in expected.keys() & weights.keys() if expected[key].shape != weights[key].shape
+        ]
+        if missing or unexpected or mismatched:
+            raise ValueError(
+                f"Incompatible PI05 base weights: missing={missing}, unexpected={unexpected}, "
+                f"shape_mismatches={mismatched}"
+            )
+        result = self.load_state_dict(weights, strict=False)
+        logging.info("Loaded all %d PI05 model tensors; retained dataset normalization statistics.", len(weights))
+        return result
+
     def _fix_pytorch_state_dict_keys(
         self, state_dict
     ):  # see openpi `BaseModelConfig, _fix_pytorch_state_dict_keys`
@@ -264,7 +301,7 @@ class PI05Policy(PreTrainedPolicy):
         fixed_state_dict = {}
 
         for key, value in state_dict.items():
-            new_key = "model." + key 
+            new_key = key if key.startswith("model.") else "model." + key
 
             # Handle layer norm structure changes: .weight -> .dense.weight + .dense.bias
             # For gemma expert layers
@@ -292,9 +329,9 @@ class PI05Policy(PreTrainedPolicy):
             # Handle MLP naming changes for pi05
             # pi05 model expects time_mlp_*, but checkpoint might have action_time_mlp_*
             if key.startswith("action_time_mlp_in."):
-                new_key = key.replace("action_time_mlp_in.", "time_mlp_in.")
+                new_key = "model." + key.replace("action_time_mlp_in.", "time_mlp_in.")
             elif key.startswith("action_time_mlp_out."):
-                new_key = key.replace("action_time_mlp_out.", "time_mlp_out.")
+                new_key = "model." + key.replace("action_time_mlp_out.", "time_mlp_out.")
             # Also handle state_proj which shouldn't exist in pi05
             if key.startswith("state_proj."):
                 logging.warning(f"Skipping state_proj key in pi05 mode: {key}")
@@ -320,6 +357,8 @@ class PI05Policy(PreTrainedPolicy):
         }
     
     def gen_subtask(self, batch):
+        if self.processor is None:
+            raise ValueError("gen_subtask requires a full PaliGemma processor directory, not only a vocabulary.")
         image = batch["observation.images.primary"]
         state_np = batch[OBS_ROBOT].cpu().numpy()
         discretized_states = np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
@@ -449,8 +488,11 @@ class PI05Policy(PreTrainedPolicy):
 
         # present_img_keys = [key for key in self.config.image_features if key in batch]
         # missing_img_keys = [key for key in self.config.image_features if key not in batch]
-        present_img_keys = ["observation.images.primary"]
-        missing_img_keys = []
+        present_img_keys = [key for key in self.config.image_features if key in batch]
+        missing_img_keys = [key for key in self.config.image_features if key not in batch]
+        required_missing = [key for key in missing_img_keys if not key.startswith("observation.images.empty_camera_")]
+        if required_missing:
+            raise ValueError(f"Missing configured camera observations: {required_missing}")
 
         if len(present_img_keys) == 0:
             raise ValueError(
@@ -518,7 +560,7 @@ class PI05Policy(PreTrainedPolicy):
             padding="max_length",
             # padding=True,
             padding_side="right",
-            max_length = 1200,
+            max_length = self.config.tokenizer_max_length,
             # max_length=self.config.tokenizer_max_length,
             truncation=True,
             return_tensors="pt",
@@ -551,9 +593,13 @@ class PI05Policy(PreTrainedPolicy):
         """Predict a chunk of actions given environment observations."""
         self.eval()
 
-        # Prepare inputs
+        batch = self.normalize_inputs(batch)
         images, img_masks = self._preprocess_images(batch)
-        tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
+        if "task" in batch:
+            batch = self._prepare_state_prompt(batch)
+            tokens, masks = self.prepare_language(batch)
+        else:
+            tokens, masks = batch[OBS_LANGUAGE_TOKENS], batch[OBS_LANGUAGE_ATTENTION_MASK]
 
         # Sample actions using the model (no separate state needed for PI05)
         actions = self.model.sample_actions(images, img_masks, tokens, masks)
@@ -562,7 +608,21 @@ class PI05Policy(PreTrainedPolicy):
         original_action_dim = self.config.output_features[ACTION].shape[0]
         actions = actions[:, :, :original_action_dim]
 
-        return actions
+        return self.unnormalize_outputs({ACTION: actions})[ACTION]
+
+    def _prepare_state_prompt(self, batch):
+        batch = dict(batch)
+        state = pad_vector(batch[OBS_ROBOT], self.config.max_state_dim)
+        if state.shape[-1] != self.config.max_state_dim:
+            raise ValueError("State dimension exceeds max_state_dim.")
+        state_np = state.detach().float().cpu().numpy()
+        discretized = np.digitize(state_np, bins=np.linspace(-1, 1, 257)[:-1]) - 1
+        batch["task"] = [
+            f"Task: {task.strip().replace('_', ' ').replace(chr(10), ' ')}, "
+            f"State: {' '.join(map(str, values))};\nAction: "
+            for task, values in zip(batch["task"], discretized, strict=True)
+        ]
+        return batch
 
     def construct_input_target_pair(self, input_texts, target_texts, input_ids):
         labels = input_ids.clone()
@@ -585,17 +645,7 @@ class PI05Policy(PreTrainedPolicy):
         images, img_masks = self._preprocess_images(batch)
 
         # follow lerobot pi05: https://github.com/huggingface/lerobot/blob/main/src/lerobot/policies/pi05/processor_pi05.py#L79
-        state_np = batch[OBS_ROBOT].cpu().numpy()
-        discretized_states = np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
-        full_prompts = []
-        tasks = batch["task"]
-        for i, task in enumerate(tasks):
-            cleaned_text = task.strip().replace("_", " ").replace("\n", " ")
-            state_str = " ".join(map(str, discretized_states[i]))
-            full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
-            full_prompts.append(full_prompt)
-        
-        batch["task"] = full_prompts
+        batch = self._prepare_state_prompt(batch)
         tokens, masks = self.prepare_language(batch)
         # tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
@@ -608,7 +658,13 @@ class PI05Policy(PreTrainedPolicy):
         original_action_dim = self.config.output_features[ACTION].shape[0]
         losses = losses[:, :, :original_action_dim]
 
-        loss = losses.mean()
+        if "action_is_pad" in batch:
+            valid = ~batch["action_is_pad"].bool()
+            if not valid.any():
+                raise ValueError("The training batch contains no valid action targets.")
+            loss = losses[valid].mean()
+        else:
+            loss = losses.mean()
 
         loss_dict = {
             "loss": loss.item(),
@@ -809,7 +865,7 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        prefix_embs, prefix_pad_masks, prefix_att_masks, _ = self.embed_prefix(images, img_masks, tokens, masks)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
 
         if (
@@ -870,7 +926,7 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
             )  # Use config max_action_dim for internal processing
             noise = self.sample_noise(actions_shape, device)
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        prefix_embs, prefix_pad_masks, prefix_att_masks, _ = self.embed_prefix(images, img_masks, tokens, masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 

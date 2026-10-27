@@ -101,6 +101,11 @@ pi0 = [
     "torchao>=0.15.0,<0.16.0",
     "safetensors>=0.4.0",
 ]
+pi05 = [
+    "transformers>=4.57.0,<5.0",
+    "sentencepiece>=0.2.0",
+    "safetensors>=0.4.0",
+]
 pusht = ["gym-pusht>=0.1.5 ; python_version < '4.0'"]
 stretch = [
     "hello-robot-stretch-body>=0.7.27 ; python_version < '4.0' and sys_platform == 'linux'",

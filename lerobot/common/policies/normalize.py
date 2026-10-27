@@ -128,6 +128,14 @@ def _no_stats_error_str(name: str) -> str:
     )
 
 
+def _quantile_range(q01: Tensor, q99: Tensor, eps: float) -> Tensor:
+    if not torch.isfinite(q01).all() or not torch.isfinite(q99).all():
+        raise ValueError("QUANTILES normalization requires finite q01 and q99 statistics.")
+    if torch.any(q99 < q01):
+        raise ValueError("QUANTILES normalization requires q99 >= q01.")
+    return (q99 - q01).clamp_min(eps)
+
+
 class Normalize(nn.Module):
     """Normalizes data (e.g. "observation.image") for more stable and faster convergence during training."""
 
@@ -210,25 +218,11 @@ class Normalize(nn.Module):
                 batch[key] = (batch[key] - min) / (max - min + 1e-8)
                 # normalize to [-1, 1]
                 batch[key] = batch[key] * 2 - 1
-            elif norm_mode in NormalizationMode.QUANTILES:
-                # q01 = stats.get("q01", None)
-                # q99 = stats.get("q99", None)
+            elif norm_mode is NormalizationMode.QUANTILES:
                 q01 = buffer["q01"]
                 q99 = buffer["q99"]
-                print("q01", q01)
-                print("q99", q99)
-                print(batch[key].shape)
-                if q01 is None or q99 is None:
-                    raise ValueError(
-                        "QUANTILES normalization mode requires q01 and q99 stats, please update the dataset with the correct stats using the `augment_dataset_quantile_stats.py` script"
-                    )
-
-                denom = q99 - q01
-                # Avoid division by zero by adding epsilon when quantiles are identical
-                denom = torch.where(
-                    denom == 0, torch.tensor(self.eps, device=batch[key].device, dtype=batch[key].dtype), denom
-                )
-                batch[key] = (batch[key] + 1.0) * denom / 2.0 + q01
+                denom = _quantile_range(q01, q99, self.eps)
+                batch[key] = 2.0 * (batch[key] - q01) / denom - 1.0
             else:
                 raise ValueError(norm_mode)
         return batch
@@ -301,21 +295,12 @@ class Unnormalize(nn.Module):
                 assert not torch.isinf(max).any(), _no_stats_error_str("max")
                 batch[key] = (batch[key] + 1) / 2
                 batch[key] = batch[key] * (max - min) + min
-            elif norm_mode in NormalizationMode.QUANTILES:
+            elif norm_mode is NormalizationMode.QUANTILES:
                 # q01 = stats.get("q01", None)
                 # q99 = stats.get("q99", None)
                 q01 = buffer["q01"]
                 q99 = buffer["q99"]
-                if q01 is None or q99 is None:
-                    raise ValueError(
-                        "QUANTILES normalization mode requires q01 and q99 stats, please update the dataset with the correct stats using the `augment_dataset_quantile_stats.py` script"
-                    )
-
-                denom = q99 - q01
-                # Avoid division by zero by adding epsilon when quantiles are identical
-                denom = torch.where(
-                    denom == 0, torch.tensor(self.eps, device=batch[key].device, dtype=batch[key].dtype), denom
-                )
+                denom = _quantile_range(q01, q99, self.eps)
                 batch[key] = (batch[key] + 1.0) * denom / 2.0 + q01
             else:
                 raise ValueError(norm_mode)

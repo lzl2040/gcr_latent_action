@@ -30,6 +30,7 @@ class PI05Config(PreTrainedConfig):
     paligemma_variant: str = "gemma_2b"
     action_expert_variant: str = "gemma_300m"
     dtype: str = "float32"  # Options: "bfloat16", "float32"
+    tokenizer_path: str = "google/paligemma-3b-pt-224"
 
     n_obs_steps: int = 1
     chunk_size: int = 50  # Number of action steps to predict, in openpi called "action_horizon"
@@ -87,8 +88,6 @@ class PI05Config(PreTrainedConfig):
     scheduler_decay_steps: int = 30_000
     scheduler_decay_lr: float = 2.5e-6
 
-    tokenizer_max_length: int = 200  # see openpi `__post_init__`
-
     def __post_init__(self):
         super().__post_init__()
 
@@ -106,6 +105,10 @@ class PI05Config(PreTrainedConfig):
 
         if self.dtype not in ["bfloat16", "float32"]:
             raise ValueError(f"Invalid dtype: {self.dtype}")
+        if self.chunk_size <= 0 or self.n_action_steps <= 0 or self.num_inference_steps <= 0:
+            raise ValueError("chunk_size, n_action_steps, and num_inference_steps must be positive.")
+        if not self.tokenizer_path:
+            raise ValueError("tokenizer_path must point to a PaliGemma tokenizer.")
 
     def validate_features(self) -> None:
         """Validate and set up input/output features."""
