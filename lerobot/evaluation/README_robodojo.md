@@ -1835,3 +1835,10 @@ The instrumented run uses the same session-local passive camera wrapper
 as the 20-step baseline. Its settings, logs, native result, and videos are
 kept in the fresh output directory above. This is a three-layout
 diagnostic, not the full benchmark; preparation alone establishes no result.
+
+The instrumented run started successfully and produced finite `(32, 20)`
+physical-action predictions with ten executed actions per replan. The saved
+coordinator settings differ from the 20-step baseline only in the sampling
+override, output directory, and port. Startup evidence is retained in
+`startup_comparison_with_sampling20.json`; the native evaluation is still
+running, so no success-rate comparison is available yet.
