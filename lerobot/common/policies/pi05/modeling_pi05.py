@@ -884,10 +884,13 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
         prefix_embs, prefix_pad_masks, prefix_att_masks, _ = self.embed_prefix(images, img_masks, tokens, masks)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
 
-        if (
-            self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
-            == torch.bfloat16
-        ):
+        joint_training = self.paligemma_with_expert.joint_blocks is not None
+        language_dtype = (
+            getattr(torch, self.config.dtype)
+            if joint_training
+            else self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+        )
+        if language_dtype == torch.bfloat16:
             suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
             prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
 
@@ -910,9 +913,14 @@ class PI05FlowMatching(nn.Module):  # see openpi `PI0Pytorch`
             )
             return suffix_out
 
-        suffix_out = self._apply_checkpoint(
-            forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
-        )
+        if joint_training:
+            suffix_out = forward_func(
+                prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
+            )
+        else:
+            suffix_out = self._apply_checkpoint(
+                forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
+            )
 
         suffix_out = suffix_out[:, -self.config.chunk_size :]
         suffix_out = suffix_out.to(dtype=torch.float32)

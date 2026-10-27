@@ -7,7 +7,9 @@ from transformers import GemmaConfig, PaliGemmaConfig
 from transformers.models.gemma.modeling_gemma import GemmaForCausalLM
 from transformers.models.paligemma.modeling_paligemma import PaliGemmaForConditionalGeneration
 
+from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.common.policies.pi05.modeling_gemma import GemmaModel
+from lerobot.common.policies.pi05.modeling_pi05 import PI05FlowMatching
 from lerobot.common.policies.pi05.paligemma_with_expert import PaliGemmaWithExpertModel
 from lerobot.scripts.train_pi05_robodojo_fsdp import canonical_pi05_state_dict
 
@@ -124,6 +126,46 @@ def test_joint_training_layout_rejects_cached_inference():
     model.enable_joint_blocks()
     with pytest.raises(ValueError, match="export for inference"):
         model(inputs_embeds=[torch.randn(1, 3, 16), None])
+
+
+def test_flow_matching_joint_layout_matches_legacy_with_three_cameras():
+    torch.manual_seed(8)
+    legacy = PI05FlowMatching.__new__(PI05FlowMatching)
+    nn.Module.__init__(legacy)
+    legacy.config = PI05Config(
+        dtype="float32", chunk_size=2, n_action_steps=2, max_action_dim=4, device="cpu"
+    )
+    legacy.paligemma_with_expert = tiny_joint_model()
+    legacy.action_in_proj = nn.Linear(4, 8)
+    legacy.action_out_proj = nn.Linear(8, 4)
+    legacy.time_mlp_in = nn.Linear(8, 8)
+    legacy.time_mlp_out = nn.Linear(8, 8)
+    legacy.gradient_checkpointing_enable()
+    joint = copy.deepcopy(legacy)
+    joint.paligemma_with_expert.enable_joint_blocks()
+    for block in joint.paligemma_with_expert.joint_blocks:
+        block.gradient_checkpointing = True
+    inputs = {
+        "images": [torch.randn(2, 3, 28, 28) for _ in range(3)],
+        "img_masks": [torch.ones(2, dtype=torch.bool) for _ in range(3)],
+        "tokens": torch.randint(0, 30, (2, 3)),
+        "masks": torch.ones(2, 3, dtype=torch.bool),
+        "actions": torch.randn(2, 2, 4),
+        "noise": torch.randn(2, 2, 4),
+        "time": torch.tensor([0.3, 0.8]),
+    }
+    expected = legacy(**inputs)
+    actual = joint(**inputs)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    expected.mean().backward()
+    actual.mean().backward()
+    gradients = canonical_pi05_state_dict(
+        {name: p.grad for name, p in joint.named_parameters() if p.grad is not None}
+    )
+    expected_gradients = {name: p.grad for name, p in legacy.named_parameters() if p.grad is not None}
+    assert gradients.keys() == expected_gradients.keys()
+    for name in expected_gradients:
+        torch.testing.assert_close(gradients[name], expected_gradients[name], rtol=0, atol=0)
 
 
 def test_export_rejects_duplicate_canonical_names():
