@@ -248,6 +248,55 @@ globally averaged losses, and `launch_stepN.json` records provenance and
 training geometry. `summary.json` distinguishes a bounded stop from
 reaching the total training budget.
 
+### Optional large-microbatch memory controls
+
+The existing FP32-master/ordinary-AdamW/eager defaults remain unchanged.
+For a **new** run targeting eight A100 40GB cards, the launcher additionally
+accepts:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 FSDP_WRAP_STRATEGY=layer \
+MASTER_DTYPE=bfloat16 OPTIMIZER=adamw8bit ATTENTION_BACKEND=sdpa \
+BATCH_SIZE=16 GRAD_ACCUMULATION_STEPS=1 \
+JOB_NAME=pi05_robodojo_delta_bs16_memory_v1 \
+MAX_UPDATES_THIS_RUN=2 \
+bash train_pi05_robodojo_fsdp.sh
+```
+
+This requests a real per-rank microbatch of 16, not hidden sample splitting
+or gradient accumulation. All three RGB views remain 224x224, the language
+limit remains 200, and the action chunk remains 32. Effective batch is 128.
+Treat this as a bounded capacity test, not a verified eight-A100 guarantee.
+Keep `STEPS` at the intended total budget when stopping early.
+Use a fresh output directory when changing optimizer, parameter precision,
+attention backend, or batching; those settings are checked on resume.
+The bitsandbytes version is also recorded and checked for 8-bit runs.
+
+`MASTER_DTYPE=bfloat16` stores model master parameters and reduced gradients
+in BF16, while all normalization statistics remain exactly FP32. There is
+no hidden FP32 master copy. BF16 can round away small updates, so finite
+loss and a successful memory test do not establish convergence quality.
+`OPTIMIZER=adamw8bit` uses the existing bitsandbytes AdamW preset with PI05's
+learning rate, betas, epsilon, weight decay and external gradient clipping.
+Large moments are quantized; small moments and quantization metadata are
+not all 8-bit. Install the declared dependency in the active environment
+if needed: `python -m pip install 'bitsandbytes>=0.48.0,<0.51.0'`.
+
+`ATTENTION_BACKEND=sdpa` applies the original joint prefix/action mask and
+attention scale through PyTorch SDPA. CUDA is restricted to fused
+Flash/memory-efficient kernels: unsupported hardware or masks fail rather
+than silently falling back to quadratic-memory math attention. Completely
+masked padding queries produce uniform outputs as in eager attention; they
+never supervise actions or become visible keys. The ordinary inference
+layout is unchanged. The SDPA backend changes floating-point rounding,
+so numerical agreement, not bitwise agreement with eager, is expected.
+
+The root strategy intentionally rejects these new modes. Training summaries
+record setup allocated peaks separately from post-setup training/save/export
+allocated and reserved peaks; actual device use includes CUDA/NCCL overhead
+and unrelated jobs beyond these PyTorch allocator counters.
+
 ### Completed layered-FSDP validation
 
 The official base completed real two-GPU training with

@@ -1,4 +1,5 @@
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -10,7 +11,10 @@ from transformers.models.paligemma.modeling_paligemma import PaliGemmaForConditi
 from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.common.policies.pi05.modeling_gemma import GemmaModel
 from lerobot.common.policies.pi05.modeling_pi05 import PI05FlowMatching
-from lerobot.common.policies.pi05.paligemma_with_expert import PaliGemmaWithExpertModel
+from lerobot.common.policies.pi05.paligemma_with_expert import (
+    PaliGemmaWithExpertModel,
+    joint_attention,
+)
 from lerobot.scripts.train_pi05_robodojo_fsdp import canonical_pi05_state_dict
 
 
@@ -128,7 +132,8 @@ def test_joint_training_layout_rejects_cached_inference():
         model(inputs_embeds=[torch.randn(1, 3, 16), None])
 
 
-def test_flow_matching_joint_layout_matches_legacy_with_three_cameras():
+@pytest.mark.parametrize("attention_backend", ["eager", "sdpa"])
+def test_flow_matching_joint_layout_matches_legacy_with_three_cameras(attention_backend):
     torch.manual_seed(8)
     legacy = PI05FlowMatching.__new__(PI05FlowMatching)
     nn.Module.__init__(legacy)
@@ -145,6 +150,7 @@ def test_flow_matching_joint_layout_matches_legacy_with_three_cameras():
     joint.paligemma_with_expert.enable_joint_blocks()
     for block in joint.paligemma_with_expert.joint_blocks:
         block.gradient_checkpointing = True
+        block.attention_backend = attention_backend
     inputs = {
         "images": [torch.randn(2, 3, 28, 28) for _ in range(3)],
         "img_masks": [torch.ones(2, dtype=torch.bool) for _ in range(3)],
@@ -156,7 +162,8 @@ def test_flow_matching_joint_layout_matches_legacy_with_three_cameras():
     }
     expected = legacy(**inputs)
     actual = joint(**inputs)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    tolerance = {"rtol": 0, "atol": 0} if attention_backend == "eager" else {"rtol": 2e-5, "atol": 1e-7}
+    torch.testing.assert_close(actual, expected, **tolerance)
     expected.mean().backward()
     actual.mean().backward()
     gradients = canonical_pi05_state_dict(
@@ -165,7 +172,7 @@ def test_flow_matching_joint_layout_matches_legacy_with_three_cameras():
     expected_gradients = {name: p.grad for name, p in legacy.named_parameters() if p.grad is not None}
     assert gradients.keys() == expected_gradients.keys()
     for name in expected_gradients:
-        torch.testing.assert_close(gradients[name], expected_gradients[name], rtol=0, atol=0)
+        torch.testing.assert_close(gradients[name], expected_gradients[name], **tolerance)
 
 
 def test_export_rejects_duplicate_canonical_names():
@@ -176,3 +183,51 @@ def test_export_rejects_duplicate_canonical_names():
                 "model.paligemma.model.language_model.layers.0.weight": torch.ones(1),
             }
         )
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA is required to validate the fused kernel"
+            ),
+        ),
+    ],
+)
+def test_sdpa_joint_mask_outputs_and_gradients_match_eager(device):
+    torch.manual_seed(19)
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    head_dim, heads, length = (256, 8, 1000) if device == "cuda" else (8, 2, 7)
+    module = SimpleNamespace(num_key_value_groups=heads, scaling=head_dim**-0.5, training=True)
+    tensors = [torch.randn(1, count, length, head_dim, device=device, dtype=dtype) for count in (heads, 1, 1)]
+    mask = torch.zeros(1, 1, length, length, device=device, dtype=torch.float32)
+    mask[:, :, : length - 2, length - 2 :] = -2.3819763e38
+    mask[:, :, :, 1] = -2.3819763e38
+    # Real padding masks can also produce completely masked query rows.
+    mask[:, :, 1, :] = -2.3819763e38
+
+    def run(backend):
+        inputs = [value.clone().requires_grad_() for value in tensors]
+        result = joint_attention(module, *inputs, mask, backend)
+        # Padding queries never contribute to the real action loss or subsequent keys.
+        valid_queries = torch.ones(length, device=device)
+        valid_queries[1] = 0
+        (result.float().square() * valid_queries[None, :, None, None]).mean().backward()
+        return [result] + [value.grad for value in inputs]
+
+    expected, actual = run("eager"), run("sdpa")
+    for left, right in zip(expected, actual, strict=True):
+        assert torch.isfinite(right).all()
+        if device == "cpu":
+            torch.testing.assert_close(left, right, rtol=2e-5, atol=1e-7)
+        else:
+            # BF16 eager rounds attention scores/probabilities; fused SDPA does not.
+            relative_error = (left.float() - right.float()).norm() / left.float().norm()
+            assert relative_error < 0.03
+    if device == "cuda":
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+            run("sdpa")
+        assert any("_scaled_dot_product_efficient_attention" in item.key for item in profile.key_averages())

@@ -42,6 +42,9 @@ def launch_env(tmp_path):
         "BATCH_SIZE": "1",
         "GRAD_ACCUMULATION_STEPS": "1",
         "FSDP_WRAP_STRATEGY": "layer",
+        "MASTER_DTYPE": "float32",
+        "OPTIMIZER": "adamw",
+        "ATTENTION_BACKEND": "eager",
         "CHUNK_SIZE": "32",
         "NUM_WORKERS": "0",
         "SAVE_FREQ": "1",
@@ -113,6 +116,9 @@ def test_launcher_multinode_resume_and_accumulation(launch_env):
         ("WEIGHT_RESUME", "true", "No latest_checkpoint"),
         ("NNODES", "2", "reachable from other nodes"),
         ("FSDP_WRAP_STRATEGY", "decoder", "must be layer or root"),
+        ("MASTER_DTYPE", "float16", "must be float32 or bfloat16"),
+        ("OPTIMIZER", "sgd", "must be adamw or adamw8bit"),
+        ("ATTENTION_BACKEND", "flash", "must be eager or sdpa"),
     ],
 )
 def test_launcher_rejects_invalid_settings(launch_env, key, value, message):
@@ -241,3 +247,87 @@ def test_root_wrapper_preserves_fp32_masters_and_normalization(monkeypatch):
     }
     assert {id(parameter) for parameter in options["ignored_states"]} == expected
     assert all(parameter.dtype == torch.float32 for parameter in options["ignored_states"])
+
+
+def test_launcher_memory_modes_and_root_rejection(launch_env):
+    env = {
+        **launch_env,
+        "MASTER_DTYPE": "bfloat16",
+        "OPTIMIZER": "adamw8bit",
+        "ATTENTION_BACKEND": "sdpa",
+        "BATCH_SIZE": "16",
+    }
+    result = launch(env)
+    assert result.returncode == 0, result.stderr
+    command = shlex.split(result.stdout.split("Command: ", 1)[1])
+    for key, value in (
+        ("--master-dtype", "bfloat16"),
+        ("--optimizer", "adamw8bit"),
+        ("--attention-backend", "sdpa"),
+        ("--batch-size", "16"),
+    ):
+        assert command[command.index(key) + 1] == value
+    result = launch({**env, "FSDP_WRAP_STRATEGY": "root"})
+    assert result.returncode != 0 and "require FSDP_WRAP_STRATEGY=layer" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("key", "changed"),
+    [("master_dtype", "bfloat16"), ("optimizer", "adamw8bit"), ("attention_backend", "sdpa")],
+)
+def test_resume_memory_modes_preserve_old_defaults_and_reject_changes(tmp_path, key, changed):
+    checkpoint = tmp_path / "checkpoint_00000001"
+    checkpoint.mkdir()
+    (tmp_path / "latest_checkpoint").write_text(checkpoint.name)
+    old = {"batch_size": 1}
+    (checkpoint / "metadata.json").write_text(json.dumps({"training_geometry": old}))
+    current = {**old, "master_dtype": "float32", "optimizer": "adamw", "attention_backend": "eager"}
+    assert training.check_resume_geometry(tmp_path, current) == old
+    with pytest.raises(ValueError, match="unchanged"):
+        training.check_resume_geometry(tmp_path, {**current, key: changed})
+
+
+def test_bf16_master_preserves_original_fp32_quantiles(monkeypatch):
+    options = {}
+
+    def fake_fsdp(policy, **kwargs):
+        options.update(kwargs)
+        return policy
+
+    monkeypatch.setattr(training, "FullyShardedDataParallel", fake_fsdp)
+    policy = torch.nn.Module()
+    policy.model = torch.nn.Linear(2, 2)
+    expected = torch.tensor([[0.123456789]], dtype=torch.float32)
+    for name in ("normalize_inputs", "normalize_targets", "unnormalize_outputs"):
+        normalizer = torch.nn.Linear(1, 1, bias=False).requires_grad_(False)
+        normalizer.weight.copy_(expected)
+        setattr(policy, name, normalizer)
+    training.wrap_pi05(policy, torch.device("cpu"), strategy="root", master_dtype="bfloat16")
+    assert policy.model.weight.dtype == torch.bfloat16
+    for parameter in options["ignored_states"]:
+        torch.testing.assert_close(parameter, expected, rtol=0, atol=0)
+        assert parameter.dtype == torch.float32
+    assert options["mixed_precision"].reduce_dtype == torch.bfloat16
+
+
+def test_8bit_optimizer_uses_pi05_hyperparameters(monkeypatch):
+    settings = {}
+
+    class FakeConfig:
+        def __init__(self, **kwargs):
+            settings.update(kwargs)
+
+        def build(self, parameters):
+            return list(parameters)
+
+    monkeypatch.setattr(training, "AdamW8bitConfig", FakeConfig)
+    config = training.PI05Config()
+    model = torch.nn.Linear(2, 2)
+    assert training.make_optimizer(config, model, "adamw8bit") == list(model.parameters())
+    assert settings == {
+        "lr": 2.5e-5,
+        "betas": (0.9, 0.95),
+        "eps": 1e-8,
+        "weight_decay": 0.01,
+        "grad_clip_norm": 1.0,
+    }

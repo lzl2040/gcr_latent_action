@@ -1,7 +1,9 @@
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Literal, Callable, Optional, Union
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lerobot.common.utils.import_utils import _transformers_available
 from lerobot.common.policies.pi05.modeling_gemma import GemmaModel, _gated_residual
@@ -33,7 +35,42 @@ def compute_layer_complete(
     )
 
 
-def compute_joint_layer(layers, rotary_emb, inputs_embeds, attention_mask, position_ids, adarms_cond):
+def joint_attention(module, query, key, value, attention_mask, backend="eager"):
+    if backend == "eager":
+        return modeling_gemma.eager_attention_forward(
+            module, query, key, value, attention_mask, module.scaling
+        )[0]
+    if backend != "sdpa":
+        raise ValueError(f"Unknown joint attention backend: {backend}")
+    key = modeling_gemma.repeat_kv(key, module.num_key_value_groups)
+    value = modeling_gemma.repeat_kv(value, module.num_key_value_groups)
+    if attention_mask is not None:
+        attention_mask = attention_mask[..., : key.shape[-2]].to(query.dtype)
+        # Padding queries have all entries masked. Eager's finite sentinel makes
+        # their outputs uniform; express that explicitly to avoid fused softmax overflow.
+        empty_rows = (attention_mask < 0).all(dim=-1, keepdim=True)
+        attention_mask = attention_mask.masked_fill(empty_rows, 0)
+        query = query.masked_fill(empty_rows, 0)
+        # Memory-efficient CUDA kernels require aligned bias strides, even for tiny tests.
+        padding = (-attention_mask.shape[-1]) % 8
+        if padding:
+            attention_mask = F.pad(attention_mask, (0, padding))[..., : key.shape[-2]]
+    kernels = (
+        sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION])
+        if query.is_cuda
+        else nullcontext()
+    )
+    # Do not silently fall back to quadratic-memory math attention on CUDA.
+    with kernels:
+        output = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=attention_mask, dropout_p=0.0, scale=module.scaling
+        )
+    return output.transpose(1, 2).contiguous()
+
+
+def compute_joint_layer(
+    layers, rotary_emb, inputs_embeds, attention_mask, position_ids, adarms_cond, attention_backend="eager"
+):
     query_states = []
     key_states = []
     value_states = []
@@ -66,15 +103,14 @@ def compute_joint_layer(layers, rotary_emb, inputs_embeds, attention_mask, posit
         query_states, key_states, cos, sin, unsqueeze_dim=1
     )
     batch_size = query_states.shape[0]
-    scaling = layers[0].self_attn.scaling
     # Attention computation
-    att_output, _ = modeling_gemma.eager_attention_forward(
+    att_output = joint_attention(
         layers[0].self_attn,
         query_states,
         key_states,
         value_states,
         attention_mask,
-        scaling,
+        attention_backend,
     )
     # Get head_dim from the current layer, not from the model
     head_dim = layers[0].self_attn.head_dim
@@ -111,6 +147,7 @@ class JointAttentionBlock(nn.Module):
         self.language_layer = language_layer
         self.expert_layer = expert_layer
         self.gradient_checkpointing = False
+        self.attention_backend = "eager"
 
     def forward(self, inputs_embeds, attention_mask, position_ids, adarms_cond, rotary_emb):
         if self.gradient_checkpointing and self.training:
@@ -134,6 +171,7 @@ class JointAttentionBlock(nn.Module):
             attention_mask,
             position_ids,
             adarms_cond,
+            self.attention_backend,
         )
 
 

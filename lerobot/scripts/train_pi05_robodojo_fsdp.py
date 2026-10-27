@@ -22,6 +22,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.utils.data import DataLoader, DistributedSampler
 
+from lerobot.common.optim.optimizers import AdamW8bitConfig
 from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.common.policies.pi05.modeling_pi05 import PI05Policy
 from lerobot.common.utils.fsdp_training import (
@@ -53,6 +54,9 @@ def distributed_args():
     parser.add_argument("--export-final", action="store_true")
     parser.add_argument("--max-updates-this-run", type=int)
     parser.add_argument("--fsdp-wrap-strategy", choices=("layer", "root"), default="layer")
+    parser.add_argument("--master-dtype", choices=("float32", "bfloat16"), default="float32")
+    parser.add_argument("--optimizer", choices=("adamw", "adamw8bit"), default="adamw")
+    parser.add_argument("--attention-backend", choices=("eager", "sdpa"), default="eager")
     args = parse_args(parser)
     if args.device is not None or args.validate_data_only:
         parser.error("Use the single-device entry for --device or --validate-data-only.")
@@ -62,6 +66,10 @@ def distributed_args():
         parser.error("--lr must be finite and --seed must be nonnegative.")
     if args.max_updates_this_run is not None and args.max_updates_this_run <= 0:
         parser.error("--max-updates-this-run must be positive.")
+    if args.fsdp_wrap_strategy != "layer" and (
+        args.master_dtype != "float32" or args.optimizer != "adamw" or args.attention_backend != "eager"
+    ):
+        parser.error("Memory-optimized modes require --fsdp-wrap-strategy layer.")
     if not all(name in os.environ for name in ("RANK", "WORLD_SIZE", "LOCAL_RANK")):
         parser.error("Launch this entry with torchrun, not python alone.")
     return args
@@ -94,13 +102,15 @@ def epoch_iterator(loader, sampler, generator, seed, epoch, batch_in_epoch):
     return iterator
 
 
-def wrap_pi05(policy, device, strategy="layer"):
+def wrap_pi05(policy, device, strategy="layer", master_dtype="float32", attention_backend="eager"):
     policy.float()
+    if master_dtype == "bfloat16":
+        policy.model.bfloat16()
     normalizers = (policy.normalize_inputs, policy.normalize_targets, policy.unnormalize_outputs)
     normalizer_parameters = []
     for normalizer in normalizers:
         # Normalize stores statistics as frozen Parameters, not registered buffers.
-        normalizer.to(device)
+        normalizer.to(device=device, dtype=torch.float32)
         normalizer_parameters.extend(normalizer.parameters())
     wrap_policy = None
     if strategy == "layer":
@@ -110,6 +120,7 @@ def wrap_pi05(policy, device, strategy="layer"):
         joint.enable_joint_blocks()
         for block in joint.joint_blocks:
             block.gradient_checkpointing = policy.config.gradient_checkpointing
+            block.attention_backend = attention_backend
         # Prefix weights are called through these modules' forwards, not the decoder layers.
         wrap_policy = ModuleWrapPolicy(
             {JointAttentionBlock, type(joint.paligemma.vision_tower), torch.nn.Embedding}
@@ -122,7 +133,7 @@ def wrap_pi05(policy, device, strategy="layer"):
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         mixed_precision=MixedPrecision(
             param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32,
+            reduce_dtype=getattr(torch, master_dtype),
             buffer_dtype=None,
         ),
         use_orig_params=True,
@@ -133,11 +144,32 @@ def wrap_pi05(policy, device, strategy="layer"):
     )
 
 
+def make_optimizer(config, model, name):
+    if name == "adamw":
+        return config.get_optimizer_preset().build(model.parameters())
+    if name != "adamw8bit":
+        raise ValueError(f"Unknown PI05 optimizer: {name}")
+    return AdamW8bitConfig(
+        lr=config.optimizer_lr,
+        betas=config.optimizer_betas,
+        eps=config.optimizer_eps,
+        weight_decay=config.optimizer_weight_decay,
+        grad_clip_norm=config.optimizer_grad_clip_norm,
+    ).build(model.parameters())
+
+
 def check_resume_geometry(output_dir, geometry):
     checkpoint = resolve_latest_fsdp_checkpoint(output_dir)
     metadata = json.loads((checkpoint / "metadata.json").read_text())
     saved = metadata["training_geometry"]
     previous, current = dict(saved), dict(geometry)
+    for key, default in (
+        ("master_dtype", "float32"),
+        ("optimizer", "adamw"),
+        ("attention_backend", "eager"),
+    ):
+        previous.setdefault(key, default)
+        current.setdefault(key, default)
     if current.get("tokenizer_sha256") is not None and (
         current["tokenizer_sha256"] == previous.get("tokenizer_sha256")
     ):
@@ -217,7 +249,14 @@ def train(args, device, checkpoint_group):
         "warmup_steps": args.warmup_steps,
         "seed": args.seed,
         "video_backend": args.video_backend,
+        "master_dtype": args.master_dtype,
+        "optimizer": args.optimizer,
+        "attention_backend": args.attention_backend,
     }
+    if args.optimizer == "adamw8bit":
+        import bitsandbytes
+
+        geometry["bitsandbytes_version"] = bitsandbytes.__version__
     if args.resume:
         geometry = check_resume_geometry(args.output_dir, geometry)
     elif rank == 0:
@@ -241,9 +280,9 @@ def train(args, device, checkpoint_group):
     if not args.resume:
         policy.load_base_weights(base_file)
     policy.config.device = str(device)
-    model = wrap_pi05(policy, device, args.fsdp_wrap_strategy)
+    model = wrap_pi05(policy, device, args.fsdp_wrap_strategy, args.master_dtype, args.attention_backend)
     model.train()
-    optimizer = config.get_optimizer_preset().build(model.parameters())
+    optimizer = make_optimizer(config, model, args.optimizer)
     scheduler_config = config.get_scheduler_preset()
     scheduler_config.num_platform_steps = 0
     scheduler_config.decay_from_platform_end = True
@@ -288,6 +327,8 @@ def train(args, device, checkpoint_group):
         with (args.output_dir / name).open("x") as stream:
             json.dump(contract, stream, indent=2)
     stop_step = min(args.steps, update_step + (args.max_updates_this_run or args.steps))
+    setup_peak = torch.tensor(torch.cuda.max_memory_allocated(device), device=device)
+    dist.all_reduce(setup_peak, op=dist.ReduceOp.MAX)
     torch.cuda.reset_peak_memory_stats(device)
     log = (args.output_dir / "training.jsonl").open("a" if args.resume else "x") if rank == 0 else None
     try:
@@ -364,6 +405,8 @@ def train(args, device, checkpoint_group):
             export_policy(model, policy, args.output_dir, update_step)
         peak = torch.tensor(torch.cuda.max_memory_allocated(device), device=device)
         dist.all_reduce(peak, op=dist.ReduceOp.MAX)
+        reserved_peak = torch.tensor(torch.cuda.max_memory_reserved(device), device=device)
+        dist.all_reduce(reserved_peak, op=dist.ReduceOp.MAX)
         if rank == 0:
             summary = {
                 "completed": update_step == args.steps,
@@ -372,9 +415,14 @@ def train(args, device, checkpoint_group):
                 "final_loss": row["loss"],
                 "world_size": world_size,
                 "fsdp_wrap_strategy": args.fsdp_wrap_strategy,
+                "master_dtype": args.master_dtype,
+                "optimizer": args.optimizer,
+                "attention_backend": args.attention_backend,
                 "fsdp_units": len(FullyShardedDataParallel.fsdp_modules(model)),
                 "peak_cuda_allocated_bytes_before_export_per_rank_max": before_export_peak.item(),
                 "peak_cuda_allocated_bytes_per_rank_max": peak.item(),
+                "peak_cuda_reserved_bytes_per_rank_max": reserved_peak.item(),
+                "setup_peak_cuda_allocated_bytes_per_rank_max": setup_peak.item(),
             }
             (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     finally:
