@@ -144,7 +144,7 @@ outputs and logs, while pretrained downloads use node-local disk:
 | Dataset | `${PARENT_DIR_V30}/RoboDojo/data/stack_bowls_delta` |
 | Training output | `/mnt/wangxiaofa/qwen3vl_mot_exp/${JOB_NAME}` |
 | Console logs | `/mnt/wangxiaofa/ace_logs` |
-| Download cache | `${TMPDIR:-/tmp}/pi05_models` |
+| Download cache | `/scratch/pi05_models` |
 | Pretrained model | `${MODEL_LOCAL_CACHE}/pi05_base/model.safetensors` |
 | Tokenizer | `${MODEL_LOCAL_CACHE}/pi05_base/paligemma_tokenizer.model` |
 
@@ -161,9 +161,10 @@ launcher; they never fall back to random initialization.
 Missing paths under a mounted `PRETRAINED_PATH` are not created: replacement
 downloads always go to node-local cache. Existing mounted assets can still
 be reused read-only. Network filesystems, FUSE/Blob mounts, and RAM-backed
-filesystems are rejected as download destinations. Set `MODEL_LOCAL_CACHE`
-to a sufficiently large local SSD/scratch directory if `/tmp` is unsuitable
-or small; the base weight file alone is approximately 14.47 GB.
+filesystems are rejected as download destinations. The default cache is
+under `/scratch`, independent of `TMPDIR`. Set `MODEL_LOCAL_CACHE` to
+override it with another sufficiently large local disk directory; the base
+weight file alone is approximately 14.47 GB.
 `MODEL_AUTO_DOWNLOAD=false` allows existing explicit or complete cached
 assets only. `DRY_RUN=true` prints the planned paths without downloading,
 creating cache/output/log directories, or starting training.

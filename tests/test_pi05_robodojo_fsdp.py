@@ -176,17 +176,26 @@ def test_resume_accepts_identical_tokenizer_at_another_node_local_path(tmp_path)
         training.check_resume_geometry(tmp_path, {**current, "tokenizer_sha256": "different-content"})
 
 
-def test_launcher_defaults_use_mounts_for_outputs_and_local_disk_for_assets(launch_env):
+@pytest.mark.parametrize("use_default_cache", [False, True])
+def test_launcher_defaults_use_mounts_for_outputs_and_local_disk_for_assets(launch_env, use_default_cache):
     env = dict(launch_env)
     for key in ("OUTPUT_DIR", "OUTPUT_ROOT", "LOG_DIR", "PRETRAINED_PATH", "TOKENIZER_PATH"):
         env.pop(key, None)
+    if use_default_cache:
+        env.pop("MODEL_LOCAL_CACHE")
+    env["TMPDIR"] = "/another/temporary/directory"
+    expected_cache = "/scratch/pi05_models" if use_default_cache else env["MODEL_LOCAL_CACHE"]
     env.update(DRY_RUN="true", CHECK_PATHS="false", MODEL_AUTO_DOWNLOAD="true")
     result = launch(env)
     assert result.returncode == 0, result.stderr
     command = shlex.split(result.stdout.split("Command: ", 1)[1])
     assert command[command.index("--output-dir") + 1].startswith("/mnt/wangxiaofa/qwen3vl_mot_exp/")
-    assert command[command.index("--pretrained-path") + 1] == f"{env['MODEL_LOCAL_CACHE']}/pi05_base"
-    assert not Path(env["MODEL_LOCAL_CACHE"]).exists()
+    assert command[command.index("--pretrained-path") + 1] == f"{expected_cache}/pi05_base"
+    assert (
+        command[command.index("--tokenizer-path") + 1]
+        == f"{expected_cache}/pi05_base/paligemma_tokenizer.model"
+    )
+    assert not Path(launch_env["MODEL_LOCAL_CACHE"]).exists()
 
 
 def test_launcher_dry_run_allows_missing_downloadable_assets(launch_env):
