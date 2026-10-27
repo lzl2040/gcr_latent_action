@@ -1904,4 +1904,36 @@ action dimensions and separately compare integrated native targets over
 the first 10 actions and full 32-action horizon. Clean ground-truth action
 embedding reconstruction and ground-truth-conditioned denoising losses are
 separate diagnostics, not substitutes for pure-noise sampling accuracy.
-Results are pending.
+
+The four-window measurement completed in BF16. Training/deployment sampling
+parity is exact for every window. Both step counts use identical per-window
+seeds (0/1/2/3); saved predictions independently reproduce the reported MSEs.
+
+| Metric, averaged equally across four windows | 10 sampling steps | 20 sampling steps |
+|---|---|---|
+| Full 32-action normalized MSE | 0.201318 | 0.202351 |
+| First 10-action normalized MSE | 0.208998 | 0.196754 |
+| Full 32-action normalized RMSE | 0.448685 | 0.449834 |
+| First 10 target position mean L2, left / right | 5.15 / 6.99 mm | 5.20 / 6.96 mm |
+| First 10 target rotation mean error, left / right | 1.22 / 1.08 deg | 1.19 / 1.17 deg |
+| Full 32 target position mean L2, left / right | 15.02 / 18.79 mm | 12.94 / 19.45 mm |
+| Full 32 target rotation mean error, left / right | 3.52 / 3.69 deg | 3.08 / 3.90 deg |
+| Full 32 target clipped gripper MAE, left / right | 0.0122 / 0.0268 | 0.0114 / 0.0268 |
+
+Normalized MSE averages squared error across 20 active dimensions; it has
+no single physical unit. Position/rotation metrics compare predicted and
+demonstrated delta sequences integrated from the same measured anchor,
+using the exact deployment conversion. They measure execution-target
+accuracy, not actual simulator tracking.
+
+Passing clean ground-truth action embeddings through the physical decoder
+alone gives mean normalized MSE 0.186810 (first ten: 0.217971). Thus decoder
+reconstruction is also imperfect. This ground-truth-assisted diagnostic
+is neither a lower bound nor an additive error decomposition: subtracting
+it from sampling MSE does not isolate a causal sampling-error component.
+The hold-current baseline gives full-horizon MSE 1.243064. These limited
+windows show similar 10/20-step errors, not statistical equivalence.
+
+Raw per-window metrics, predictions, and aggregate results are retained in
+`diagnostics.json`, `sample_*/{actions.npz,metrics.json}`, and
+`aggregate_action_error.json` in the output directory above.
