@@ -77,7 +77,7 @@ python -m lerobot.scripts.train_pi05_robodojo \
 ```
 
 Output directories must be new. For a full run, choose the intended step
-budget and batch size explicitly, e.g. `--steps 30000 --batch-size 4`.
+budget and batch size explicitly, e.g. `--steps 30000 --batch-size 1`.
 This example is not a recommendation that 30000 steps is sufficient or
 optimal. Default LR is `2.5e-5`, warmup is 1000 updates (shortened for a
 shorter run), followed immediately by cosine decay to `2.5e-6` at the
@@ -107,3 +107,47 @@ writes `summary.json`; the current entry point starts fresh and does not
 implement resume. A successful smoke check is not evidence of RoboDojo
 task success; closed-loop PI05 deployment must be connected and evaluated
 separately.
+
+## Completed smoke check
+
+The official checkpoint was downloaded into the `BASE` directory above.
+Its `model.safetensors` SHA256 is
+`0eb11ca9587678c1d2ef8cf32807c29f8ce53a2bfdfc1aa4a4c96f16fca59b0f`.
+The 44774-frame, 100-episode, 25 FPS delta dataset passed three-camera
+decoding and feature checks. At the last row of episode 0, the first target
+is valid and the remaining 31 future targets are correctly masked, without
+crossing into episode 1.
+
+A real official-base run completed two single-sample GPU updates with
+finite losses `0.4177229` and `0.2684192`, finite pre-clipping gradient norms
+`24.3978` and `9.5307`, and learning rates `1.25e-5` and `2.5e-5`.
+These are different batches/noise samples, not a convergence measurement.
+The optimizer is standard PyTorch AdamW, not the repository-wide `adamw`
+alias that selects bitsandbytes. Peak PyTorch allocated memory was
+32732044288 bytes (30.48 GiB) for batch size 1; larger batches and concurrent
+jobs require additional headroom.
+
+The resulting `step2` checkpoint reloads with `strict=True`. State/action
+quantile buffers exactly match the dataset, and standalone prediction from
+a real three-camera observation produces a finite `(1, 32, 20)` action
+chunk with 10 denoising steps. CUDA autocast is handled inside the policy,
+so callers do not have to supply an external mixed-precision context.
+
+Evidence and the checkpoint are retained at:
+
+```text
+/home/jianf/lzl_project/gcr_latent_action/outputs/evaluation/robodojo/pi05_delta_official_smoke_20261027_v2/
+  data_contract.json
+  training.jsonl
+  summary.json
+  reload_validation.json
+  step2/config.json
+  step2/model.safetensors
+  step2/training_state.pt
+```
+
+The first attempt exposed the missing bitsandbytes dependency of the old
+optimizer alias; it did not perform any updates. The subsequent reload
+check exposed a BF16/FP32 standalone-inference mismatch, which was fixed
+before the successful reload/prediction check. No long training job or
+closed-loop PI05 RoboDojo success-rate evaluation has been started.

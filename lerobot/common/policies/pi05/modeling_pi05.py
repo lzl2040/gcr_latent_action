@@ -618,6 +618,8 @@ class PI05Policy(PreTrainedPolicy):
         state = pad_vector(batch[OBS_ROBOT], self.config.max_state_dim)
         if state.shape[-1] != self.config.max_state_dim:
             raise ValueError("State dimension exceeds max_state_dim.")
+        if not torch.isfinite(state).all():
+            raise ValueError("State prompts require finite robot observations.")
         state_np = state.detach().float().cpu().numpy()
         discretized = np.digitize(state_np, bins=np.linspace(-1, 1, 257)[:-1]) - 1
         batch["task"] = [

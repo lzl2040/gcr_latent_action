@@ -66,6 +66,25 @@ def test_constant_quantile_is_finite():
     torch.testing.assert_close(inverse(normalize(batch))["action"], batch["action"])
 
 
+@pytest.mark.parametrize("mode", [NormalizationMode.MEAN_STD, NormalizationMode.MIN_MAX])
+def test_other_normalization_modes_are_unchanged(mode):
+    features = {"action": PolicyFeature(FeatureType.ACTION, (2,))}
+    stats = {
+        "action": {
+            "mean": torch.tensor([2.0, 4.0]),
+            "std": torch.tensor([2.0, 4.0]),
+            "min": torch.zeros(2),
+            "max": torch.tensor([4.0, 8.0]),
+        }
+    }
+    values = {"action": torch.tensor([[2.0, 4.0], [4.0, 8.0]])}
+    normalize = Normalize(features, {FeatureType.ACTION: mode}, stats)
+    inverse = Unnormalize(features, {FeatureType.ACTION: mode}, stats)
+    normalized = normalize(values)
+    torch.testing.assert_close(normalized["action"], torch.tensor([[0.0, 0.0], [1.0, 1.0]]))
+    torch.testing.assert_close(inverse(normalized)["action"], values["action"])
+
+
 def bare_policy():
     policy = PI05Policy.__new__(PI05Policy)
     nn.Module.__init__(policy)
@@ -113,6 +132,9 @@ def test_state_prompt_padding_and_token_limit():
     )
     policy.prepare_language(prompts)
     assert policy.language_tokenizer.call_args.kwargs["max_length"] == 200
+    batch["observation.state"][0, 0] = float("nan")
+    with pytest.raises(ValueError, match="finite robot observations"):
+        policy._prepare_state_prompt(batch)
 
 
 @pytest.fixture
