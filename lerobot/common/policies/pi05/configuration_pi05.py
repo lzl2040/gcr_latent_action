@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
-from lerobot.common.optim.optimizers import AdamWConfig
+from lerobot.common.optim.optimizers import AdamWNormConfig
 from lerobot.common.optim.schedulers import (
     CosineDecayWithWarmupSchedulerConfig,
 )
@@ -134,8 +134,8 @@ class PI05Config(PreTrainedConfig):
             )
             self.output_features["action"] = action_feature
 
-    def get_optimizer_preset(self) -> AdamWConfig:
-        return AdamWConfig(
+    def get_optimizer_preset(self) -> AdamWNormConfig:
+        return AdamWNormConfig(
             lr=self.optimizer_lr,
             betas=self.optimizer_betas,
             eps=self.optimizer_eps,

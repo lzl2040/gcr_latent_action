@@ -22,6 +22,12 @@ def quantile_stats():
     }
 
 
+def test_pi05_uses_standard_adamw():
+    parameter = nn.Parameter(torch.ones(1))
+    optimizer = PI05Config().get_optimizer_preset().build([parameter])
+    assert type(optimizer) is torch.optim.AdamW
+
+
 def test_quantile_normalization_round_trip():
     features = {"action": PolicyFeature(FeatureType.ACTION, (2,))}
     modes = {FeatureType.ACTION: NormalizationMode.QUANTILES}
