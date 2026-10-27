@@ -14,9 +14,18 @@ if [[ "${WEIGHT_RESUME}" != "true" ]]; then
 fi
 OUTPUT_DIR="${OUTPUT_DIR:-qwen3vl_mot}"
 TRAINING_STAGE="${TRAINING_STAGE:-auto}"
+MAX_EPOCHS="${MAX_EPOCHS:-}"
 if [[ "$TRAINING_STAGE" != "auto" && "$TRAINING_STAGE" != "pretrain" && "$TRAINING_STAGE" != "finetune" ]]; then
     echo "Error: TRAINING_STAGE must be auto, pretrain or finetune" >&2
     exit 1
+fi
+EPOCH_ARGS=()
+if [[ -n "$MAX_EPOCHS" ]]; then
+    if [[ ! "$MAX_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: MAX_EPOCHS must be a positive integer, got $MAX_EPOCHS" >&2
+        exit 1
+    fi
+    EPOCH_ARGS+=(--max_epochs="${MAX_EPOCHS}")
 fi
 PYTHON_BIN="${PYTHON_BIN:-python}"
 QWEN3VL_DIR="${QWEN3VL_DIR:-/Data/lzl/huggingface/Qwen3-VL-4B-Instruct}"
@@ -177,6 +186,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --deepspeed="${DEEPSPEED_CONFIG:-./ds_zero2_qwen3vl_mot.json}" \
     --policy.type="qwen3vl_mot" \
     --stage="${TRAINING_STAGE}" \
+    "${EPOCH_ARGS[@]}" \
     --policy.qwen3vl_dir="${QWEN3VL_DIR}" \
     --policy.cosmos3_dir="${COSMOS3_DIR}" \
     "${GENERATION_ARGS[@]}" \

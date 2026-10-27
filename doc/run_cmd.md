@@ -22,6 +22,30 @@ train_qwen3vl_mot_local.sh
 conda activate lerobot_v2
 ```
 
+## 最大训练 epoch
+
+两个 launcher 都支持 `MAX_EPOCHS`，对应 Python CLI 的 `--max_epochs`：
+
+```bash
+MAX_EPOCHS=100 bash train_qwen3vl_mot_fsdp.sh
+# 本地入口使用相同参数；保留原命令所需的权重、数据和输出目录配置
+MAX_EPOCHS=100 bash train_qwen3vl_mot_local.sh
+```
+
+该值必须是正整数，表示从训练开始累计的 **sampler epoch 总上限**，
+不是恢复 checkpoint 后再额外训练的轮数。显式设置会替代原有
+`source_equivalent_epochs + 100` 计划，也可以小于一个完整源数据覆盖周期。
+不传时保留原逻辑；LIBERO finetune 全覆盖模式通常为 `1 + 100 = 101` 轮。
+预训练的 sampler epoch 按每轮采样量定义，不一定等于全源数据一遍；
+`SAMPLES_PER_EPOCH` 控制采样量，不是最大 epoch，finetune 则自动使用有效 anchor 总数。
+
+FSDP 仍同时受 `STEPS`（累计 optimizer update 上限，默认 `600000`）限制，
+先达到 epoch 或 step 上限就停止。DeepSpeed 本地入口保持原行为，`STEPS` 不参与停止条件。
+续训使用当前传入的 epoch 上限和已保存进度；若已达到上限，不再更新参数。
+仅用 `WEIGHT_RESUME=true` 自动恢复权重时，仍需传入希望使用的 `MAX_EPOCHS`；
+完整训练配置会保存 `max_epochs`，通过 `--config_path` 读取时保留保存值，
+也可以用 `--max_epochs` 显式覆盖。修改参数需重新启动训练，不影响已运行进程。
+
 ## 预训练生成：Edge / Nano
 
 两个 launcher 的新实验默认 `GENERATION_BACKBONE=edge`。理解侧仍是 Qwen3-VL-4B，
@@ -983,6 +1007,7 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `BATCH_SIZE` | `16` | 每卡 micro-batch |
 | `GRADIENT_ACCUMULATION_STEPS` | `1` | 梯度累积 |
 | `STEPS` | `600000` | optimizer step 上限 |
+| `MAX_EPOCHS` | 未设置 | sampler epoch 累计总上限；省略时使用源数据覆盖轮数 + 100；FSDP 与 `STEPS` 先到先停 |
 | `SAVE_FREQ` | `2000` | 每隔多少 optimizer step 保存一次 |
 | `GENERATION_EVAL_ENABLED` | `false` | 是否启用固定 held-out episode 生成验证 |
 | `GENERATION_EVAL_FREQ` | `10000` | 每隔多少 optimizer step 生成一次 artifact |

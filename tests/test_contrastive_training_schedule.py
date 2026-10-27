@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ import torch
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.qwen3vl_mot.configuration_qwen3vl_mot import Qwen3VLMoTConfig
 from lerobot.scripts.dps_train_contrast import (
+    ContrastiveTrainPipelineConfig,
     _compute_epoch_schedule,
     _data_read_batch_counts,
     _load_stage2_resume_policy_config,
@@ -57,6 +59,83 @@ def test_epoch_schedule_rejects_invalid_sizes() -> None:
         _compute_epoch_schedule(100, 10, 0)
     with pytest.raises(ValueError):
         _compute_epoch_schedule(100, 10, 32, extra_epochs=-1)
+
+
+@pytest.mark.parametrize("max_epochs", [1, 2, 100, 1_500])
+@pytest.mark.parametrize("source_frames", [273_465, 10_000_000_000])
+def test_max_epochs_sets_exact_total_instead_of_adding_epochs(max_epochs, source_frames):
+    schedule = _compute_epoch_schedule(
+        total_source_frames=source_frames,
+        steps_per_epoch=535,
+        global_samples_per_step=512,
+        max_epochs=max_epochs,
+    )
+    assert schedule.total_epochs == max_epochs
+    assert schedule.total_steps == max_epochs * 535
+    assert schedule.source_equivalent_epochs == math.ceil(source_frames / (535 * 512))
+    assert schedule.extra_epochs == max(0, max_epochs - schedule.source_equivalent_epochs)
+
+
+def test_omitting_max_epochs_preserves_legacy_schedule():
+    schedule = _compute_epoch_schedule(273_465, 535, 512)
+    assert schedule == _compute_epoch_schedule(273_465, 535, 512, max_epochs=None)
+    assert schedule.total_epochs == 101
+    assert schedule.total_steps == 54_035
+    assert schedule.extra_epochs == 100
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, "100"])
+def test_epoch_schedule_rejects_invalid_max_epochs(value):
+    with pytest.raises(ValueError, match="max_epochs must be a positive integer"):
+        _compute_epoch_schedule(100, 10, 32, max_epochs=value)
+
+
+@pytest.mark.parametrize("config_class", [ContrastiveTrainPipelineConfig, FSDPTrainPipelineConfig])
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, "100"])
+def test_max_epochs_validation_rejects_invalid_values_before_training(config_class, value):
+    cfg = config_class(dataset=SimpleNamespace(), max_epochs=value)
+    with pytest.raises(ValueError, match="max_epochs must be a positive integer"):
+        cfg.validate()
+
+
+@pytest.mark.parametrize("config_class", [ContrastiveTrainPipelineConfig, FSDPTrainPipelineConfig])
+def test_max_epochs_cli_and_saved_configuration_roundtrip(tmp_path, config_class):
+    cfg = draccus.parse(config_class, args=[
+        "--dataset.repo_id=whatever", "--policy.type=qwen3vl_mot",
+        "--device=cpu", "--max_epochs=25",
+    ])
+    cfg.validate()
+    assert cfg.max_epochs == 25
+    cfg._save_pretrained(tmp_path)
+    assert json.loads((tmp_path / "train_config.json").read_text())["max_epochs"] == 25
+    restored = config_class.from_pretrained(tmp_path)
+    assert restored.max_epochs == 25
+    overridden = config_class.from_pretrained(tmp_path, cli_args=["--max_epochs=40"])
+    assert overridden.max_epochs == 40
+
+    saved_config = json.loads((tmp_path / "train_config.json").read_text())
+    del saved_config["max_epochs"]
+    (tmp_path / "train_config.json").write_text(json.dumps(saved_config))
+    assert config_class.from_pretrained(tmp_path).max_epochs is None
+
+
+@pytest.mark.parametrize("accumulation", [1, 3])
+def test_max_epochs_and_optimizer_step_cap_use_first_limit(accumulation):
+    schedule = _compute_epoch_schedule(100, 4, 32, max_epochs=2)
+    assert schedule.total_steps == 8
+    assert _planned_update_steps(schedule.total_steps, accumulation, 100) == math.ceil(8 / accumulation)
+    assert _planned_update_steps(schedule.total_steps, accumulation, 2) == 2
+
+
+@pytest.mark.parametrize("max_epochs,remaining_batches", [(2, 0), (3, 3), (5, 23)])
+def test_max_epochs_counts_completed_progress_on_resume(max_epochs, remaining_batches):
+    schedule = _compute_epoch_schedule(100, 10, 10, max_epochs=max_epochs)
+    epoch, batch = _normalize_resume_position(2, 7, schedule.steps_per_epoch)
+    remaining = sum(
+        schedule.steps_per_epoch - (batch if current == epoch else 0)
+        for current in range(epoch, schedule.total_epochs)
+    )
+    assert remaining == remaining_batches
 
 
 def test_fsdp_stage2_steps_cap_optimizer_updates() -> None:
@@ -121,6 +200,82 @@ def test_fsdp_cli_decodes_nested_runtime_config() -> None:
     assert cfg.fsdp.fp8 is False
     assert cfg.fsdp.fp8_scope == "generation"
     assert cfg.batch_size == 16
+
+
+@pytest.mark.parametrize("launcher", ["train_qwen3vl_mot_fsdp.sh", "train_qwen3vl_mot_local.sh"])
+@pytest.mark.parametrize("max_epochs", [None, "", "2", "200"])
+@pytest.mark.parametrize("resume", [False, True])
+def test_stage2_launchers_pass_optional_max_epochs(tmp_path, launcher, max_epochs, resume):
+    root = Path(__file__).resolve().parents[1]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python_stub = bin_dir / "model-cache-stub"
+    python_stub.write_text("#!/usr/bin/env bash\nprintf '%s\\n' /mock/qwen /mock/cosmos /mock/generation\n")
+    python_stub.chmod(0o755)
+    deepspeed_stub = bin_dir / "deepspeed"
+    deepspeed_stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n')
+    deepspeed_stub.chmod(0o755)
+    run_dir = tmp_path / "run"
+    if resume:
+        checkpoint = run_dir / "checkpoint_00000001"
+        checkpoint.mkdir(parents=True)
+        (run_dir / "latest_checkpoint").write_text(checkpoint.name)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHON_BIN": str(python_stub),
+        "WEIGHT_RESUME": str(resume).lower(), "CHECK_PATHS": "false", "DRY_RUN": "true",
+        "STAGE1_CHECKPOINT": str(tmp_path / "stage1"), "OUTPUT_DIR": str(run_dir),
+        "MASTER_PORT": "29599", "NNODES": "1", "NPROC_PER_NODE": "1",
+    }
+    if max_epochs is None:
+        env.pop("MAX_EPOCHS", None)
+    else:
+        env["MAX_EPOCHS"] = max_epochs
+    result = subprocess.run(
+        ["bash", str(root / launcher)], cwd=root, env=env,
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    is_fsdp = launcher == "train_qwen3vl_mot_fsdp.sh"
+    command = (
+        shlex.split(result.stdout.split("command:", 1)[1])
+        if is_fsdp else result.stdout.splitlines()
+    )
+    entrypoint = f"lerobot/scripts/{'fsdp' if is_fsdp else 'dps'}_train_contrast.py"
+    args = command[command.index(entrypoint) + 1:]
+    config_class = FSDPTrainPipelineConfig if is_fsdp else ContrastiveTrainPipelineConfig
+    cfg = draccus.parse(config_class, args=args)
+    assert cfg.max_epochs == (int(max_epochs) if max_epochs else None)
+    assert cfg.weight_resume is resume
+    assert sum(arg.startswith("--max_epochs=") for arg in args) == bool(max_epochs)
+
+    if max_epochs:
+        overridden = subprocess.run(
+            ["bash", str(root / launcher), "--max_epochs=7"], cwd=root, env=env,
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        command = (
+            shlex.split(overridden.stdout.split("command:", 1)[1])
+            if is_fsdp else overridden.stdout.splitlines()
+        )
+        args = command[command.index(entrypoint) + 1:]
+        assert draccus.parse(config_class, args=args).max_epochs == 7
+
+
+@pytest.mark.parametrize("launcher", ["train_qwen3vl_mot_fsdp.sh", "train_qwen3vl_mot_local.sh"])
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "invalid", "true"])
+def test_stage2_launchers_reject_invalid_max_epochs(tmp_path, launcher, value):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["bash", str(root / launcher)], cwd=root,
+        env={
+            **os.environ, "WEIGHT_RESUME": "false", "MAX_EPOCHS": value,
+            "CHECK_PATHS": "false", "DRY_RUN": "true",
+            "STAGE1_CHECKPOINT": str(tmp_path / "stage1"), "OUTPUT_DIR": str(tmp_path / "run"),
+        },
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert "MAX_EPOCHS must be a positive integer" in result.stderr
 
 
 def test_fsdp_output_dir_is_exact_and_validation_is_idempotent(tmp_path) -> None:
