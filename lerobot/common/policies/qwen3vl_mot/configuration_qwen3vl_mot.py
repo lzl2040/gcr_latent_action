@@ -94,6 +94,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     sigma_min: float = 1e-3
     sigma_max: float = 0.999
     time_sampling_distribution: str = "uniform"
+    time_sampling_shift: float = 1.0
     time_sampling_beta_alpha: float = 1.5
     time_sampling_beta_beta: float = 1.0
     time_sampling_beta_probability: float = 0.5
@@ -277,9 +278,11 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
                 f"Expected 0 <= sigma_min < sigma_max <= 1, got "
                 f"{self.sigma_min} and {self.sigma_max}."
             )
-        if self.time_sampling_distribution not in ("uniform", "beta", "mixed"):
-            raise ValueError("`time_sampling_distribution` must be 'uniform', 'beta', or 'mixed'.")
-        for name in ("time_sampling_beta_alpha", "time_sampling_beta_beta"):
+        if self.time_sampling_distribution not in ("uniform", "beta", "mixed", "shifted_uniform"):
+            raise ValueError(
+                "`time_sampling_distribution` must be 'uniform', 'beta', 'mixed', or 'shifted_uniform'."
+            )
+        for name in ("time_sampling_beta_alpha", "time_sampling_beta_beta", "time_sampling_shift"):
             value = getattr(self, name)
             if not (math.isfinite(value) and value > 0):
                 raise ValueError(f"`{name}` must be finite and positive.")

@@ -26,6 +26,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/wangxiaofa/qwen3vl_mot_exp}"
 OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_ROOT}/${JOB_NAME}}"
 LOG_DIR="${LOG_DIR:-/mnt/wangxiaofa/ace_logs}"
 TRAINING_STAGE="${TRAINING_STAGE:-auto}"
+MAX_EPOCHS="${MAX_EPOCHS:-}"
 FP8_ENABLED="${FP8_ENABLED:-auto}"
 FP8_EMULATE="${FP8_EMULATE:-false}"
 SAMPLE_POOL_ENABLED="${SAMPLE_POOL_ENABLED:-true}"
@@ -47,6 +48,7 @@ PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
 STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
 TIME_SAMPLING_DISTRIBUTION="${TIME_SAMPLING_DISTRIBUTION:-}"
+TIME_SAMPLING_SHIFT="${TIME_SAMPLING_SHIFT:-}"
 TIME_SAMPLING_BETA_ALPHA="${TIME_SAMPLING_BETA_ALPHA:-}"
 TIME_SAMPLING_BETA_BETA="${TIME_SAMPLING_BETA_BETA:-}"
 TIME_SAMPLING_BETA_PROBABILITY="${TIME_SAMPLING_BETA_PROBABILITY:-}"
@@ -111,6 +113,11 @@ require_positive_int \
     "$GENERATION_EVAL_EPISODES_PER_DATASET"
 require_positive_int "GENERATION_EVAL_BATCH_SIZE" "$GENERATION_EVAL_BATCH_SIZE"
 require_positive_int "GENERATION_EVAL_VIDEO_FPS" "$GENERATION_EVAL_VIDEO_FPS"
+EPOCH_ARGS=()
+if [[ -n "$MAX_EPOCHS" ]]; then
+    require_positive_int "MAX_EPOCHS" "$MAX_EPOCHS"
+    EPOCH_ARGS+=(--max_epochs="${MAX_EPOCHS}")
+fi
 if [[ -n "$STAGE2_TASK_NAMES" || -n "$STAGE2_TASK_WEIGHTS" ]]; then
     [[ -n "$STAGE2_TASK_NAMES" && -n "$STAGE2_TASK_WEIGHTS" ]] \
         || die "STAGE2_TASK_NAMES and STAGE2_TASK_WEIGHTS must be set together"
@@ -277,10 +284,13 @@ if [[ -n "$STATE_PRED_RECON_WEIGHT" ]]; then
 fi
 if [[ -n "$TIME_SAMPLING_DISTRIBUTION" ]]; then
     case "$TIME_SAMPLING_DISTRIBUTION" in
-        uniform|beta|mixed) ;;
-        *) die "TIME_SAMPLING_DISTRIBUTION must be uniform, beta or mixed" ;;
+        uniform|beta|mixed|shifted_uniform) ;;
+        *) die "TIME_SAMPLING_DISTRIBUTION must be uniform, beta, mixed or shifted_uniform" ;;
     esac
     PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_distribution="${TIME_SAMPLING_DISTRIBUTION}")
+fi
+if [[ -n "$TIME_SAMPLING_SHIFT" ]]; then
+    PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_shift="${TIME_SAMPLING_SHIFT}")
 fi
 if [[ -n "$TIME_SAMPLING_BETA_ALPHA" ]]; then
     PHYSICAL_FLOW_ARGS+=(--policy.time_sampling_beta_alpha="${TIME_SAMPLING_BETA_ALPHA}")
@@ -422,10 +432,11 @@ echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "  rgb_augmentation=${RGB_AUG_ENABLED} (training only; crop 90-100%, mild color jitter; no rotation)"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
 echo "  predicted_recon_weights: action=${ACTION_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} state=${STATE_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} (no clean codec loss)"
-echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"
+echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} shift=${TIME_SAMPLING_SHIFT:-<saved config; default 1>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"
 echo "  generation_backbone=${GENERATION_BACKBONE:-<from checkpoint>} pretrained=${GENERATION_PRETRAINED_DIR:-<not required on resume>}"
 echo "  generation_tuning=${GENERATION_TUNING_MODE:-saved config on resume; full on fresh run}"
 echo "  training_stage=${TRAINING_STAGE} (auto: LIBERO=finetune, other mixtures=pretrain)"
+echo "  max_epochs=${MAX_EPOCHS:-<source-equivalent coverage + 100>} optimizer_step_cap=${STEPS:-600000}"
 echo "  fp8=${FP8_ENABLED} emulate=${FP8_EMULATE} (auto: A100=BF16, H100-class=native FP8)"
 echo "  model_auto_download=${MODEL_AUTO_DOWNLOAD} node_cache=${MODEL_LOCAL_CACHE} dry_run=${DRY_RUN}"
 echo "distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC_PER_NODE} master=${MASTER_ADDR}:${MASTER_PORT}"
@@ -455,6 +466,7 @@ CMD=(
     lerobot/scripts/fsdp_train_contrast.py
     --policy.type="qwen3vl_mot"
     --stage="${TRAINING_STAGE}"
+    "${EPOCH_ARGS[@]}"
     --policy.qwen3vl_dir="${QWEN3VL_DIR}"
     --policy.cosmos3_dir="${COSMOS3_DIR}"
     "${GENERATION_ARGS[@]}"

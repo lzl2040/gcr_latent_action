@@ -527,6 +527,7 @@ def resume_checkpoint(tmp_path, monkeypatch):
     [
         ({}, (2, 7)),
         ({"total_source_frames": 120}, (2, 7)),
+        ({"total_epochs": 50, "total_micro_steps": 500}, (2, 7)),
         ({"steps_per_epoch": 20, "total_source_frames": 200}, (1, 7)),
         ({"steps_per_epoch": 3, "total_source_frames": 30}, (9, 0)),
         ({"steps_per_epoch": 9, "total_source_frames": 90}, (3, 0)),

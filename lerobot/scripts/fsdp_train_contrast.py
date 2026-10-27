@@ -42,8 +42,8 @@ from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.utils import format_big_number
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs import parser
-from lerobot.configs.train import TrainPipelineConfig
 from lerobot.scripts.dps_train_contrast import (
+    ContrastiveTrainPipelineConfig,
     _compute_epoch_schedule,
     _data_read_batch_counts,
     _load_stage2_resume_policy_config,
@@ -56,8 +56,7 @@ from lerobot.scripts.dps_train_contrast import (
 
 
 @dataclass
-class FSDPTrainPipelineConfig(TrainPipelineConfig):
-    stage: str = "auto"
+class FSDPTrainPipelineConfig(ContrastiveTrainPipelineConfig):
     fsdp: FSDPTrainingConfig = field(default_factory=FSDPTrainingConfig)
     generation_eval: GenerationEvalConfig = field(
         default_factory=GenerationEvalConfig
@@ -243,6 +242,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         total_source_frames=dataset.total_pool_anchors,
         steps_per_epoch=len(sampler),
         global_samples_per_step=cfg.batch_size * world_size,
+        max_epochs=cfg.max_epochs,
     )
     total_update_steps = _planned_update_steps(
         epoch_schedule.total_steps,
@@ -295,7 +295,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         logger.info("Dataset: %s", dataset)
         logger.info(
             "Epoch schedule: source_frames=%s pool_anchors=%s configured_samples_per_epoch=%s "
-            "actual_samples_per_epoch=%s micro_steps_per_epoch=%s total_epochs=%s "
+            "actual_samples_per_epoch=%s micro_steps_per_epoch=%s total_epochs=%s max_epochs=%s "
             "total_micro_steps=%s optimizer_steps=%s pool=%s",
             format_big_number(dataset.total_source_frames),
             format_big_number(dataset.total_pool_anchors),
@@ -303,6 +303,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
             format_big_number(epoch_schedule.samples_per_epoch),
             format_big_number(epoch_schedule.steps_per_epoch),
             format_big_number(epoch_schedule.total_epochs),
+            cfg.max_epochs,
             format_big_number(epoch_schedule.total_steps),
             format_big_number(total_update_steps),
             dataset.sample_pool_fingerprint,

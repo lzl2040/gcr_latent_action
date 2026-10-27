@@ -930,7 +930,7 @@ def test_spatial_tactile_target_and_generation_are_decodable():
 @pytest.mark.parametrize("multiview", [False, True])
 @pytest.mark.parametrize("flow_space", ["raw", "embedding"])
 @pytest.mark.parametrize("generation_variant", ["random", "edge", "nano", "edge_frozen"])
-@pytest.mark.parametrize("time_distribution", ["uniform", "beta", "mixed"])
+@pytest.mark.parametrize("time_distribution", ["uniform", "beta", "mixed", "shifted_uniform"])
 def test_policy_runs_all_task_routes_with_lightweight_backends(
     tmp_path, monkeypatch, multiview, flow_space, generation_variant, time_distribution
 ):
@@ -1070,6 +1070,7 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         action_prediction_reconstruction_loss_weight=0.1 if flow_space == "embedding" else 0.0,
         state_prediction_reconstruction_loss_weight=0.1 if flow_space == "embedding" else 0.0,
         time_sampling_distribution=time_distribution,
+        time_sampling_shift=3.0,
         inference_steps=3,
     )
     policy = stage2.Qwen3VLMoTPolicy(config)
@@ -1852,6 +1853,12 @@ def test_three_task_joint_sampling_uses_only_current_conditions(flow_space, mult
     repeated = policy.generate_validation(changed, seed=47)
     for name in prediction:
         torch.testing.assert_close(repeated[name], prediction[name])
+
+    policy.config.time_sampling_distribution = "shifted_uniform"
+    policy.config.time_sampling_shift = 3.0
+    shifted = policy.generate_validation(batch, seed=47)
+    for name in prediction:
+        torch.testing.assert_close(shifted[name], prediction[name], rtol=0, atol=0)
     current_only = {
         name: batch[name] for name in ("image_t0", "state_mask", "action_mask", "task")
     }
@@ -1951,16 +1958,21 @@ def test_legacy_clean_codec_weight_is_retired_with_explicit_warning(caplog):
     assert "Clean physical codec reconstruction has been removed" in caplog.text
 
 
-@pytest.mark.parametrize("distribution,mean,low_probability", [
-    ("uniform", 0.5, 0.1), ("beta", 0.6, 0.1 ** 1.5),
-    ("mixed", 0.55, 0.5 * (0.1 + 0.1 ** 1.5)),
+@pytest.mark.parametrize("distribution,mean,low_probability,high_probability", [
+    ("uniform", 0.5, 0.1, 0.2),
+    ("beta", 0.6, 0.1 ** 1.5, 1 - 0.8 ** 1.5),
+    ("mixed", 0.55, 0.5 * (0.1 + 0.1 ** 1.5), 0.5 * (0.2 + 1 - 0.8 ** 1.5)),
+    ("shifted_uniform", 0.6760407835, 0.1 / 2.8, 3 / 7),
 ])
 @pytest.mark.parametrize("device", [
     "cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")),
 ])
-def test_time_sampling_distribution_statistics_and_bounds(distribution, mean, low_probability, device):
+def test_time_sampling_distribution_statistics_and_bounds(
+    distribution, mean, low_probability, high_probability, device
+):
     policy, _ = _embedding_physical_policy()
     policy.config.time_sampling_distribution = distribution
+    policy.config.time_sampling_shift = 3.0
     torch.manual_seed(204)
     with torch.autocast(device, dtype=torch.bfloat16):
         sigma = policy._sample_sigma(50000, torch.device(device))
@@ -1973,6 +1985,68 @@ def test_time_sampling_distribution_statistics_and_bounds(distribution, mean, lo
     u = (sigma - policy.config.sigma_min) / (policy.config.sigma_max - policy.config.sigma_min)
     assert u.mean().item() == pytest.approx(mean, abs=0.005)
     assert (u < 0.1).float().mean().item() == pytest.approx(low_probability, abs=0.004)
+    assert (u > 0.8).float().mean().item() == pytest.approx(high_probability, abs=0.006)
+
+
+@pytest.mark.parametrize("shift", [0.25, 1.0, 3.0, 10.0])
+def test_shifted_time_sampling_matches_exact_mapping_and_custom_bounds(monkeypatch, shift):
+    policy, _ = _embedding_physical_policy()
+    policy.config.time_sampling_distribution = "shifted_uniform"
+    policy.config.time_sampling_shift = shift
+    policy.config.sigma_min, policy.config.sigma_max = 0.15, 0.8
+    uniform = torch.tensor([0.0, 0.1, 0.5, 0.9, 1.0])
+
+    def fixed_uniform(size, *, device, dtype):
+        assert size == uniform.numel()
+        return uniform.to(device=device, dtype=dtype)
+
+    monkeypatch.setattr(torch, "rand", fixed_uniform)
+    actual = policy._sample_sigma(uniform.numel(), torch.device("cpu"))
+    shifted = shift * uniform / (1 + (shift - 1) * uniform)
+    expected = 0.15 + 0.65 * shifted
+    torch.testing.assert_close(actual, expected)
+    assert actual[0].item() == pytest.approx(0.15)
+    assert actual[-1].item() == pytest.approx(0.8)
+
+
+def test_shifted_time_sampling_is_monotone_and_identity_at_one():
+    policy, _ = _embedding_physical_policy()
+    torch.manual_seed(73)
+    uniform = policy._sample_sigma(1000, torch.device("cpu"))
+    policy.config.time_sampling_distribution = "shifted_uniform"
+    previous = None
+    for shift in (0.25, 1.0, 3.0, 10.0):
+        policy.config.time_sampling_shift = shift
+        torch.manual_seed(73)
+        actual = policy._sample_sigma(1000, torch.device("cpu"))
+        if shift == 1.0:
+            torch.testing.assert_close(actual, uniform)
+        if previous is not None:
+            assert (actual >= previous).all()
+        previous = actual
+
+
+@pytest.mark.parametrize("shift", [1e-300, 1e300])
+def test_shifted_time_sampling_remains_finite_for_extreme_positive_shifts(shift):
+    policy, _ = _embedding_physical_policy()
+    policy.config.time_sampling_distribution = "shifted_uniform"
+    policy.config.time_sampling_shift = shift
+    sigma = policy._sample_sigma(1000, torch.device("cpu"))
+    assert torch.isfinite(sigma).all()
+    assert sigma.min() >= policy.config.sigma_min
+    assert sigma.max() <= policy.config.sigma_max
+
+
+@pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed"])
+def test_time_sampling_shift_does_not_change_existing_distributions(distribution):
+    policy, _ = _embedding_physical_policy()
+    policy.config.time_sampling_distribution = distribution
+    samples = []
+    for shift in (0.5, 3.0):
+        policy.config.time_sampling_shift = shift
+        torch.manual_seed(73)
+        samples.append(policy._sample_sigma(1000, torch.device("cpu")))
+    torch.testing.assert_close(*samples, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("probability,reference", [(0.0, "uniform"), (1.0, "beta")])
@@ -1992,6 +2066,9 @@ def test_mixed_time_sampling_endpoints_match_pure_distribution(probability, refe
     {"time_sampling_beta_alpha": float("nan")}, {"time_sampling_beta_beta": -1},
     {"time_sampling_beta_beta": float("inf")}, {"time_sampling_beta_probability": -0.1},
     {"time_sampling_beta_probability": 1.1}, {"time_sampling_beta_probability": float("nan")},
+    {"time_sampling_shift": 0}, {"time_sampling_shift": -1},
+    {"time_sampling_shift": float("nan")}, {"time_sampling_shift": float("inf")},
+    {"time_sampling_shift": float("-inf")},
 ])
 def test_time_sampling_rejects_invalid_configuration(kwargs):
     with pytest.raises(ValueError, match="time_sampling"):

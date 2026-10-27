@@ -22,6 +22,30 @@ train_qwen3vl_mot_local.sh
 conda activate lerobot_v2
 ```
 
+## 最大训练 epoch
+
+两个 launcher 都支持 `MAX_EPOCHS`，对应 Python CLI 的 `--max_epochs`：
+
+```bash
+MAX_EPOCHS=100 bash train_qwen3vl_mot_fsdp.sh
+# 本地入口使用相同参数；保留原命令所需的权重、数据和输出目录配置
+MAX_EPOCHS=100 bash train_qwen3vl_mot_local.sh
+```
+
+该值必须是正整数，表示从训练开始累计的 **sampler epoch 总上限**，
+不是恢复 checkpoint 后再额外训练的轮数。显式设置会替代原有
+`source_equivalent_epochs + 100` 计划，也可以小于一个完整源数据覆盖周期。
+不传时保留原逻辑；LIBERO finetune 全覆盖模式通常为 `1 + 100 = 101` 轮。
+预训练的 sampler epoch 按每轮采样量定义，不一定等于全源数据一遍；
+`SAMPLES_PER_EPOCH` 控制采样量，不是最大 epoch，finetune 则自动使用有效 anchor 总数。
+
+FSDP 仍同时受 `STEPS`（累计 optimizer update 上限，默认 `600000`）限制，
+先达到 epoch 或 step 上限就停止。DeepSpeed 本地入口保持原行为，`STEPS` 不参与停止条件。
+续训使用当前传入的 epoch 上限和已保存进度；若已达到上限，不再更新参数。
+仅用 `WEIGHT_RESUME=true` 自动恢复权重时，仍需传入希望使用的 `MAX_EPOCHS`；
+完整训练配置会保存 `max_epochs`，通过 `--config_path` 读取时保留保存值，
+也可以用 `--max_epochs` 显式覆盖。修改参数需重新启动训练，不影响已运行进程。
+
 ## 预训练生成：Edge / Nano
 
 两个 launcher 的新实验默认 `GENERATION_BACKBONE=edge`。理解侧仍是 Qwen3-VL-4B，
@@ -263,7 +287,7 @@ forward 不引入 state，也不重建干净 action 条件。flow loss 和多步
 
 ### 训练噪声时间分布
 
-两个 launcher 都支持 `TIME_SAMPLING_DISTRIBUTION=uniform|beta|mixed`：
+两个 launcher 都支持 `TIME_SAMPLING_DISTRIBUTION=uniform|beta|mixed|shifted_uniform`：
 
 ```bash
 TIME_SAMPLING_DISTRIBUTION=mixed \
@@ -278,8 +302,30 @@ TIME_SAMPLING_DISTRIBUTION=mixed \
 直接 Python CLI 等价选项是 `--policy.time_sampling_distribution=mixed`。
 resume 时显式设置这些参数可以覆盖保存的设置。
 
+需要增加高噪声训练样本占比时，显式选择 `shifted_uniform`：
+
+```bash
+TIME_SAMPLING_DISTRIBUTION=shifted_uniform \
+TIME_SAMPLING_SHIFT=3 \
+  bash train_qwen3vl_mot_fsdp.sh
+```
+
+`train_qwen3vl_mot_local.sh` 接受相同环境变量。
+先采样 `u ~ Uniform(0,1)`，再计算
+`q = shift*u / (1 + (shift-1)*u)`，
+最后映射 `sigma = sigma_min + (sigma_max-sigma_min)*q`。
+`TIME_SAMPLING_SHIFT` 必须为有限正数，默认 `1`；
+`shift=1` 等价于均匀分布，`shift>1` 偏高噪声，`0<shift<1` 偏低噪声。
+例如 `shift=3` 时归一化噪声比例 `q>0.8` 的概率约为 `42.86%`，
+均匀分布为 `20%`。
+直接 Python CLI 等价参数为
+`--policy.time_sampling_distribution=shifted_uniform --policy.time_sampling_shift=3`。
+resume 未显式设置时保留保存的分布及 shift；旧配置缺少 shift 时按 `1` 读取。
+只设置 shift 不会切换分布，它不改变 `uniform`、`beta`、`mixed` 的行为。
+
 `joint_prediction` 的 video/action/state 目标共享每个样本的 sigma，但高斯噪声各自独立；
-当前帧和 current-state 条件保持干净。推理仍用默认 20 步等间隔 Euler，不从 Beta 随机抽推理网格。
+当前帧和 current-state 条件保持干净。以上开关只改变训练分布；
+推理仍用默认 20 步等间隔 Euler，不从这些分布随机抽推理网格。
 
 首次运行或基础镜像更新后，安装 Stage 2 已验证的 FP8/8-bit optimizer 版本：
 
@@ -961,6 +1007,7 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `BATCH_SIZE` | `16` | 每卡 micro-batch |
 | `GRADIENT_ACCUMULATION_STEPS` | `1` | 梯度累积 |
 | `STEPS` | `600000` | optimizer step 上限 |
+| `MAX_EPOCHS` | 未设置 | sampler epoch 累计总上限；省略时使用源数据覆盖轮数 + 100；FSDP 与 `STEPS` 先到先停 |
 | `SAVE_FREQ` | `2000` | 每隔多少 optimizer step 保存一次 |
 | `GENERATION_EVAL_ENABLED` | `false` | 是否启用固定 held-out episode 生成验证 |
 | `GENERATION_EVAL_FREQ` | `10000` | 每隔多少 optimizer step 生成一次 artifact |
@@ -973,7 +1020,8 @@ launcher 在 `NNODES=1` 时使用 `--standalone`；在 `NNODES>1` 时改用 stat
 | `RGB_AUG_ENABLED` | `false` | 可选训练 RGB 增强：90%-100% 裁剪和轻量颜色抖动，不含旋转；验证关闭 |
 | `ACTION_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码 action 的 masked MSE 权重；`0` 关闭，仅支持 embedding |
 | `STATE_PRED_RECON_WEIGHT` | embedding 缺省 `0.1`；resume 保留保存值 | 预测 embedding 解码未来 state 的 masked MSE 权重；不监督第 0 帧，`0` 关闭 |
-| `TIME_SAMPLING_DISTRIBUTION` | fresh `uniform`；resume 使用保存值 | 训练时间分布：`uniform` / `beta` / `mixed`；joint 三个目标共享 sigma |
+| `TIME_SAMPLING_DISTRIBUTION` | fresh `uniform`；resume 使用保存值 | 训练时间分布：`uniform` / `beta` / `mixed` / `shifted_uniform`；joint 三个目标共享 sigma |
+| `TIME_SAMPLING_SHIFT` | fresh `1.0`；resume 使用保存值 | 仅影响 `shifted_uniform`；有限正数，`>1` 偏高噪声，`=1` 均匀，`<1` 偏低噪声；不改变推理网格 |
 | `TIME_SAMPLING_BETA_ALPHA` | `1.5` | Beta 的 alpha 参数，必须为有限正数 |
 | `TIME_SAMPLING_BETA_BETA` | `1.0` | Beta 的 beta 参数，必须为有限正数 |
 | `TIME_SAMPLING_BETA_PROBABILITY` | `0.5` | mixed 中选 Beta 的概率，范围 `[0,1]` |

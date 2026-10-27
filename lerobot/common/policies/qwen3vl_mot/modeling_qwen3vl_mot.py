@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -931,12 +932,17 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             return torch.empty(batch_size, device=device).uniform_(
                 self.config.sigma_min, self.config.sigma_max
             )
-        beta = torch.distributions.Beta(
-            torch.tensor(self.config.time_sampling_beta_alpha, device=device, dtype=torch.float32),
-            torch.tensor(self.config.time_sampling_beta_beta, device=device, dtype=torch.float32),
-            validate_args=False,
-        )
-        sample = beta.sample((batch_size,))
+        if distribution == "shifted_uniform":
+            sample = torch.rand(batch_size, device=device, dtype=torch.float32)
+            # Equivalent to s*u/(1+(s-1)*u), without overflow for large finite shifts.
+            sample = torch.sigmoid(torch.logit(sample) + math.log(self.config.time_sampling_shift))
+        else:
+            beta = torch.distributions.Beta(
+                torch.tensor(self.config.time_sampling_beta_alpha, device=device, dtype=torch.float32),
+                torch.tensor(self.config.time_sampling_beta_beta, device=device, dtype=torch.float32),
+                validate_args=False,
+            )
+            sample = beta.sample((batch_size,))
         if distribution == "mixed" and probability < 1:
             choose_beta = torch.rand(batch_size, device=device) < probability
             sample = torch.where(choose_beta, sample, torch.rand(batch_size, device=device))

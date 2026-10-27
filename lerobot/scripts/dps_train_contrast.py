@@ -62,6 +62,14 @@ _EXTRA_TRAINING_EPOCHS = 100
 @dataclass
 class ContrastiveTrainPipelineConfig(TrainPipelineConfig):
     stage: str = "auto"
+    max_epochs: int | None = None
+
+    def validate(self):
+        if self.max_epochs is not None and (
+            type(self.max_epochs) is not int or self.max_epochs <= 0
+        ):
+            raise ValueError("max_epochs must be a positive integer.")
+        super().validate()
 
 
 def _make_training_sampler(
@@ -130,6 +138,7 @@ def _compute_epoch_schedule(
     steps_per_epoch: int,
     global_samples_per_step: int,
     extra_epochs: int = _EXTRA_TRAINING_EPOCHS,
+    max_epochs: int | None = None,
 ) -> EpochSchedule:
     if total_source_frames <= 0:
         raise ValueError("total_source_frames must be positive.")
@@ -139,16 +148,18 @@ def _compute_epoch_schedule(
         raise ValueError("global_samples_per_step must be positive.")
     if extra_epochs < 0:
         raise ValueError("extra_epochs must be non-negative.")
+    if max_epochs is not None and (type(max_epochs) is not int or max_epochs <= 0):
+        raise ValueError("max_epochs must be a positive integer.")
 
     samples_per_epoch = steps_per_epoch * global_samples_per_step
     source_equivalent_epochs = math.ceil(total_source_frames / samples_per_epoch)
-    total_epochs = source_equivalent_epochs + extra_epochs
+    total_epochs = source_equivalent_epochs + extra_epochs if max_epochs is None else max_epochs
     return EpochSchedule(
         steps_per_epoch=steps_per_epoch,
         global_samples_per_step=global_samples_per_step,
         samples_per_epoch=samples_per_epoch,
         source_equivalent_epochs=source_equivalent_epochs,
-        extra_epochs=extra_epochs,
+        extra_epochs=max(0, total_epochs - source_equivalent_epochs),
         total_epochs=total_epochs,
         source_equivalent_steps=source_equivalent_epochs * steps_per_epoch,
         total_steps=total_epochs * steps_per_epoch,
@@ -325,6 +336,7 @@ def _load_stage2_resume_policy_config(
         "action_prediction_reconstruction_loss_weight",
         "state_prediction_reconstruction_loss_weight",
         "time_sampling_distribution",
+        "time_sampling_shift",
         "time_sampling_beta_alpha",
         "time_sampling_beta_beta",
         "time_sampling_beta_probability",
@@ -400,12 +412,13 @@ def train(cfg: ContrastiveTrainPipelineConfig):
         total_source_frames=dataset.total_pool_anchors,
         steps_per_epoch=len(sampler),
         global_samples_per_step=batch_size * world_size,
+        max_epochs=cfg.max_epochs,
     )
     if rank == 0:
         logger.info(
             "Epoch schedule: source_frames=%s pool_anchors=%s configured_samples_per_epoch=%s "
             "actual_samples_per_epoch=%s steps_per_epoch=%s "
-            "source_equivalent_epochs=%s extra_epochs=%s total_epochs=%s "
+            "source_equivalent_epochs=%s extra_epochs=%s total_epochs=%s max_epochs=%s "
             "source_equivalent_steps=%s total_steps=%s pool=%s; cfg.steps=%s is ignored",
             format_big_number(dataset.total_source_frames),
             format_big_number(dataset.total_pool_anchors),
@@ -415,6 +428,7 @@ def train(cfg: ContrastiveTrainPipelineConfig):
             format_big_number(epoch_schedule.source_equivalent_epochs),
             format_big_number(epoch_schedule.extra_epochs),
             format_big_number(epoch_schedule.total_epochs),
+            cfg.max_epochs,
             format_big_number(epoch_schedule.source_equivalent_steps),
             format_big_number(epoch_schedule.total_steps),
             dataset.sample_pool_fingerprint,
@@ -471,10 +485,11 @@ def train(cfg: ContrastiveTrainPipelineConfig):
         num_total_params = sum(p.numel() for p in policy.parameters())
         logger.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
         logger.info(
-            "Training epochs: %s source-equivalent + %s extra = %s; total steps: %s",
+            "Training epochs: source-equivalent=%s extra=%s total=%s max_epochs=%s; total steps: %s",
             format_big_number(epoch_schedule.source_equivalent_epochs),
             format_big_number(epoch_schedule.extra_epochs),
             format_big_number(epoch_schedule.total_epochs),
+            cfg.max_epochs,
             format_big_number(epoch_schedule.total_steps),
         )
         logger.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
