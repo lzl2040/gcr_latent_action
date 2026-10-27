@@ -1737,3 +1737,40 @@ Artifacts under
 - `policy/predictions/`: predicted-camera videos and conditioning/future PNGs.
 - `simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_step12k_20261026_v1/`:
   native result, physics profile, and all nine actual camera MP4s.
+
+#### Matched step16k evaluation preparation
+
+The `step16k` checkpoint from
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu`
+is cached under the same runtime-assets experiment directory as 12k.
+All 19 files (25,200,797,460 bytes) have matching source/destination SHA256
+hashes, with source sizes and modification times unchanged during copying.
+The parent policy/training configurations match 12k byte-for-byte, all 16
+model shards differ from 12k, and the DCP metadata preserves all 2560 state
+entries with matching tensor shapes/dtypes and 16910 valid storage references.
+Provenance is retained in
+`runtime_assets/robodojo_stack_bowl_2nodes_8gpu/checkpoint_provenance_step16k.json`.
+
+This is another **three-layout matched diagnostic**, not the full
+75-episode, three-seed `stack_bowls` evaluation. It retains layouts 0/1/2,
+seed 0, one environment, the saved 20 denoising steps, 32 predicted actions,
+10 executed actions per replan, and actual/predicted video export.
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint "$CACHE/robodojo_stack_bowl_2nodes_8gpu/step16k" \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --save-predicted-video --port 19050 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_step16k_20261027_v1
+```
+
+The initial run also uses the session-local passive camera wrapper used for
+10k v2 and 12k; the command above reproduces supported evaluation settings
+without installing that diagnostic wrapper. Use a fresh output directory
+for repeats. This preparation does not establish a success result.
