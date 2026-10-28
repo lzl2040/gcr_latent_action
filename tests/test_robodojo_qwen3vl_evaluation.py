@@ -628,6 +628,55 @@ def test_clean_action_autoencoding_uses_real_targets_and_canonical_masks():
     assert not decoded[..., 20:].any()
 
 
+def test_state_metrics_exclude_current_and_use_absolute_state_statistics(delta_adapter):
+    from lerobot.evaluation.robodojo_diagnostics import state_metrics
+
+    raw = torch.from_numpy(state_to_canonical(observation()))
+    target = torch.zeros(1, 32, 40)
+    target[..., :20] = (raw - delta_adapter.state_mean) / delta_adapter.state_std
+    predicted = target.clone()
+    predicted[:, 0, 0] += 50
+    predicted[:, 1:11, 0] += 0.5
+    predicted[..., 20:] = 999
+    metrics = state_metrics(predicted, target, delta_adapter, 10)
+    assert metrics["future_steps"] == 31
+    assert metrics["current_normalized_max_error"] == pytest.approx(50)
+    assert metrics["normalized_mse"] == pytest.approx(10 * 0.5**2 / (31 * 20))
+    assert metrics["prefix_normalized_mse"] == pytest.approx(0.5**2 / 20)
+    assert metrics["left"]["xyz_mean_l2_m"] == pytest.approx(10 / 31)
+    assert metrics["left"]["prefix_xyz_mean_l2_m"] == pytest.approx(1)
+    assert metrics["right"]["xyz_mean_l2_m"] == 0
+    assert metrics["left"]["rotation_mean_deg"] == pytest.approx(0, abs=1e-6)
+
+
+def test_state_metrics_report_rotation_and_unclipped_gripper_errors(delta_adapter):
+    from lerobot.evaluation.robodojo_diagnostics import state_metrics
+
+    raw = torch.from_numpy(state_to_canonical(observation()))
+    target = torch.zeros(1, 32, 40)
+    target[..., :20] = (raw - delta_adapter.state_mean) / delta_adapter.state_std
+    predicted_raw = raw.repeat(32, 1)
+    rotation = Rotation.from_euler("z", 30, degrees=True) * Rotation.from_quat(
+        observation()["state"]["left_ee_pose"][[4, 5, 6, 3]]
+    )
+    predicted_raw[1:11, 3:9] = torch.tensor(rotation.as_matrix()[:, :2].reshape(6))
+    predicted_raw[1:11, 9] += 1
+    predicted = target.clone()
+    predicted[..., :20] = (predicted_raw - delta_adapter.state_mean) / delta_adapter.state_std
+    metrics = state_metrics(predicted, target, delta_adapter, 10)
+    assert metrics["left"]["prefix_rotation_mean_deg"] == pytest.approx(30, abs=1e-5)
+    assert metrics["left"]["rotation_mean_deg"] == pytest.approx(300 / 31, abs=1e-5)
+    assert metrics["left"]["gripper_mae"] == pytest.approx(10 / 31)
+    assert metrics["left"]["prefix_gripper_mae"] == pytest.approx(1)
+    assert metrics["left"]["prefix_gripper_mae_clipped"] == pytest.approx(0.75)
+    assert metrics["right"]["gripper_mae"] == 0
+    with pytest.raises(ValueError, match="prefix"):
+        state_metrics(predicted, target, delta_adapter, 32)
+    predicted[:, 0, 0] = torch.nan
+    with pytest.raises(ValueError, match="finite"):
+        state_metrics(predicted, target, delta_adapter, 10)
+
+
 @pytest.fixture
 def delta_adapter(tmp_path):
     from lerobot.evaluation.scripts.add_robodojo_delta_actions import DELTA_CONTRACT

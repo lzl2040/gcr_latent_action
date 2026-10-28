@@ -137,7 +137,39 @@ def action_metrics(
             "rotation_mean_deg": float(angle.mean()),
             "prefix_rotation_mean_deg": float(angle[:prefix].mean()),
             "gripper_mae_clipped": float(grip.mean()),
+            "prefix_gripper_mae_clipped": float(grip[:prefix].mean()),
         }
+    return result
+
+
+def state_metrics(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    adapter: RoboDojoAdapter,
+    prefix: int,
+) -> dict:
+    """Measure absolute future states, excluding the clamped current-state slot."""
+    if prediction.shape != target.shape or prediction.ndim != 3 or prediction.shape[-1] != 40:
+        raise ValueError("Prediction and ground truth must have matching (1,T,40) shapes.")
+    if prediction.shape[1] < 2:
+        raise ValueError("State diagnostics require a current state and at least one future state.")
+    if not torch.isfinite(prediction).all() or not torch.isfinite(target).all():
+        raise ValueError("Diagnostic states must be finite.")
+    state_adapter = RoboDojoAdapter(
+        adapter.state_mean, adapter.state_std, adapter.state_mean, adapter.state_std, adapter.fps
+    )
+    result = action_metrics(prediction[:, 1:], target[:, 1:], state_adapter, prefix)
+    result["current_normalized_max_error"] = (
+        (prediction[:, 0, :20].float() - target[:, 0, :20].float()).abs().max().item()
+    )
+    result["future_steps"] = prediction.shape[1] - 1
+    for arm, offset in zip(ARMS, (0, 10), strict=True):
+        error = (
+            (prediction[0, 1:, offset + 9].float() - target[0, 1:, offset + 9].float()).cpu()
+            * adapter.state_std[offset + 9]
+        ).abs()
+        result[arm]["gripper_mae"] = error.mean().item()
+        result[arm]["prefix_gripper_mae"] = error[:prefix].mean().item()
     return result
 
 
@@ -194,6 +226,8 @@ def diagnostic_samples(dataset, episodes: list[int], frames: list[int]) -> list[
                 {
                     "dataset_index": 0,
                     "episode_index": episode,
+                    "episode_start": start,
+                    "episode_end": end,
                     "frame_index": start + frame,
                     "source": "additional_training_diagnostic",
                 }
@@ -238,6 +272,11 @@ def diagnose(args) -> None:
         "video_backend": dataset._video_backend,
         "precision": precision,
         "sampler_parity_note": "Uses identical normalized current state after separately measuring adapter roundtrip.",
+        "state_metric_scope": (
+            "Absolute states at chunk indices 1..31; index0 is the supplied/clamped current state "
+            "and is excluded. Prefix states use indices 1..replan_steps. State and action MSEs "
+            "use their respective normalization statistics and only the 20 active dimensions."
+        ),
         "samples": [],
     }
     path = args.output_dir / "diagnostics.json"
@@ -261,9 +300,16 @@ def diagnose(args) -> None:
         entry["sampler_parity_max_action_error"] = (
             (validation["action_normalized"] - deployed["action_normalized"]).abs().max().item()
         )
+        if "state_normalized" in deployed:
+            entry["sampler_parity_max_state_error"] = (
+                (validation["state_normalized"] - deployed["state_normalized"]).abs().max().item()
+            )
         target = batch["action"][:, : policy.config.n_action_steps]
         entry["free_running"] = {}
         predictions = {"ground_truth": target.float().cpu().numpy()}
+        state_target = batch["observation.state"]
+        if "state_normalized" in deployed:
+            predictions["ground_truth_states"] = state_target.float().cpu().numpy()
         if policy.physical_embedding_flow:
             with torch.autocast(device.type, dtype=torch.bfloat16):
                 decoded = clean_action_autoencoding(policy, batch)[:, : policy.config.n_action_steps]
@@ -274,14 +320,22 @@ def diagnose(args) -> None:
         for steps in dict.fromkeys([saved_steps, *args.diagnostic_inference_steps]):
             policy.config.inference_steps = steps
             if steps == saved_steps:
-                predicted = deployed["action_normalized"]
+                sampled = deployed
             else:
                 with torch.autocast(device.type, dtype=torch.bfloat16):
-                    predicted = policy.generate_validation(deployment, seed=seed)["action_normalized"]
+                    sampled = policy.generate_validation(deployment, seed=seed)
+            predicted = sampled["action_normalized"]
             entry["free_running"][str(steps)] = action_metrics(
                 predicted, target, adapter, args.replan_steps, observation
             )
             predictions[f"prediction_steps_{steps}"] = predicted.float().cpu().numpy()
+            if "state_normalized" in sampled:
+                entry.setdefault("free_running_state", {})[str(steps)] = state_metrics(
+                    sampled["state_normalized"], state_target, adapter, args.replan_steps
+                )
+                predictions[f"state_prediction_steps_{steps}"] = (
+                    sampled["state_normalized"].float().cpu().numpy()
+                )
         policy.config.inference_steps = saved_steps
         current_raw = (
             batch["observation.state"][:, 0, :20].float().cpu() * adapter.state_std + adapter.state_mean
