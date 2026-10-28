@@ -1980,6 +1980,18 @@ The command above is the standard entry; this instrumented run uses the
 existing session-local camera wrapper around that entry without modifying
 the shared simulator.
 
+The instrumented evaluation started successfully: the policy server loaded
+12.585B parameters with the single joint-prediction task and ten denoising
+steps, and returned a finite `(32, 20)` action chunk to the native simulator.
+Settings match the step7k run except for checkpoint, output directory, and
+port. The layout0 initial state matches step7k exactly; the initial head
+camera transform is stable, and the saved actual head image shows the
+expected table, three bowls, and robot framing. Evidence is retained in
+`startup_validation.json` and `camera_audit/`. The detached run is still
+in progress at this check; no success or score result is available yet.
+Numerical, video, and passive-camera audits are scheduled automatically
+after native evaluation finishes.
+
 #### High-noise shift5 step7k evaluation (2026-10-28)
 
 The requested experiment is
