@@ -1983,3 +1983,14 @@ Preparation verifies checkpoint integrity and protocol only; it does not
 establish a task result. Logs and artifacts are retained in the output
 directory above, with actual videos under `simulator/eval_result/` and
 predicted videos under `policy/predictions/`.
+
+The instrumented run started successfully. Strict model loading restored
+all 2,560 tensors using the single-task configuration; the simulator
+returned its first native observation and received a finite `(32, 20)`
+physical-action chunk. The layout0 initial state matches the step16k
+ten-step baseline exactly. After resolving relative/absolute asset paths,
+the coordinator settings differ only in checkpoint, output directory, and
+port. The initial head-camera snapshot and actual conditioning image show
+the expected table/bowl framing. Evidence is saved in
+`startup_validation.json`. Evaluation is still running at this startup
+check; no task success result is available yet.
