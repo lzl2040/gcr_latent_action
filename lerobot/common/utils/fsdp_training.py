@@ -19,13 +19,14 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, BinaryIO, Callable, TypeVar
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch import nn
+from torch.distributed.checkpoint.filesystem import FileSystem
 from torch.distributed.checkpoint.metadata import Metadata
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -53,7 +54,7 @@ _DEFAULT_DISTRIBUTED_TIMEOUT_MINUTES = 60
 _DEFAULT_CHECKPOINT_HEARTBEAT_SECONDS = 60
 _CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS = 60
 _LOGGER = logging.getLogger(__name__)
-FSDP_CHECKPOINT_IO_COMPAT_VERSION = 3
+FSDP_CHECKPOINT_IO_COMPAT_VERSION = 4
 
 
 def make_distributed_timeout(
@@ -590,18 +591,45 @@ def _checkpoint_heartbeat(
         heartbeat.join(timeout=1)
 
 
+@contextmanager
+def _atomic_checkpoint_file(path: Path) -> Iterator[BinaryIO]:
+    # Do not let another node cache a final filename's zero-byte size during writing.
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.partial")
+    with temporary_path.open("xb") as stream:
+        yield stream
+    temporary_path.rename(path)
+
+
+class _AtomicCheckpointFileSystem(FileSystem):
+    @contextmanager
+    def create_stream(self, path: str | os.PathLike, mode: str) -> Iterator[BinaryIO]:
+        if mode == "wb":
+            with _atomic_checkpoint_file(Path(path)) as stream:
+                yield stream
+        else:
+            with super().create_stream(path, mode) as stream:
+                yield stream
+
+
+def _save_checkpoint_state(state: dict[str, Any], path: Path) -> None:
+    with _atomic_checkpoint_file(path) as stream:
+        torch.save(state, stream)
+
+
 def _make_checkpoint_writer(
     checkpoint_dir: Path,
     checkpoint_io: FSDPCheckpointIOConfig,
 ) -> dcp.FileSystemWriter:
     checkpoint_io.validate()
-    return dcp.FileSystemWriter(
+    writer = dcp.FileSystemWriter(
         checkpoint_dir,
         single_file_per_rank=True,
         sync_files=checkpoint_io.sync_files,
         thread_count=checkpoint_io.thread_count,
         overwrite=False,
     )
+    writer.fs = _AtomicCheckpointFileSystem()
+    return writer
 
 
 def _verify_model_checkpoint(
@@ -654,11 +682,29 @@ def _verify_model_checkpoint(
                 missing.append(relative_path)
                 continue
             actual_size = path.stat().st_size
-            actual_bytes += actual_size
             if actual_size < expected_size:
-                truncated.append(
-                    f"{relative_path} ({actual_size} < {expected_size} bytes)"
-                )
+                try:
+                    with path.open("rb") as stream:
+                        stream.seek(expected_size - 1)
+                        tail_readable = bool(stream.read(1))
+                except FileNotFoundError:
+                    missing.append(relative_path)
+                    continue
+                if tail_readable:
+                    _LOGGER.warning(
+                        "DCP shard %s has cached size %d < %d bytes, but its last "
+                        "referenced byte is readable; using the verified data range.",
+                        path,
+                        actual_size,
+                        expected_size,
+                    )
+                    actual_size = expected_size
+                else:
+                    truncated.append(
+                        f"{relative_path} ({actual_size} < {expected_size} bytes; "
+                        "last referenced byte is unreadable)"
+                    )
+            actual_bytes += actual_size
         if not missing and not truncated:
             return len(expected_sizes), actual_bytes
         if time.monotonic() >= deadline:
@@ -873,7 +919,7 @@ def save_fsdp_checkpoint(
 
     _run_checkpoint_phase(
         "save rank-local optimizer state",
-        lambda: torch.save(
+        lambda: _save_checkpoint_state(
             _local_training_state(optimizer, model, device),
             temporary_dir / f"optimizer_rank_{rank:05d}.pt",
         ),
@@ -895,11 +941,9 @@ def save_fsdp_checkpoint(
             "checkpoint_io": asdict(checkpoint_io),
             "training_geometry": training_geometry,
         }
-        (temporary_dir / _METADATA_FILE).write_text(
-            json.dumps(metadata, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        torch.save(
+        with _atomic_checkpoint_file(temporary_dir / _METADATA_FILE) as stream:
+            stream.write(json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8"))
+        _save_checkpoint_state(
             {"scheduler": scheduler.state_dict() if scheduler is not None else None},
             temporary_dir / _TRAINER_STATE_FILE,
         )

@@ -263,10 +263,10 @@ def probe_stage2_runtime(
         )
         details["fsdp_training_path"] = fsdp_training_module.__file__
         details["checkpoint_io_compat_version"] = checkpoint_compat_version
-        if checkpoint_compat_version != 3:
+        if checkpoint_compat_version != 4:
             errors.append(
-                "the uploaded source predates mounted-storage checkpoint "
-                f"compatibility (marker={checkpoint_compat_version!r}, expected=3)"
+                "the uploaded source predates atomic mounted-storage checkpoint "
+                f"compatibility (marker={checkpoint_compat_version!r}, expected=4)"
             )
     return tuple(errors), details
 

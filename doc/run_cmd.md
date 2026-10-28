@@ -374,9 +374,13 @@ FSDP_CHECKPOINT_HEARTBEAT_SECONDS=60
 ```
 
 `sync_files=false` 只关闭 PyTorch `FileSystemWriter` 在每个大型 `.distcp` 文件结尾执行的
-`fsync()`；文件仍会正常写入并关闭。所有 rank 写完后，rank 0 会读取 DCP metadata，检查其中
-引用的每个 shard 已可见且文件大小完整，然后才原子发布 checkpoint 和更新
-`latest_checkpoint`。这避免 BlobFuse 上长时间卡在 `fsync()`，代价是节点或存储服务在文件
+`fsync()`；文件仍会正常写入并关闭。模型分片、optimizer/trainer state 和 metadata
+先写同目录的隐藏 `.partial` 文件，关闭成功后才改为正式文件名，避免其他节点在写入初期
+缓存正式分片的零字节大小。所有 rank 写完后，rank 0 会读取 DCP metadata，检查其中
+引用的每个 shard。若 `stat` 长度不足，会实际读取 metadata 引用范围的最后一个字节；
+只有读到该字节才能判定长度缓存过期并通过，否则仍等待并在超时后拒绝发布。
+全部完整性检查通过后才发布 checkpoint 和更新 `latest_checkpoint`。
+这避免 BlobFuse 上长时间卡在 `fsync()`，代价是节点或存储服务在文件
 关闭后立刻故障时，没有 POSIX `fsync` 级别的持久性保证。若输出是可靠的本地 POSIX 文件系统，
 可显式设置：
 
@@ -398,9 +402,20 @@ shard 为空，也能正常保存；不会再出现 `Only single local shard is 
 一次 heartbeat；写 model shard 时还会报告当前可见的 `.distcp` 文件数和总大小。因此：
 
 - 卡在 `materialize model state`：问题位于 FSDP state-dict/CPU offload；
-- 卡在 `write model shards` 且文件持续增长：问题是挂载盘吞吐；
-- 卡在 `write model shards` 且没有文件：问题位于 DCP planning/control collective；
+- 卡在 `write model shards` 且完整分片数量增加：正在逐个完成写入；
+- 卡在 `write model shards` 且没有正式分片：可能仍在 planning、序列化或写 `.partial`，
+  不能仅凭正式文件数为零判定 collective 卡住；
 - 进入 `verify model checkpoint` 后失败：某些 shard 没有在共享挂载上完整可见。
+
+保存可见性修复要求 checkpoint I/O marker 为 `4`；训练端必须重新上传源码并重启，
+已经运行的 Python 进程不会自动采用本地修改。可在训练环境核对：
+
+```bash
+python -c "from lerobot.common.utils.fsdp_training import FSDP_CHECKPOINT_IO_COMPAT_VERSION; print(FSDP_CHECKPOINT_IO_COMPAT_VERSION)"
+```
+
+输出应为 `4`。继续使用原输出目录和 `WEIGHT_RESUME=true`，从最新完整保存恢复。
+不需要开启 BlobFuse `fsync`，也没有取消分片或训练状态完整性校验。
 
 被 watchdog 终止的保存不是有效 checkpoint，通常会留下：
 

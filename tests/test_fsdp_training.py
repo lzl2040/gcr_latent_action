@@ -585,11 +585,12 @@ def test_model_state_statistics_use_local_shards_before_tensor_dispatch() -> Non
     assert total_bytes == 2 * 3 * torch.ones(1).element_size()
 
 
-def test_checkpoint_writer_round_trip_is_visible(tmp_path) -> None:
+@pytest.mark.parametrize("thread_count", [1, 2])
+def test_checkpoint_writer_round_trip_is_visible(tmp_path, thread_count) -> None:
     checkpoint_dir = tmp_path / "model"
     writer = _make_checkpoint_writer(
         checkpoint_dir,
-        FSDPCheckpointIOConfig(sync_files=False),
+        FSDPCheckpointIOConfig(sync_files=False, thread_count=thread_count),
     )
     dcp.save(
         {"model": {"weight": torch.arange(8)}},
@@ -601,6 +602,68 @@ def test_checkpoint_writer_round_trip_is_visible(tmp_path) -> None:
 
     assert file_count == 1
     assert total_bytes > 0
+
+    loaded = {"model": {"weight": torch.zeros(8, dtype=torch.int64)}}
+    dcp.load(loaded, checkpoint_id=checkpoint_dir, no_dist=True)
+    torch.testing.assert_close(loaded["model"]["weight"], torch.arange(8))
+
+
+def test_checkpoint_writer_hides_in_progress_shards(tmp_path) -> None:
+    writer = _make_checkpoint_writer(tmp_path, FSDPCheckpointIOConfig())
+    shard = tmp_path / "__0_0.distcp"
+
+    with writer.fs.create_stream(shard, "wb") as stream:
+        stream.write(b"partial")
+        stream.flush()
+        assert not shard.exists()
+        stream.write(b" complete")
+
+    assert shard.read_bytes() == b"partial complete"
+
+
+def test_checkpoint_writer_does_not_publish_failed_shard(tmp_path) -> None:
+    writer = _make_checkpoint_writer(tmp_path, FSDPCheckpointIOConfig())
+    shard = tmp_path / "__0_0.distcp"
+
+    with pytest.raises(OSError, match="write interrupted"), writer.fs.create_stream(shard, "wb") as stream:
+        stream.write(b"partial")
+        raise OSError("write interrupted")
+
+    assert not shard.exists()
+    assert not list(tmp_path.glob("*.distcp"))
+
+
+def test_verification_reads_past_stale_model_shard_size(tmp_path, monkeypatch, caplog) -> None:
+    writer = _make_checkpoint_writer(tmp_path, FSDPCheckpointIOConfig())
+    dcp.save({"model": {"weight": torch.arange(8)}}, storage_writer=writer, no_dist=True)
+    shard = next(tmp_path.glob("*.distcp"))
+    expected_size = shard.stat().st_size
+    original_stat = Path.stat
+
+    def stale_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == shard:
+            fields = list(result)
+            fields[6] = 0
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(Path, "stat", stale_stat)
+    assert _verify_model_checkpoint(tmp_path, timeout_seconds=0) == (1, expected_size)
+    assert "cached size" in caplog.text
+    loaded = {"model": {"weight": torch.zeros(8, dtype=torch.int64)}}
+    dcp.load(loaded, checkpoint_id=tmp_path, no_dist=True)
+    torch.testing.assert_close(loaded["model"]["weight"], torch.arange(8))
+
+
+def test_verification_rejects_unreadable_model_shard_tail(tmp_path) -> None:
+    writer = _make_checkpoint_writer(tmp_path, FSDPCheckpointIOConfig())
+    dcp.save({"model": {"weight": torch.arange(8)}}, storage_writer=writer, no_dist=True)
+    shard = next(tmp_path.glob("*.distcp"))
+    shard.write_bytes(shard.read_bytes()[:-1])
+
+    with pytest.raises(RuntimeError, match="truncated"):
+        _verify_model_checkpoint(tmp_path, timeout_seconds=0)
 
 
 @pytest.mark.parametrize(
@@ -623,7 +686,7 @@ def test_checkpoint_io_rejects_invalid_environment(
 
 
 def test_distributed_timeout_defaults_to_one_hour() -> None:
-    assert FSDP_CHECKPOINT_IO_COMPAT_VERSION == 3
+    assert FSDP_CHECKPOINT_IO_COMPAT_VERSION == 4
     assert make_distributed_timeout().total_seconds() == 3_600
     assert make_distributed_timeout("90").total_seconds() == 5_400
 
@@ -868,15 +931,15 @@ def test_save_never_publishes_truncated_checkpoint(resume_checkpoint, monkeypatc
 
         monkeypatch.setattr(dcp, "save", partial_model_save)
     else:
-        original_save = torch.save
+        original_save = training._save_checkpoint_state
         filename = "optimizer_rank_00000.pt" if broken_component == "optimizer" else "trainer_state.pt"
 
-        def partial_training_save(value, target, *args, **kwargs):
-            original_save(value, target, *args, **kwargs)
-            if isinstance(target, (str, os.PathLike)) and Path(target).name == filename:
-                Path(target).write_bytes(b"")
+        def partial_training_save(value, target):
+            original_save(value, target)
+            if target.name == filename:
+                target.write_bytes(b"")
 
-        monkeypatch.setattr(torch, "save", partial_training_save)
+        monkeypatch.setattr(training, "_save_checkpoint_state", partial_training_save)
     with pytest.raises(RuntimeError):
         save_fsdp_checkpoint(
             model=model, optimizer=optimizer, scheduler=None,
@@ -889,7 +952,46 @@ def test_save_never_publishes_truncated_checkpoint(resume_checkpoint, monkeypatc
     assert (checkpoint.output_dir / "latest_checkpoint").read_text() == checkpoint.checkpoint_dir.name
 
 
-def _distributed_checkpoint_retry_worker(rank, world_size, directory):
+def test_training_state_is_not_visible_during_serialization(resume_checkpoint, monkeypatch):
+    checkpoint = resume_checkpoint
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+    monkeypatch.setattr(torch.cuda, "get_rng_state", lambda device: checkpoint.local_state["cuda_rng_state"])
+    original_save = torch.save
+    observed = set()
+
+    def inspect_save(value, target, *args, **kwargs):
+        result = original_save(value, target, *args, **kwargs)
+        name = target if isinstance(target, (str, os.PathLike)) else getattr(target, "name", None)
+        if name is None:
+            return result
+        path = Path(name)
+        for filename in ("optimizer_rank_00000.pt", "trainer_state.pt"):
+            if filename in path.name:
+                assert not (path.parent / filename).exists()
+                observed.add(filename)
+        return result
+
+    monkeypatch.setattr(torch, "save", inspect_save)
+    saved = save_fsdp_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        scheduler=None,
+        output_dir=checkpoint.output_dir,
+        fsdp_config=checkpoint.config,
+        training_geometry=checkpoint.geometry,
+        micro_step=28,
+        update_step=28,
+        epoch=2,
+        batch_in_epoch=8,
+        device=torch.device("cpu"),
+        checkpoint_io=FSDPCheckpointIOConfig(heartbeat_seconds=0),
+    )
+    assert observed == {"optimizer_rank_00000.pt", "trainer_state.pt"}
+    assert _verify_fsdp_checkpoint(saved)["update_step"] == 28
+
+
+def _distributed_checkpoint_retry_worker(rank, world_size, directory, stale_sizes):
     root = Path(directory)
     torch.set_num_threads(1)
     torch.distributed.init_process_group(
@@ -910,9 +1012,20 @@ def _distributed_checkpoint_retry_worker(rank, world_size, directory):
             "checkpoint_process_group": torch.distributed.group.WORLD,
             "checkpoint_io": FSDPCheckpointIOConfig(heartbeat_seconds=0),
         }
+        original_stat = Path.stat
+
+        def cached_stat(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            if stale_sizes and rank == 0 and path.suffix == ".distcp":
+                fields = list(result)
+                fields[6] = 0
+                return os.stat_result(fields)
+            return result
+
         with (
             patch.object(torch.cuda, "get_rng_state", return_value=torch.tensor([rank], dtype=torch.uint8)),
             patch.object(torch.cuda, "set_rng_state"),
+            patch.object(Path, "stat", cached_stat),
         ):
             for step in (1, 2):
                 optimizer.zero_grad()
@@ -942,9 +1055,13 @@ def _distributed_checkpoint_retry_worker(rank, world_size, directory):
         torch.distributed.destroy_process_group()
 
 
-def test_two_rank_gloo_resume_and_save_retry_use_the_same_checkpoint(tmp_path):
+@pytest.mark.parametrize("stale_sizes", [False, True])
+def test_two_rank_gloo_resume_and_save_retry_use_the_same_checkpoint(tmp_path, stale_sizes):
     torch.multiprocessing.spawn(
-        _distributed_checkpoint_retry_worker, args=(2, str(tmp_path)), nprocs=2, join=True,
+        _distributed_checkpoint_retry_worker,
+        args=(2, str(tmp_path), stale_sizes),
+        nprocs=2,
+        join=True,
     )
     states = [json.loads((tmp_path / f"rank_{rank}.json").read_text()) for rank in range(2)]
     assert states[0] == states[1]
