@@ -391,7 +391,10 @@ shard 为空，也能正常保存；不会再出现 `Only single local shard is 
 
 保存日志会分别显示 `prepare save directory`、`materialize model state`、
 `write model shards`、`verify model checkpoint`、`save rank-local optimizer state`、
-`save checkpoint metadata` 和 `publish checkpoint` 的开始与完成耗时。耗时阶段每 60 秒输出
+`save checkpoint metadata`、`verify complete checkpoint` 和 `publish checkpoint`
+的开始与完成耗时。发布前还会检查 trainer state 和每个 rank 的 optimizer state
+序列化归档结构完整，并等待挂载可见性；resume 筛选则立即跳过不完整保存。
+耗时阶段每 60 秒输出
 一次 heartbeat；写 model shard 时还会报告当前可见的 `.distcp` 文件数和总大小。因此：
 
 - 卡在 `materialize model state`：问题位于 FSDP state-dict/CPU offload；
@@ -403,11 +406,14 @@ shard 为空，也能正常保存；不会再出现 `Only single local shard is 
 
 ```text
 ${OUTPUT_DIR}/.checkpoint_00002000.tmp
+${OUTPUT_DIR}/.checkpoint_00002000.<随机后缀>.tmp
 ```
 
-launcher 现在会在训练前检测这类残留并立即退出，避免从头训练 2000 步后才发现目录冲突。
-确认旧任务已经结束后，删除日志中列出的**具体临时目录**，或者改用新的 `JOB_NAME/OUTPUT_DIR`；
-不要把 `.tmp` 目录改名成正式 checkpoint，也不能用它 resume。
+自动恢复会记录并跳过这些未发布目录，不再因它们存在而退出；不需要先手工删除。
+每次保存使用 rank 0 创建并广播的独立临时目录，因此恢复后再次保存同一步不会撞上旧 `.tmp`。
+如果正式的 `checkpoint_XXXXXXXX` 也不完整，resume 会跳过；重新保存到该步时，
+旧文件会保留到 `.checkpoint_XXXXXXXX.incomplete.<随机后缀>`，不会覆盖完整 checkpoint。
+不要把临时目录或不完整目录手工发布成正式 checkpoint，也不要让两个任务同时写同一输出目录。
 
 不要把 `WANDB_API_KEY` 或其他凭据写入本文、launcher 或 AMLT YAML。集群运行时应通过
 任务系统 secret 或环境变量注入。
@@ -778,13 +784,21 @@ WEIGHT_RESUME=true
 
 这是自动恢复模式：
 
-1. 检查 `${OUTPUT_DIR}/latest_checkpoint`；
-2. 若该位置没有 pointer，但旧版双层目录
-   `${OUTPUT_DIR}/${JOB_NAME}/latest_checkpoint` 存在，则自动切换到旧目录恢复；
-3. pointer 不存在且目录中没有 `checkpoint_*` 时，自动改为 `WEIGHT_RESUME=false`，
+1. 检查 `${OUTPUT_DIR}` 中的 checkpoint 记录；`latest_checkpoint` 仅作提示，不直接信任它；
+2. 若该位置没有 checkpoint 记录，但旧版双层目录
+   `${OUTPUT_DIR}/${JOB_NAME}` 有记录，则自动切换到旧目录恢复；
+3. 只有完全没有 pointer、正式 checkpoint 或中断保存残留时，才自动改为 `WEIGHT_RESUME=false`，
    从 Stage 1 开始新训练；
-4. pointer 指向有效的 `checkpoint_XXXXXXXX` 目录时恢复；
-5. pointer 损坏，或已有 `checkpoint_*` 但 pointer 丢失时直接报错，不会静默重新训练。
+4. 按保存步数倒序检查正式 `checkpoint_XXXXXXXX`，校验 metadata、DCP 记录的每个模型分片
+   及其字节范围、trainer state 和保存 world size 对应的所有 rank optimizer state；
+5. 跳过 `.tmp` 和缺失、零字节、截断或元数据损坏的保存，明确记录路径和原因，
+   从最新完整的一份继续；pointer 丢失、过期或指向损坏保存时也会扫描回退；
+6. 已有保存记录但没有任何完整 checkpoint 时明确报错，绝不静默从头训练。
+
+分布式加载由 rank 0 选择 checkpoint，再广播同一目录给所有 rank，
+避免不同节点各自读取过期 pointer 后恢复到不同步数。
+已有 checkpoint 的 optimizer 参数组、world size 和 FSDP/FP8 兼容性检查仍保留，
+不会通过忽略不兼容训练状态来伪装成完整续训。
 
 因此新 `JOB_NAME/OUTPUT_DIR` 和已有 checkpoint 的任务可以使用同一条启动命令。
 

@@ -1057,10 +1057,19 @@ launcher 会校验它是正整数，也允许挂载盘较慢时提高到 120 分
 每个 phase 的开始与总耗时，后续可以区分是 model DCP shard、rank-local optimizer state，
 还是 metadata/publish 阶段变慢，而不是只看到最后的 NCCL timeout。
 
-watchdog 强制终止还可能留下 `.checkpoint_XXXXXXXX.tmp`。该目录没有完成所有 phase，也没有
-原子更新 `latest_checkpoint`，因此不能恢复。launcher 现在启动前显式检测这些隐藏目录并报出
-完整路径；确认旧任务已结束后只能删除对应临时目录或换新的输出目录，不能把它手工发布成正式
-checkpoint。
+watchdog 强制终止还可能留下 `.checkpoint_XXXXXXXX.tmp` 或带随机后缀的 `.tmp`。
+这些目录没有完成所有 phase，不能恢复；启动时会记录并跳过，不再直接阻断 resume。
+自动恢复按步数倒序检查正式保存的 metadata、模型分片字节范围、trainer state 和全部 rank
+optimizer state，跳过缺失、零字节或截断的保存；pointer 丢失或过期也能找到最新完整的一份。
+存在历史保存但没有任何完整 checkpoint 时仍明确报错，不会静默从头训练。
+保存使用独立临时目录，恢复后再次到达中断步数也能重新保存；不完整的正式目录会保留到
+`.checkpoint_XXXXXXXX.incomplete.<随机后缀>`，不删除旧数据、不覆盖完整 checkpoint。
+不要手工把 `.tmp` 发布成正式保存，也不要让两个任务同时写同一输出目录。
+
+`Distributed checkpoint phase 'verify model checkpoint' failed` 中的
+`truncated=['__8_0.distcp (0 < ... bytes)']` 实际是**保存阶段**发现分片没有完整可见，
+不是模型加载报错。这个保护仍保留；修复的是下次启动能够跳过失败残留并从完整保存恢复，
+而不是放过零字节分片或把失败的保存发布出去。
 
 ### 15.5 BlobFuse 上默认 DCP `fsync` 会让完整模型保存长时间无进展
 

@@ -205,21 +205,27 @@ def test_fsdp_cli_decodes_nested_runtime_config() -> None:
 @pytest.mark.parametrize("launcher", ["train_qwen3vl_mot_fsdp.sh", "train_qwen3vl_mot_local.sh"])
 @pytest.mark.parametrize("max_epochs", [None, "", "2", "200"])
 @pytest.mark.parametrize("resume", [False, True])
-def test_stage2_launchers_pass_optional_max_epochs(tmp_path, launcher, max_epochs, resume):
+def test_stage2_launchers_pass_optional_max_epochs(
+    tmp_path, launcher, max_epochs, resume, fsdp_checkpoint_factory
+):
     root = Path(__file__).resolve().parents[1]
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     python_stub = bin_dir / "model-cache-stub"
-    python_stub.write_text("#!/usr/bin/env bash\nprintf '%s\\n' /mock/qwen /mock/cosmos /mock/generation\n")
+    python_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1" == "-m" && "$2" == "lerobot.common.utils.fsdp_training" ]]; then\n'
+        f"    exec {shlex.quote(sys.executable)} \"$@\"\n"
+        "fi\n"
+        "printf '%s\\n' /mock/qwen /mock/cosmos /mock/generation\n"
+    )
     python_stub.chmod(0o755)
     deepspeed_stub = bin_dir / "deepspeed"
     deepspeed_stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n')
     deepspeed_stub.chmod(0o755)
     run_dir = tmp_path / "run"
     if resume:
-        checkpoint = run_dir / "checkpoint_00000001"
-        checkpoint.mkdir(parents=True)
-        (run_dir / "latest_checkpoint").write_text(checkpoint.name)
+        fsdp_checkpoint_factory(run_dir)
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}", "PYTHON_BIN": str(python_stub),
@@ -651,13 +657,11 @@ def test_stage2_resume_rejects_prediction_reconstruction_for_raw_space(tmp_path,
     (True, "", None), (True, "embedding", "embedding"),
 ])
 def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedding(
-    tmp_path, checkpoint_present, explicit_mode, expected_mode
+    tmp_path, checkpoint_present, explicit_mode, expected_mode, fsdp_checkpoint_factory
 ):
     run_dir = tmp_path / "run"
     if checkpoint_present:
-        checkpoint = run_dir / "checkpoint_00000001"
-        checkpoint.mkdir(parents=True)
-        (run_dir / "latest_checkpoint").write_text(checkpoint.name)
+        fsdp_checkpoint_factory(run_dir)
     env = {
         **os.environ,
         "CHECK_PATHS": "false", "DRY_RUN": "true", "WEIGHT_RESUME": "true",
@@ -688,12 +692,12 @@ def test_fsdp_launcher_preserves_saved_physical_flow_or_defaults_fresh_to_embedd
 
 @pytest.mark.parametrize("resume,weight", [(False, "0"), (False, "0.2"), (True, "0.1")])
 @pytest.mark.parametrize("distribution", ["uniform", "beta", "mixed", "shifted_uniform"])
-def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(tmp_path, resume, weight, distribution):
+def test_fsdp_launcher_wires_explicit_prediction_reconstruction_weight(
+    tmp_path, resume, weight, distribution, fsdp_checkpoint_factory
+):
     run_dir = tmp_path / "run"
     if resume:
-        checkpoint = run_dir / "checkpoint_00000001"
-        checkpoint.mkdir(parents=True)
-        (run_dir / "latest_checkpoint").write_text(checkpoint.name)
+        fsdp_checkpoint_factory(run_dir)
     env = {
         **os.environ,
         "CHECK_PATHS": "false", "DRY_RUN": "true", "WEIGHT_RESUME": "true",
@@ -800,12 +804,12 @@ def test_stage2_resume_rejects_generation_tuning_mode_switch(tmp_path):
 
 @pytest.mark.parametrize("kind", ["random", "edge", "nano"])
 @pytest.mark.parametrize("resume", [False, True])
-def test_fsdp_launcher_selects_pretrained_generator_only_on_fresh_runs(tmp_path, kind, resume):
+def test_fsdp_launcher_selects_pretrained_generator_only_on_fresh_runs(
+    tmp_path, kind, resume, fsdp_checkpoint_factory
+):
     run_dir = tmp_path / "run"
     if resume:
-        checkpoint = run_dir / "checkpoint_00000001"
-        checkpoint.mkdir(parents=True)
-        (run_dir / "latest_checkpoint").write_text(checkpoint.name)
+        fsdp_checkpoint_factory(run_dir)
     env = {
         **os.environ, "CHECK_PATHS": "false", "DRY_RUN": "true", "WEIGHT_RESUME": "true",
         "OUTPUT_DIR": str(run_dir), "STAGE1_CHECKPOINT": str(tmp_path / "stage1"),
