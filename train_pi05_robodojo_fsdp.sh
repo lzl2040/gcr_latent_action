@@ -102,7 +102,9 @@ positive_int DISTRIBUTED_TIMEOUT_MINUTES "$DISTRIBUTED_TIMEOUT_MINUTES"
 if [[ "$CHECK_PATHS" == true ]]; then
     [[ -f "$DATASET_ROOT/meta/info.json" && -f "$DATASET_ROOT/meta/stats.json" ]] || die "Missing dataset metadata: $DATASET_ROOT"
     if [[ "$WEIGHT_RESUME" == true ]]; then
-        [[ -f "$OUTPUT_DIR/latest_checkpoint" ]] || die "No latest_checkpoint in $OUTPUT_DIR"
+        if [[ ! -e "$OUTPUT_DIR/latest_checkpoint" && ! -L "$OUTPUT_DIR/latest_checkpoint" ]]; then
+            echo "Warning: No latest_checkpoint in $OUTPUT_DIR; starting fresh (existing output will be backed up)." >&2
+        fi
     else
         [[ ! -e "$OUTPUT_DIR" ]] || die "OUTPUT_DIR already exists; choose a fresh directory or WEIGHT_RESUME=true"
     fi

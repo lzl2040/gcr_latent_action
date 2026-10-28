@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import subprocess
+import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -51,7 +52,9 @@ def distributed_args():
     parser.description = __doc__
     parser.set_defaults(device=None)
     parser.add_argument("--grad-accumulation-steps", type=int, default=1)
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--resume", action="store_true", help="Resume if latest_checkpoint exists; otherwise start fresh."
+    )
     parser.add_argument("--export-final", action="store_true")
     parser.add_argument("--max-updates-this-run", type=int)
     parser.add_argument("--fsdp-wrap-strategy", choices=("layer", "root"), default="layer")
@@ -74,6 +77,32 @@ def distributed_args():
     if not all(name in os.environ for name in ("RANK", "WORLD_SIZE", "LOCAL_RANK")):
         parser.error("Launch this entry with torchrun, not python alone.")
     return args
+
+
+def prepare_output_directory(output_dir, resume, rank):
+    status = [resume, None]
+    if rank == 0:
+        try:
+            marker = output_dir / "latest_checkpoint"
+            if resume and not (marker.exists() or marker.is_symlink()):
+                status[0] = False
+                logging.warning("No latest_checkpoint in %s; starting fresh from base weights.", output_dir)
+                if output_dir.exists():
+                    if not output_dir.is_dir() or output_dir.is_symlink():
+                        raise OSError(f"Refusing to move non-directory or symlink output: {output_dir}")
+                    backup = Path(
+                        tempfile.mkdtemp(prefix=f"{output_dir.name}.no-checkpoint-", dir=output_dir.parent)
+                    )
+                    output_dir.rename(backup / "previous_run")
+                    logging.warning("Previous output preserved in %s", backup / "previous_run")
+            if not status[0]:
+                output_dir.mkdir(parents=True, exist_ok=False)
+        except OSError as error:
+            status[1] = str(error)
+    dist.broadcast_object_list(status, src=0)
+    if status[1] is not None:
+        raise RuntimeError(f"Cannot prepare output directory: {status[1]}")
+    return status[0]
 
 
 def make_loader(dataset, args, rank, world_size):
@@ -258,10 +287,9 @@ def train(args, device, checkpoint_group):
         import bitsandbytes
 
         geometry["bitsandbytes_version"] = bitsandbytes.__version__
+    args.resume = prepare_output_directory(args.output_dir, args.resume, rank)
     if args.resume:
         geometry = check_resume_geometry(args.output_dir, geometry)
-    elif rank == 0:
-        args.output_dir.mkdir(parents=True, exist_ok=False)
     dist.barrier()
     config = PI05Config(
         tokenizer_path=args.tokenizer_path,

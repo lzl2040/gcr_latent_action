@@ -238,6 +238,15 @@ after one update and save progress without changing the configured
 schedule, for a bounded save/resume smoke check. Interrupted/incomplete
 checkpoint directories are never overwritten.
 
+`WEIGHT_RESUME=true` resumes when `latest_checkpoint` exists. If the pointer
+is absent, training warns and starts from base weights at update zero with
+a fresh optimizer, scheduler, and W&B run. Rank zero preserves any existing
+output directory under `${OUTPUT_DIR}.no-checkpoint-*/previous_run` before
+creating the fresh output; all ranks use the same restart decision.
+An existing but invalid checkpoint pointer still fails rather than silently
+discarding training progress. `WEIGHT_RESUME=false` continues to reject an
+existing output directory.
+
 `EXPORT_FINAL=true` (default) also exports the last update of this
 invocation as `stepN/{config.json,model.safetensors}`, including dataset
 normalization buffers, for ordinary `PI05Policy.from_pretrained` loading.

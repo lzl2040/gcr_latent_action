@@ -130,6 +130,70 @@ def test_launcher_multinode_resume_and_accumulation(launch_env):
     assert command[command.index("--fsdp-wrap-strategy") + 1] == "root"
 
 
+@pytest.mark.parametrize("check_paths", ["true", "false"])
+def test_launcher_allows_resume_without_checkpoint(launch_env, check_paths):
+    result = launch({**launch_env, "WEIGHT_RESUME": "true", "CHECK_PATHS": check_paths})
+    assert result.returncode == 0, result.stderr
+    command = shlex.split(result.stdout.split("Command: ", 1)[1])
+    assert "--resume" in command
+    assert not Path(launch_env["OUTPUT_DIR"]).exists()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_missing_checkpoint_starts_fresh_and_preserves_previous_output(tmp_path, monkeypatch, existing):
+    monkeypatch.setattr(training.dist, "broadcast_object_list", lambda status, src: None)
+    output = tmp_path / "run"
+    if existing:
+        output.mkdir()
+        (output / "training.jsonl").write_text("previous metrics\n")
+        (output / "checkpoint_00000001").mkdir()
+    assert training.prepare_output_directory(output, True, 0) is False
+    assert output.is_dir() and not list(output.iterdir())
+    backups = list(tmp_path.glob("run.no-checkpoint-*/previous_run"))
+    assert len(backups) == int(existing)
+    if existing:
+        assert (backups[0] / "training.jsonl").read_text() == "previous metrics\n"
+        assert (backups[0] / "checkpoint_00000001").is_dir()
+
+
+def test_existing_checkpoint_retains_resume_even_if_invalid(tmp_path, monkeypatch):
+    monkeypatch.setattr(training.dist, "broadcast_object_list", lambda status, src: None)
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "latest_checkpoint").write_text("missing-checkpoint")
+    assert training.prepare_output_directory(output, True, 0) is True
+    with pytest.raises((FileNotFoundError, ValueError)):
+        training.check_resume_geometry(output, {})
+    assert not list(tmp_path.glob("run.no-checkpoint-*"))
+
+
+def test_output_preparation_broadcasts_fallback_and_errors(tmp_path, monkeypatch):
+    messages = []
+    monkeypatch.setattr(
+        training.dist, "broadcast_object_list", lambda status, src: messages.append(status[:])
+    )
+    output = tmp_path / "run"
+    assert training.prepare_output_directory(output, True, 0) is False
+    assert messages[-1] == [False, None]
+    with pytest.raises(RuntimeError, match="Cannot prepare output directory"):
+        training.prepare_output_directory(output, False, 0)
+    error_status = messages[-1]
+    assert error_status[1] is not None
+
+    def receive(status, src):
+        status[:] = messages[0]
+
+    monkeypatch.setattr(training.dist, "broadcast_object_list", receive)
+    assert training.prepare_output_directory(output, True, 1) is False
+
+    def receive_error(status, src):
+        status[:] = error_status
+
+    monkeypatch.setattr(training.dist, "broadcast_object_list", receive_error)
+    with pytest.raises(RuntimeError, match="Cannot prepare output directory"):
+        training.prepare_output_directory(output, False, 1)
+
+
 @pytest.mark.parametrize(
     ("key", "value", "message"),
     [
@@ -139,7 +203,6 @@ def test_launcher_multinode_resume_and_accumulation(launch_env):
         ("WANDB_ENABLE", "yes", "true or false"),
         ("LR", "nan", "finite and positive"),
         ("PRETRAINED_PATH", "/definitely/missing/pi05", "Missing base weights"),
-        ("WEIGHT_RESUME", "true", "No latest_checkpoint"),
         ("NNODES", "2", "reachable from other nodes"),
         ("FSDP_WRAP_STRATEGY", "decoder", "must be layer or root"),
         ("MASTER_DTYPE", "float16", "must be float32 or bfloat16"),
