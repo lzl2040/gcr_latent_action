@@ -2127,3 +2127,61 @@ diagnostic output. `aggregate_state_action_error.json` retains the
 independently checked aggregates and persistence baseline.
 `rollout_state_forecast_error.json` in the native evaluation output
 retains aligned rollout-pair errors and their scope.
+
+##### Why a small training `state_pred` loss does not match sampling error
+
+The trainer's `state_pred` display maps to
+`state_prediction_reconstruction_loss`, not `state_flow_loss`.
+For embedding-space flow, the reconstruction metric is computed from
+`decode(z_sigma - sigma * predicted_velocity)` against normalized real
+states, where `z_sigma = (1-sigma)*encode(real_states) + sigma*noise`.
+The other target modalities in joint training also contain correspondingly
+corrupted real futures. This is the intended denoising objective, not a
+pure-noise rollout or evidence of an unintended future-condition leak.
+
+Deployment instead initializes all future streams from noise and
+repeatedly feeds its own intermediate predictions through the model.
+One-step reconstruction accuracy on training corruption is therefore not
+the same quantity as multi-step free-running forecast accuracy.
+Both metrics use the same 31 future frames and 20 active dimensions here:
+each probed training sample reports exactly 620 valid state-reconstruction
+elements. The loss is not diluted by padded dimensions or the clamped
+current state. The saved reconstruction weight 5 scales its contribution
+to the total optimization loss, not the reported `state_pred` value.
+
+A fixed-sigma joint-training-style forward probe on the same four
+step7k windows gives:
+
+| Evaluation input/procedure | Mean normalized state reconstruction MSE |
+|---|---|
+| Real future corrupted at sigma 0.1, one forward | 0.052600 |
+| Real future corrupted at sigma 0.5, one forward | 0.005537 |
+| Real future corrupted at sigma 0.75, one forward | 0.006116 |
+| Real future corrupted at sigma 0.9, one forward | 0.007191 |
+| Real future corrupted at sigma 0.99, one forward | 0.011451 |
+| Pure-noise endpoint sigma 1.0, one forward | 0.011584 |
+| Free-running 10-step integration | 0.070089 |
+| Free-running 20-step integration | 0.076964 |
+
+These are BF16 probes, with fixed per-window noise seeds; the one-forward
+and sampler procedures do not use identical noise tensors or trajectories.
+They demonstrate a loss/forecast gap but do not quantitatively isolate its
+causes or reproduce the user's full-training average of 0.004.
+
+There is a specific warning sign in this checkpoint: its low-noise
+sigma0.1 reconstruction error is much worse than its mid-noise error.
+Under the saved shifted-uniform distribution with shift5 and sigma range
+0.001--0.999, only 2.15% of draws are below sigma0.1 and 16.67% below
+sigma0.5. The linear inference schedule must nevertheless traverse this
+low-noise region. Undertraining or distribution mismatch there may worsen
+sampling, but these probes alone do not prove it causes the rollout
+failure or establish which noise schedule would fix it.
+
+Finally, 0.004 is standardized MSE over mixed state coordinates, not
+meters, millimeters, or pose error: its square root is approximately
+0.063 standardized units. It does not imply 0.004-meter position error.
+Free-running state validation, physical pose errors, and per-sigma
+denoising metrics should be tracked separately from the training average.
+Full probe values and valid-element counts are retained in
+`conditional_state_loss_sigma_probe.json` under the state/action
+diagnostic output above.
