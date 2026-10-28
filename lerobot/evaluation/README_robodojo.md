@@ -2036,3 +2036,94 @@ native result, numerical checks, and reviewed contact sheets. Actual
 videos are nested under `simulator/eval_result/`; predicted videos are
 under `policy/predictions/`. This remains a three-layout diagnostic, not
 the full benchmark.
+
+##### Shift5 step7k state/action prediction errors
+
+The state diagnostic excludes chunk index0: joint sampling overwrites it
+with the current observation, so its zero error is not predictive accuracy.
+Future states use indices 1--31; the first-ten-state prefix uses 1--10.
+Actions use all 32 predictions or indices 0--9 for the executed prefix.
+Only the 20 active dimensions enter MSE. State and action MSE use different
+normalization statistics and must not be directly compared.
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+CUDA_VISIBLE_DEVICES=0 python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta diagnose \
+  --checkpoint "$CACHE/robodojo_stack_bowl_2nodes_8gpu_decay_20k_high_noise_shift_5/step7k" \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --diagnostic-episodes 0 6 --diagnostic-frames 0 \
+  --diagnostic-inference-steps 10 20 --replan-steps 10 --seed 0 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_high_noise_shift5_step7k_state_action_error_20261028_v1
+```
+
+This BF16 measurement uses the same four windows as the previous step16k
+action diagnostic: episode/global-frame pairs `(6,2299)`, `(85,39103)`,
+`(0,0)`, and `(6,1884)`. All have a complete, unpadded 32-frame window.
+Both state and action training/deployment sampler outputs match exactly.
+Saved arrays independently reproduce the reported MSEs. These are four
+**training-data** windows, not held-out generalization or benchmark-wide
+error estimates. Each window uses the same seed at 10 and 20 steps.
+
+| Normalized MSE, equally averaged across windows | Sampling10 | Sampling20 |
+|---|---|---|
+| Future state, 31 frames | 0.070089 | 0.076964 |
+| Future state, first 10 frames | 0.059804 | 0.062515 |
+| Action, 32 steps | 0.194308 | 0.245919 |
+| Action, first 10 steps | 0.133362 | 0.146457 |
+
+Physical errors below use **ten sampling steps**. Position is mean
+Euclidean error, not per-coordinate MAE; orientation is mean geodesic
+rotation error. Action-target errors compare predicted and demonstration
+delta sequences integrated from the same measured anchor, not predicted
+states or actual simulator tracking.
+
+| Compared quantity | Position L/R | Rotation L/R |
+|---|---|---|
+| Absolute future state, 31 frames | 27.64 / 44.78 mm | 6.67 / 8.19 deg |
+| Absolute future state, first 10 frames | 28.28 / 39.57 mm | 6.52 / 6.43 deg |
+| Integrated action targets, 32 steps | 9.03 / 22.33 mm | 2.04 / 4.18 deg |
+| Integrated action targets, first 10 steps | 3.20 / 6.62 mm | 0.62 / 1.01 deg |
+| Individual action increments, 32 steps | 1.03 / 2.60 mm | 0.27 / 0.43 deg |
+| Individual action increments, first 10 steps | 0.91 / 2.14 mm | 0.18 / 0.37 deg |
+
+Raw state gripper MAE is 0.0524/0.0648 over future states and
+0.0601/0.1074 over the first ten. Integrated-action clipped-gripper MAE is
+0.0057/0.0356 over 32 targets and 0.0024/0.0078 over the first ten.
+Gripper values use the native 0--1 scale. Raw state gripper errors are
+not clipped to hide out-of-range predictions.
+
+For context, simply repeating the current state gives first-ten-state
+position errors of 5.13/21.08 mm and rotation errors of 1.26/3.16 deg on
+these windows, better than the model's short-term state forecast. Over
+all 31 future frames, persistence gives 26.04/73.21 mm, so the model's
+position improvement is not uniform across arms or horizons.
+
+A separate check uses the completed native rollout, not demonstrations.
+Its 237 within-episode chunk pairs compare predicted state index10 with
+the next measured observation after executing action indices0--9:
+
+| State forecast at +10 control steps (0.4 s) | Left | Right |
+|---|---|---|
+| Mean position error | 48.63 mm | 57.96 mm |
+| 95th-percentile position error | 83.84 mm | 105.23 mm |
+| Maximum position error | 102.33 mm | 152.57 mm |
+| Mean rotation error | 19.86 deg | 19.17 deg |
+| Mean raw gripper error | 0.1574 | 0.1844 |
+| Hold-current baseline mean position error | 10.17 mm | 13.42 mm |
+| Hold-current baseline mean rotation error | 2.13 deg | 3.32 deg |
+
+Rollout-state normalized MSE is 0.431321. These numbers indicate weak
+short-term state forecasting, including worse errors than persistence in
+this rollout. They do not establish that the state head caused task
+failure. Actual execution tracking and imitation-target accuracy remain
+different measurements.
+
+Raw label predictions, state targets, and per-window metrics are in
+`diagnostics.json` and `sample_*/{actions.npz,metrics.json}` under the
+diagnostic output. `aggregate_state_action_error.json` retains the
+independently checked aggregates and persistence baseline.
+`rollout_state_forecast_error.json` in the native evaluation output
+retains aligned rollout-pair errors and their scope.
