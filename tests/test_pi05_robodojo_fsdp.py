@@ -216,23 +216,51 @@ def test_launcher_rejects_invalid_settings(launch_env, key, value, message):
     assert message in result.stderr
 
 
-def test_launcher_propagates_training_failure_through_tee(launch_env, tmp_path):
+@pytest.mark.parametrize("visible_devices", [None, "3,5", ""])
+def test_launcher_preserves_gpu_visibility_and_training_failure(launch_env, tmp_path, visible_devices):
     executable = tmp_path / "failed-python"
     executable.write_text(
-        '#!/usr/bin/env bash\nif [[ "$1" == "-m" ]]; then echo "training failed" >&2; exit 23; fi\n'
+        '#!/usr/bin/env bash\nif [[ "$1" == "-m" ]]; then\n'
+        'echo "visible=${CUDA_VISIBLE_DEVICES-unset}"\n'
+        'echo "training failed" >&2; exit 23\nfi\n'
     )
     executable.chmod(0o755)
-    result = launch(
-        {
-            **launch_env,
-            "PYTHON_BIN": str(executable),
-            "DRY_RUN": "false",
-            "CHECK_PATHS": "false",
-        }
-    )
+    env = {
+        **launch_env,
+        "PYTHON_BIN": str(executable),
+        "DRY_RUN": "false",
+        "CHECK_PATHS": "false",
+    }
+    if visible_devices is None:
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = visible_devices
+    result = launch(env)
     assert result.returncode == 23
     assert "training failed" in result.stdout
+    assert f"visible={visible_devices if visible_devices is not None else 'unset'}\n" in result.stdout
     assert len(list(Path(launch_env["LOG_DIR"]).glob("*.log"))) == 1
+
+
+@pytest.mark.parametrize(
+    ("local_rank", "local_world_size", "visible_count"),
+    [(2, 8, 2), (0, 8, 2), (1, 2, 1)],
+)
+def test_main_rejects_more_processes_than_visible_gpus(
+    monkeypatch, local_rank, local_world_size, visible_count
+):
+    monkeypatch.setattr(training, "distributed_args", lambda: None)
+    monkeypatch.setenv("LOCAL_RANK", str(local_rank))
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", str(local_world_size))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,5")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: visible_count)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda device: pytest.fail("Must fail before set_device"))
+    with pytest.raises(RuntimeError, match="Set NPROC_PER_NODE") as error:
+        training.main()
+    assert f"LOCAL_RANK={local_rank}" in str(error.value)
+    assert f"PyTorch sees {visible_count} CUDA devices" in str(error.value)
+    assert "CUDA_VISIBLE_DEVICES='3,5'" in str(error.value)
 
 
 def test_distributed_sampler_and_resumed_epoch_order():

@@ -177,6 +177,16 @@ and `VIDEO_BACKEND`. Defaults are 30000 optimizer updates, batch size 1 per
 rank, accumulation 1, LR `2.5e-5`, warmup 1000, and checkpoint frequency
 1000. Effective batch size is
 `NNODES * NPROC_PER_NODE * BATCH_SIZE * GRAD_ACCUMULATION_STEPS`.
+The launcher leaves `CUDA_VISIBLE_DEVICES` unchanged: it is optional, and
+cluster/container GPU visibility should normally be inherited from the
+scheduler. `NPROC_PER_NODE` defaults to 2; set it to the number of GPUs to
+use on each node, never more than `torch.cuda.device_count()` reports in
+the training Python environment.
+`LOCAL_RANK` indexes this visible set, not physical GPU IDs. For an
+eight-GPU allocation, `NPROC_PER_NODE=8` is sufficient without explicitly
+setting `CUDA_VISIBLE_DEVICES`. A mismatch is rejected before CUDA device
+selection or distributed initialization.
+
 Check GPU headroom before launching; no long run is started by adding this
 script. `CHECK_PATHS=false` is intended for command inspection, not as a
 replacement for valid assets.

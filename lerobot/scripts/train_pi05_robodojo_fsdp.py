@@ -471,6 +471,16 @@ def main():
     if not torch.cuda.is_available():
         raise RuntimeError("PI05 FSDP training requires CUDA.")
     local_rank = int(os.environ["LOCAL_RANK"])
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+    visible_devices = torch.cuda.device_count()
+    if not 0 <= local_rank < visible_devices or local_world_size > visible_devices:
+        raise RuntimeError(
+            f"LOCAL_RANK={local_rank}, LOCAL_WORLD_SIZE={local_world_size}, but PyTorch sees "
+            f"{visible_devices} CUDA devices (CUDA_VISIBLE_DEVICES="
+            f"{os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')!r}). "
+            "Set NPROC_PER_NODE to at most the number of visible GPUs per node. "
+            "Preserve scheduler-provided GPU visibility; CUDA device indices are local to the visible set."
+        )
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     timeout = make_distributed_timeout(os.environ.get("DISTRIBUTED_TIMEOUT_MINUTES", "60"))
