@@ -1937,3 +1937,49 @@ windows show similar 10/20-step errors, not statistical equivalence.
 Raw per-window metrics, predictions, and aggregate results are retained in
 `diagnostics.json`, `sample_*/{actions.npz,metrics.json}`, and
 `aggregate_action_error.json` in the output directory above.
+
+#### High-noise shift5 step7k evaluation (2026-10-28)
+
+The requested experiment is
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_high_noise_shift_5`.
+Its `step7k` model and experiment-specific configurations were copied to
+the local `runtime_assets` cache. All 19 files (25,200,777,614 bytes,
+including 16 DCP shards) match source SHA256 checksums; source sizes and
+modification times remained unchanged during verification. All 16,908
+DCP storage references fit their shard files. Provenance is retained as
+`checkpoint_provenance_step7k.json` in the experiment cache.
+
+This checkpoint uses `shifted_uniform` training times with shift 5,
+sigma range 0.001--0.999, and only the `joint_prediction` task. Its 2,560
+model tensors match step16k keys and dtypes; the task embedding has one
+row instead of three, matching the new saved configuration. Loading must
+use this experiment's own configuration, not the older step16k config.
+The evaluation uses ten sampling steps instead of the saved twenty,
+without modifying the checkpoint configuration.
+
+The matched protocol is `stack_bowls`, layouts 0/1/2, seed 0, one
+environment, 32 predicted actions, ten executed actions per replan,
+BF16 inference, and actual/predicted video export. It uses the same
+session-local passive camera wrapper as the previous runs. This is a
+three-layout diagnostic, not the full benchmark. Differences from the
+previous step16k experiment include training tasks, training recipe, and
+checkpoint step; the comparison does not isolate a noise-shift effect.
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint "$CACHE/robodojo_stack_bowl_2nodes_8gpu_decay_20k_high_noise_shift_5/step7k" \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19070 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_high_noise_shift5_step7k_sampling10_20261028_v1
+```
+
+Preparation verifies checkpoint integrity and protocol only; it does not
+establish a task result. Logs and artifacts are retained in the output
+directory above, with actual videos under `simulator/eval_result/` and
+predicted videos under `policy/predictions/`.
