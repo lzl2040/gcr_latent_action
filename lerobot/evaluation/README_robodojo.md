@@ -1938,6 +1938,48 @@ Raw per-window metrics, predictions, and aggregate results are retained in
 `diagnostics.json`, `sample_*/{actions.npz,metrics.json}`, and
 `aggregate_action_error.json` in the output directory above.
 
+#### High-noise shift5 step9k evaluation preparation (2026-10-28)
+
+The newly uploaded checkpoint is
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_high_noise_shift_5/step9k`.
+All 11 files (25,187,233,961 bytes, including eight DCP shards) were
+SHA256-fingerprinted; their sizes and modification times remained unchanged
+through verification. All 9,260 DCP storage references fit their shard files.
+The 2,560 tensor keys, shapes, and dtypes match step7k, and the saved policy
+configuration is unchanged: joint prediction only, shifted-uniform shift5,
+32 predicted actions, and 20 saved inference steps.
+
+The run reads these verified weights directly from `/data2` without creating
+another 25 GB local copy. Provenance is retained as
+`runtime_assets/robodojo_stack_bowl_2nodes_8gpu_decay_20k_high_noise_shift_5/checkpoint_provenance_step9k.json`
+under `outputs/evaluation/robodojo`.
+
+The matched evaluation uses `stack_bowls`, layouts 0/1/2, seed0, one
+environment, ten sampling steps, 32 predicted actions, ten executed actions,
+BF16, actual/prediction videos, and the same passive camera audit as step7k.
+The output directory is
+`outputs/evaluation/robodojo/stack_bowls_delta_high_noise_shift5_step9k_sampling10_20261028_v1`.
+Preparation alone is not a task-success result; this is a three-layout
+diagnostic, not the full benchmark.
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_high_noise_shift_5/step9k \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19090 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_high_noise_shift5_step9k_sampling10_20261028_v1
+```
+
+The command above is the standard entry; this instrumented run uses the
+existing session-local camera wrapper around that entry without modifying
+the shared simulator.
+
 #### High-noise shift5 step7k evaluation (2026-10-28)
 
 The requested experiment is
