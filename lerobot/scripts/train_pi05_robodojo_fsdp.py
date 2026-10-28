@@ -42,6 +42,7 @@ from lerobot.scripts.train_pi05_robodojo import (
     build_parser,
     file_hash,
     parse_args,
+    wandb_logging,
 )
 
 
@@ -330,8 +331,14 @@ def train(args, device, checkpoint_group):
     setup_peak = torch.tensor(torch.cuda.max_memory_allocated(device), device=device)
     dist.all_reduce(setup_peak, op=dist.ReduceOp.MAX)
     torch.cuda.reset_peak_memory_stats(device)
-    log = (args.output_dir / "training.jsonl").open("a" if args.resume else "x") if rank == 0 else None
-    try:
+    with (
+        wandb_logging(args, contract if rank == 0 else {}, rank=rank) as run,
+        (
+            (args.output_dir / "training.jsonl").open("a" if args.resume else "x")
+            if rank == 0
+            else nullcontext()
+        ) as log,
+    ):
         while update_step < stop_step:
             optimizer.zero_grad(set_to_none=True)
             total_loss = torch.zeros((), device=device)
@@ -384,6 +391,8 @@ def train(args, device, checkpoint_group):
                 log.write(json.dumps(row) + "\n")
                 log.flush()
                 logging.info("%s", row)
+                if run is not None:
+                    run.log({f"train/{key}": value for key, value in row.items()})
             if update_step % args.save_freq == 0 or update_step == stop_step:
                 save_fsdp_checkpoint(
                     model=model,
@@ -425,9 +434,8 @@ def train(args, device, checkpoint_group):
                 "setup_peak_cuda_allocated_bytes_per_rank_max": setup_peak.item(),
             }
             (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    finally:
-        if log is not None:
-            log.close()
+            if run is not None:
+                run.summary.update(summary)
 
 
 def main():

@@ -4,8 +4,9 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import subprocess
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import torch
@@ -15,7 +16,7 @@ from lerobot.common.datasets.utils import cycle
 from lerobot.common.datasets_v30.lerobot_dataset import LeRobotDataset
 from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.common.policies.pi05.modeling_pi05 import PI05Policy
-from lerobot.common.utils.random_utils import set_seed
+from lerobot.common.utils.random_utils import get_rng_state, set_rng_state, set_seed
 from lerobot.configs.types import FeatureType, PolicyFeature
 
 STATE_KEY = "observation.ee_ort6d_pos"
@@ -33,6 +34,55 @@ def file_hash(path):
         for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+@contextmanager
+def wandb_logging(args, config, *, rank=0):
+    if not args.wandb or rank != 0:
+        yield None
+        return
+    identity_path = args.output_dir / "wandb_run.json"
+    saved = {}
+    if getattr(args, "resume", False) and identity_path.is_file():
+        saved = json.loads(identity_path.read_text())
+    project = args.wandb_project or saved.get("project") or "lerobot-pi05"
+    entity = args.wandb_entity or saved.get("entity") or None
+    if saved and (project != saved["project"] or entity != saved.get("entity")):
+        raise ValueError("W&B resume requires the original project and entity.")
+    rng = get_rng_state()
+    try:
+        import wandb
+
+        run = wandb.init(
+            id=saved.get("id"),
+            project=project,
+            entity=entity,
+            name=args.wandb_run_name or args.output_dir.name,
+            mode=args.wandb_mode,
+            dir=str(args.output_dir),
+            config=config,
+            allow_val_change=True,
+            resume="allow" if saved and args.wandb_mode == "online" else None,
+            save_code=False,
+            settings=wandb.Settings(disable_git=True, disable_code=True),
+        )
+    finally:
+        set_rng_state(rng)
+    try:
+        # A custom axis preserves updates when the checkpoint trails uploaded history.
+        run.define_metric("train/*", step_metric="train/step")
+        identity = {"id": run.id, "project": run.project, "entity": run.entity or None}
+        temporary = identity_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(identity, indent=2) + "\n")
+        temporary.replace(identity_path)
+        location = run.url if args.wandb_mode == "online" else args.output_dir / "wandb"
+        logging.info("W&B %s run %s: %s", args.wandb_mode, run.id, location)
+        yield run
+    except BaseException:
+        run.finish(exit_code=1)
+        raise
+    else:
+        run.finish()
 
 
 class RoboDojoDeltaDataset(Dataset):
@@ -120,6 +170,13 @@ def build_parser():
     parser.add_argument("--warmup-steps", type=int, default=1000)
     parser.add_argument("--video-backend", choices=("pyav", "torchcodec"), default="pyav")
     parser.add_argument("--validate-data-only", action="store_true")
+    parser.add_argument("--wandb", action="store_true", help="Record training metrics with Weights & Biases.")
+    parser.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT"))
+    parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
+    parser.add_argument("--wandb-run-name", default=os.environ.get("WANDB_RUN_NAME"))
+    parser.add_argument(
+        "--wandb-mode", choices=("online", "offline"), default=os.environ.get("WANDB_MODE", "online")
+    )
     return parser
 
 
@@ -130,6 +187,8 @@ def parse_args(parser=None):
         parser.error("steps, batch-size, chunk-size, and save-freq must be positive.")
     if args.num_workers < 0 or args.warmup_steps < 0 or args.lr <= 0:
         parser.error("num-workers/warmup-steps must be nonnegative and lr must be positive.")
+    if args.wandb and args.wandb_mode not in ("online", "offline"):
+        parser.error("--wandb-mode must be online or offline.")
     if not args.validate_data_only and (args.pretrained_path is None or args.tokenizer_path is None):
         parser.error(
             "Training requires --pretrained-path and --tokenizer-path; random initialization is disabled."
@@ -207,7 +266,7 @@ def main():
     scheduler = scheduler_config.build(optimizer, args.steps)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    with (args.output_dir / "training.jsonl").open("x") as log:
+    with wandb_logging(args, contract) as run, (args.output_dir / "training.jsonl").open("x") as log:
         for step in range(1, args.steps + 1):
             batch = first_batch if step == 1 else next(iterator)
             batch = {
@@ -233,6 +292,8 @@ def main():
             log.write(json.dumps(row) + "\n")
             log.flush()
             logging.info("%s", row)
+            if run is not None:
+                run.log({f"train/{key}": value for key, value in row.items()})
             if step % args.save_freq == 0 or step == args.steps:
                 checkpoint = args.output_dir / f"step{step}"
                 policy.save_pretrained(checkpoint)
@@ -240,10 +301,12 @@ def main():
                     {"step": step, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict()},
                     checkpoint / "training_state.pt",
                 )
-    summary = {"completed": True, "steps": args.steps, "final_loss": row["loss"]}
-    if device.type == "cuda":
-        summary["peak_cuda_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
-    (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        summary = {"completed": True, "steps": args.steps, "final_loss": row["loss"]}
+        if device.type == "cuda":
+            summary["peak_cuda_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
+        (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        if run is not None:
+            run.summary.update(summary)
 
 
 if __name__ == "__main__":

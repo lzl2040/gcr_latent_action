@@ -60,6 +60,11 @@ def launch_env(tmp_path):
         "DRY_RUN": "true",
         "MODEL_AUTO_DOWNLOAD": "false",
         "MODEL_LOCAL_CACHE": str(tmp_path / "node cache"),
+        "WANDB_ENABLE": "false",
+        "WANDB_PROJECT": "pi05-tests",
+        "WANDB_ENTITY": "",
+        "WANDB_RUN_NAME": "test run",
+        "WANDB_MODE": "offline",
     }
 
 
@@ -75,9 +80,28 @@ def test_launcher_dry_run_quotes_paths_and_has_no_side_effects(launch_env):
     assert command[command.index("--tokenizer-path") + 1] == launch_env["TOKENIZER_PATH"]
     assert command[command.index("--nproc-per-node") + 1] == "2"
     assert "--export-final" in command
+    assert "--wandb" not in command
     assert command[command.index("--fsdp-wrap-strategy") + 1] == "layer"
     assert not Path(launch_env["OUTPUT_DIR"]).exists()
     assert not Path(launch_env["LOG_DIR"]).exists()
+
+
+def test_launcher_wandb_options_are_quoted_and_dry_run_stays_offline(launch_env):
+    result = launch({**launch_env, "WANDB_ENABLE": "true", "WANDB_ENTITY": "team"})
+    assert result.returncode == 0, result.stderr
+    command = shlex.split(result.stdout.split("Command: ", 1)[1])
+    assert "--wandb" in command
+    for key, value in (
+        ("--wandb-project", "pi05-tests"),
+        ("--wandb-entity", "team"),
+        ("--wandb-run-name", "test run"),
+        ("--wandb-mode", "offline"),
+    ):
+        assert command[command.index(key) + 1] == value
+    assert not Path(launch_env["OUTPUT_DIR"]).exists()
+    assert not Path(launch_env["LOG_DIR"]).exists()
+    result = launch({**launch_env, "WANDB_ENABLE": "true", "WANDB_MODE": "invalid"})
+    assert result.returncode != 0 and "online or offline" in result.stderr
 
 
 def test_launcher_multinode_resume_and_accumulation(launch_env):
@@ -112,6 +136,7 @@ def test_launcher_multinode_resume_and_accumulation(launch_env):
         ("STEPS", "0", "positive integer"),
         ("NODE_RANK", "1", "smaller than NNODES"),
         ("WEIGHT_RESUME", "yes", "true or false"),
+        ("WANDB_ENABLE", "yes", "true or false"),
         ("LR", "nan", "finite and positive"),
         ("PRETRAINED_PATH", "/definitely/missing/pi05", "Missing base weights"),
         ("WEIGHT_RESUME", "true", "No latest_checkpoint"),

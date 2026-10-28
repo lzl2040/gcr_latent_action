@@ -1,6 +1,10 @@
 import json
+import random
+import sys
+from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -10,6 +14,95 @@ from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.common.policies.pi05.modeling_pi05 import PI05FlowMatching, PI05Policy
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+
+
+@pytest.fixture
+def wandb_args(tmp_path):
+    return SimpleNamespace(
+        wandb=True,
+        wandb_project="pi05-tests",
+        wandb_entity="team",
+        wandb_run_name="batch16",
+        wandb_mode="offline",
+        output_dir=tmp_path,
+        resume=False,
+    )
+
+
+@pytest.mark.parametrize(("enabled", "rank"), [(False, 0), (True, 1)])
+def test_wandb_disabled_or_nonzero_rank_has_no_sdk_or_files(monkeypatch, wandb_args, enabled, rank):
+    from lerobot.scripts.train_pi05_robodojo import wandb_logging
+
+    wandb_args.wandb = enabled
+    monkeypatch.setitem(sys.modules, "wandb", None)
+    with wandb_logging(wandb_args, {}, rank=rank) as run:
+        assert run is None
+    assert not list(wandb_args.output_dir.iterdir())
+
+
+def test_wandb_persists_identity_and_preserves_rng(monkeypatch, wandb_args):
+    from lerobot.scripts.train_pi05_robodojo import get_rng_state, set_rng_state, wandb_logging
+
+    run = Mock(id="run123", project="pi05-tests", entity="team")
+
+    def initialize(**kwargs):
+        random.random()
+        np.random.rand()
+        torch.rand(1)
+        return run
+
+    sdk = SimpleNamespace(init=Mock(side_effect=initialize), Settings=Mock())
+    monkeypatch.setitem(sys.modules, "wandb", sdk)
+    rng = get_rng_state()
+    expected = (random.random(), np.random.rand(), torch.rand(1))
+    set_rng_state(rng)
+    with wandb_logging(wandb_args, {"effective_batch_size": 128}) as received:
+        assert received is run
+        run.define_metric.assert_called_once_with("train/*", step_metric="train/step")
+    assert random.random() == expected[0]
+    assert np.random.rand() == expected[1]
+    torch.testing.assert_close(torch.rand(1), expected[2], rtol=0, atol=0)
+    identity = json.loads((wandb_args.output_dir / "wandb_run.json").read_text())
+    assert identity == {"id": "run123", "project": "pi05-tests", "entity": "team"}
+    assert sdk.init.call_args.kwargs["config"] == {"effective_batch_size": 128}
+    assert sdk.init.call_args.kwargs["save_code"] is False
+    sdk.Settings.assert_called_once_with(disable_git=True, disable_code=True)
+    run.finish.assert_called_once_with()
+
+
+def test_wandb_online_resume_reuses_identity_and_rejects_another_project(monkeypatch, wandb_args):
+    from lerobot.scripts.train_pi05_robodojo import wandb_logging
+
+    (wandb_args.output_dir / "wandb_run.json").write_text(
+        json.dumps({"id": "previous", "project": "original", "entity": "team"})
+    )
+    wandb_args.resume = True
+    wandb_args.wandb_project = None
+    wandb_args.wandb_entity = None
+    wandb_args.wandb_mode = "online"
+    run = Mock(id="previous", project="original", entity="team")
+    sdk = SimpleNamespace(init=Mock(return_value=run), Settings=Mock())
+    monkeypatch.setitem(sys.modules, "wandb", sdk)
+    with wandb_logging(wandb_args, {}):
+        pass
+    assert sdk.init.call_args.kwargs["id"] == "previous"
+    assert sdk.init.call_args.kwargs["resume"] == "allow"
+    assert sdk.init.call_args.kwargs["project"] == "original"
+    assert sdk.init.call_args.kwargs["entity"] == "team"
+    wandb_args.wandb_project = "different"
+    with pytest.raises(ValueError, match="original project"), wandb_logging(wandb_args, {}):
+        pytest.fail("Changed project must fail before entering training.")
+    assert sdk.init.call_count == 1
+
+
+def test_wandb_marks_failed_training(monkeypatch, wandb_args):
+    from lerobot.scripts.train_pi05_robodojo import wandb_logging
+
+    run = Mock(id="failed", project="pi05-tests", entity="team")
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=Mock(return_value=run), Settings=Mock()))
+    with pytest.raises(RuntimeError, match="training failed"), wandb_logging(wandb_args, {}):
+        raise RuntimeError("training failed")
+    run.finish.assert_called_once_with(exit_code=1)
 
 
 def quantile_stats():

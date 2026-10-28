@@ -37,6 +37,11 @@ EXPORT_FINAL="${EXPORT_FINAL:-true}"
 MAX_UPDATES_THIS_RUN="${MAX_UPDATES_THIS_RUN:-}"
 CHECK_PATHS="${CHECK_PATHS:-true}"
 DRY_RUN="${DRY_RUN:-false}"
+WANDB_ENABLE="${WANDB_ENABLE:-false}"
+WANDB_PROJECT="${WANDB_PROJECT:-lerobot-pi05}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-$JOB_NAME}"
+WANDB_MODE="${WANDB_MODE:-online}"
 
 die() { echo "Error: $*" >&2; exit 1; }
 positive_int() { [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer, got $2"; }
@@ -58,6 +63,10 @@ require_bool EXPORT_FINAL "$EXPORT_FINAL"
 require_bool CHECK_PATHS "$CHECK_PATHS"
 require_bool DRY_RUN "$DRY_RUN"
 require_bool MODEL_AUTO_DOWNLOAD "$MODEL_AUTO_DOWNLOAD"
+require_bool WANDB_ENABLE "$WANDB_ENABLE"
+if [[ "$WANDB_ENABLE" == true ]]; then
+    [[ "$WANDB_MODE" == online || "$WANDB_MODE" == offline ]] || die "WANDB_MODE must be online or offline"
+fi
 [[ -z "$MAX_UPDATES_THIS_RUN" ]] || positive_int MAX_UPDATES_THIS_RUN "$MAX_UPDATES_THIS_RUN"
 (( NODE_RANK < NNODES )) || die "NODE_RANK must be smaller than NNODES"
 [[ "$VIDEO_BACKEND" == pyav || "$VIDEO_BACKEND" == torchcodec ]] || die "Unsupported VIDEO_BACKEND"
@@ -127,6 +136,10 @@ COMMAND=(
 [[ "$WEIGHT_RESUME" == false ]] || COMMAND+=(--resume)
 [[ "$EXPORT_FINAL" == false ]] || COMMAND+=(--export-final)
 [[ -z "$MAX_UPDATES_THIS_RUN" ]] || COMMAND+=(--max-updates-this-run "$MAX_UPDATES_THIS_RUN")
+if [[ "$WANDB_ENABLE" == true ]]; then
+    COMMAND+=(--wandb --wandb-project "$WANDB_PROJECT" --wandb-run-name "$WANDB_RUN_NAME" --wandb-mode "$WANDB_MODE")
+    [[ -z "$WANDB_ENTITY" ]] || COMMAND+=(--wandb-entity "$WANDB_ENTITY")
+fi
 COMMAND+=("$@")
 printf 'Effective batch size: %s\n' "$((NNODES * NPROC_PER_NODE * BATCH_SIZE * GRAD_ACCUMULATION_STEPS))"
 printf 'Pretrained assets: auto_download=%s node_cache=%s\n' "$MODEL_AUTO_DOWNLOAD" "$MODEL_LOCAL_CACHE"
