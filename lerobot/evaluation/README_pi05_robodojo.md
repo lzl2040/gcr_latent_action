@@ -248,6 +248,81 @@ globally averaged losses, and `launch_stepN.json` records provenance and
 training geometry. `summary.json` distinguishes a bounded stop from
 reaching the total training budget.
 
+### Optional Weights & Biases logging
+
+Both standalone and FSDP trainers support opt-in W&B logging. It is
+disabled by default, matching the existing Qwen launcher's
+`WANDB_ENABLE=false` convention. Local `training.jsonl`, node logs, and
+checkpoints remain unchanged.
+
+```bash
+conda activate wam
+wandb login
+WANDB_ENABLE=true WANDB_PROJECT=lerobot-pi05 \
+  JOB_NAME=pi05_stack_bowls_delta_v1 \
+  bash train_pi05_robodojo_fsdp.sh
+```
+
+W&B is already a declared project dependency. Authenticate interactively
+or supply `WANDB_API_KEY` through the cluster's secret/environment setup;
+never put the key in a script, Git commit, or command saved in this guide.
+No key is included in the saved training configuration.
+
+| Launcher setting | Default | Purpose |
+|---|---|---|
+| `WANDB_ENABLE` | `false` | Enable W&B initialization and recording |
+| `WANDB_PROJECT` | `lerobot-pi05` | Destination project |
+| `WANDB_ENTITY` | unset | Optional account/team |
+| `WANDB_RUN_NAME` | `${JOB_NAME}` | Display name |
+| `WANDB_MODE` | `online` | `online` upload or `offline` local recording |
+
+Only **global rank0** initializes the SDK, including multi-node runs.
+It logs the same metrics as the local JSONL once per optimizer update:
+`train/loss`, `train/lr`, `train/grad_norm`, and `train/step`; FSDP also
+records micro-step, epoch, batch position, and maximum allocated CUDA
+memory across ranks. Configuration/provenance and the final training
+summary are recorded, but model/dataset artifacts, source code, and
+gradient/parameter watching are not uploaded or enabled. The x-axis is
+`train/step`, not W&B's internal event counter.
+
+`WEIGHT_RESUME=true` reuses the saved ID from
+`${OUTPUT_DIR}/wandb_run.json`. Online resume uses `resume="allow"` and
+requires the original project/entity; keeping that sidecar with the
+checkpoint/output directory preserves the run association. If logging
+was previously disabled, enabling it on resume starts a new W&B run at
+the restored training step. Checkpoint geometry validation does not
+include logging options, so enabling/disabling W&B does not invalidate
+an existing training checkpoint. When uploaded history is ahead of the
+latest complete checkpoint, replayed training updates are retained
+rather than dropped by W&B's monotonically increasing internal counter.
+
+For machines without network access, use `WANDB_ENABLE=true
+WANDB_MODE=offline`. Records are kept under `${OUTPUT_DIR}/wandb/`;
+no W&B upload or login is required in that mode. SDK offline resume
+creates another local segment with the same run ID rather than resuming
+the previous local event file. `DRY_RUN=true` prints options without
+initializing W&B or creating log directories.
+
+Direct Python entry points accept `--wandb`, `--wandb-project`,
+`--wandb-entity`, `--wandb-run-name`, and `--wandb-mode`. These argparse
+trainers share a small logging context instead of the general
+`TrainPipelineConfig`-based wrapper; existing Qwen logging is untouched.
+Disabling W&B avoids importing its SDK. Initialization preserves the
+training RNG state, and runs are finished on success or marked failed
+on training exceptions.
+
+Validation used 50 targeted trainer/launcher tests, Ruff lint/format
+checks, and `bash -n`. Real W&B SDK 0.31.0 offline checks ran a synthetic
+tiny model/dataset through both actual trainer loops: two standalone
+updates and a real two-GPU FSDP save-at-update1/resume-to-update2 run.
+Decoded SDK history exactly matched every local JSONL scalar. FSDP
+created one rank0 segment per invocation with the same run ID and no
+rank1 duplicates; standalone weights matched the logging-disabled
+control bitwise. This validates logging integration, not a new
+full-size PI05 training or an authenticated online upload. Evidence:
+`outputs/evaluation/robodojo/pi05_wandb_offline_smoke_20261028_v1/validation.json`
+in the original evaluation worktree.
+
 ### Optional large-microbatch memory controls
 
 The existing FP32-master/ordinary-AdamW/eager defaults remain unchanged.
