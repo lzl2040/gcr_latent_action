@@ -1994,3 +1994,45 @@ port. The initial head-camera snapshot and actual conditioning image show
 the expected table/bowl framing. Evidence is saved in
 `startup_validation.json`. Evaluation is still running at this startup
 check; no task success result is available yet.
+
+The run subsequently completed uninterrupted in **3619.45 seconds
+(60.32 minutes)**. All three layouts reached the 800-control-step limit
+with no native unstable-episode flags:
+
+| Metric | Previous step16k, sampling10 | Shift5 step7k, sampling10 |
+|---|---|---|
+| Full success | 0/3 | 0/3 |
+| Layout 0/1/2 normalized scores | 0 / 0 / 0 | 0 / 0 / 0 |
+| Native aggregate score | 0.0 | 0.0 |
+| Mean model inference per chunk | 7.16 s | 6.21 s |
+| Mean prediction-video export per chunk | 5.96 s | 5.04 s |
+| Wall time including startup | 68.43 min | 60.32 min |
+
+These three layouts show no improvement in native success or partial
+credit. Training tasks, training recipe, and checkpoint step differ;
+this is not an isolated noise-shift experiment. Shared-machine load also
+prevents attributing the wall-time difference to the model configuration.
+
+All 240 saved chunks contain finite numeric arrays, pass inverse
+normalization and cumulative delta-integration checks, and exactly match
+their exported prediction action arrays. Maximum integration errors are
+below `1e-7`; inverse-normalization error is zero. Initial states match the
+previous step16k run exactly for all three layouts. Target-to-next-measured
+position discrepancy has median/max 0.14/17.19 mm on the left and
+0.33/30.47 mm on the right; these are tracking measurements, not errors
+against demonstration actions.
+
+All 240 conditioning head images and native head-video contact sheets
+were reviewed: table/bowl framing remains normal, with reaching/contact
+and bowl movement but no completed stack. All 51 passive snapshots retain
+fixed head/scene transforms and correct render-camera bindings; wrist-to-EE
+transform errors remain below `4e-7`.
+
+The output retains nine actual camera videos (640x480, 25 FPS, 801 frames
+each), 720 prediction videos, and 7920 prediction PNGs. See
+`summary.json`, `final_adapter_audit.json`,
+`camera_audit/camera_integrity_report.json`, and `diagnostics/` for the
+native result, numerical checks, and reviewed contact sheets. Actual
+videos are nested under `simulator/eval_result/`; predicted videos are
+under `policy/predictions/`. This remains a three-layout diagnostic, not
+the full benchmark.
