@@ -363,7 +363,9 @@ def test_cli_emits_only_resolved_paths_on_stdout(tmp_path):
 
 @pytest.mark.parametrize("launcher", ["fsdp", "local"])
 @pytest.mark.parametrize("resume", [False, True])
-def test_launchers_resolve_models_before_workers_and_skip_generator_on_resume(tmp_path, launcher, resume):
+def test_launchers_resolve_models_before_workers_and_skip_generator_on_resume(
+    tmp_path, launcher, resume, fsdp_checkpoint_factory
+):
     root = Path(__file__).resolve().parents[1]
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -372,6 +374,8 @@ def test_launchers_resolve_models_before_workers_and_skip_generator_on_resume(tm
     python.write_text(
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
+        "if 'lerobot.common.utils.fsdp_training' in sys.argv:\n"
+        f"    os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n"
         "if 'lerobot.common.utils.stage2_model_cache' in sys.argv:\n"
         "    with open(os.environ['HELPER_ARGS'], 'w') as f: json.dump(sys.argv[1:], f)\n"
         "    print('/node/qwen')\n"
@@ -388,9 +392,7 @@ def test_launchers_resolve_models_before_workers_and_skip_generator_on_resume(tm
         worker.chmod(0o755)
     run_dir = tmp_path / "run"
     if resume:
-        checkpoint = run_dir / "checkpoint_00000001"
-        checkpoint.mkdir(parents=True)
-        (run_dir / "latest_checkpoint").write_text(checkpoint.name)
+        fsdp_checkpoint_factory(run_dir)
     env = {
         **os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "PYTHON_BIN": str(python), "TORCHRUN_BIN": str(bin_dir / "torchrun"),

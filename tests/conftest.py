@@ -86,3 +86,32 @@ def patch_builtins_input(monkeypatch):
             print(text)
 
     monkeypatch.setattr("builtins.input", print_text)
+
+
+@pytest.fixture
+def fsdp_checkpoint_factory():
+    import json
+
+    import torch
+    import torch.distributed.checkpoint as dcp
+
+    def create(output_dir, update_step=1, world_size=1):
+        checkpoint = output_dir / f"checkpoint_{update_step:08d}"
+        checkpoint.mkdir(parents=True)
+        metadata = {
+            "format_version": 1,
+            "update_step": update_step,
+            "micro_step": update_step,
+            "epoch": 0,
+            "batch_in_epoch": update_step,
+            "world_size": world_size,
+        }
+        (checkpoint / "metadata.json").write_text(json.dumps(metadata))
+        dcp.save({"model": {"weight": torch.arange(8)}}, checkpoint_id=checkpoint / "model", no_dist=True)
+        for rank in range(world_size):
+            torch.save({}, checkpoint / f"optimizer_rank_{rank:05d}.pt")
+        torch.save({"scheduler": None}, checkpoint / "trainer_state.pt")
+        (output_dir / "latest_checkpoint").write_text(checkpoint.name)
+        return checkpoint
+
+    return create

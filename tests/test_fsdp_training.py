@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
+import subprocess
+import sys
+import zipfile
 from dataclasses import asdict
+from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -17,11 +24,14 @@ from lerobot.common.utils.fsdp_training import (
     FSDP_CHECKPOINT_IO_COMPAT_VERSION,
     FSDPCheckpointIOConfig,
     FSDPTrainingConfig,
+    _broadcast_checkpoint_path,
     _create_fsdp_device_mesh,
     _local_model_state_statistics,
     _make_checkpoint_writer,
+    _prepare_fsdp_checkpoint_directory,
     _restore_replicated_frozen_parameters,
     _run_checkpoint_phase,
+    _verify_fsdp_checkpoint,
     _verify_model_checkpoint,
     convert_policy_to_fp8,
     create_checkpoint_process_group,
@@ -30,6 +40,7 @@ from lerobot.common.utils.fsdp_training import (
     make_distributed_timeout,
     resolve_fp8_mode,
     resolve_latest_fsdp_checkpoint,
+    save_fsdp_checkpoint,
 )
 
 
@@ -223,6 +234,180 @@ def test_resolve_latest_checkpoint_requires_pointer(tmp_path) -> None:
         resolve_latest_fsdp_checkpoint(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing_model_metadata", "corrupt_model_metadata", "zero_model_shard", "truncated_model_shard",
+        "missing_optimizer", "zero_optimizer", "truncated_optimizer", "missing_remote_rank_optimizer",
+        "missing_trainer", "truncated_trainer", "empty_state_archive", "invalid_metadata", "wrong_step",
+    ],
+)
+def test_latest_checkpoint_skips_incomplete_saves(
+    tmp_path, fsdp_checkpoint_factory, damage, caplog, monkeypatch
+):
+    complete = fsdp_checkpoint_factory(tmp_path, update_step=10, world_size=2)
+    incomplete = fsdp_checkpoint_factory(tmp_path, update_step=20, world_size=2)
+    model_metadata = incomplete / "model/.metadata"
+    shard = next((incomplete / "model").glob("*.distcp"))
+    optimizer = incomplete / "optimizer_rank_00000.pt"
+    trainer = incomplete / "trainer_state.pt"
+    if damage == "missing_model_metadata":
+        model_metadata.unlink()
+    elif damage == "corrupt_model_metadata":
+        model_metadata.write_bytes(b"interrupted metadata")
+    elif damage == "zero_model_shard":
+        shard.write_bytes(b"")
+    elif damage == "truncated_model_shard":
+        with shard.open("r+b") as handle:
+            handle.truncate(shard.stat().st_size - 1)
+    elif damage == "missing_optimizer":
+        optimizer.unlink()
+    elif damage == "zero_optimizer":
+        optimizer.write_bytes(b"")
+    elif damage == "truncated_optimizer":
+        with optimizer.open("r+b") as handle:
+            handle.truncate(optimizer.stat().st_size - 1)
+    elif damage == "missing_remote_rank_optimizer":
+        (incomplete / "optimizer_rank_00001.pt").unlink()
+    elif damage == "missing_trainer":
+        trainer.unlink()
+    elif damage == "truncated_trainer":
+        trainer.write_bytes(trainer.read_bytes()[:64])
+    elif damage == "empty_state_archive":
+        with zipfile.ZipFile(trainer, "w"):
+            pass
+    elif damage == "invalid_metadata":
+        (incomplete / "metadata.json").write_text('{"world_size":')
+    else:
+        metadata_path = incomplete / "metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["update_step"] = 19
+        metadata_path.write_text(json.dumps(metadata))
+    monkeypatch.setattr("lerobot.common.utils.fsdp_training.time.sleep", lambda _: pytest.fail("No visibility wait on resume"))
+
+    assert resolve_latest_fsdp_checkpoint(tmp_path) == complete
+    assert "Skipping incomplete FSDP checkpoint" in caplog.text
+    assert incomplete.exists()
+    assert (tmp_path / "latest_checkpoint").read_text() == incomplete.name
+
+
+@pytest.mark.parametrize("pointer", [None, "", "checkpoint_00000010", "checkpoint_99999999", "../outside", b"\xff"])
+def test_latest_checkpoint_scans_steps_instead_of_trusting_pointer(tmp_path, fsdp_checkpoint_factory, pointer):
+    fsdp_checkpoint_factory(tmp_path, update_step=10)
+    latest = fsdp_checkpoint_factory(tmp_path, update_step=20)
+    path = tmp_path / "latest_checkpoint"
+    if pointer is None:
+        path.unlink()
+    elif isinstance(pointer, bytes):
+        path.write_bytes(pointer)
+    else:
+        path.write_text(pointer)
+    assert resolve_latest_fsdp_checkpoint(tmp_path) == latest
+
+
+def test_latest_checkpoint_ignores_unpublished_saves(tmp_path, fsdp_checkpoint_factory, caplog):
+    complete = fsdp_checkpoint_factory(tmp_path, update_step=10)
+    unpublished = tmp_path / ".checkpoint_00000020.tmp"
+    unpublished.mkdir()
+    (unpublished / "partial").write_bytes(b"keep")
+    assert resolve_latest_fsdp_checkpoint(tmp_path) == complete
+    assert (unpublished / "partial").read_bytes() == b"keep"
+    assert "Skipping unpublished FSDP checkpoint" in caplog.text
+
+
+def test_no_complete_checkpoint_fails_instead_of_silently_starting_fresh(tmp_path, fsdp_checkpoint_factory):
+    incomplete = fsdp_checkpoint_factory(tmp_path)
+    (incomplete / "optimizer_rank_00000.pt").write_bytes(b"")
+    with pytest.raises(FileNotFoundError, match="No complete FSDP checkpoint"):
+        resolve_latest_fsdp_checkpoint(tmp_path)
+
+
+def test_save_retry_keeps_old_staging_and_preserves_incomplete_published_files(tmp_path):
+    old_staging = tmp_path / ".checkpoint_00000020.tmp"
+    old_staging.mkdir()
+    (old_staging / "partial").write_bytes(b"interrupted")
+    incomplete = tmp_path / "checkpoint_00000020"
+    incomplete.mkdir()
+    (incomplete / "partial").write_bytes(b"preserve")
+
+    first = _prepare_fsdp_checkpoint_directory(tmp_path, 20)
+    second = _prepare_fsdp_checkpoint_directory(tmp_path, 20)
+
+    assert first != second and first.is_dir() and second.is_dir()
+    assert (old_staging / "partial").read_bytes() == b"interrupted"
+    preserved, = tmp_path.glob(".checkpoint_00000020.incomplete.*")
+    assert (preserved / "partial").read_bytes() == b"preserve"
+
+
+def test_save_retry_never_overwrites_a_complete_checkpoint(tmp_path, fsdp_checkpoint_factory):
+    checkpoint = fsdp_checkpoint_factory(tmp_path)
+    with pytest.raises(FileExistsError, match="Refusing to overwrite complete"):
+        _prepare_fsdp_checkpoint_directory(tmp_path, 1)
+    assert resolve_latest_fsdp_checkpoint(tmp_path) == checkpoint
+
+
+def test_save_verification_waits_for_training_state_visibility(tmp_path, fsdp_checkpoint_factory, monkeypatch):
+    checkpoint = fsdp_checkpoint_factory(tmp_path)
+    trainer = checkpoint / "trainer_state.pt"
+    complete_bytes = trainer.read_bytes()
+    trainer.write_bytes(b"")
+    sleeps = []
+
+    def make_visible(seconds):
+        sleeps.append(seconds)
+        trainer.write_bytes(complete_bytes)
+
+    monkeypatch.setattr("lerobot.common.utils.fsdp_training.time.sleep", make_visible)
+    assert _verify_fsdp_checkpoint(checkpoint, timeout_seconds=10)["update_step"] == 1
+    assert sleeps == [1]
+
+
+def test_checkpoint_path_broadcast_uses_rank0_choice_and_cpu_control_group(monkeypatch, tmp_path):
+    group = object()
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda _: "gloo")
+
+    def broadcast(paths, *, src, group, device):
+        assert src == 0 and group is not None and device == torch.device("cpu")
+        paths[0] = str(tmp_path / "checkpoint_00000010")
+
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast)
+    assert _broadcast_checkpoint_path(None, torch.device("cuda", 3), group) == tmp_path / "checkpoint_00000010"
+
+
+@pytest.mark.parametrize("scenario", ["incomplete_latest", "missing_pointer", "legacy", "only_incomplete"])
+def test_fsdp_launcher_resolves_complete_checkpoint(tmp_path, fsdp_checkpoint_factory, scenario):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "run"
+    storage = output / "job" if scenario == "legacy" else output
+    complete = fsdp_checkpoint_factory(storage, update_step=10)
+    if scenario == "missing_pointer" or scenario == "legacy":
+        (storage / "latest_checkpoint").unlink()
+    if scenario in ("incomplete_latest", "only_incomplete"):
+        incomplete = fsdp_checkpoint_factory(storage, update_step=20)
+        next((incomplete / "model").glob("*.distcp")).write_bytes(b"")
+        (storage / ".checkpoint_00000030.tmp").mkdir()
+    if scenario == "only_incomplete":
+        (complete / "trainer_state.pt").unlink()
+    result = subprocess.run(
+        ["bash", str(root / "train_qwen3vl_mot_fsdp.sh")], cwd=root,
+        env={
+            **os.environ, "OUTPUT_DIR": str(output), "JOB_NAME": "job",
+            "WEIGHT_RESUME": "true", "DRY_RUN": "true", "CHECK_PATHS": "false",
+            "PYTHON_BIN": sys.executable, "MASTER_PORT": "29599", "NNODES": "1", "NPROC_PER_NODE": "1",
+        },
+        text=True, capture_output=True, timeout=30,
+    )
+    if scenario == "only_incomplete":
+        assert result.returncode != 0
+        assert "no complete FSDP checkpoint" in result.stderr
+        assert "starting a fresh" not in result.stdout
+    else:
+        assert result.returncode == 0, result.stderr
+        assert f"resume: found {complete}" in result.stdout
+        assert "--weight_resume=true" in result.stdout
+
+
 def test_restore_replicated_frozen_parameters_uses_canonical_fsdp_names() -> None:
     inner = nn.Module()
     inner.weight = nn.Parameter(torch.zeros(2, 3), requires_grad=False)
@@ -400,11 +585,12 @@ def test_model_state_statistics_use_local_shards_before_tensor_dispatch() -> Non
     assert total_bytes == 2 * 3 * torch.ones(1).element_size()
 
 
-def test_checkpoint_writer_round_trip_is_visible(tmp_path) -> None:
+@pytest.mark.parametrize("thread_count", [1, 2])
+def test_checkpoint_writer_round_trip_is_visible(tmp_path, thread_count) -> None:
     checkpoint_dir = tmp_path / "model"
     writer = _make_checkpoint_writer(
         checkpoint_dir,
-        FSDPCheckpointIOConfig(sync_files=False),
+        FSDPCheckpointIOConfig(sync_files=False, thread_count=thread_count),
     )
     dcp.save(
         {"model": {"weight": torch.arange(8)}},
@@ -416,6 +602,68 @@ def test_checkpoint_writer_round_trip_is_visible(tmp_path) -> None:
 
     assert file_count == 1
     assert total_bytes > 0
+
+    loaded = {"model": {"weight": torch.zeros(8, dtype=torch.int64)}}
+    dcp.load(loaded, checkpoint_id=checkpoint_dir, no_dist=True)
+    torch.testing.assert_close(loaded["model"]["weight"], torch.arange(8))
+
+
+def test_checkpoint_writer_hides_in_progress_shards(tmp_path) -> None:
+    writer = _make_checkpoint_writer(tmp_path, FSDPCheckpointIOConfig())
+    shard = tmp_path / "__0_0.distcp"
+
+    with writer.fs.create_stream(shard, "wb") as stream:
+        stream.write(b"partial")
+        stream.flush()
+        assert not shard.exists()
+        stream.write(b" complete")
+
+    assert shard.read_bytes() == b"partial complete"
+
+
+def test_checkpoint_writer_does_not_publish_failed_shard(tmp_path) -> None:
+    writer = _make_checkpoint_writer(tmp_path, FSDPCheckpointIOConfig())
+    shard = tmp_path / "__0_0.distcp"
+
+    with pytest.raises(OSError, match="write interrupted"), writer.fs.create_stream(shard, "wb") as stream:
+        stream.write(b"partial")
+        raise OSError("write interrupted")
+
+    assert not shard.exists()
+    assert not list(tmp_path.glob("*.distcp"))
+
+
+def test_verification_reads_past_stale_model_shard_size(tmp_path, monkeypatch, caplog) -> None:
+    writer = _make_checkpoint_writer(tmp_path, FSDPCheckpointIOConfig())
+    dcp.save({"model": {"weight": torch.arange(8)}}, storage_writer=writer, no_dist=True)
+    shard = next(tmp_path.glob("*.distcp"))
+    expected_size = shard.stat().st_size
+    original_stat = Path.stat
+
+    def stale_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == shard:
+            fields = list(result)
+            fields[6] = 0
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(Path, "stat", stale_stat)
+    assert _verify_model_checkpoint(tmp_path, timeout_seconds=0) == (1, expected_size)
+    assert "cached size" in caplog.text
+    loaded = {"model": {"weight": torch.zeros(8, dtype=torch.int64)}}
+    dcp.load(loaded, checkpoint_id=tmp_path, no_dist=True)
+    torch.testing.assert_close(loaded["model"]["weight"], torch.arange(8))
+
+
+def test_verification_rejects_unreadable_model_shard_tail(tmp_path) -> None:
+    writer = _make_checkpoint_writer(tmp_path, FSDPCheckpointIOConfig())
+    dcp.save({"model": {"weight": torch.arange(8)}}, storage_writer=writer, no_dist=True)
+    shard = next(tmp_path.glob("*.distcp"))
+    shard.write_bytes(shard.read_bytes()[:-1])
+
+    with pytest.raises(RuntimeError, match="truncated"):
+        _verify_model_checkpoint(tmp_path, timeout_seconds=0)
 
 
 @pytest.mark.parametrize(
@@ -438,7 +686,7 @@ def test_checkpoint_io_rejects_invalid_environment(
 
 
 def test_distributed_timeout_defaults_to_one_hour() -> None:
-    assert FSDP_CHECKPOINT_IO_COMPAT_VERSION == 2
+    assert FSDP_CHECKPOINT_IO_COMPAT_VERSION == 4
     assert make_distributed_timeout().total_seconds() == 3_600
     assert make_distributed_timeout("90").total_seconds() == 5_400
 
@@ -536,10 +784,16 @@ def resume_checkpoint(tmp_path, monkeypatch):
         ({"dataset_names": ["original", "added"]}, (2, 7)),
     ],
 )
+@pytest.mark.parametrize("incomplete_newer", [False, True])
 def test_fsdp_resume_allows_data_changes_and_preserves_training_state(
-    resume_checkpoint, caplog, changes, expected_position
+    resume_checkpoint, caplog, changes, expected_position, incomplete_newer
 ):
     checkpoint = resume_checkpoint
+    if incomplete_newer:
+        partial = checkpoint.output_dir / "checkpoint_00000028"
+        partial.mkdir()
+        (partial / "metadata.json").write_text('{"world_size":')
+        (checkpoint.output_dir / "latest_checkpoint").write_text(partial.name)
     model = nn.Linear(2, 2)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.02)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10)
@@ -571,7 +825,7 @@ def test_fsdp_resume_allows_data_changes_and_preserves_training_state(
         assert "geometry changed across resume" in caplog.text
         assert "sample order will not be an exact continuation" in caplog.text
         assert "Remapped checkpoint data position" in caplog.text
-    else:
+    elif not incomplete_newer:
         assert not caplog.records
 
     optimizer.zero_grad()
@@ -599,6 +853,7 @@ def test_fsdp_resume_retains_non_data_compatibility_checks(resume_checkpoint, ch
         metadata = checkpoint.metadata.copy()
         if change == "world_size":
             metadata["world_size"] = 2
+            torch.save(checkpoint.local_state, checkpoint.checkpoint_dir / "optimizer_rank_00001.pt")
         else:
             metadata["fsdp_config"] = {**metadata["fsdp_config"], "fp8": True}
         (checkpoint.checkpoint_dir / "metadata.json").write_text(json.dumps(metadata))
@@ -616,3 +871,200 @@ def test_fsdp_resume_retains_non_data_compatibility_checks(resume_checkpoint, ch
             device=torch.device("cpu"),
             checkpoint_io=FSDPCheckpointIOConfig(heartbeat_seconds=0),
         )
+
+
+def test_resumed_save_can_retry_an_interrupted_step_and_load_again(resume_checkpoint, monkeypatch):
+    checkpoint = resume_checkpoint
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10)
+    kwargs = {
+        "model": model, "optimizer": optimizer, "scheduler": scheduler,
+        "output_dir": checkpoint.output_dir, "fsdp_config": checkpoint.config,
+        "training_geometry": checkpoint.geometry, "device": torch.device("cpu"),
+        "checkpoint_io": FSDPCheckpointIOConfig(heartbeat_seconds=0),
+    }
+    leftover = checkpoint.output_dir / ".checkpoint_00000028.tmp"
+    leftover.mkdir()
+    (leftover / "partial").write_bytes(b"unfinished shard")
+    partial = checkpoint.output_dir / "checkpoint_00000028"
+    partial.mkdir()
+    (checkpoint.output_dir / "latest_checkpoint").write_text(partial.name)
+    resume = load_fsdp_checkpoint(**kwargs)
+    assert resume.update_step == 27
+    optimizer.zero_grad()
+    model(torch.ones(1, 2)).square().sum().backward()
+    optimizer.step()
+    scheduler.step()
+    expected_model = {name: value.clone() for name, value in model.state_dict().items()}
+    monkeypatch.setattr(torch.cuda, "get_rng_state", lambda device: checkpoint.local_state["cuda_rng_state"])
+    saved = save_fsdp_checkpoint(**kwargs, micro_step=28, update_step=28, epoch=2, batch_in_epoch=8)
+    assert saved == partial and _verify_fsdp_checkpoint(saved)["update_step"] == 28
+    assert (leftover / "partial").read_bytes() == b"unfinished shard"
+    assert len(tuple(checkpoint.output_dir.glob(".checkpoint_00000028.incomplete.*"))) == 1
+    assert (checkpoint.output_dir / "latest_checkpoint").read_text() == saved.name
+    with torch.no_grad():
+        model.weight.zero_()
+    reloaded = load_fsdp_checkpoint(**kwargs)
+    assert reloaded.update_step == 28 and (reloaded.epoch, reloaded.batch_in_epoch) == (2, 8)
+    torch.testing.assert_close(model.state_dict(), expected_model, rtol=0, atol=0)
+    assert scheduler.last_epoch == 28
+    assert all(state["step"].item() == 28 for state in optimizer.state.values())
+
+
+@pytest.mark.parametrize("broken_component", ["model", "optimizer", "trainer"])
+def test_save_never_publishes_truncated_checkpoint(resume_checkpoint, monkeypatch, broken_component):
+    import lerobot.common.utils.fsdp_training as training
+
+    checkpoint = resume_checkpoint
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+    monkeypatch.setattr(torch.cuda, "get_rng_state", lambda device: checkpoint.local_state["cuda_rng_state"])
+    monkeypatch.setattr(training, "_CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS", 0)
+    if broken_component == "model":
+        original_save = dcp.save
+
+        def partial_model_save(*args, **kwargs):
+            result = original_save(*args, **kwargs)
+            next(kwargs["storage_writer"].path.glob("*.distcp")).write_bytes(b"")
+            return result
+
+        monkeypatch.setattr(dcp, "save", partial_model_save)
+    else:
+        original_save = training._save_checkpoint_state
+        filename = "optimizer_rank_00000.pt" if broken_component == "optimizer" else "trainer_state.pt"
+
+        def partial_training_save(value, target):
+            original_save(value, target)
+            if target.name == filename:
+                target.write_bytes(b"")
+
+        monkeypatch.setattr(training, "_save_checkpoint_state", partial_training_save)
+    with pytest.raises(RuntimeError):
+        save_fsdp_checkpoint(
+            model=model, optimizer=optimizer, scheduler=None,
+            output_dir=checkpoint.output_dir, fsdp_config=checkpoint.config,
+            training_geometry=checkpoint.geometry, micro_step=28, update_step=28,
+            epoch=2, batch_in_epoch=8, device=torch.device("cpu"),
+            checkpoint_io=FSDPCheckpointIOConfig(heartbeat_seconds=0),
+        )
+    assert not (checkpoint.output_dir / "checkpoint_00000028").exists()
+    assert (checkpoint.output_dir / "latest_checkpoint").read_text() == checkpoint.checkpoint_dir.name
+
+
+def test_training_state_is_not_visible_during_serialization(resume_checkpoint, monkeypatch):
+    checkpoint = resume_checkpoint
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+    monkeypatch.setattr(torch.cuda, "get_rng_state", lambda device: checkpoint.local_state["cuda_rng_state"])
+    original_save = torch.save
+    observed = set()
+
+    def inspect_save(value, target, *args, **kwargs):
+        result = original_save(value, target, *args, **kwargs)
+        name = target if isinstance(target, (str, os.PathLike)) else getattr(target, "name", None)
+        if name is None:
+            return result
+        path = Path(name)
+        for filename in ("optimizer_rank_00000.pt", "trainer_state.pt"):
+            if filename in path.name:
+                assert not (path.parent / filename).exists()
+                observed.add(filename)
+        return result
+
+    monkeypatch.setattr(torch, "save", inspect_save)
+    saved = save_fsdp_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        scheduler=None,
+        output_dir=checkpoint.output_dir,
+        fsdp_config=checkpoint.config,
+        training_geometry=checkpoint.geometry,
+        micro_step=28,
+        update_step=28,
+        epoch=2,
+        batch_in_epoch=8,
+        device=torch.device("cpu"),
+        checkpoint_io=FSDPCheckpointIOConfig(heartbeat_seconds=0),
+    )
+    assert observed == {"optimizer_rank_00000.pt", "trainer_state.pt"}
+    assert _verify_fsdp_checkpoint(saved)["update_step"] == 28
+
+
+def _distributed_checkpoint_retry_worker(rank, world_size, directory, stale_sizes):
+    root = Path(directory)
+    torch.set_num_threads(1)
+    torch.distributed.init_process_group(
+        "gloo", init_method=f"file://{root / 'rendezvous'}",
+        rank=rank, world_size=world_size, timeout=timedelta(seconds=60),
+    )
+    try:
+        torch.manual_seed(7)
+        model = nn.Linear(2, 2)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10)
+        kwargs = {
+            "model": model, "optimizer": optimizer, "scheduler": scheduler,
+            "output_dir": root / "run",
+            "fsdp_config": FSDPTrainingConfig(fp8=False, replicate_frozen_params=False),
+            "training_geometry": {"steps_per_epoch": 10},
+            "device": torch.device("cpu"),
+            "checkpoint_process_group": torch.distributed.group.WORLD,
+            "checkpoint_io": FSDPCheckpointIOConfig(heartbeat_seconds=0),
+        }
+        original_stat = Path.stat
+
+        def cached_stat(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            if stale_sizes and rank == 0 and path.suffix == ".distcp":
+                fields = list(result)
+                fields[6] = 0
+                return os.stat_result(fields)
+            return result
+
+        with (
+            patch.object(torch.cuda, "get_rng_state", return_value=torch.tensor([rank], dtype=torch.uint8)),
+            patch.object(torch.cuda, "set_rng_state"),
+            patch.object(Path, "stat", cached_stat),
+        ):
+            for step in (1, 2):
+                optimizer.zero_grad()
+                model(torch.ones(1, 2)).square().sum().backward()
+                optimizer.step()
+                scheduler.step()
+                expected = {name: value.clone() for name, value in model.state_dict().items()}
+                saved = save_fsdp_checkpoint(
+                    **kwargs, micro_step=step, update_step=step, epoch=0, batch_in_epoch=step,
+                )
+                if step == 1 and rank == 0:
+                    (saved.parent / "checkpoint_00000002").mkdir()
+                    (saved.parent / ".checkpoint_00000002.tmp").mkdir()
+                    (saved.parent / "latest_checkpoint").write_text("checkpoint_00000002")
+                torch.distributed.barrier()
+                with torch.no_grad():
+                    model.weight.zero_()
+                state = load_fsdp_checkpoint(**kwargs)
+                assert state.update_step == step and state.checkpoint_dir == saved
+                torch.testing.assert_close(model.state_dict(), expected, rtol=0, atol=0)
+                assert scheduler.last_epoch == step
+                assert all(value["step"].item() == step for value in optimizer.state.values())
+            (root / f"rank_{rank}.json").write_text(json.dumps({
+                "checkpoint": str(state.checkpoint_dir), "update_step": state.update_step,
+            }))
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+@pytest.mark.parametrize("stale_sizes", [False, True])
+def test_two_rank_gloo_resume_and_save_retry_use_the_same_checkpoint(tmp_path, stale_sizes):
+    torch.multiprocessing.spawn(
+        _distributed_checkpoint_retry_worker,
+        args=(2, str(tmp_path), stale_sizes),
+        nprocs=2,
+        join=True,
+    )
+    states = [json.loads((tmp_path / f"rank_{rank}.json").read_text()) for rank in range(2)]
+    assert states[0] == states[1]
+    assert states[0]["update_step"] == 2
+    assert (tmp_path / "run/.checkpoint_00000002.tmp").is_dir()
+    assert len(tuple((tmp_path / "run").glob(".checkpoint_00000002.incomplete.*"))) == 1

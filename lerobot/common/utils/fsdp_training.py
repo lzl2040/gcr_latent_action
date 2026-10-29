@@ -6,21 +6,28 @@ import gc
 import json
 import logging
 import os
+import pickle
 import random
+import re
+import tempfile
 import threading
 import time
+import uuid
+import zipfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, BinaryIO, Callable, TypeVar
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch import nn
+from torch.distributed.checkpoint.filesystem import FileSystem
+from torch.distributed.checkpoint.metadata import Metadata
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -47,7 +54,7 @@ _DEFAULT_DISTRIBUTED_TIMEOUT_MINUTES = 60
 _DEFAULT_CHECKPOINT_HEARTBEAT_SECONDS = 60
 _CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS = 60
 _LOGGER = logging.getLogger(__name__)
-FSDP_CHECKPOINT_IO_COMPAT_VERSION = 2
+FSDP_CHECKPOINT_IO_COMPAT_VERSION = 4
 
 
 def make_distributed_timeout(
@@ -584,40 +591,82 @@ def _checkpoint_heartbeat(
         heartbeat.join(timeout=1)
 
 
+@contextmanager
+def _atomic_checkpoint_file(path: Path) -> Iterator[BinaryIO]:
+    # Do not let another node cache a final filename's zero-byte size during writing.
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.partial")
+    with temporary_path.open("xb") as stream:
+        yield stream
+    temporary_path.rename(path)
+
+
+class _AtomicCheckpointFileSystem(FileSystem):
+    @contextmanager
+    def create_stream(self, path: str | os.PathLike, mode: str) -> Iterator[BinaryIO]:
+        if mode == "wb":
+            with _atomic_checkpoint_file(Path(path)) as stream:
+                yield stream
+        else:
+            with super().create_stream(path, mode) as stream:
+                yield stream
+
+
+def _save_checkpoint_state(state: dict[str, Any], path: Path) -> None:
+    with _atomic_checkpoint_file(path) as stream:
+        torch.save(state, stream)
+
+
 def _make_checkpoint_writer(
     checkpoint_dir: Path,
     checkpoint_io: FSDPCheckpointIOConfig,
 ) -> dcp.FileSystemWriter:
     checkpoint_io.validate()
-    return dcp.FileSystemWriter(
+    writer = dcp.FileSystemWriter(
         checkpoint_dir,
         single_file_per_rank=True,
         sync_files=checkpoint_io.sync_files,
         thread_count=checkpoint_io.thread_count,
         overwrite=False,
     )
+    writer.fs = _AtomicCheckpointFileSystem()
+    return writer
 
 
-def _verify_model_checkpoint(checkpoint_dir: Path) -> tuple[int, int]:
+def _verify_model_checkpoint(
+    checkpoint_dir: Path, *, timeout_seconds: float | None = None,
+) -> tuple[int, int]:
     metadata_path = checkpoint_dir / ".metadata"
-    deadline = time.monotonic() + _CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS
+    if timeout_seconds is None:
+        timeout_seconds = _CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout_seconds
     while not metadata_path.is_file():
         if time.monotonic() >= deadline:
             raise FileNotFoundError(
                 f"DCP model metadata was not visible after "
-                f"{_CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS} seconds: {metadata_path}."
+                f"{timeout_seconds} seconds: {metadata_path}."
             )
         time.sleep(1)
 
     metadata = dcp.FileSystemReader(checkpoint_dir).read_metadata()
-    if not metadata.state_dict_metadata:
+    if not isinstance(metadata, Metadata) or not metadata.state_dict_metadata:
         raise RuntimeError(f"DCP model metadata is empty: {metadata_path}.")
     if not metadata.storage_data:
         raise RuntimeError(f"DCP model storage metadata is empty: {metadata_path}.")
 
     expected_sizes: dict[str, int] = {}
+    resolved_dir = checkpoint_dir.resolve()
     for storage_info in metadata.storage_data.values():
         relative_path = storage_info.relative_path
+        if (
+            relative_path not in expected_sizes
+            and (
+                Path(relative_path).is_absolute()
+                or not (checkpoint_dir / relative_path).resolve().is_relative_to(resolved_dir)
+            )
+        ):
+            raise RuntimeError(f"Invalid DCP storage path: {relative_path}.")
+        if storage_info.offset < 0 or storage_info.length <= 0:
+            raise RuntimeError(f"Invalid DCP storage range: {storage_info}.")
         expected_sizes[relative_path] = max(
             expected_sizes.get(relative_path, 0),
             storage_info.offset + storage_info.length,
@@ -633,11 +682,29 @@ def _verify_model_checkpoint(checkpoint_dir: Path) -> tuple[int, int]:
                 missing.append(relative_path)
                 continue
             actual_size = path.stat().st_size
-            actual_bytes += actual_size
             if actual_size < expected_size:
-                truncated.append(
-                    f"{relative_path} ({actual_size} < {expected_size} bytes)"
-                )
+                try:
+                    with path.open("rb") as stream:
+                        stream.seek(expected_size - 1)
+                        tail_readable = bool(stream.read(1))
+                except FileNotFoundError:
+                    missing.append(relative_path)
+                    continue
+                if tail_readable:
+                    _LOGGER.warning(
+                        "DCP shard %s has cached size %d < %d bytes, but its last "
+                        "referenced byte is readable; using the verified data range.",
+                        path,
+                        actual_size,
+                        expected_size,
+                    )
+                    actual_size = expected_size
+                else:
+                    truncated.append(
+                        f"{relative_path} ({actual_size} < {expected_size} bytes; "
+                        "last referenced byte is unreadable)"
+                    )
+            actual_bytes += actual_size
         if not missing and not truncated:
             return len(expected_sizes), actual_bytes
         if time.monotonic() >= deadline:
@@ -651,6 +718,89 @@ def _verify_model_checkpoint(checkpoint_dir: Path) -> tuple[int, int]:
                 f"publication: {'; '.join(details)}."
             )
         time.sleep(1)
+
+
+class _IncompleteFSDPCheckpointError(RuntimeError):
+    pass
+
+
+def _read_fsdp_checkpoint(checkpoint_dir: Path) -> dict[str, Any]:
+    try:
+        metadata = json.loads((checkpoint_dir / _METADATA_FILE).read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            raise RuntimeError("Checkpoint metadata must be an object.")
+        for key in ("world_size", "update_step", "micro_step", "epoch", "batch_in_epoch"):
+            value = metadata.get(key)
+            minimum = 1 if key == "world_size" else 0
+            if type(value) is not int or value < minimum:
+                raise RuntimeError(f"Invalid or missing checkpoint metadata field {key!r}.")
+        match = re.fullmatch(r"checkpoint_(\d{8,})", checkpoint_dir.name)
+        if match and int(match[1]) != metadata["update_step"]:
+            raise RuntimeError("Checkpoint directory and saved update_step differ.")
+        _verify_model_checkpoint(checkpoint_dir / "model", timeout_seconds=0)
+        state_paths = [
+            checkpoint_dir / _TRAINER_STATE_FILE,
+            *(checkpoint_dir / f"optimizer_rank_{rank:05d}.pt" for rank in range(metadata["world_size"])),
+        ]
+        for path in state_paths:
+            with zipfile.ZipFile(path) as archive:
+                if not any(
+                    (info.filename == "data.pkl" or info.filename.endswith("/data.pkl"))
+                    and info.file_size > 0
+                    for info in archive.infolist()
+                ):
+                    raise RuntimeError(f"Missing serialized training state in {path}.")
+    except (
+        FileNotFoundError, NotADirectoryError, EOFError, json.JSONDecodeError, UnicodeDecodeError,
+        pickle.UnpicklingError, zipfile.BadZipFile, RuntimeError,
+    ) as exc:
+        raise _IncompleteFSDPCheckpointError(f"{checkpoint_dir}: {exc}") from exc
+    return metadata
+
+
+def _verify_fsdp_checkpoint(checkpoint_dir: Path, *, timeout_seconds: float = 0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            return _read_fsdp_checkpoint(checkpoint_dir)
+        except _IncompleteFSDPCheckpointError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(1)
+
+
+def _prepare_fsdp_checkpoint_directory(output_dir: Path, update_step: int) -> Path:
+    checkpoint_name = f"checkpoint_{update_step:08d}"
+    checkpoint_dir = output_dir / checkpoint_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if checkpoint_dir.exists():
+        try:
+            _verify_fsdp_checkpoint(checkpoint_dir)
+        except _IncompleteFSDPCheckpointError as exc:
+            preserved = output_dir / f".{checkpoint_name}.incomplete.{uuid.uuid4().hex}"
+            checkpoint_dir.rename(preserved)
+            _LOGGER.warning("Preserved incomplete FSDP checkpoint at %s before retry: %s", preserved, exc)
+        else:
+            raise FileExistsError(f"Refusing to overwrite complete FSDP checkpoint {checkpoint_dir}.")
+    return Path(tempfile.mkdtemp(prefix=f".{checkpoint_name}.", suffix=".tmp", dir=output_dir))
+
+
+def _broadcast_checkpoint_path(
+    checkpoint_dir: Path | None,
+    device: torch.device,
+    process_group: dist.ProcessGroup | None,
+) -> Path:
+    paths = [str(checkpoint_dir) if checkpoint_dir is not None else None]
+    if dist.get_world_size() > 1:
+        control_device = (
+            torch.device("cpu")
+            if process_group is not None and dist.get_backend(process_group) == dist.Backend.GLOO
+            else device
+        )
+        dist.broadcast_object_list(paths, src=0, group=process_group, device=control_device)
+    if paths[0] is None:
+        raise RuntimeError("Rank 0 did not select an FSDP checkpoint directory.")
+    return Path(paths[0])
 
 
 def _local_training_state(
@@ -690,29 +840,22 @@ def save_fsdp_checkpoint(
     output_dir = Path(output_dir)
     checkpoint_name = f"checkpoint_{update_step:08d}"
     checkpoint_dir = output_dir / checkpoint_name
-    temporary_dir = output_dir / f".{checkpoint_name}.tmp"
-    model_checkpoint_dir = temporary_dir / "model"
-
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
-    def prepare_directory() -> None:
+    def prepare_directory() -> Path | None:
         if rank != 0:
-            return
-        if checkpoint_dir.exists() or temporary_dir.exists():
-            raise FileExistsError(
-                f"Refusing to overwrite an existing FSDP checkpoint at {checkpoint_dir} "
-                f"or {temporary_dir}."
-            )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        temporary_dir.mkdir()
+            return None
+        return _prepare_fsdp_checkpoint_directory(output_dir, update_step)
 
-    _run_checkpoint_phase(
+    temporary_dir = _run_checkpoint_phase(
         "prepare save directory",
         prepare_directory,
         device,
         checkpoint_process_group,
     )
+    temporary_dir = _broadcast_checkpoint_path(temporary_dir, device, checkpoint_process_group)
+    model_checkpoint_dir = temporary_dir / "model"
 
     def materialize_model_state() -> dict[str, Any]:
         with _checkpoint_heartbeat(
@@ -776,7 +919,7 @@ def save_fsdp_checkpoint(
 
     _run_checkpoint_phase(
         "save rank-local optimizer state",
-        lambda: torch.save(
+        lambda: _save_checkpoint_state(
             _local_training_state(optimizer, model, device),
             temporary_dir / f"optimizer_rank_{rank:05d}.pt",
         ),
@@ -798,11 +941,9 @@ def save_fsdp_checkpoint(
             "checkpoint_io": asdict(checkpoint_io),
             "training_geometry": training_geometry,
         }
-        (temporary_dir / _METADATA_FILE).write_text(
-            json.dumps(metadata, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        torch.save(
+        with _atomic_checkpoint_file(temporary_dir / _METADATA_FILE) as stream:
+            stream.write(json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8"))
+        _save_checkpoint_state(
             {"scheduler": scheduler.state_dict() if scheduler is not None else None},
             temporary_dir / _TRAINER_STATE_FILE,
         )
@@ -810,6 +951,14 @@ def save_fsdp_checkpoint(
     _run_checkpoint_phase(
         "save checkpoint metadata",
         save_metadata,
+        device,
+        checkpoint_process_group,
+    )
+    _run_checkpoint_phase(
+        "verify complete checkpoint",
+        lambda: _verify_fsdp_checkpoint(
+            temporary_dir, timeout_seconds=_CHECKPOINT_VISIBILITY_TIMEOUT_SECONDS,
+        ) if rank == 0 else None,
         device,
         checkpoint_process_group,
     )
@@ -834,17 +983,35 @@ def save_fsdp_checkpoint(
 def resolve_latest_fsdp_checkpoint(output_dir: str | Path) -> Path:
     output_dir = Path(output_dir)
     pointer = output_dir / _LATEST_CHECKPOINT
-    if not pointer.is_file():
-        raise FileNotFoundError(
-            f"`weight_resume=true` was requested, but {pointer} does not exist."
-        )
-    checkpoint_dir = output_dir / pointer.read_text(encoding="utf-8").strip()
-    if not checkpoint_dir.is_dir():
-        raise FileNotFoundError(
-            f"The latest FSDP checkpoint pointer resolves to missing directory "
-            f"{checkpoint_dir}."
-        )
-    return checkpoint_dir
+    pointer_name = None
+    if pointer.is_file():
+        try:
+            pointer_name = pointer.read_text(encoding="utf-8").strip()
+        except (FileNotFoundError, UnicodeDecodeError) as exc:
+            _LOGGER.warning("Ignoring unreadable FSDP checkpoint pointer %s: %s", pointer, exc)
+    for path in sorted(output_dir.glob(".checkpoint_*.tmp")):
+        _LOGGER.warning("Skipping unpublished FSDP checkpoint directory %s.", path)
+    candidates = sorted(
+        (path for path in output_dir.glob("checkpoint_*") if re.fullmatch(r"checkpoint_\d{8,}", path.name)),
+        key=lambda path: int(path.name.removeprefix("checkpoint_")),
+        reverse=True,
+    )
+    for checkpoint_dir in candidates:
+        try:
+            _verify_fsdp_checkpoint(checkpoint_dir)
+        except _IncompleteFSDPCheckpointError as exc:
+            _LOGGER.warning("Skipping incomplete FSDP checkpoint: %s", exc)
+            continue
+        if pointer_name != checkpoint_dir.name:
+            _LOGGER.warning(
+                "Using newest complete FSDP checkpoint %s instead of latest_checkpoint=%r.",
+                checkpoint_dir, pointer_name,
+            )
+        return checkpoint_dir
+    raise FileNotFoundError(
+        f"No complete FSDP checkpoint found in {output_dir}; "
+        f"latest_checkpoint={pointer_name!r}. Incomplete saves cannot be resumed."
+    )
 
 
 def load_fsdp_checkpoint(
@@ -862,17 +1029,24 @@ def load_fsdp_checkpoint(
     checkpoint_io = checkpoint_io or FSDPCheckpointIOConfig.from_environment()
     checkpoint_io.validate()
 
-    def load_metadata() -> tuple[Path, dict[str, Any]]:
-        checkpoint_dir = resolve_latest_fsdp_checkpoint(output_dir)
+    checkpoint_dir = _run_checkpoint_phase(
+        "select resume checkpoint",
+        lambda: resolve_latest_fsdp_checkpoint(output_dir) if dist.get_rank() == 0 else None,
+        device,
+        checkpoint_process_group,
+    )
+    checkpoint_dir = _broadcast_checkpoint_path(checkpoint_dir, device, checkpoint_process_group)
+
+    def load_metadata() -> dict[str, Any]:
         metadata_path = checkpoint_dir / _METADATA_FILE
         if not metadata_path.is_file():
             raise FileNotFoundError(
                 f"FSDP checkpoint metadata is missing: {metadata_path}."
             )
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        return checkpoint_dir, metadata
+        return metadata
 
-    checkpoint_dir, metadata = _run_checkpoint_phase(
+    metadata = _run_checkpoint_phase(
         "load checkpoint metadata",
         load_metadata,
         device,
@@ -1052,3 +1226,12 @@ def load_fsdp_checkpoint(
         epoch=epoch,
         batch_in_epoch=batch_in_epoch,
     )
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Find the newest complete FSDP training checkpoint.")
+    parser.add_argument("--resolve-latest", type=Path, required=True)
+    logging.basicConfig(level=logging.WARNING)
+    print(resolve_latest_fsdp_checkpoint(parser.parse_args().resolve_latest))

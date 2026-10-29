@@ -216,41 +216,37 @@ if [[ "$DRY_RUN" != "true" ]]; then
 fi
 
 LEGACY_OUTPUT_DIR="${OUTPUT_DIR}/${JOB_NAME}"
+has_fsdp_checkpoint_artifacts() {
+    local directory="$1"
+    [[ -e "$directory/latest_checkpoint" || -L "$directory/latest_checkpoint" ]] && return 0
+    local artifacts
+    shopt -s nullglob
+    artifacts=(
+        "$directory"/checkpoint_*
+        "$directory"/.checkpoint_*.tmp
+        "$directory"/.checkpoint_*.incomplete.*
+    )
+    shopt -u nullglob
+    (( ${#artifacts[@]} > 0 ))
+}
 if [[
     "$WEIGHT_RESUME" == "true"
-    && ! -e "${OUTPUT_DIR}/latest_checkpoint"
-    && -f "${LEGACY_OUTPUT_DIR}/latest_checkpoint"
-]]; then
+]] && ! has_fsdp_checkpoint_artifacts "$OUTPUT_DIR" \
+    && has_fsdp_checkpoint_artifacts "$LEGACY_OUTPUT_DIR"; then
     echo "resume: using legacy nested output directory ${LEGACY_OUTPUT_DIR}"
     OUTPUT_DIR="${LEGACY_OUTPUT_DIR}"
 fi
 
 LATEST_CHECKPOINT_POINTER="${OUTPUT_DIR}/latest_checkpoint"
 RESUME_CHECKPOINT=""
-shopt -s nullglob
-_incomplete_checkpoints=("$OUTPUT_DIR"/.checkpoint_*.tmp)
-shopt -u nullglob
-if (( ${#_incomplete_checkpoints[@]} > 0 )); then
-    die "found incomplete FSDP checkpoint directories: ${_incomplete_checkpoints[*]}. After confirming no job is writing to OUTPUT_DIR, remove these exact directories or use a new JOB_NAME/OUTPUT_DIR."
-fi
 if [[ "$WEIGHT_RESUME" == "true" ]]; then
-    if [[ ! -e "$LATEST_CHECKPOINT_POINTER" ]]; then
-        shopt -s nullglob
-        _orphan_checkpoints=("$OUTPUT_DIR"/checkpoint_*)
-        shopt -u nullglob
-        if (( ${#_orphan_checkpoints[@]} > 0 )); then
-            die "found checkpoint artifacts but no latest_checkpoint pointer in $OUTPUT_DIR"
-        fi
+    if ! has_fsdp_checkpoint_artifacts "$OUTPUT_DIR"; then
         echo "resume: no ${LATEST_CHECKPOINT_POINTER}; starting a fresh Stage 2 run"
         WEIGHT_RESUME=false
-    elif [[ ! -f "$LATEST_CHECKPOINT_POINTER" ]]; then
-        die "resume pointer is not a regular file: $LATEST_CHECKPOINT_POINTER"
     else
-        CHECKPOINT_NAME="$(<"$LATEST_CHECKPOINT_POINTER")"
-        [[ "$CHECKPOINT_NAME" =~ ^checkpoint_[0-9]{8}$ ]] \
-            || die "invalid checkpoint name in $LATEST_CHECKPOINT_POINTER: $CHECKPOINT_NAME"
-        RESUME_CHECKPOINT="${OUTPUT_DIR}/${CHECKPOINT_NAME}"
-        require_dir "latest FSDP checkpoint" "$RESUME_CHECKPOINT"
+        RESUME_CHECKPOINT="$(
+            "${PYTHON_BIN}" -m lerobot.common.utils.fsdp_training --resolve-latest "$OUTPUT_DIR"
+        )" || die "no complete FSDP checkpoint is available for resume in $OUTPUT_DIR"
         echo "resume: found ${RESUME_CHECKPOINT}"
     fi
 else

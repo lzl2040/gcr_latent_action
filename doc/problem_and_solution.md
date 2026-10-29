@@ -1057,10 +1057,19 @@ launcher 会校验它是正整数，也允许挂载盘较慢时提高到 120 分
 每个 phase 的开始与总耗时，后续可以区分是 model DCP shard、rank-local optimizer state，
 还是 metadata/publish 阶段变慢，而不是只看到最后的 NCCL timeout。
 
-watchdog 强制终止还可能留下 `.checkpoint_XXXXXXXX.tmp`。该目录没有完成所有 phase，也没有
-原子更新 `latest_checkpoint`，因此不能恢复。launcher 现在启动前显式检测这些隐藏目录并报出
-完整路径；确认旧任务已结束后只能删除对应临时目录或换新的输出目录，不能把它手工发布成正式
-checkpoint。
+watchdog 强制终止还可能留下 `.checkpoint_XXXXXXXX.tmp` 或带随机后缀的 `.tmp`。
+这些目录没有完成所有 phase，不能恢复；启动时会记录并跳过，不再直接阻断 resume。
+自动恢复按步数倒序检查正式保存的 metadata、模型分片字节范围、trainer state 和全部 rank
+optimizer state，跳过缺失、零字节或截断的保存；pointer 丢失或过期也能找到最新完整的一份。
+存在历史保存但没有任何完整 checkpoint 时仍明确报错，不会静默从头训练。
+保存使用独立临时目录，恢复后再次到达中断步数也能重新保存；不完整的正式目录会保留到
+`.checkpoint_XXXXXXXX.incomplete.<随机后缀>`，不删除旧数据、不覆盖完整 checkpoint。
+不要手工把 `.tmp` 发布成正式保存，也不要让两个任务同时写同一输出目录。
+
+`Distributed checkpoint phase 'verify model checkpoint' failed` 中的
+`truncated=['__8_0.distcp (0 < ... bytes)']` 实际是**保存阶段**发现分片没有完整可见，
+不是模型加载报错。这个保护仍保留；修复的是下次启动能够跳过失败残留并从完整保存恢复，
+而不是放过零字节分片或把失败的保存发布出去。
 
 ### 15.5 BlobFuse 上默认 DCP `fsync` 会让完整模型保存长时间无进展
 
@@ -1093,7 +1102,8 @@ collective 序列化和设备搬运。
 4. 显式创建 `FileSystemWriter(sync_files=false, overwrite=false)`；
 5. 每 60 秒输出 phase heartbeat，写盘阶段同时报告可见 shard 数和 GiB；
 6. DCP 返回后由 rank 0 读取 `.metadata`，逐个检查 metadata 引用的 shard 存在且文件长度
-   覆盖最后一个写入区间，全部通过后才保存 optimizer/trainer state 并发布 checkpoint。
+   覆盖最后一个写入区间；长度不足时以实际尾部读取确认是否只是挂载缓存过期，
+   全部通过后才保存 optimizer/trainer state 并发布 checkpoint。
 
 对应开关为：
 
@@ -1107,6 +1117,39 @@ FSDP_CHECKPOINT_HEARTBEAT_SECONDS=60
 且可见性检查通过后才发布目录。但它不提供进程返回后立刻掉电时的 POSIX 强持久性保证。若输出
 目录位于本地 ext4/xfs 而不是 BlobFuse，可设置 `FSDP_CHECKPOINT_SYNC_FILES=true`；不要在
 BlobFuse 卡住时继续单纯增大 `DISTRIBUTED_TIMEOUT_MINUTES`。
+
+#### 15.5.1 写完后仍报零字节：避免提前暴露正式名，并用实际读取区分缓存和截断
+
+`sync_files=false` 后，如果再次频繁出现：
+
+```text
+DCP model shards were not completely visible before checkpoint publication:
+truncated=['__8_0.distcp (0 < ... bytes)']
+```
+
+不能仅凭日志断言远端真实文件一定是零字节。原 DCP writer 直接用最终
+`__<rank>_<index>.distcp` 文件名创建文件；rank 0 的 heartbeat 会在写入尚未完成时
+对其他节点的文件执行 `stat`。BlobFuse/FUSE 属性缓存可能保留此时的零字节或短长度，
+导致所有 writer 已返回后，验证仍反复看到旧大小。
+但同样的异常也可能来自真实写入失败，不能直接关闭验证或忽略短文件。
+
+当前修复不改变 DCP 格式、训练通信拓扑或默认 `fsync=false`：
+
+1. 每个文件先写同目录下唯一的隐藏 `.partial` 名称，成功关闭后才 rename 到 DCP 正式名；
+   optimizer state、trainer state 和 JSON metadata 同样处理。
+2. 验证发现 `stat` 长度不足时，打开文件并读取 DCP metadata 最后一个引用区间的末字节。
+   实际可读才记录 `cached size` warning 并采用已验证的范围；真实 EOF、缺失分片仍会失败。
+3. 保留整个 checkpoint 的发布前检查，以及恢复时跳过不完整保存的行为。
+   写入中断只留下未发布目录中的隐藏残留，不会前移 `latest_checkpoint`。
+
+这不是重新打开 BlobFuse `fsync`，也不是把等待时间无限加长。正常 `stat` 路径没有新增
+全模型重读；只有大小可疑的分片才进行尾部读取。rename 的具体原子性、吞吐和文件关闭后的
+持久性仍依赖挂载实现，不能把它视为对象存储的 POSIX 强持久性保证。
+
+训练端需要重新上传代码并重启；checkpoint I/O marker 和依赖检查均要求 `4`。
+继续使用原输出目录、`WEIGHT_RESUME=true`。序列化格式版本仍为 `1`，
+旧的完整 checkpoint 不需要转换。若实际读取仍失败，应继续检查挂载和存储服务；
+当前修复不会将真正没有写完整的文件发布为有效 checkpoint。
 
 ### 15.6 Torch 2.7 ShardedTensor 无法表示某些 rank 的空 local shard
 
