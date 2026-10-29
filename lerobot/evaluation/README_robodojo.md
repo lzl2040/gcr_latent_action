@@ -1975,6 +1975,22 @@ this entry, without editing the shared simulator. Its final audit explicitly
 validates `stack_bowls_random` results and allows the intentional task change
 relative to ordinary step14k; it does not substitute ordinary-task scores.
 
+Startup has been verified against a real first action chunk. The policy
+and simulator processes are live, and the simulator command selects
+`stack_bowls_random`. Relative to ordinary step14k, saved settings differ
+only in `task`, `output_dir`, and `port`; the checkpoint and model assets
+are unchanged. The first `(32, 20)` action chunk contains only finite
+numeric values and executes ten steps. Layout0's initial robot state
+happens to match the ordinary run exactly, without requiring the object
+scenes to match.
+
+The initial head-camera input was visually inspected: three white bowls
+are visible among substantial distractor clutter on the randomized scene
+surface. This confirms that the first real model input is not the ordinary
+uncluttered bowls scene. Initial camera transforms are recorded and stable.
+`startup_validation.json` records these numerical/configuration checks;
+final native success scores and full-run audits are still pending.
+
 #### High-noise shift5 step14k evaluation (2026-10-29)
 
 The requested checkpoint is
