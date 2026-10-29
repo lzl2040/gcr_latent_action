@@ -1938,6 +1938,43 @@ Raw per-window metrics, predictions, and aggregate results are retained in
 `diagnostics.json`, `sample_*/{actions.npz,metrics.json}`, and
 `aggregate_action_error.json` in the output directory above.
 
+#### Random bowls, shift5 step14k evaluation preparation (2026-10-29)
+
+This diagnostic uses the same verified `step14k` checkpoint as the ordinary
+bowls evaluation below, but selects the native `stack_bowls_random` task.
+Checkpoint file sizes and modification times still match the completed
+step14k provenance. The native seed0 layout files 0/1/2 exist; their bowl
+model IDs are 14/11/11 respectively, with additional clutter in every scene.
+Task-config and layout SHA256 fingerprints are retained in
+`outputs/evaluation/robodojo/runtime_assets/random_bowls_step14k_preflight.json`.
+
+The protocol retains three layouts, seed0, one environment, ten sampling
+steps, 32 predicted actions, ten executed actions, BF16, actual/prediction
+videos, and the passive camera audit. Unlike checkpoint-to-checkpoint
+comparisons, the scenes intentionally differ from ordinary `stack_bowls`;
+robot initial states are recorded but are not required to match. This is
+not the complete 25-layout native task evaluation or the full benchmark.
+Preparation alone is not a task result.
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_high_noise_shift_5/step14k \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls_random --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19141 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_random_delta_high_noise_shift5_step14k_sampling10_20261029_v1
+```
+
+The instrumented run uses the existing session-local camera wrapper around
+this entry, without editing the shared simulator. Its final audit explicitly
+validates `stack_bowls_random` results and allows the intentional task change
+relative to ordinary step14k; it does not substitute ordinary-task scores.
+
 #### High-noise shift5 step14k evaluation (2026-10-29)
 
 The requested checkpoint is
