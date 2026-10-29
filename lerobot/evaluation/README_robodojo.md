@@ -1938,7 +1938,7 @@ Raw per-window metrics, predictions, and aggregate results are retained in
 `diagnostics.json`, `sample_*/{actions.npz,metrics.json}`, and
 `aggregate_action_error.json` in the output directory above.
 
-#### Random bowls, shift5 step14k evaluation preparation (2026-10-29)
+#### Random bowls, shift5 step14k evaluation (2026-10-29)
 
 This diagnostic uses the same verified `step14k` checkpoint as the ordinary
 bowls evaluation below, but selects the native `stack_bowls_random` task.
@@ -1990,6 +1990,59 @@ surface. This confirms that the first real model input is not the ordinary
 uncluttered bowls scene. Initial camera transforms are recorded and stable.
 `startup_validation.json` records these numerical/configuration checks;
 final native success scores and full-run audits are still pending.
+
+The run subsequently completed all three requested layouts. Native success
+is **0/3 (0%)**, versus **2/3 (66.67%)** for the same checkpoint on ordinary
+`stack_bowls`. Random layouts 0/1/2 each scored 0, ran the full 800 control
+steps, and had zero native unstable-episode flags. Wall time was 4415.78s
+(73.60min); mean policy inference and prediction export were 8.1422s and
+5.2051s per chunk. Different episode lengths and shared-machine load mean
+this is not a controlled inference-speed comparison.
+
+All 240 chunks contain finite numerical arrays. Inverse normalization and
+prediction-export action parity are exact; maximum translation, rotation
+matrix, and gripper integration errors are respectively `5.97e-8`,
+`1.02e-7`, and `2.99e-8`. The checkpoint's recorded sizes/mtimes and random
+task-config/layout SHA256 fingerprints remain unchanged. The final CPU
+audit initially lacked the repository `PYTHONPATH`; rerunning only that
+audit with the repository import path passed, without restarting inference.
+
+All nine actual videos are 640x480 at 25 FPS, with 801 frames each.
+There are also 720 prediction videos and 7920 exported PNGs. Fifty-one
+passive camera snapshots show zero head/world or within-layout static-scene
+transform drift, correct render bindings, and wrist-to-EE transform errors
+below `3.3e-7`. All 240 conditioning head thumbnails, three sampled native
+head timelines, and nine final native views were visually reviewed: the
+bowls remain separate in all three scenes. Arms move, retract, and rotate
+without completing stacking; some later right-wrist views face the room
+or ceiling, consistent with the arm pose rather than camera drift.
+
+Target tracking is also worse than in the ordinary run. Left/right
+median position errors are 3.24/4.50mm and maxima 62.71/548.94mm.
+The largest right-arm deviation occurs in layout0 at control590→600;
+this measures commanded target versus subsequent physical EE position,
+not denoising or demonstration error. The numerical adapter checks pass,
+but that does not establish that the generated targets are reachable or
+that physical tracking is adequate.
+
+These three cases show a substantial drop on the combined randomization
+(bowl models, clutter, and scene appearance), not an isolated causal test
+of any one factor or a reliable full-task success-rate estimate.
+Final reports are `final_adapter_audit.json` and
+`camera_audit/camera_integrity_report.json` under the output directory.
+Actual videos are under:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_random_delta_high_noise_shift5_step14k_sampling10_20261029_v1/
+  simulator/eval_result/RoboDojo/stack_bowls_random/Qwen3VLMoT/arx_x5/
+    0_action_type=ee,simulator=isaacsim6/
+      stack_bowls_random_delta_high_noise_shift5_step14k_sampling10_20261029_v1/
+        episode_000000{0,1,2}_cam_{head,left_wrist,right_wrist}_fail.mp4
+```
+
+Prediction videos remain under `policy/predictions/`, and the reviewed
+contact sheets are under `diagnostics/`. Owned policy/simulator processes
+have exited; no unrelated jobs were stopped.
 
 #### High-noise shift5 step14k evaluation (2026-10-29)
 
