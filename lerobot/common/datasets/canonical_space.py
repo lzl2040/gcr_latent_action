@@ -687,9 +687,9 @@ PHYSICAL_SPECS: dict[str, dict] = {
     # simulation
     "robodojo": {
         # TO DO: 20-50 is 10 finger xyz
-        "action": [_seg("action.ee_ort6d_pos", 0, 20, 0)],
+        "action": [_seg("delta_action.ee_ort6d_pos", 0, 20, 0)],
         "state": [_seg("observation.ee_ort6d_pos", 0, 20, 0)],
-        "action_padding": "repeat_last",
+        # "action_padding": "repeat_last", # because offical robodojo is absolute position
     },
     "delta_robodojo_stack_bowl": {
         # TO DO: 20-50 is 10 finger xyz
