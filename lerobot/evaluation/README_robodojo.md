@@ -1977,6 +1977,18 @@ OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_
 The command above is the standard entry; this instrumented run uses the
 existing session-local camera wrapper without changing the shared simulator.
 
+The instrumented evaluation started successfully: the policy server loaded
+12.585B parameters, enabled only joint prediction, and used ten denoising
+steps. The first native action chunk is finite with shape `(32, 20)`.
+Settings differ from step9k only in checkpoint, output directory, and port;
+layout0 initial state matches step9k exactly. The initial head camera has
+zero transform drift, and visual inspection shows the expected table,
+three bowls, and robot framing. Evidence is retained in
+`startup_validation.json` and `camera_audit/`. The detached run is still
+in progress at this startup check; no success or score result is available.
+Numerical, video, and passive-camera audits are chained automatically
+after native evaluation completes.
+
 #### High-noise shift5 step9k evaluation (2026-10-28)
 
 The newly uploaded checkpoint is
