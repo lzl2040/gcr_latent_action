@@ -1938,7 +1938,7 @@ Raw per-window metrics, predictions, and aggregate results are retained in
 `diagnostics.json`, `sample_*/{actions.npz,metrics.json}`, and
 `aggregate_action_error.json` in the output directory above.
 
-#### High-noise shift5 step14k evaluation preparation (2026-10-29)
+#### High-noise shift5 step14k evaluation (2026-10-29)
 
 The requested checkpoint is
 `/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_high_noise_shift_5/step14k`.
@@ -1988,6 +1988,46 @@ three bowls, and robot framing. Evidence is retained in
 in progress at this startup check; no success or score result is available.
 Numerical, video, and passive-camera audits are chained automatically
 after native evaluation completes.
+
+The run subsequently completed uninterrupted in **1871.12 seconds
+(31.19 minutes)**. The matched checkpoint comparison is:
+
+| Metric | Shift5 step7k | Shift5 step9k | Shift5 step14k |
+|---|---|---|---|
+| Sampling steps | 10 | 10 | 10 |
+| Full success | 0/3 | 1/3 (33.33%) | **2/3 (66.67%)** |
+| Layout 0/1/2 success | no / no / no | no / no / yes | **yes / no / yes** |
+| Layout 0/1/2 normalized scores | 0 / 0 / 0 | 0.15 / 0 / 1.0 | **1.0 / 0 / 1.0** |
+| Native aggregate score (0--100) | 0.0 | 38.33 | **66.67** |
+| Layout 0/1/2 control steps | 800 / 800 / 800 | 800 / 800 / 367 | **495 / 800 / 381** |
+
+Layout0 now completes the stack, and layout2 remains successful. The final
+native head frames show nested bowls after release in both successful
+layouts. Layout1 still leaves the bowls separate and reaches the 800-step
+limit. All three native unstable-episode counts are zero. This demonstrates
+improvement on these three fixed layouts only, not full-benchmark success
+or statistical evidence of a general improvement.
+
+All 169 action chunks are finite, pass inverse-normalization and cumulative
+delta-integration checks, and exactly match their prediction action exports.
+Inverse-normalization error is zero; integration errors are below `1e-7`.
+Initial states match step9k exactly in every layout. All nine actual videos
+decode at 640x480/25 FPS, with 496/801/382 frames per layout/view. The run
+also saves 507 prediction videos and 5,577 prediction PNGs. All 35 passive
+camera snapshots have stable head/scene transforms and correct render
+bindings; wrist-to-EE transform errors remain below `3.1e-7`. Source
+checkpoint sizes and modification times are unchanged throughout the run.
+
+Visual review covers all 169 conditioning head-image thumbnails, sampled
+native head-video contact sheets, and final head/left-wrist/right-wrist
+frames for all layouts; see `diagnostics/native_final_frames.jpg`.
+The persisted `final_adapter_audit.json` records numerical, camera, and
+visual checks. Previous step9 target versus next measured anchor has left
+median/max tracking discrepancy 0.24/4.18 mm and right 0.11/13.42 mm;
+these are physical tracking checks, not demonstration prediction errors.
+Mean model inference and prediction export times are 4.43 s and 3.72 s
+per chunk. Early successful termination and different shared-machine load
+both affect wall time; do not attribute the speed difference to weights.
 
 #### High-noise shift5 step9k evaluation (2026-10-28)
 
