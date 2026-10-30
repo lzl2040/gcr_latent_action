@@ -2,10 +2,10 @@
 
 更新日期：2026-10-30。
 
-本文汇总已完成的有效正式评测，共 109 份结果、18,800 次 rollout：
-85 份完整 suite 评测、17,000 次，以及 24 份已完成的任务子集评测、1,800 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 67 份、10,400 次，
-包括 43 份完整 suite 和 24 份任务子集，分开记录。
+本文汇总已完成的有效正式评测，共 111 份结果、18,940 次 rollout：
+85 份完整 suite 评测、17,000 次，以及 26 份已完成的任务子集评测、1,940 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 69 份、10,540 次，
+包括 43 份完整 suite 和 26 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -1662,6 +1662,87 @@ Spatial 上层抽屉取碗从 10/20 提升至 13/20，但仍失败 7 次；
 | Spatial | `5c8d81c2d25049ffa5d140751b3bd4ea4bee561b46c5b55dedeed40091540c0c` |
 | Object | `905d321ff7fdcf55ca145464e70e4ee191dfca4a8004431bc16048eea917a9f3` |
 
+### 1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5：14k，困难任务重新评测
+
+使用同一实验的 `step14k/model`，只测 Goal `[0, 3, 4, 9]`（80 次）和
+Spatial `[4, 6, 9]`（60 次），每任务使用前 20 个固定初态，共 140 次 rollout。
+不测 Object；两份结果均为任务子集，不是完整 suite 或三套 benchmark 成绩。
+首次 14k 评测按用户要求暂停，随后终止进程以释放显存；
+用户要求继续后，本轮以 `weak_tasks_restart` 标记启动全新进程，从头完成全部 140 次。
+未从原暂停点续跑，也未合并首次的部分 rollout；中断产物保留，不计入正式结果数。
+
+32 个 BF16 DCP 分片通过 tensor schema 和 storage 范围检查，
+共 2,560 个 tensor、12,585,124,197 个元素。
+抽查的三个可训练参数 SHA256 与中断前的 14k 完全相同，且均与同实验 12k 不同。
+预检核验可读取的 12k 权重指纹、保存的结果、manifest、identity 和输入；
+策略、训练配置、运行时代码及所选 suite 的归一化指纹与 12k 一致。
+训练噪声仍为 `shifted_uniform`、`time_sampling_shift=5.0`，
+保存的 Beta `(0.25, 0.25)` 参数不参与当前分布采样，未对推理网格施加训练 shift。
+上传内容没有训练 metadata，14k 步数按目录标注，训练 `world_size` 未独立核验。
+
+Goal 使用物理 GPU 3、Spatial 使用物理 GPU 2，两个独立进程并行。
+沿用 BF16、`primary` + `wrist`、RGB 256、预测 32 步、执行 10 步、
+Flow 20 步，以及 Goal 300、Spatial 220 步控制上限。
+每套进程只在启动时设置一次 `seed=0`，后续任务、episode 和 replanning 不 reseed。
+两套均已有真实 rollout 的启动核验时间为 `2026-10-30T10:55:37Z`，
+最终完成汇总时间为 `2026-10-30T12:02:45Z`。
+两个 worker 均正常退出且没有重试；140 次唯一任务/固定初态覆盖、有限 7D 动作、
+失败视频、实际设置和输入指纹全部核验通过。
+
+主比较只取 12k 中相同的困难任务，不将本轮 140 次与 12k 的 340 次混合总分比较：
+
+| 匹配范围 | 同实验 12k | 本轮 14k | 变化 |
+| --- | --- | --- | --- |
+| Goal，任务 0/3/4/9 | 93.75%（75/80） | 83.75%（67/80） | -10.00 个百分点 |
+| Spatial，任务 4/6/9 | 73.33%（44/60） | 65.0%（39/60） | -8.33 个百分点 |
+| 所选 7 任务合计 | 85.0%（119/140） | **75.71%（106/140）** | -9.29 个百分点 |
+
+另按此前用户要求核对同名义 epoch 的旧 v3 `wo_rotate` 14k 参考。
+两版保存的每卡 batch 均为 16、梯度累积为 1，`data_mix="libero"`、
+`dataset_size_one_epoch=273465`。
+**若两版均为 4 节点 × 8 GPU，则两者名义样本曝光量均为 7,168,000，
+约 26.21 个 epoch。** 两者均缺训练 metadata，以上对齐依赖均使用 32 卡的前提，
+不能仅凭 32 个 DCP 分片独立确认。
+旧 v3 的汇总和两份匹配任务原始结果 SHA256 已重新核验；
+只比较其 Goal80 + Spatial60，不纳入其 Object200。
+
+| 匹配范围 | 旧 v3 `wo_rotate` 14k | 本轮 v4 shift5 14k | 数值差异 |
+| --- | --- | --- | --- |
+| Goal，任务 0/3/4/9 | 85.0%（68/80） | 83.75%（67/80） | -1.25 个百分点 |
+| Spatial，任务 4/6/9 | 81.67%（49/60） | 65.0%（39/60） | -16.67 个百分点 |
+| 所选 7 任务合计 | 83.57%（117/140） | **75.71%（106/140）** | -7.86 个百分点 |
+
+逐任务结果如下，每项均为成功次数 / 20：
+
+| Suite | 任务编号与描述 | v4 12k | 本轮 v4 14k | 旧 v3 14k |
+| --- | --- | --- | --- | --- |
+| Goal | 0：打开中层抽屉 | 19/20 | 19/20 | 18/20 |
+| Goal | 3：打开上层抽屉并放碗 | 17/20 | 16/20 | 16/20 |
+| Goal | 4：碗放到柜顶 | 20/20 | 19/20 | 19/20 |
+| Goal | 9：酒瓶放酒架 | 19/20 | 13/20 | 15/20 |
+| Spatial | 4：上层抽屉取碗 | 13/20 | 8/20 | 12/20 |
+| Spatial | 6：cookie box 旁取碗 | 17/20 | 17/20 | 19/20 |
+| Spatial | 9：木柜上取碗 | 14/20 | 14/20 | 18/20 |
+
+本轮共失败 34/140 次：Goal 13 次、Spatial 21 次，比同实验 12k 多失败 13 次。
+其中酒瓶放酒架从 19/20 降至 13/20，上层抽屉取碗从 13/20 降至 8/20，
+两项合计减少 11 次成功，是相对 12k 的主要下降来源。
+相对旧 v3 14k，合计少成功 11 次，其中 Spatial 少成功 10 次。
+因此当前同名义 epoch 的这组困难任务结果不支持 shift5 版更好的结论。
+没有额外回放诊断，不能只凭成功率归因具体失败阶段、过拟合或训练噪声设置。
+连续 RNG 下，相同初态和启动 seed 不等于逐 trial 噪声配对；
+没有多随机种子重复，以上是固定评测条件下的观察，不能据此认定稳定优劣。
+
+本轮工件前缀为
+`libero_v4_4nodes_8gpu_wo_rotate_high_noise_shift5_14k_weak_tasks_restart_run_seeded`；
+汇总 SHA256 为 `6fa43a1c11d746151170e7449bd6755f6e564c8faf7d8c9683b7f978bb0bb737`。
+原始结果文件的 SHA256：
+
+| Suite | `results.json` SHA256 |
+| --- | --- |
+| Goal | `cfb327a16fd2b4f4ec31ba3eaf515329c59c9561e52731439aac3bce6f394360` |
+| Spatial | `58964bb9e752fe0f753a3e1d63f8e7e844c3b1810ddf424ecd54f66c4e5767da` |
+
 ### 误拷权重评测：曾标作 8k（不计入正式结果）
 
 **2026-10-24 用户确认 `step8k/model` 拷贝了错误权重。**
@@ -1745,6 +1826,7 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1027_v3_4nodes_8gpu_wo_rotate`（26k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1027_v3_4nodes_8gpu_wo_rotate/step26k/model` |
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5`（8k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5/step8k/model` |
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5`（12k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5/step12k/model` |
+| `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5`（14k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5/step14k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -1874,6 +1956,8 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5` | 12k | Goal（任务 0/3/4/9，80 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift5_step12k_weak_tasks_run_seeded_goal_20trials_20261030/results.json` |
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5` | 12k | Spatial（任务 4/6/9，60 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift5_step12k_weak_tasks_run_seeded_spatial_20trials_20261030/results.json` |
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5` | 12k | Object（全套，200 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift5_step12k_weak_tasks_run_seeded_object_20trials_20261030/results.json` |
+| `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5` | 14k | Goal（任务 0/3/4/9，重新评测，80 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift5_step14k_weak_tasks_restart_run_seeded_goal_20trials_20261030/results.json` |
+| `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5` | 14k | Spatial（任务 4/6/9，重新评测，60 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift5_step14k_weak_tasks_restart_run_seeded_spatial_20trials_20261030/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 
