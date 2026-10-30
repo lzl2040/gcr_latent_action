@@ -1938,7 +1938,7 @@ Raw per-window metrics, predictions, and aggregate results are retained in
 `diagnostics.json`, `sample_*/{actions.npz,metrics.json}`, and
 `aggregate_action_error.json` in the output directory above.
 
-#### Beta(0.5, 0.5) step12k evaluation preparation (2026-10-30)
+#### Beta(0.5, 0.5) step12k evaluation (2026-10-30)
 
 The source is `step12k` in the same
 `/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5`
@@ -1990,6 +1990,52 @@ visually inspected and shows the same ordinary uncluttered three-bowl
 scene. `startup_validation.json`, the initial camera snapshot, and actual/
 prediction video outputs are being retained. At this check the run is
 still active; final success scores are pending.
+
+The run subsequently completed all three layouts with **0/3 successful
+episodes**, exactly matching beta step10k's native result. Layouts0/1/2
+scored **0.15 / 0 / 0.15**, for an aggregate **10.0/100**. All three ran
+800 control steps with zero native unstable-episode flags. Wall time was
+3920.84s (65.35min); mean inference and prediction export were 6.9153s and
+5.5515s per chunk. This is not a controlled runtime comparison.
+
+All 240 chunks are finite. Inverse normalization and prediction-export
+action parity are exact; maximum translation, rotation-matrix, and gripper
+integration errors are below `6.0e-8`, `9.5e-8`, and `3.0e-8` respectively.
+Source files still match their recorded sizes/mtimes. All three initial
+robot states match beta step10k exactly. Fifty-one camera snapshots show
+zero head/static-scene transform drift, correct render-product bindings,
+and wrist-to-EE transform errors below `3.5e-7`.
+
+All nine actual videos are 640x480 at 25 FPS, with 801 frames each;
+720 prediction videos and 7920 PNGs were also saved. Visual review covered
+all 240 conditioning head thumbnails, three sampled native head timelines,
+and nine final native views. The policy approaches and transports bowls.
+Layouts 0/2 retain a nested pair, but the third bowl remains separate near/
+in the left gripper instead of completing a released three-bowl stack.
+Layout 1 brings bowls together with tipping/contact but does not finish
+stacking. The scores match step10k, not necessarily its exact trajectories.
+
+Left/right median target-tracking errors were 0.158/0.489mm and maxima
+2.137/47.461mm. The right-arm maximum occurs in layout 2 at control510→520.
+Its maximum is smaller than step10k's 117.757mm, but the commands differ,
+so this alone does not establish improved policy accuracy. No task-score
+improvement was observed on these three layouts; this is not evidence of
+a full-benchmark training plateau.
+
+Final reports are `final_adapter_audit.json` and
+`camera_audit/camera_integrity_report.json`. Actual videos are under:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_delta_beta05_step12k_sampling10_20261030_v1/
+  simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/
+    0_action_type=ee,simulator=isaacsim6/
+      stack_bowls_delta_beta05_step12k_sampling10_20261030_v1/
+        episode_000000{0,1,2}_cam_{head,left_wrist,right_wrist}_fail.mp4
+```
+
+Prediction videos remain under `policy/predictions/`; reviewed contact
+sheets are under `diagnostics/`. Owned policy/simulator processes exited
+normally; no unrelated jobs were stopped.
 
 #### Beta(0.5, 0.5) step10k evaluation (2026-10-30)
 
