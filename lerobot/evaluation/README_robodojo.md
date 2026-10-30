@@ -1938,6 +1938,49 @@ Raw per-window metrics, predictions, and aggregate results are retained in
 `diagnostics.json`, `sample_*/{actions.npz,metrics.json}`, and
 `aggregate_action_error.json` in the output directory above.
 
+#### Beta(0.5, 0.5) step12k evaluation preparation (2026-10-30)
+
+The source is `step12k` in the same
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5`
+experiment. Policy and training config SHA256 fingerprints match the
+completed beta step10k evaluation exactly; sampling remains pure
+Beta(0.5, 0.5), not shifted-uniform or a uniform mixture.
+
+Preflight passed for 19 files, including 16 DCP shards, totaling
+25,200,777,625 bytes. Source files remained stable throughout SHA256
+verification; all 2560 tensor keys/shapes/dtypes match step10k, and all
+16,908 storage references fit their shard files. All 16 weight-shard hashes
+differ from step10k. The manifest is saved in
+`outputs/evaluation/robodojo/runtime_assets/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5/checkpoint_provenance_step12k.json`.
+No full checkpoint duplicate is made.
+
+The matched protocol is ordinary **`stack_bowls`, not random**: layouts
+0/1/2, seed0, one environment, sampling10, prediction32/execution10, BF16,
+actual/prediction videos, and passive camera auditing. The reference is
+the same experiment's step10k (0/3 success, native aggregate score10/100).
+Only three layouts are requested, not the full native task benchmark;
+preparation alone is not an evaluation result.
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5/step12k \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19152 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_beta05_step12k_sampling10_20261030_v1
+```
+
+The instrumented run uses the existing passive camera wrapper without
+changing shared simulator tasks, cameras, or physics. Final audits compare
+against beta step10k and retain checkpoint stability, initial-state,
+numerical, video, and camera checks. Shared-machine load prevents causal
+runtime comparisons.
+
 #### Beta(0.5, 0.5) step10k evaluation (2026-10-30)
 
 The requested source is
