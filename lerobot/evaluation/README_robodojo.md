@@ -1981,6 +1981,16 @@ against beta step10k and retain checkpoint stability, initial-state,
 numerical, video, and camera checks. Shared-machine load prevents causal
 runtime comparisons.
 
+Startup is verified with a real finite `(32, 20)` action chunk executing
+ten steps. The live policy and simulator select this exact step12k
+checkpoint and ordinary `stack_bowls`. Saved evaluation settings differ
+from beta step10k only in checkpoint, output directory, and port; layout0's
+initial robot state matches exactly. The initial head-camera input was
+visually inspected and shows the same ordinary uncluttered three-bowl
+scene. `startup_validation.json`, the initial camera snapshot, and actual/
+prediction video outputs are being retained. At this check the run is
+still active; final success scores are pending.
+
 #### Beta(0.5, 0.5) step10k evaluation (2026-10-30)
 
 The requested source is
