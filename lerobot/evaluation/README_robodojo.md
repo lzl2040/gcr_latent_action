@@ -1295,6 +1295,60 @@ under the output directory above. Preparation commit: `81d5668`.
 Evaluation remains running at this startup check; final success scores
 and complete audits are not yet available.
 
+The run subsequently completed with **0/3 successful episodes**, all
+three native scores **0/0/0**, aggregate **0/100**. Layouts 0/1/2 each
+reached 800 control steps with zero unstable-physics flags.
+
+| Ordinary stack_bowls checkpoint | Success | Layout 0/1/2 scores | Aggregate /100 |
+|---|---|---|---|
+| Earlier high_noise_shift5 step14k | 2/3 | 1.0 / 0.0 / 1.0 | 66.67 |
+| This robodojo_decay_20k step14k | 0/3 | 0.0 / 0.0 / 0.0 | 0.00 |
+
+This checkpoint performs worse on these three fixed layouts, not a
+population-level ranking or proof that mixed noise caused the failures.
+Wall time was 2922.56 seconds (48.71 minutes); mean inference and
+prediction-video export were 4.944 and 3.983 seconds per chunk.
+
+All 240 chunks are finite and pass inverse normalization, independent
+32-step physical integration and prediction-export action parity checks.
+Denormalization error is zero; translation, rotation-matrix and gripper
+errors are below 6.0e-8, 9.8e-8 and 3.0e-8. All three initial measured
+states match the earlier shift5 step14k exactly. Left/right target-tracking
+median errors are 0.070/0.180 mm and maxima 1.700/4.271 mm; these measure
+command following, not expert-action prediction quality.
+
+All nine actual videos decode at 640x480/25 FPS with 801 frames each;
+720 prediction videos and 7920 prediction PNGs are saved. All 51 passive
+camera snapshots pass with zero head/static-scene transform drift,
+correct render bindings and wrist-to-EE errors below 4.14e-7.
+Post-run SHA256 hashes of all 19 source files match the preflight manifest.
+The evaluation and chained auditor exited successfully; policy port
+19168 is closed.
+
+Visual review covered all 240 conditioning-head thumbnails, three native
+head-video timelines/final frames and six final native wrist snapshots.
+Layout0 reaches the right bowl then makes little progress near its rim;
+layout1 spends a long time at the right bowl and later approaches the
+outer bowls with both arms; layout2 moves/tips the right bowl toward the
+center before approaching the left bowl. No valid nested stack forms.
+The reviewed inputs/cameras look coherent; low tracking errors do not
+mean correct learned task decisions.
+
+Final report: the output's `final_adapter_audit.json`; camera report:
+`camera_audit/camera_integrity_report.json`. Complete conditioning sheets:
+`diagnostics/layout_{0,1,2}_all_conditioning_heads.jpg`; native timelines:
+`diagnostics/episode_000000{0,1,2}_cam_head_fail_contact_sheet.jpg`;
+final wrist snapshots: `camera_audit/layout_{0,1,2}_step_0800_cam_{left,right}_wrist.png`.
+Video/result subdirectory:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_decay20k_step14k_sampling10_20261030_v1/
+```
+
+Head videos are `episode_000000{0,1,2}_cam_head_fail.mp4`, with matching
+left/right wrist videos. Matched model futures remain under
+`policy/predictions/reset_*/env_000/replan_*_step_*/{primary,secondary,wrist}.mp4`.
+
 ## Evaluating a delta-trained stack-bowls checkpoint
 
 Use the dedicated entry, which defaults to the supplied
