@@ -1938,6 +1938,52 @@ Raw per-window metrics, predictions, and aggregate results are retained in
 `diagnostics.json`, `sample_*/{actions.npz,metrics.json}`, and
 `aggregate_action_error.json` in the output directory above.
 
+#### Beta(0.5, 0.5) step10k evaluation preparation (2026-10-30)
+
+The requested source is
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5/step10k`.
+Its saved policy selects pure `beta` sampling with alpha=beta=0.5 and
+sigma bounds `[0.001, 0.999]`. The saved `time_sampling_shift=5` is inactive
+for this sampler; `time_sampling_beta_probability=0.5` only affects
+`mixed`, so this is not a 50% uniform mixture.
+
+The protocol uses ordinary **`stack_bowls`, not `stack_bowls_random`**:
+layouts0/1/2, seed0, one environment, ten inference steps, prediction32/
+execution10, BF16, actual/prediction videos, and passive camera auditing.
+Source files are read directly without duplicating the full checkpoint.
+SHA256/file-stability and DCP tensor/storage checks are recorded in
+`outputs/evaluation/robodojo/runtime_assets/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5/checkpoint_provenance_step10k.json`.
+
+Relative to the shift5 policy config, the differences are the noise
+distribution, beta alpha/beta parameters, and scheduler plateau100 rather
+than200. Comparisons with ordinary shift5 step14k also change checkpoint
+update, so they cannot isolate the effect of the noise distribution.
+This is a three-layout diagnostic, not the complete native task benchmark.
+Preparation alone is not an evaluation result.
+
+```bash
+conda activate wam
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5/step10k \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19150 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_beta05_step10k_sampling10_20261030_v1
+```
+
+The instrumented run uses the existing session-local passive camera wrapper
+around this entry; no shared simulator task, camera, or physics code changes
+are required.
+
+Preflight passed: 19 source files (including 16 DCP shards), totaling
+25,200,777,625 bytes, remained stable through SHA256 verification. All
+2560 tensor keys/shapes/dtypes match the previously evaluated architecture,
+and all 16,908 storage references fit within their shard files.
+
 #### Random bowls, shift5 step14k evaluation (2026-10-29)
 
 This diagnostic uses the same verified `step14k` checkpoint as the ordinary
