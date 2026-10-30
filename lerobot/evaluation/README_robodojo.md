@@ -1226,6 +1226,56 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 `--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
 conftest; the dataset tools do not require robot hardware or a simulator.
 
+## Qwen robodojo_decay_20k step14k ordinary bowls (2026-10-30)
+
+This evaluates **our Qwen3VL-MoT, not PI05**, from
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_decay_20k/step14k`.
+The requested scope is ordinary `stack_bowls` only, not random.
+Changes and results belong to `qwen3vl_mot_pretrained_generation`.
+
+Preflight verified all 19 source files (16 DCP shards), totaling
+25,200,777,591 bytes, with stable sizes/mtimes during SHA256 hashing.
+All 2560 tensor keys/shapes/dtypes match the previously evaluated Qwen
+architecture, and all 16,908 storage references fit their shard files.
+The saved training data mix is `delta_robodojo_stack_bowl`. Source weights
+are loaded directly; no full-size checkpoint duplicate is made.
+Manifest:
+`outputs/evaluation/robodojo/runtime_assets/robodojo_decay_20k/checkpoint_provenance_step14k.json`.
+
+This experiment's saved noise distribution is **mixed: 50% Beta(1.5,1.0)
+and 50% uniform** over the saved sigma range. It is not pure Beta(0.5,0.5)
+or shifted-uniform; the saved shift5 field is inactive in mixed mode.
+Evaluation does not change this configuration. Saved inference steps are
+20, overridden to 10 to match earlier diagnostics.
+
+Use layouts 0/1/2, seed0, one environment, BF16, sampling10,
+prediction32/execution10, three actual cameras, matched future-prediction
+videos, and passive camera auditing. Compare with the earlier shift5
+step14k ordinary run (2/3, aggregate66.67/100), but these are different
+training experiments: matched evaluation alone cannot isolate the effect
+of the training noise distribution. Three layouts are diagnostic, not a
+full-benchmark success-rate estimate.
+
+```bash
+conda activate wam
+cd /home/jianf/lzl_project/gcr_latent_action
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_decay_20k/step14k \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19168 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_decay20k_step14k_sampling10_20261030_v1
+```
+
+The instrumented session uses the existing passive camera wrapper without
+editing shared simulator sources. Full numerical/action-export/video/
+camera checks and a post-run source rehash are chained automatically.
+Preparation is verified; actual startup and final results remain pending.
+
 ## Evaluating a delta-trained stack-bowls checkpoint
 
 Use the dedicated entry, which defaults to the supplied
