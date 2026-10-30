@@ -1984,6 +1984,16 @@ Preflight passed: 19 source files (including 16 DCP shards), totaling
 2560 tensor keys/shapes/dtypes match the previously evaluated architecture,
 and all 16,908 storage references fit within their shard files.
 
+Startup is verified: the policy restored this exact `step10k/model`,
+reports BF16 and ten denoising steps, and the live simulator command selects
+ordinary `stack_bowls`. Relative to ordinary shift5 step14k, saved evaluation
+settings differ only in checkpoint, output directory, and port. The first
+`(32, 20)` action chunk is finite and executes ten steps; layout0's initial
+robot state matches exactly. The initial head-camera input was visually
+inspected and shows three bowls on the ordinary uncluttered wooden table.
+`startup_validation.json` and the initial passive camera snapshot are saved.
+The evaluation remains running; no final success result is available yet.
+
 #### Random bowls, shift5 step14k evaluation (2026-10-29)
 
 This diagnostic uses the same verified `step14k` checkpoint as the ordinary
