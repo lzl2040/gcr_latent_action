@@ -1276,6 +1276,25 @@ editing shared simulator sources. Full numerical/action-export/video/
 camera checks and a post-run source rehash are chained automatically.
 Preparation is verified; actual startup and final results remain pending.
 
+The actual native rollout subsequently started successfully. The loader
+restored this exact `robodojo_decay_20k/step14k` DCP checkpoint and reports
+12.585B parameters, joint prediction, BF16 and ten denoising steps. First
+real simulator inference took 4.976 seconds; prediction export took
+4.274 seconds. The returned `(32,20)` physical action chunk is finite,
+and the native simulator has advanced beyond its first ten-action reply.
+The policy service is responsive on port 19168.
+
+Complete evaluation settings differ from the earlier shift5 step14k only
+in checkpoint, output directory and port; layout0's initial measured state
+matches exactly. All three actual conditioning views were visually checked:
+ordinary white bowls on the wooden table with correct head/left-wrist/
+right-wrist roles. Matched prediction videos and the initial passive
+camera snapshot are persisted. Evidence: `startup_validation.json`,
+`policy/chunks/inference.jsonl`, `policy/predictions/` and `camera_audit/`
+under the output directory above. Preparation commit: `81d5668`.
+Evaluation remains running at this startup check; final success scores
+and complete audits are not yet available.
+
 ## Evaluating a delta-trained stack-bowls checkpoint
 
 Use the dedicated entry, which defaults to the supplied
