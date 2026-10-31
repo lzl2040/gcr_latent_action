@@ -1271,6 +1271,23 @@ The instrumented session uses the existing passive camera wrapper and
 chains the CPU auditor without editing shared simulator sources.
 Preparation is verified; actual startup and final results remain pending.
 
+The actual native rollout subsequently started successfully. The loader
+restores this exact Beta17k DCP checkpoint and reports 12.585B parameters,
+BF16, joint prediction and ten denoising steps. First real simulator
+inference took 5.581 seconds; matched prediction export took 5.056 seconds.
+The first `(32,20)` physical action chunk is finite and configured for
+ten-action execution; policy port19172 is responsive.
+
+Complete saved evaluation settings differ from Beta12k only in
+checkpoint, output directory and port. Layout0's initial measured state
+matches exactly. All three actual conditioning views were visually
+checked: ordinary white bowls/wooden table and expected head/left-wrist/
+right-wrist roles. The first passive camera snapshot and three matched
+future videos are persisted. Evidence is in the output's
+`startup_validation.json`, `policy/chunks/`, `policy/predictions/` and
+`camera_audit/`. Preparation commit: `70ccbf4`. Final success scores and
+full audits remain pending at this startup check.
+
 ## Qwen robodojo_decay_20k step17k ordinary bowls (2026-10-31)
 
 Evaluate our Qwen3VL-MoT checkpoint
