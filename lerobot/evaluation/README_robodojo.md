@@ -1288,6 +1288,68 @@ future videos are persisted. Evidence is in the output's
 `camera_audit/`. Preparation commit: `70ccbf4`. Final success scores and
 full audits remain pending at this startup check.
 
+The run subsequently completed with **1/3 success (33.33%)** and native
+aggregate **38.33/100**.
+
+| Layout | Success | Native score | Control steps | Visual outcome |
+|---|---|---|---|---|
+| 0 | Yes | 1.00 | 520 | Right arm stacks two bowls, then left arm adds/releases the third. |
+| 1 | No | 0.00 | 800 | Bowls brought together, but remain separate without nesting. |
+| 2 | No | 0.15 | 800 | Two-bowl partial stack remains; third bowl moves outside the head view. |
+
+| Same Beta(0.5,0.5) experiment | Success | Layout0/1/2 scores | Aggregate /100 |
+|---|---|---|---|
+| step10k | 0/3 | 0.15 / 0.00 / 0.15 | 10.00 |
+| step12k | 0/3 | 0.15 / 0.00 / 0.15 | 10.00 |
+| step17k | 1/3 | 1.00 / 0.00 / 0.15 | 38.33 |
+
+Step17k improves on these three fixed layouts, not a reliable full-benchmark
+ranking. All initial measured states match Beta12k exactly, and saved
+evaluation settings differ only in checkpoint/output directory/port.
+Wall time was 2581.73 seconds (43.03 minutes); mean inference and
+prediction-video export were 4.777 and 4.123 seconds per chunk.
+Shared-machine load prevents causal runtime comparisons.
+
+All 212 chunks are finite and pass inverse normalization, independent
+32-step physical integration and exact prediction-export action parity.
+Denormalization error is zero; translation/rotation-matrix/gripper errors
+are below 6.0e-8/1.06e-7/3.0e-8. All nine actual videos decode at
+640x480/25 FPS, with 521 frames per layout0 view and 801 per layout1/2
+view, matching actual control steps plus the initial frame.
+There are 636 prediction videos and 6996 prediction PNGs.
+
+All 45 passive camera snapshots pass: zero head/static-scene transform
+drift, correct render bindings and wrist-to-EE errors below 3.94e-7.
+All 19 source-file SHA256 hashes match the preflight manifest.
+Native physics-instability flags are zero. However, physical tracking
+is not perfect: left/right median errors are 0.191/0.514 mm and maxima
+196.996/155.218 mm. Both maxima occur in layout2, at control360->370
+and660->670 respectively. These are command-following discrepancies,
+not expert-action prediction errors; the adapter/camera checks do not
+eliminate contact, reachability or controller limitations.
+
+Visual review covered all 212 conditioning-head thumbnails, three native
+head-video timelines and exact final frames from all nine actual videos.
+The successful final head frame shows three nested bowls with the
+grippers withdrawn. The ordinary scene/camera roles remain coherent;
+late layout2 wrist views point away from the table as the arms move,
+not because of camera-binding or transform drift.
+
+Final report: the output's `final_adapter_audit.json`; camera report:
+`camera_audit/camera_integrity_report.json`; final-view overview:
+`diagnostics/native_final_frames.jpg`. Conditioning sheets and native
+timelines are under `diagnostics/`. Video/result subdirectory:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_beta05_step17k_sampling10_20261031_v1/
+```
+
+Successful head video: `episode_0000000_cam_head_success.mp4`;
+layouts1/2: `episode_000000{1,2}_cam_head_fail.mp4`, each with matching
+left/right wrist videos. Model futures remain under `policy/predictions/`.
+The evaluator/chained auditor exited successfully and policy port19172
+is closed.
+
 ## Qwen robodojo_decay_20k step17k ordinary bowls (2026-10-31)
 
 Evaluate our Qwen3VL-MoT checkpoint
