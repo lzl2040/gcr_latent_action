@@ -1302,6 +1302,53 @@ Its eventual failure will stop before requesting layout1, while success
 will continue without restarting the policy. Startup evidence:
 `startup_validation.json`. Preparation commit: `43b162b`.
 
+The first episode subsequently **failed at 800 control steps, native
+score0.0**, and the evaluator stopped as requested. **Only layout0 ran:
+0/1 success. Layouts1/2 were not evaluated**, not counted as failures.
+`first_episode_gate.json` records `first_failure_stopped`; the summary
+records `requested_max_episodes=3`, `evaluated_episodes=1` and
+`stopped_early=true`. The conditional protocol is complete, not the
+unconditional three-layout benchmark.
+
+The right arm brings two bowls into overlap/contact, then the left arm
+transports the remaining bowl beside them and stalls without a valid
+completed stack. Native partial credit remains zero. All 80 conditioning
+head thumbnails, the actual head-video timeline/final frame and both final
+native wrist snapshots were reviewed; the ordinary scene and camera
+roles remain coherent. The same layout0 succeeded at Beta17k in 520 steps,
+but this single conditional result does not establish a general ranking.
+
+Wall time was 1120.98 seconds (18.68 minutes); mean inference/prediction
+export were 4.811/4.165 seconds per chunk. All 80 chunks are finite and
+pass inverse normalization, independent 32-step integration and exact
+exported-action parity. Denormalization error is zero; translation/
+rotation-matrix/gripper errors are below 6.0e-8/8.5e-8/3.0e-8.
+The initial measured state matches Beta17k exactly. Left/right tracking
+median errors are 0.166/0.633 mm and maxima 1.103/3.724 mm, measuring
+command following rather than expert-action prediction quality.
+
+All three actual videos decode at 640x480/25 FPS with 801 frames each;
+240 prediction videos and 2640 PNGs are saved. All 17 passive camera
+snapshots pass with zero head/static-scene transform drift, correct render
+bindings and wrist-to-EE errors below 2.35e-7. Native unstable-physics
+flags are zero and all 19 source-file SHA256 hashes match preflight.
+The evaluator/chained auditor exited successfully and policy port19174
+is closed.
+
+Final report: the output's `final_adapter_audit.json`; camera report:
+`camera_audit/camera_integrity_report.json`. Visual evidence:
+`diagnostics/layout_0_all_conditioning_heads.jpg`,
+`diagnostics/episode_0000000_cam_head_fail_contact_sheet.jpg` and
+`camera_audit/layout_0_step_0800_cam_{left,right}_wrist.png`.
+Video/result subdirectory:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_beta05_step15k_sampling10_first_failure_stop_20261031_v1/
+```
+
+Actual videos are `episode_0000000_cam_{head,left_wrist,right_wrist}_fail.mp4`;
+matched futures remain under `policy/predictions/reset_0002/env_000/`.
+
 ## Qwen Beta(0.5,0.5) step17k ordinary bowls (2026-10-31)
 
 Evaluate our Qwen3VL-MoT checkpoint
