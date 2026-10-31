@@ -1295,6 +1295,56 @@ regardless of layout0's outcome. Startup evidence:
 `startup_validation.json`. Preparation commit: `ff65ccb`.
 Evaluation is running; final success counts are not yet available.
 
+The corrected **step12k** evaluation subsequently completed: **0/3
+success**, native scores **0.15/0.0/0.15**, aggregate **10/100**. All
+three episodes ran to 800 control steps, with no first-failure stopping.
+The partial scores are not successful three-bowl stacks.
+
+Visual review covered all conditioning-head contact sheets, actual
+head-video timelines and exact final frames from all nine actual videos.
+Layout0 forms a two-bowl partial stack; the left arm brings the remaining
+bowl toward it but fails to complete the stack. Layout1 brings the bowls
+together without valid nesting, ending with zero credit. Layout2 retains
+a two-bowl partial stack while the left arm approaches the remaining bowl
+and stalls. Thus the main failure remains completing the third-bowl
+placement, with layout1 also failing the first valid pair.
+
+Wall time was 3163.83 seconds (52.73 minutes), including startup.
+The run saved 240 chunks, 720 predicted videos, 7920 prediction PNGs and
+nine actual videos (640x480, 25 FPS, 801 frames each). Mean inference and
+prediction-export times were 5.132 and 4.057 seconds per chunk; shared
+load prevents causal timing comparisons.
+
+All numerical/independent-integration/export-parity, camera, video and
+post-run source-SHA256 checks passed. All three initial measured states
+match the reference exactly. Across 51 passive camera snapshots, head
+and static-scene matrix drift were zero; wrist transforms/render bindings
+were consistent. No episode was flagged physically unstable.
+Left/right target tracking medians were 0.205/0.232 mm, maxima
+4.871/8.505 mm. These checks do not imply grasping or task success.
+
+Artifacts:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_delta_beta025_step12k_sampling10_20261031_v1/
+  summary.json
+  final_adapter_audit.json
+  camera_audit/camera_integrity_report.json
+  diagnostics/native_final_frames.jpg
+  policy/predictions/
+```
+
+Actual videos are below the same root:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_beta025_step12k_sampling10_20261031_v1/
+```
+
+All three requested episodes and final audits are complete, not the
+full benchmark. The owned policy service shut down; port19178 is closed.
+Startup commit: `837b073`. Results here are specifically for step12k;
+the previous, user-reported problematic step16k run remains separate.
+
 ## Qwen Beta(0.25,0.25) step16k ordinary bowls (2026-10-31)
 
 Evaluate
