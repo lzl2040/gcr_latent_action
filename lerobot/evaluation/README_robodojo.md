@@ -1279,6 +1279,23 @@ Final validation must cover all three native results, unchanged source
 SHA256 fingerprints, numerical/action parity, cameras, videos and visual
 review. Preparation is verified; startup and results are pending.
 
+The actual native rollout subsequently started successfully. The loader
+restores this exact step16k DCP checkpoint as 12.585B parameters, BF16,
+joint prediction and ten denoising steps. First actual inference took
+5.493 seconds, with matched prediction export 4.742 seconds. The
+`(32,20)` action chunk is finite and configured for ten-action execution;
+the policy service is responsive on port19176.
+
+Saved evaluation settings differ from Beta05 step17k only in checkpoint,
+output directory and port; layout0's initial measured state matches
+exactly. All three actual conditioning images were visually checked:
+ordinary white bowls/wooden table and expected head/left-wrist/right-wrist
+roles. Actual predictions and passive camera observations are saved.
+There is no first-failure gate marker: all three layouts remain requested
+regardless of layout0's outcome. Startup evidence:
+`startup_validation.json`. Preparation commit: `d27908d`.
+Evaluation is running; final success counts are not yet available.
+
 ## Qwen Beta(0.5,0.5) step15k conditional evaluation (2026-10-31)
 
 Evaluate the same experiment's Qwen3VL-MoT checkpoint
