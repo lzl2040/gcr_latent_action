@@ -1226,6 +1226,64 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 `--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
 conftest; the dataset tools do not require robot hardware or a simulator.
 
+## Qwen Beta(0.5,0.5) step15k conditional evaluation (2026-10-31)
+
+Evaluate the same experiment's Qwen3VL-MoT checkpoint
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5/step15k`
+on ordinary `stack_bowls`. **Stop if the first episode (layout0) fails**;
+otherwise continue layouts1/2 in the same process, without reseeding the
+policy. A later layout1 failure does not trigger this first-episode gate.
+An early stop reports only the one evaluated episode, not three failures.
+
+Preflight verifies 19 files, 16 DCP shards, 25,200,777,625 bytes,
+2560 tensors and 16,908 storage references. All 16 shard hashes differ
+from Beta17k; policy/training config hashes match exactly. Noise remains
+pure Beta(0.5,0.5). No full checkpoint copy is made. Manifest:
+`outputs/evaluation/robodojo/runtime_assets/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5/checkpoint_provenance_step15k.json`.
+
+The session-local camera wrapper implements the requested gate at native
+next-seed selection: on first failure, return no next layout and allow
+native result/video saving and graceful shutdown. On first success,
+normal seed selection continues. `first_episode_gate.json` records that
+decision. The coordinator validates exactly one failed layout0 if stopped,
+otherwise all three layouts, and records requested versus actual episode
+counts explicitly. The CPU auditor checks the actual count rather than
+inventing results for unrun layouts. This changes neither shared simulator
+sources nor policy actions.
+
+Three focused gate tests passed: first failure prevents requesting a
+second seed; first success continues even if the second episode fails;
+multiple environments are rejected. Evaluation otherwise matches Beta17k:
+seed0, one environment, sampling10, prediction32/execution10, BF16,
+native/future videos and passive cameras. Early-stopped aggregates must
+not be compared with unconditional three-layout aggregates.
+
+The actual instrumented command is session-specific:
+
+```bash
+conda activate wam
+cd /home/jianf/lzl_project/gcr_latent_action
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+ENTRY=/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py
+PYTHONPATH="$PWD" ROBODOJO_STOP_AFTER_FIRST_FAILURE=1 OMNI_KIT_ACCEPT_EULA=YES \
+python "$ENTRY" eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.5/step15k \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19174 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_beta05_step15k_sampling10_first_failure_stop_20261031_v1
+```
+
+`--eval-num 3` is the maximum, not a promise that three episodes run.
+This conditional stopping rule is supplied by the session wrapper/env
+variable, not a new public evaluator CLI option. Final audits include
+source hashes, numerical/action parity, cameras, videos and visual review.
+Preparation is verified; actual startup and the first episode outcome
+are pending.
+
 ## Qwen Beta(0.5,0.5) step17k ordinary bowls (2026-10-31)
 
 Evaluate our Qwen3VL-MoT checkpoint
