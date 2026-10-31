@@ -1287,6 +1287,60 @@ and matched future videos are persisted. Evidence is in the output's
 `camera_audit/`. Preparation commit: `ebdd847`. Final success scores and
 full audits remain pending at this startup check.
 
+The run subsequently completed with **0/3 successful episodes** and
+native aggregate **5.0/100**. Layout0 earns partial credit0.15; layouts1/2
+score zero. All three run 800 control steps with zero unstable-physics flags.
+
+| Same robodojo_decay_20k experiment | Success | Layout0/1/2 scores | Aggregate /100 |
+|---|---|---|---|
+| step14k | 0/3 | 0.00 / 0.00 / 0.00 | 0.0 |
+| step17k | 0/3 | 0.15 / 0.00 / 0.00 | 5.0 |
+
+Step17k shows partial progress on layout0, but full success remains zero.
+These three fixed layouts are insufficient for a general performance
+ranking. Wall time was 3532.23 seconds (58.87 minutes); mean inference
+and prediction export were 6.172 and 4.766 seconds per chunk. Shared load
+prevents a causal runtime comparison with 14k.
+
+All 240 chunks are finite and pass inverse normalization, independent
+32-step physical integration and exact prediction-export action parity.
+Denormalization error is zero; translation/rotation-matrix/gripper errors
+are below 6.0e-8/9.3e-8/3.0e-8. All three initial measured states match 14k
+exactly. Left/right target-tracking median errors are 0.082/0.261 mm,
+maxima 2.477/38.839 mm; these are command-following errors rather than
+expert-action prediction errors.
+
+All nine actual videos decode at 640x480/25 FPS with 801 frames each;
+720 prediction videos and 7920 prediction PNGs are retained. All 51 passive
+camera snapshots pass with zero head/static-scene transform drift,
+correct render bindings and wrist-to-EE errors below 3.61e-7.
+All 19 source-file SHA256 hashes match their preflight records.
+The evaluator and chained auditor exited successfully, and owned policy
+port19170 is closed.
+
+Visual review covered all 240 conditioning-head thumbnails, three native
+head-video timelines/final frames and six final native wrist snapshots.
+Layout0 forms a two-bowl partial stack; the left arm transports the third
+bowl beside it rather than completing the stack. Layout1 spends most of
+the episode near the right bowl without stacking. Layout2 brings/tips a
+bowl into contact with the center bowl but does not retain a valid stack.
+The reviewed inputs/cameras look coherent.
+
+Final report: the output's `final_adapter_audit.json`; camera report:
+`camera_audit/camera_integrity_report.json`. Conditioning sheets:
+`diagnostics/layout_{0,1,2}_all_conditioning_heads.jpg`; native timelines:
+`diagnostics/episode_000000{0,1,2}_cam_head_fail_contact_sheet.jpg`;
+final wrist snapshots: `camera_audit/layout_{0,1,2}_step_0800_cam_{left,right}_wrist.png`.
+Video/result subdirectory:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_decay20k_step17k_sampling10_20261031_v1/
+```
+
+Head videos are `episode_000000{0,1,2}_cam_head_fail.mp4`, with matching
+left/right wrist videos. Matched model futures are under
+`policy/predictions/reset_*/env_000/replan_*_step_*/{primary,secondary,wrist}.mp4`.
+
 ## Qwen robodojo_decay_20k step14k ordinary bowls (2026-10-30)
 
 This evaluates **our Qwen3VL-MoT, not PI05**, from
