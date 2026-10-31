@@ -1226,6 +1226,58 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 `--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
 conftest; the dataset tools do not require robot hardware or a simulator.
 
+## Qwen Beta(0.25,0.25) step12k ordinary bowls (2026-10-31)
+
+The user corrected the requested checkpoint to **step12k**, reporting a
+problem with step16k. Retain the previous step16k artifacts as historical
+evidence, not as the result of this corrected request; the reported
+step16k problem has not been independently diagnosed.
+
+Evaluate
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.25/step12k`
+on ordinary `stack_bowls`, layouts0/1/2 once each, **all three episodes
+regardless of the first outcome**. Fresh preflight verified all 19 files,
+16 DCP shards, 25,200,777,632 bytes, 2560 tensors and 16,908 valid storage
+references. All 16 shard hashes differ from step16k. Policy equals the
+saved training policy: pure Beta(0.25,0.25), finetuning on
+`delta_robodojo_stack_bowl`, 44,774 frames. The existing matching
+bowl-delta statistics SHA256 is
+`cd7e1005b9f99678f036d24bb07626140f3771f2da36b6d15bc57a1887605e2a`.
+No full checkpoint duplicate is made. Manifest:
+`outputs/evaluation/robodojo/runtime_assets/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.25/checkpoint_provenance_step12k.json`.
+
+Use the same BF16, seed0, one environment, sampling10,
+prediction32/execution10, continuous policy RNG, actual/future videos and
+passive camera audits as previous ordinary runs. Beta05 step17k remains
+the initial-state/settings reference, not an isolated noise-distribution
+comparison or full-benchmark estimate.
+
+The actual instrumented command is session-specific:
+
+```bash
+conda activate wam
+cd /home/jianf/lzl_project/gcr_latent_action
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$PWD" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+export ROBODOJO_EVAL_MODULE=lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+ENTRY=/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py
+python "$ENTRY" eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_stack_bowl_2nodes_8gpu_decay_20k_beta_0.25/step12k \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19178 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_beta025_step12k_sampling10_20261031_v1
+```
+
+Final validation covers all three native results, unchanged source
+SHA256 fingerprints, numerical/action parity, cameras, videos and visual
+review. Preparation is verified; startup and results are pending.
+
 ## Qwen Beta(0.25,0.25) step16k ordinary bowls (2026-10-31)
 
 Evaluate
