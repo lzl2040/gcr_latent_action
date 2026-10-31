@@ -1284,6 +1284,24 @@ source hashes, numerical/action parity, cameras, videos and visual review.
 Preparation is verified; actual startup and the first episode outcome
 are pending.
 
+The actual native rollout subsequently started successfully. The loader
+restores this exact Beta15k checkpoint as 12.585B parameters, BF16,
+joint prediction and ten denoising steps. First actual inference took
+6.352 seconds, with matched prediction export 4.890 seconds. The
+`(32,20)` action chunk is finite and configured for ten-action execution;
+the policy service is responsive on port19174.
+
+Saved evaluation settings differ from Beta17k only in checkpoint,
+output directory and port; layout0's initial measured state matches
+exactly. All three actual conditioning images were visually checked:
+ordinary white bowls/wooden table, expected head/left-wrist/right-wrist
+roles. Actual predictions and passive camera observations are saved.
+The installed native gate reports `waiting_for_first_episode` in
+`first_episode_gate.json`; the first episode has not finished yet.
+Its eventual failure will stop before requesting layout1, while success
+will continue without restarting the policy. Startup evidence:
+`startup_validation.json`. Preparation commit: `43b162b`.
+
 ## Qwen Beta(0.5,0.5) step17k ordinary bowls (2026-10-31)
 
 Evaluate our Qwen3VL-MoT checkpoint
