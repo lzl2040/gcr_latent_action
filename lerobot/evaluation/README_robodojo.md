@@ -1226,6 +1226,50 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 `--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
 conftest; the dataset tools do not require robot hardware or a simulator.
 
+## Qwen robodojo_decay_20k step17k ordinary bowls (2026-10-31)
+
+Evaluate our Qwen3VL-MoT checkpoint
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_decay_20k/step17k`
+on ordinary `stack_bowls`, not random or PI05. The reference is this
+same experiment's completed step14k (0/3, aggregate0/100).
+
+Preflight passed for all 19 source files, including 16 DCP shards,
+25,200,777,591 bytes, 2560 model tensors and 16,908 storage references.
+Tensor keys/shapes/dtypes match the evaluated architecture, storage
+ranges fit their shards, and source sizes/mtimes remain stable during
+SHA256 verification. **All 16 weight-shard hashes differ from step14k**;
+policy and training config SHA256 hashes match step14k exactly.
+The noise recipe remains 50% Beta(1.5,1.0) plus 50% uniform.
+Weights are read directly without a full checkpoint copy. Manifest:
+`outputs/evaluation/robodojo/runtime_assets/robodojo_decay_20k/checkpoint_provenance_step17k.json`.
+
+Keep layouts0/1/2, seed0, one environment, BF16, sampling10,
+prediction32/execution10, native/future videos and passive camera
+auditing. Only checkpoint, output directory and port may differ from
+step14k's saved evaluation settings. This is a three-layout diagnostic,
+not a full-benchmark estimate. Final audits include initial-state parity,
+independent action integration, exported-action parity, video decoding,
+camera geometry and all source SHA256 hashes.
+
+```bash
+conda activate wam
+cd /home/jianf/lzl_project/gcr_latent_action
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+OMNI_KIT_ACCEPT_EULA=YES python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_decay_20k/step17k \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19170 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_decay20k_step17k_sampling10_20261031_v1
+```
+
+The instrumented session uses the existing passive camera wrapper and
+chains the CPU auditor without changing shared simulator sources.
+Preparation is verified; actual startup and final results remain pending.
+
 ## Qwen robodojo_decay_20k step14k ordinary bowls (2026-10-30)
 
 This evaluates **our Qwen3VL-MoT, not PI05**, from
