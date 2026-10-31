@@ -1296,6 +1296,58 @@ regardless of layout0's outcome. Startup evidence:
 `startup_validation.json`. Preparation commit: `d27908d`.
 Evaluation is running; final success counts are not yet available.
 
+The three-layout run subsequently completed: **0/3 success**, native
+scores **0.0/0.0/0.0**, aggregate **0/100**. All three episodes reached
+800 control steps; no first-failure stopping occurred. Wall time was
+3151.13 seconds (52.52 minutes), with 240 action chunks, 720 predicted
+videos, 7920 prediction PNGs and nine actual rollout videos. Each actual
+video is 640x480, 25 FPS, 801 frames. Mean inference/export time was
+5.316/4.313 seconds per chunk; shared-machine timing is not a causal
+performance comparison.
+
+Visual review covered all conditioning-head contact sheets, actual
+head-video timelines and exact final frames from all nine actual videos.
+Layout0 brings the right bowl near the middle bowl, then repeats
+near-contact poses without nesting. Layout1 approaches/slightly moves
+the left bowl and stalls. Layout2 nudges the left bowl toward the middle
+bowl but likewise stalls; the right arm changes pose without finishing
+a stack. The final bowls remain separate, consistent with zero scores.
+
+All numerical/independent-integration/export-parity, camera, video and
+post-run source-SHA256 checks passed. All initial measured states match
+Beta05 step17k exactly. The 51 passive camera snapshots show zero head or
+static-scene matrix drift; wrist render bindings/transforms are consistent.
+No native episode was flagged physically unstable. Left/right target
+tracking medians were 0.134/0.228 mm, maxima 3.075/8.295 mm.
+These checks do not imply grasping or task success.
+
+For context, Beta(0.5,0.5) step17k succeeded 1/3 on the same layouts,
+scores 1.0/0.0/0.15 (38.33/100). This Beta(0.25,0.25) step16k diagnostic
+is worse on these three layouts, but different experiments/update counts
+and only three layouts do not establish that the noise distribution
+caused the difference.
+
+Artifacts:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_delta_beta025_step16k_sampling10_20261031_v1/
+  summary.json
+  final_adapter_audit.json
+  camera_audit/camera_integrity_report.json
+  diagnostics/native_final_frames.jpg
+  policy/predictions/
+```
+
+Actual videos are below the same root:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_beta025_step16k_sampling10_20261031_v1/
+```
+
+All three requested episodes and final audits are complete, not the
+full benchmark. The owned policy service shut down; port19176 is closed.
+Startup commit: `c46837d`.
+
 ## Qwen Beta(0.5,0.5) step15k conditional evaluation (2026-10-31)
 
 Evaluate the same experiment's Qwen3VL-MoT checkpoint
