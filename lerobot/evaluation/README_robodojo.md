@@ -1292,6 +1292,63 @@ regardless of layout0's outcome. Startup evidence:
 `startup_validation.json`. Preparation commit: `d5bddac`.
 Evaluation is running; final success counts are not yet available.
 
+The step17k run subsequently completed: **0/3 success**, native scores
+**0.15/0.0/0.15**, aggregate **10/100**, all three episodes reaching
+800 control steps. These outcomes match step12k on the same layouts:
+there is no success/score improvement in this three-layout diagnostic.
+No first-failure stopping occurred.
+
+Visual review covered all conditioning-head contact sheets, actual
+head-video timelines and exact final frames from all nine actual videos.
+Layout0 forms a partial pair; the left arm attempts the remaining-bowl
+placement without completing the task. Late arm motions retreat outside
+the head view; the final head image has only one bowl-shaped silhouette,
+not evidence of a complete three-bowl stack. Layout1 brings the bowls
+alongside one another but never obtains valid nesting. Layout2 retains a
+two-bowl partial stack while the left arm stalls near the remaining bowl.
+Partial credit must not be reported as task success.
+
+Wall time was 3007.72 seconds (50.13 minutes), with 240 action chunks,
+720 predicted videos, 7920 prediction PNGs and nine actual rollout videos.
+Each actual video is 640x480, 25 FPS, 801 frames. Mean inference/export
+time was 5.051/4.199 seconds per chunk; shared load prevents causal
+timing comparisons.
+
+All numerical/independent-integration/export-parity, camera, video and
+post-run source-SHA256 checks passed. All three initial measured states
+match step12k exactly. The 51 passive camera snapshots show zero head or
+static-scene matrix drift; wrist render bindings/transforms are consistent.
+No episode was flagged physically unstable.
+
+**Physical tracking has material outliers despite these checks.**
+Left/right median target-to-measured position errors are 0.188/0.441 mm,
+but maxima are 228.904/255.795 mm, both in layout0: left670->680,
+right610->620. Step12k maxima were only 4.871/8.505 mm. The independent
+adapter and camera audits do not certify accurate physical following;
+the large errors' cause is not established by this evaluation.
+
+Artifacts:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_delta_beta025_step17k_sampling10_20261101_v1/
+  summary.json
+  final_adapter_audit.json
+  worst_target_tracking.json
+  camera_audit/camera_integrity_report.json
+  diagnostics/native_final_frames.jpg
+  policy/predictions/
+```
+
+Actual videos are below the same root:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_beta025_step17k_sampling10_20261101_v1/
+```
+
+All three requested episodes and final audits are complete, not the
+full benchmark. The owned policy service shut down; port19180 is closed.
+Startup commit: `2645db1`.
+
 ## Qwen Beta(0.25,0.25) step12k ordinary bowls (2026-10-31)
 
 The user corrected the requested checkpoint to **step12k**, reporting a
