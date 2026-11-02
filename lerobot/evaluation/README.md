@@ -4,6 +4,9 @@ For the dual-arm RoboDojo benchmark, see [README_robodojo.md](README_robodojo.md
 For LIBERO-Plus, use the separate `lerobot.evaluation.eval_qwen3vl_mot_libero_plus`
 entry point documented in [the Plus evaluation protocol](../../doc/evaluation/libero.md#libero-plus-官方协议评测).
 Do not point the original evaluator below at the Plus checkout.
+LIBERO-Pro installation and CPU verification are documented in
+[the Pro environment setup](../../doc/evaluation/libero.md#libero-pro-环境安装).
+Pro policy evaluation needs separate adaptation; changing the original evaluator's source root is not sufficient.
 
 From the repository root:
 

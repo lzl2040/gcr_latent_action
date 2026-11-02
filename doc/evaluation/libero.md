@@ -191,6 +191,108 @@ python -m pytest --noconftest -q \
     tests/test_libero_qwen3vl_evaluation.py tests/test_libero_cluster_setup.py
 ```
 
+## LIBERO-Pro 环境安装
+
+2026-11-02 将官方 [Zxy-MLlab/LIBERO-PRO](https://github.com/Zxy-MLlab/LIBERO-PRO)
+源码克隆到 `/home/v-wangxiaofa/lzl/LIBERO_PRO`，安装进现有
+`libero_lerobot_qwen3vl` 环境，保留原 LIBERO 和 LIBERO_PLUS 源码。
+**本次只准备环境与资源，不加载策略、不开始模型 benchmark，也不计入正式 rollout。**
+
+可复现安装和 CPU 验证代码：
+
+```bash
+conda activate libero_lerobot_qwen3vl
+cd /home/v-wangxiaofa/lzl/gcr_latent_action
+bash lerobot/evaluation/scripts/setup_libero_pro.sh
+PYTHONNOUSERSITE=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+python lerobot/evaluation/scripts/verify_libero_pro.py \
+    --libero-root /home/v-wangxiaofa/lzl/LIBERO_PRO
+```
+
+安装脚本支持 `PYTHON`、`LIBERO_PRO_ROOT` 环境变量覆盖；默认解释器就是上述现有
+Conda 环境的 Python。源码固定为
+`eafdb809426b13153aa1e4c42d6601844217dfec`；已有 checkout 不符或 tracked 文件
+有改动时拒绝安装，不 reset 用户代码。
+不安装上游旧 `requirements.txt`：其 Python/Torch/NumPy 等历史版本要求不适合当前评测环境。
+这里只以 `--no-deps --no-build-isolation --config-settings editable_mode=compat`
+安装 `libero`，没有新增或降级其他 Python 包。
+安装前后核验 Torch、TorchVision、Transformers、Diffusers、NumPy、SciPy、Pillow、
+两种 OpenCV、MuJoCo、robosuite 和 BDDL 共 12 项版本，实际均保持不变。
+`PYTHONNOUSERSITE=1 python -m pip check` 通过。
+
+### 官方资源与可用范围
+
+下载官方 [zhouxueyang/LIBERO-Pro](https://huggingface.co/datasets/zhouxueyang/LIBERO-Pro)
+数据集的经典兼容 revision
+`bcaa82b85c591fc04151499ba61bfdba4bf55eb0`，仅获取 `bddl_files/**`、
+`init_files/**`，不下载训练 demonstrations。共 **160 个 BDDL + 160 个初态文件**，
+合计 1,085,336 字节；逐文件核验官方 Git blob SHA1/大小，并记录本地 SHA256。
+数据复制到 Pro 自身的 `libero/libero/bddl_files`、`init_files` 下，
+遇到已有但内容不一致的文件会拒绝覆盖。
+
+四个基础 suite 均为 `libero_spatial`、`libero_object`、`libero_goal`、`libero_10`，
+每套每类 10 个任务：
+
+| 扰动类别 | suite 后缀 | 本次准备状态 |
+| --- | --- | --- |
+| Object / 物体替换 | `_object` | 40 个任务，各有 50 条官方固定初态 |
+| Position / 位置交换 | `_swap` | 40 个任务，各有 50 条官方固定初态 |
+| Semantic / 语言改写 | `_lan` | 40 个任务，各有 50 条官方固定初态 |
+| Task / 目标变化 | `_task` | 40 个任务，各有 50 条官方固定初态 |
+| Environment / 环境替换 | `_env` | 生成器及运行环境可用；官方资源未预打包这一类的 BDDL/固定初态 |
+
+**不能据此宣称五类正式评测资源已经齐全。** `_env` 注册类存在不等于文件已生成；
+正式评测仍需先生成完整的环境替换 BDDL 和每任务 50 条固定初态，并检查数量与有效性。
+对应上游代码是 `perturbation.py` 和 `notebooks/generate_init_states.py`。
+该固定源码的 `EnvironmentReplacePerturbator` 实际将目标环境硬编码为
+`living_room_table`，不是随机候选采样；本次保留上游行为，没有自行修改它。
+本次只为每个基础 suite 生成 1 个临时环境替换 BDDL 做 fresh-reset smoke，
+不复用原始任务初态，也没有批量生成正式评测初态。
+
+不直接下载 Hugging Face 最新 revision：其新增七类扩展包含视角、遮挡、纹理等，
+BDDL 使用额外的 `:perturbation_config` 字段，需要配套 parser/评测集成，
+不是此固定 GitHub 源码已经支持的经典五类，不能混入当前评测。
+
+### 配置隔离与验收
+
+原 LIBERO、Plus、Pro 都使用 `libero==0.1.0` / `libero.libero`。
+安装 Pro 后，环境中默认 editable 指向 Pro，**每个工具仍须明确选取源码和配置，
+并在独立 Python 进程中运行**。安装器不修改 `~/.libero/config.yaml`，
+而是在 Pro 的 `.setup/config/config.yaml` 保存独立路径；安装前后共享配置 SHA256 一致。
+独立使用上游 Pro 工具时显式设置：
+
+```bash
+LIBERO_CONFIG_PATH=/home/v-wangxiaofa/lzl/LIBERO_PRO/.setup/config \
+PYTHONPATH=/home/v-wangxiaofa/lzl/LIBERO_PRO \
+PYTHONNOUSERSITE=1 python -c \
+  'import libero.libero as libero; print(libero.__file__); print(libero.get_libero_path("bddl_files"))'
+```
+
+原 LIBERO 和 Plus 的现有评测入口仍通过各自 `--libero-root` 选择对应源码、创建独立配置；
+Pro 安装后，二者各自独立进程的原生 OSMesa reset、官方初态加载、双相机和 step 均通过。
+**本次没有新增 Pro 策略评测入口。** 后续适配不能只把原 evaluator 的 root 换成 Pro：
+尤其 `_lan` 的真实语言位于 BDDL 的 `:language` 中，
+应读取 `get_problem_info(bddl_path)["language_instruction"]`，
+不能只用按未改名文件名推断的 `task.language`；
+物体/目标扰动也必须加载对应扰动 suite 的初态，而不是原任务的状态。
+
+CPU 验收通过全部 **160 个官方初态文件**，每个文件均有 50 条有限值状态；
+原生环境 smoke 共 **24 个 case**，覆盖四套的四类预打包扰动、四个原任务及四个环境替换。
+每例 reset、恢复官方第 0 初态（环境替换例除外），执行 3 步 dummy action，
+检查双路 `256×256` RGB、图像非空及末端位置有限值；OSMesa 渲染，不使用 GPU。
+这只是安装验收，不是策略成功率测试。
+独立回归为 **167 passed、3 skipped**，包含上面的原 LIBERO/Plus 回归文件及新增 Pro 检查。
+
+本机可追溯工件都保存在 `/home/v-wangxiaofa/lzl/LIBERO_PRO/.setup/`：
+`installation.json`、`assets.json`、`verification.json`、
+`environment-before.txt` / `environment-after.txt`、`protected-runtime.json`、
+`original-config-sha256.txt` 和独立 `config/`。
+下载缓存位于 Pro 的 `.downloads/`；smoke BDDL 位于 `.setup/environment_smoke_bddl/`。
+本次 `assets.json` SHA256 为
+`035fbadfd43a5efc532af366b8d39bb9c62b9d2f1a66c57f18df9a7533987992`，
+`verification.json` SHA256 为
+`e30ba1f47147dcfc09d05924a70bdbf756c7a020f06d8c9e31e606fbf0b9fcee`。
+
 ## 历史评测设置
 
 下表及“旧协议结果汇总”使用旧协议：每个 episode 前按
