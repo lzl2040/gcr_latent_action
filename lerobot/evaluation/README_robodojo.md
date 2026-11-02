@@ -1294,6 +1294,62 @@ regardless of layout0's outcome. Startup evidence:
 `startup_validation.json`. Preparation commit: `d54bd25`.
 Evaluation is running; final success counts are not yet available.
 
+The shift5_1102 step12k run subsequently completed: **1/3 success**,
+native scores **1.0/0.0/0.15**, aggregate **38.33/100**. Layout0 succeeded
+at 467 control steps; layouts1/2 reached 800 steps. All three requested
+layouts ran in one uninterrupted policy invocation.
+
+Visual review covered all conditioning-head contact sheets, actual
+head-video timelines and exact final frames from all nine actual videos.
+In layout0, the right arm forms a pair, then the left arm places the
+third bowl, releases and withdraws; the exact final native video frame
+shows the completed three-bowl stack. Layout1 brings the bowls alongside
+one another but never obtains valid nesting despite later contact and
+repositioning. Layout2 retains a two-bowl partial stack, with the remaining
+bowl beside it rather than successfully added.
+
+Wall time was 2964.02 seconds (49.40 minutes), including startup.
+The run saved 207 action chunks, 621 predicted videos, 6831 prediction
+PNGs and nine actual rollout videos. Each actual video is 640x480 at
+25 FPS: 468 frames for layout0, 801 for layouts1/2. Mean inference/export
+time was 5.391/4.475 seconds per chunk; shared load prevents causal
+timing comparisons.
+
+All numerical/independent-integration/export-parity, camera, video and
+post-run source-SHA256 checks passed. All three initial measured states
+match the reference exactly. Across 44 passive camera snapshots, head
+and static-scene matrix drift were zero; wrist transforms/render bindings
+were consistent. No episode was flagged physically unstable.
+Left/right target tracking medians were 0.242/0.212 mm, maxima
+12.411/8.091 mm. These checks do not imply perfect physical following.
+
+For context, Beta025 step12k and step17k each scored 0/3 with
+0.15/0/0.15 (10/100) on these layouts. This new experiment improves
+layout0 to a full success, while the other layout scores remain the same.
+Different experiments and only three layouts do not establish that the
+training noise distribution caused the improvement.
+
+Artifacts:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_delta_shift5_1102_step12k_sampling10_20261102_v1/
+  summary.json
+  final_adapter_audit.json
+  camera_audit/camera_integrity_report.json
+  diagnostics/native_final_frames.jpg
+  policy/predictions/
+```
+
+Actual videos are below the same root:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_shift5_1102_step12k_sampling10_20261102_v1/
+```
+
+All three requested episodes and final audits are complete, not the
+full benchmark. The owned policy service shut down; port19182 is closed.
+Startup commit: `d2ae5b6`.
+
 ## Qwen Beta(0.25,0.25) step17k ordinary bowls (2026-11-01)
 
 Evaluate the same Beta025 experiment's checkpoint
