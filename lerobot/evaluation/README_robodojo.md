@@ -1292,6 +1292,62 @@ layouts remain requested regardless of layout0's outcome. Startup evidence:
 `startup_validation.json`. Preparation commit: `b9056c8`.
 Evaluation is running; final success counts are not yet available.
 
+The shift5_1102 step16k run subsequently completed: **1/3 success**,
+native scores **1.0/0.0/0.0**, aggregate **33.33/100**. Layout0 succeeded
+at 490 control steps; layouts1/2 reached 800 steps. All three requested
+layouts ran in one uninterrupted policy invocation.
+
+Visual review covered all conditioning-head contact sheets, actual
+head-video timelines and exact final frames from all nine actual videos.
+In layout0, the right arm forms a pair, then the left arm places the
+third bowl, releases and withdraws; the exact final native video frame
+shows the completed three-bowl stack. Layout1 brings the bowls together
+without valid nesting, followed by repeated contact/repositioning and
+tipping. Layout2 initially brings two bowls into overlapping contact,
+but does not retain a valid pair; the final bowls are separate and tilted.
+
+Compared with this experiment's step12k, full success remains 1/3 on the
+same layout0. Layout0 takes 490 rather than 467 control steps, and layout2
+loses its previous 0.15 partial credit, reducing the aggregate from
+38.33 to 33.33/100. There is no improvement on these three layouts;
+this is not a full-benchmark estimate or statistical ranking.
+
+Wall time was 3926.61 seconds (65.44 minutes), including startup.
+The run saved 209 action chunks, 627 predicted videos, 6897 prediction
+PNGs and nine actual rollout videos. Each actual video is 640x480 at
+25 FPS: 491 frames for layout0, 801 for layouts1/2. Mean inference/export
+time was 7.002/5.583 seconds per chunk; shared load and slower startup
+prevent attributing wall-time differences to checkpoint weights.
+
+All numerical/independent-integration/export-parity, camera, video and
+post-run source-SHA256 checks passed. All three initial measured states
+match step12k exactly. Across 44 passive camera snapshots, head and
+static-scene matrix drift were zero; wrist transforms/render bindings
+were consistent. No episode was flagged physically unstable.
+Left/right target tracking medians were 0.160/0.083 mm, maxima
+2.263/6.929 mm. These checks do not imply grasping or task success.
+
+Artifacts:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_delta_shift5_1102_step16k_sampling10_20261102_v1/
+  summary.json
+  final_adapter_audit.json
+  camera_audit/camera_integrity_report.json
+  diagnostics/native_final_frames.jpg
+  policy/predictions/
+```
+
+Actual videos are below the same root:
+
+```text
+simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_shift5_1102_step16k_sampling10_20261102_v1/
+```
+
+All three requested episodes and final audits are complete, not the
+full benchmark. The owned policy service shut down; port19184 is closed.
+Startup commit: `e1ef3e7`.
+
 ## Qwen shift5_1102 step12k ordinary bowls (2026-11-02)
 
 Evaluate the newly supplied checkpoint
