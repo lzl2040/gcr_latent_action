@@ -1275,6 +1275,23 @@ aggregate38.33/100). This is a three-layout checkpoint diagnostic, not a
 full-benchmark estimate; shared load prevents causal timing comparisons.
 Preparation is verified; startup and results are pending.
 
+The actual native rollout subsequently started successfully. The loader
+explicitly restores `high_noise_shift_5_1102/step16k/model`, reporting
+12.585B parameters, BF16, joint prediction and ten denoising steps.
+First actual inference took 6.723 seconds, with matched prediction export
+13.403 seconds. The `(32,20)` action chunk is finite and configured for
+ten-action execution; the policy service is responsive on port19184.
+
+Saved evaluation settings differ from this experiment's step12k only in
+checkpoint, output directory and port; layout0's initial measured state
+matches exactly. All three actual conditioning images were visually
+checked: ordinary white bowls/wooden table and expected
+head/left-wrist/right-wrist roles. Actual predictions and passive camera
+observations are saved. There is no first-failure gate marker: all three
+layouts remain requested regardless of layout0's outcome. Startup evidence:
+`startup_validation.json`. Preparation commit: `b9056c8`.
+Evaluation is running; final success counts are not yet available.
+
 ## Qwen shift5_1102 step12k ordinary bowls (2026-11-02)
 
 Evaluate the newly supplied checkpoint
