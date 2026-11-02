@@ -10,6 +10,84 @@
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
 
+## LIBERO-Plus 环境安装
+
+2026-11-02 将官方源码安装到 `/home/v-wangxiaofa/lzl/LIBERO_PLUS`，
+复用现有评测环境 `libero_lerobot_qwen3vl`，保留原 `/home/v-wangxiaofa/lzl/LIBERO`。
+这只是环境准备，不计入本文正式 rollout 数量，也未加载模型或开始 Plus benchmark。
+
+可复现安装代码为 `lerobot/evaluation/scripts/setup_libero_plus.sh`，
+额外依赖记录在 `lerobot/evaluation/requirements_libero_plus.txt`：
+
+```bash
+conda activate libero_lerobot_qwen3vl
+cd /home/v-wangxiaofa/lzl/gcr_latent_action
+bash lerobot/evaluation/scripts/setup_libero_plus.sh
+PYTHONNOUSERSITE=1 python lerobot/evaluation/scripts/verify_libero_plus.py \
+    --libero-root /home/v-wangxiaofa/lzl/LIBERO_PLUS
+```
+
+源码固定为 `sylvestf/LIBERO-plus` 的
+`4976dc30028e805ff8094b55501d532c48fec182`。
+官方资源为 Hugging Face 数据集 `Sylvest/LIBERO-plus` 的 `assets.zip`，
+固定 revision `dd2bd61b7d9a6fef1abc52d606e983b41886a149`，
+大小 6,395,849,578 字节，
+SHA256 为 `96764a4bfbdaea98d4411598caeab235458318fe0f549611b93d1a323027b3cf`。
+下载保存在 `LIBERO_PLUS/.downloads`，校验后解压至 `LIBERO_PLUS/libero/libero/assets`；
+不下载 RLDS/LeRobot 训练轨迹。官方 ZIP 包含构建机器上的多层目录前缀，
+脚本移除 `assets/` 之前的前缀，并检查路径与磁盘空间，不能直接原样解压到目标目录。
+
+补装 `Wand==0.6.13`、`scikit-image==0.25.2`，
+锁定其依赖 `lazy-loader==0.6`、`tifffile==2026.3.3`，
+并补齐现有 Matplotlib 在隔离用户 site 时缺失的 `fonttools==4.66.1`；
+并用 `--no-deps --no-build-isolation --config-settings editable_mode=compat -e`
+安装官方源码，兼容其嵌套 namespace package 与当前 setuptools。
+不执行上游旧版 `requirements.txt`，避免其 NumPy 1.22、Transformers 4.21 等
+旧依赖破坏现有 Python 3.12 模型环境。
+安装脚本约束并核验现有 Torch、NumPy、MuJoCo、robosuite 等版本，
+不修改驱动、系统库或共享的 `~/.libero/config.yaml`。
+
+安装前后依赖快照、保护的运行时版本、资源校验与安装报告位于
+`LIBERO_PLUS/.setup/`；本地 Plus 配置为 `.setup/config/config.yaml`。
+独立使用官方 Plus 工具时，应按进程指定配置，不更改原 LIBERO 全局配置：
+
+```bash
+LIBERO_CONFIG_PATH=/home/v-wangxiaofa/lzl/LIBERO_PLUS/.setup/config \
+PYTHONPATH=/home/v-wangxiaofa/lzl/LIBERO_PLUS${PYTHONPATH:+:$PYTHONPATH} \
+TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
+python -c 'from libero.libero import benchmark; print(sorted(benchmark.get_benchmark_dict()))'
+```
+
+`TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` 仅用于上述固定版本的可信官方 NumPy 初态文件，
+兼容上游未显式传 `weights_only=False` 的 `torch.load`；不要用于不可信 pickle。
+CPU-only 检查脚本自行设置隔离配置和 OSMesa，
+检查七类扰动、五个 suite 的 reset/固定初态/双相机渲染/step，
+以及五类图像噪声函数；结果写入 `.setup/verification.json`，
+不使用 GPU、不加载策略，不能当作模型成功率。
+
+本机验收已通过：11 个环境 smoke 覆盖全部七类扰动和五个 suite，
+五类图像噪声均可运行；Plus 四个扰动 suite 分别包含 Spatial 2,402、
+Object 2,518、Goal 2,591、Long 2,519 个任务，共 10,030 个，另有原始 LIBERO-90。
+这不表示逐个运行了全部 10,030 个任务。
+原 LIBERO Goal 的 10 任务列表、50 个官方初态加载和双相机 reset/step
+也在独立进程中通过，模块来源仍为原目录。
+安装器使用缓存重跑成功；隔离用户 site 后 `python -m pip check` 无依赖错误。
+现有评测与安装回归为 122 passed、3 skipped，命令如下；
+`--noconftest` 避免加载这些独立测试不需要的机器人串口硬件依赖：
+
+```bash
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+python -m pytest --noconftest -q \
+    tests/test_libero_qwen3vl_evaluation.py tests/test_libero_cluster_setup.py
+```
+
+**环境安装不等于已完成正式评测适配。**
+Plus 对相机、机器人、语言、纹理等任务复用并重映射初态文件名；
+当前 `eval_qwen3vl_mot_libero.py` 的原 LIBERO 初态读取器直接按任务文件名读取，
+不能仅替换 `--libero-root` 就保证兼容 Plus。
+后续评测需要单独处理初态映射、任务分类和 Plus trials 协议，
+不能沿用原 LIBERO 的任务编号或 20 次初态设置冒充官方 Plus 成绩。
+
 ## 历史评测设置
 
 下表及“旧协议结果汇总”使用旧协议：每个 episode 前按

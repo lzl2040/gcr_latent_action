@@ -1,0 +1,7 @@
+# Additions to the existing LIBERO evaluation environment; keep its NumPy/Torch stack.
+Wand==0.6.13
+scikit-image==0.25.2
+lazy-loader==0.6
+tifffile==2026.3.3
+# The existing Matplotlib installation otherwise relies on the user site.
+fonttools==4.66.1
