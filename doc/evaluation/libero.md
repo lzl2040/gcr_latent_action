@@ -81,12 +81,115 @@ python -m pytest --noconftest -q \
     tests/test_libero_qwen3vl_evaluation.py tests/test_libero_cluster_setup.py
 ```
 
-**环境安装不等于已完成正式评测适配。**
-Plus 对相机、机器人、语言、纹理等任务复用并重映射初态文件名；
-当前 `eval_qwen3vl_mot_libero.py` 的原 LIBERO 初态读取器直接按任务文件名读取，
-不能仅替换 `--libero-root` 就保证兼容 Plus。
-后续评测需要单独处理初态映射、任务分类和 Plus trials 协议，
-不能沿用原 LIBERO 的任务编号或 20 次初态设置冒充官方 Plus 成绩。
+原 `eval_qwen3vl_mot_libero.py` 的初态读取器不能仅替换 `--libero-root`
+用于 Plus；请使用下方新增的独立入口，原 LIBERO 评测代码没有修改。
+
+## LIBERO-Plus 官方协议评测
+
+入口：`lerobot/evaluation/eval_qwen3vl_mot_libero_plus.py`。
+依据固定版本的[官方 Evaluation 说明](https://github.com/sylvestf/LIBERO-plus/tree/4976dc30028e805ff8094b55501d532c48fec182#-evaluation)、
+`Benchmark.get_task_init_states`、`task_classification.json` 和官方环境实现，
+并对照其引用的 [OpenVLA-OFT LIBERO evaluator](https://github.com/moojink/openvla-oft/blob/main/experiments/robot/libero/run_libero_eval.py)。
+这只是实现与验收记录，尚无本模型的 Plus 正式成绩，不增加本文开头的 rollout 数量。
+
+每个扰动任务固定 **1 trial、官方初态索引 0**，不能改成原 LIBERO 的 20/50 trials。
+初态通过官方 `suite.get_task_init_states(task_id)` 获取，包括布局任务的一维初态 reshape，
+不自行猜测文件名；相机、机器人、噪声、纹理与光照由官方环境执行，不重复添加扰动。
+语言直接使用官方 `task.language`，包括从 BDDL 读取的改写指令，不替换为原始任务指令。
+分类按任务**名称**匹配：CLI `--task-ids` 是 suite 内从 0 开始的索引，
+不是分类 JSON 从 1 开始的 `id`；输出同时保留二者。
+
+环境为 20 Hz、双 256×256 RGB，每个环境构造后 `env.seed(0)`，
+固定先执行 10 步 dummy action，再开始策略控制与成功判定。
+Spatial/Object/Goal/Long 控制上限为 220/280/300/520，静置步骤不计入。
+策略沿用现有加载器与 canonical 40D→native 7D 适配器，
+使用对应原 LIBERO suite 的训练 mean/std，不从 Plus 测试数据重新估计。
+保存模型的图像处理、action chunk 与 Flow 设置属于模型配置；
+默认执行前 10 个 action 后重新规划，Flow 步数默认取保存配置。
+`--seed` 默认 0，在模型加载前初始化一次 Python/NumPy/Torch；
+环境的 `seed(0)` 会重设 NumPy，Torch 动作采样流不逐任务或逐 replan 重设。
+
+先做不加载模型、不使用 GPU 的全量初态预检查；输出目录必须不存在：
+
+```bash
+conda activate libero_lerobot_qwen3vl
+cd /home/v-wangxiaofa/lzl/gcr_latent_action
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' \
+python -m lerobot.evaluation.eval_qwen3vl_mot_libero_plus \
+    --dry-run --render-backend osmesa \
+    --output-dir /Data/lzl/libero_plus_eval/preflight
+```
+
+使用一个混合训练 checkpoint 测全部四个 suite：
+
+```bash
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0 \
+python -m lerobot.evaluation.eval_qwen3vl_mot_libero_plus \
+    --checkpoint /path/to/experiment/step12k \
+    --task-suite all --trials-per-task 1 \
+    --precision bf16 --replan-steps 10 --seed 0 \
+    --render-gpu-device-id 0 \
+    --output-dir /Data/lzl/libero_plus_eval/step12k_all
+```
+
+`--checkpoint` 换为实际目录，可传 `step12k` 或 `step12k/model`；
+不能自动定位保存配置时加 `--policy-config /path/to/config.json`。
+默认只保存失败 rollout 视频，不解码预测视频；`--no-save-video` 可关闭录像。
+`--render-gpu-device-id` 是物理 EGL 卡号，独立于 `CUDA_VISIBLE_DEVICES` 的逻辑卡号。
+每个进程生成自己的 LIBERO 配置，不修改共享配置、上游源码或原 LIBERO evaluator。
+
+支持单 suite `--task-suite libero_goal`，七类筛选
+`--categories camera robot language light background noise layout`，
+以及 `--difficulty-levels 1 2 3 4 5`。
+默认包含全部任务；官方有 **121 个任务的难度为 null**，统计为 `unrated`，
+不能为了得到五档难度均值而默默丢弃。显式难度筛选会排除这些任务，因此不是完整 benchmark。
+没有缩短 horizon 或首次成功就退出的正式评测开关。
+
+多卡时，每个进程传相同的任务筛选和 `--num-shards 3`，分别使用
+`--shard-index 0`、`1`、`2`，各自选择 GPU 与不同输出目录。
+分片在规范任务顺序上取 `tasks[index::num_shards]`，互不重叠；
+Torch RNG 各进程独立，因此不承诺与单进程的扩散噪声逐任务配对。
+完成后 CPU 合并：
+
+```bash
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' \
+python -m lerobot.evaluation.eval_qwen3vl_mot_libero_plus \
+    --merge /Data/lzl/libero_plus_eval/shard0/results.json \
+            /Data/lzl/libero_plus_eval/shard1/results.json \
+            /Data/lzl/libero_plus_eval/shard2/results.json \
+    --render-backend osmesa \
+    --output-dir /Data/lzl/libero_plus_eval/merged
+```
+
+也可按 suite 使用各自微调 checkpoint，再合并四份结果；同一 suite 的分片必须使用相同
+checkpoint/config/normalization。合并拒绝任务重叠、来源/runtime 或推理协议不一致，
+并保留各 suite 的权重来源，不能隐去不同 checkpoint 的事实。
+
+`task_manifest.json` 保存任务与输入来源，`results.json` 每个已完成 trial 原子更新，
+包含七类扰动、suite、难度的成功率和覆盖量；JSON 成功率为 0–1。
+异常会中止并保留此前结果，不默默跳过失败的任务。
+只完成所选任务时 `evaluation_complete=true`；只有完整覆盖四个 suite 的
+**10,030 个不同任务**，才有 `benchmark_complete=true` 和非空
+`official_total_success_rate`。Total 为所有任务的成功数/10,030，
+不是七类成功率的等权平均；原 LIBERO-90 不纳入此分母。
+来源记录包含评测代码、分类、模型配置、DCP **元数据**、归一化文件和动作文件的 SHA256；
+DCP 元数据 hash 不是权重内容的完整指纹，评测期间应保留 checkpoint 不被覆盖。
+
+2026-11-02 验收通过：10,030/10,030 个任务分类与官方第 0 初态的实际 CPU 预检查，
+以及独立回归 **158 passed、3 skipped**。
+最终原生环境 smoke 的 16 个 case 覆盖七类扰动、五类噪声、四个 suite，
+包括 `_table_`/`_tb_` 背景和 `_add_`/`_level` 布局分支；
+使用真实训练归一化、双相机输入与新 rollout 路径，10 步静置后执行 2 步 dummy policy。
+OSMesa CPU 渲染，不加载训练权重、不使用 GPU，不属于 benchmark；
+所有模型成绩仍需实际运行上面的评测命令。
+独立回归命令：
+
+```bash
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+python -m pytest --noconftest -q \
+    tests/test_libero_plus_evaluation.py \
+    tests/test_libero_qwen3vl_evaluation.py tests/test_libero_cluster_setup.py
+```
 
 ## 历史评测设置
 
