@@ -1253,7 +1253,18 @@ only when the dataset has the verified delta contract, 20D delta feature,
 usable state/delta statistics, and the saved training frame count.
 Existing absolute and bowl-subset delta behavior is preserved. Regression
 validation: 46 evaluator tests passed; Ruff lint and format checks passed.
-Source/data preflight, actual native startup and final results are pending.
+Fresh preflight verified all 19 checkpoint files, 16 DCP shards,
+25,200,777,551 bytes, 2560 tensors and 16,908 valid storage references.
+Source size/mtime remained unchanged; no full-size checkpoint duplicate
+was made. Independently checked all 1,856,102 full-task rows and all 3500
+episode boundaries against measured-state delta integration, including
+identity terminal rotations; maximum delta discrepancy was
+`5.960464477539063e-8`. Recomputed state/delta means and standard
+deviations match the saved full-task statistics (preserved state uses
+sample std, new delta uses population std). Metadata and all data parquet
+SHA256 fingerprints are retained alongside checkpoint fingerprints:
+`outputs/evaluation/robodojo/runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step12k.json`.
+Preparation is verified; actual native startup and final results are pending.
 
 The planned instrumented command is:
 
