@@ -1295,6 +1295,20 @@ reference; training data, normalization and LR schedule differ. Three
 fixed layouts do not estimate full-benchmark performance or establish a
 causal effect of full-task finetuning.
 
+The actual native rollout started successfully. The first finite
+`[32,20]` delta chunk executed ten controls; independent denormalization
+uses the verified full-task statistics, and its integration anchor
+exactly matches the native camera snapshot's measured state. Layout0's
+initial state is bitwise identical to the bowl-subset reference.
+The only CLI differences are checkpoint, dataset root, output and port.
+Primary/left-wrist/right-wrist conditioning images were visually checked:
+all three bowls and the expected robot/camera roles are present, with no
+black input or obvious role swap. Policy port19185 is reachable and
+inference is active. Startup report:
+`outputs/evaluation/robodojo/stack_bowls_delta_alltask_shift5_decay25k_step12k_sampling10_20261103_v1/startup_validation.json`.
+All three results and final numerical/source/data/camera/video audits
+remain pending; successful startup is not a success-rate result.
+
 ## Qwen shift5_1102 step16k ordinary bowls (2026-11-02)
 
 Evaluate the same newly supplied shift5_1102 experiment's checkpoint
