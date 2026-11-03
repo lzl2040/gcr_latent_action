@@ -1,14 +1,297 @@
 # LIBERO 评测记录
 
-更新日期：2026-10-31。
+更新日期：2026-11-02。
 
-本文汇总已完成的有效正式评测，共 115 份结果、19,340 次 rollout：
-85 份完整 suite 评测、17,000 次，以及 30 份已完成的任务子集评测、2,340 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 73 份、10,940 次，
-包括 43 份完整 suite 和 30 份任务子集，分开记录。
+本文汇总已完成的有效正式评测，共 127 份结果、20,700 次 rollout：
+89 份完整 suite 评测、17,800 次，以及 38 份已完成的任务子集评测、2,900 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 85 份、12,300 次，
+包括 47 份完整 suite 和 38 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
+
+## LIBERO-Plus 环境安装
+
+2026-11-02 将官方源码安装到 `/home/v-wangxiaofa/lzl/LIBERO_PLUS`，
+复用现有评测环境 `libero_lerobot_qwen3vl`，保留原 `/home/v-wangxiaofa/lzl/LIBERO`。
+这只是环境准备，不计入本文正式 rollout 数量，也未加载模型或开始 Plus benchmark。
+
+可复现安装代码为 `lerobot/evaluation/scripts/setup_libero_plus.sh`，
+额外依赖记录在 `lerobot/evaluation/requirements_libero_plus.txt`：
+
+```bash
+conda activate libero_lerobot_qwen3vl
+cd /home/v-wangxiaofa/lzl/gcr_latent_action
+bash lerobot/evaluation/scripts/setup_libero_plus.sh
+PYTHONNOUSERSITE=1 python lerobot/evaluation/scripts/verify_libero_plus.py \
+    --libero-root /home/v-wangxiaofa/lzl/LIBERO_PLUS
+```
+
+源码固定为 `sylvestf/LIBERO-plus` 的
+`4976dc30028e805ff8094b55501d532c48fec182`。
+官方资源为 Hugging Face 数据集 `Sylvest/LIBERO-plus` 的 `assets.zip`，
+固定 revision `dd2bd61b7d9a6fef1abc52d606e983b41886a149`，
+大小 6,395,849,578 字节，
+SHA256 为 `96764a4bfbdaea98d4411598caeab235458318fe0f549611b93d1a323027b3cf`。
+下载保存在 `LIBERO_PLUS/.downloads`，校验后解压至 `LIBERO_PLUS/libero/libero/assets`；
+不下载 RLDS/LeRobot 训练轨迹。官方 ZIP 包含构建机器上的多层目录前缀，
+脚本移除 `assets/` 之前的前缀，并检查路径与磁盘空间，不能直接原样解压到目标目录。
+
+补装 `Wand==0.6.13`、`scikit-image==0.25.2`，
+锁定其依赖 `lazy-loader==0.6`、`tifffile==2026.3.3`，
+并补齐现有 Matplotlib 在隔离用户 site 时缺失的 `fonttools==4.66.1`；
+并用 `--no-deps --no-build-isolation --config-settings editable_mode=compat -e`
+安装官方源码，兼容其嵌套 namespace package 与当前 setuptools。
+不执行上游旧版 `requirements.txt`，避免其 NumPy 1.22、Transformers 4.21 等
+旧依赖破坏现有 Python 3.12 模型环境。
+安装脚本约束并核验现有 Torch、NumPy、MuJoCo、robosuite 等版本，
+不修改驱动、系统库或共享的 `~/.libero/config.yaml`。
+
+安装前后依赖快照、保护的运行时版本、资源校验与安装报告位于
+`LIBERO_PLUS/.setup/`；本地 Plus 配置为 `.setup/config/config.yaml`。
+独立使用官方 Plus 工具时，应按进程指定配置，不更改原 LIBERO 全局配置：
+
+```bash
+LIBERO_CONFIG_PATH=/home/v-wangxiaofa/lzl/LIBERO_PLUS/.setup/config \
+PYTHONPATH=/home/v-wangxiaofa/lzl/LIBERO_PLUS${PYTHONPATH:+:$PYTHONPATH} \
+TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
+python -c 'from libero.libero import benchmark; print(sorted(benchmark.get_benchmark_dict()))'
+```
+
+`TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` 仅用于上述固定版本的可信官方 NumPy 初态文件，
+兼容上游未显式传 `weights_only=False` 的 `torch.load`；不要用于不可信 pickle。
+CPU-only 检查脚本自行设置隔离配置和 OSMesa，
+检查七类扰动、五个 suite 的 reset/固定初态/双相机渲染/step，
+以及五类图像噪声函数；结果写入 `.setup/verification.json`，
+不使用 GPU、不加载策略，不能当作模型成功率。
+
+本机验收已通过：11 个环境 smoke 覆盖全部七类扰动和五个 suite，
+五类图像噪声均可运行；Plus 四个扰动 suite 分别包含 Spatial 2,402、
+Object 2,518、Goal 2,591、Long 2,519 个任务，共 10,030 个，另有原始 LIBERO-90。
+这不表示逐个运行了全部 10,030 个任务。
+原 LIBERO Goal 的 10 任务列表、50 个官方初态加载和双相机 reset/step
+也在独立进程中通过，模块来源仍为原目录。
+安装器使用缓存重跑成功；隔离用户 site 后 `python -m pip check` 无依赖错误。
+现有评测与安装回归为 122 passed、3 skipped，命令如下；
+`--noconftest` 避免加载这些独立测试不需要的机器人串口硬件依赖：
+
+```bash
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+python -m pytest --noconftest -q \
+    tests/test_libero_qwen3vl_evaluation.py tests/test_libero_cluster_setup.py
+```
+
+原 `eval_qwen3vl_mot_libero.py` 的初态读取器不能仅替换 `--libero-root`
+用于 Plus；请使用下方新增的独立入口，原 LIBERO 评测代码没有修改。
+
+## LIBERO-Plus 官方协议评测
+
+入口：`lerobot/evaluation/eval_qwen3vl_mot_libero_plus.py`。
+依据固定版本的[官方 Evaluation 说明](https://github.com/sylvestf/LIBERO-plus/tree/4976dc30028e805ff8094b55501d532c48fec182#-evaluation)、
+`Benchmark.get_task_init_states`、`task_classification.json` 和官方环境实现，
+并对照其引用的 [OpenVLA-OFT LIBERO evaluator](https://github.com/moojink/openvla-oft/blob/main/experiments/robot/libero/run_libero_eval.py)。
+这只是实现与验收记录，尚无本模型的 Plus 正式成绩，不增加本文开头的 rollout 数量。
+
+每个扰动任务固定 **1 trial、官方初态索引 0**，不能改成原 LIBERO 的 20/50 trials。
+初态通过官方 `suite.get_task_init_states(task_id)` 获取，包括布局任务的一维初态 reshape，
+不自行猜测文件名；相机、机器人、噪声、纹理与光照由官方环境执行，不重复添加扰动。
+语言直接使用官方 `task.language`，包括从 BDDL 读取的改写指令，不替换为原始任务指令。
+分类按任务**名称**匹配：CLI `--task-ids` 是 suite 内从 0 开始的索引，
+不是分类 JSON 从 1 开始的 `id`；输出同时保留二者。
+
+环境为 20 Hz、双 256×256 RGB，每个环境构造后 `env.seed(0)`，
+固定先执行 10 步 dummy action，再开始策略控制与成功判定。
+Spatial/Object/Goal/Long 控制上限为 220/280/300/520，静置步骤不计入。
+策略沿用现有加载器与 canonical 40D→native 7D 适配器，
+使用对应原 LIBERO suite 的训练 mean/std，不从 Plus 测试数据重新估计。
+保存模型的图像处理、action chunk 与 Flow 设置属于模型配置；
+默认执行前 10 个 action 后重新规划，Flow 步数默认取保存配置。
+`--seed` 默认 0，在模型加载前初始化一次 Python/NumPy/Torch；
+环境的 `seed(0)` 会重设 NumPy，Torch 动作采样流不逐任务或逐 replan 重设。
+
+先做不加载模型、不使用 GPU 的全量初态预检查；输出目录必须不存在：
+
+```bash
+conda activate libero_lerobot_qwen3vl
+cd /home/v-wangxiaofa/lzl/gcr_latent_action
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' \
+python -m lerobot.evaluation.eval_qwen3vl_mot_libero_plus \
+    --dry-run --render-backend osmesa \
+    --output-dir /Data/lzl/libero_plus_eval/preflight
+```
+
+使用一个混合训练 checkpoint 测全部四个 suite：
+
+```bash
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0 \
+python -m lerobot.evaluation.eval_qwen3vl_mot_libero_plus \
+    --checkpoint /path/to/experiment/step12k \
+    --task-suite all --trials-per-task 1 \
+    --precision bf16 --replan-steps 10 --seed 0 \
+    --render-gpu-device-id 0 \
+    --output-dir /Data/lzl/libero_plus_eval/step12k_all
+```
+
+`--checkpoint` 换为实际目录，可传 `step12k` 或 `step12k/model`；
+不能自动定位保存配置时加 `--policy-config /path/to/config.json`。
+默认只保存失败 rollout 视频，不解码预测视频；`--no-save-video` 可关闭录像。
+`--render-gpu-device-id` 是物理 EGL 卡号，独立于 `CUDA_VISIBLE_DEVICES` 的逻辑卡号。
+每个进程生成自己的 LIBERO 配置，不修改共享配置、上游源码或原 LIBERO evaluator。
+
+支持单 suite `--task-suite libero_goal`，七类筛选
+`--categories camera robot language light background noise layout`，
+以及 `--difficulty-levels 1 2 3 4 5`。
+默认包含全部任务；官方有 **121 个任务的难度为 null**，统计为 `unrated`，
+不能为了得到五档难度均值而默默丢弃。显式难度筛选会排除这些任务，因此不是完整 benchmark。
+没有缩短 horizon 或首次成功就退出的正式评测开关。
+
+多卡时，每个进程传相同的任务筛选和 `--num-shards 3`，分别使用
+`--shard-index 0`、`1`、`2`，各自选择 GPU 与不同输出目录。
+分片在规范任务顺序上取 `tasks[index::num_shards]`，互不重叠；
+Torch RNG 各进程独立，因此不承诺与单进程的扩散噪声逐任务配对。
+完成后 CPU 合并：
+
+```bash
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' \
+python -m lerobot.evaluation.eval_qwen3vl_mot_libero_plus \
+    --merge /Data/lzl/libero_plus_eval/shard0/results.json \
+            /Data/lzl/libero_plus_eval/shard1/results.json \
+            /Data/lzl/libero_plus_eval/shard2/results.json \
+    --render-backend osmesa \
+    --output-dir /Data/lzl/libero_plus_eval/merged
+```
+
+也可按 suite 使用各自微调 checkpoint，再合并四份结果；同一 suite 的分片必须使用相同
+checkpoint/config/normalization。合并拒绝任务重叠、来源/runtime 或推理协议不一致，
+并保留各 suite 的权重来源，不能隐去不同 checkpoint 的事实。
+
+`task_manifest.json` 保存任务与输入来源，`results.json` 每个已完成 trial 原子更新，
+包含七类扰动、suite、难度的成功率和覆盖量；JSON 成功率为 0–1。
+异常会中止并保留此前结果，不默默跳过失败的任务。
+只完成所选任务时 `evaluation_complete=true`；只有完整覆盖四个 suite 的
+**10,030 个不同任务**，才有 `benchmark_complete=true` 和非空
+`official_total_success_rate`。Total 为所有任务的成功数/10,030，
+不是七类成功率的等权平均；原 LIBERO-90 不纳入此分母。
+来源记录包含评测代码、分类、模型配置、DCP **元数据**、归一化文件和动作文件的 SHA256；
+DCP 元数据 hash 不是权重内容的完整指纹，评测期间应保留 checkpoint 不被覆盖。
+
+2026-11-02 验收通过：10,030/10,030 个任务分类与官方第 0 初态的实际 CPU 预检查，
+以及独立回归 **158 passed、3 skipped**。
+最终原生环境 smoke 的 16 个 case 覆盖七类扰动、五类噪声、四个 suite，
+包括 `_table_`/`_tb_` 背景和 `_add_`/`_level` 布局分支；
+使用真实训练归一化、双相机输入与新 rollout 路径，10 步静置后执行 2 步 dummy policy。
+OSMesa CPU 渲染，不加载训练权重、不使用 GPU，不属于 benchmark；
+所有模型成绩仍需实际运行上面的评测命令。
+独立回归命令：
+
+```bash
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+python -m pytest --noconftest -q \
+    tests/test_libero_plus_evaluation.py \
+    tests/test_libero_qwen3vl_evaluation.py tests/test_libero_cluster_setup.py
+```
+
+## LIBERO-Pro 环境安装
+
+2026-11-02 将官方 [Zxy-MLlab/LIBERO-PRO](https://github.com/Zxy-MLlab/LIBERO-PRO)
+源码克隆到 `/home/v-wangxiaofa/lzl/LIBERO_PRO`，安装进现有
+`libero_lerobot_qwen3vl` 环境，保留原 LIBERO 和 LIBERO_PLUS 源码。
+**本次只准备环境与资源，不加载策略、不开始模型 benchmark，也不计入正式 rollout。**
+
+可复现安装和 CPU 验证代码：
+
+```bash
+conda activate libero_lerobot_qwen3vl
+cd /home/v-wangxiaofa/lzl/gcr_latent_action
+bash lerobot/evaluation/scripts/setup_libero_pro.sh
+PYTHONNOUSERSITE=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+python lerobot/evaluation/scripts/verify_libero_pro.py \
+    --libero-root /home/v-wangxiaofa/lzl/LIBERO_PRO
+```
+
+安装脚本支持 `PYTHON`、`LIBERO_PRO_ROOT` 环境变量覆盖；默认解释器就是上述现有
+Conda 环境的 Python。源码固定为
+`eafdb809426b13153aa1e4c42d6601844217dfec`；已有 checkout 不符或 tracked 文件
+有改动时拒绝安装，不 reset 用户代码。
+不安装上游旧 `requirements.txt`：其 Python/Torch/NumPy 等历史版本要求不适合当前评测环境。
+这里只以 `--no-deps --no-build-isolation --config-settings editable_mode=compat`
+安装 `libero`，没有新增或降级其他 Python 包。
+安装前后核验 Torch、TorchVision、Transformers、Diffusers、NumPy、SciPy、Pillow、
+两种 OpenCV、MuJoCo、robosuite 和 BDDL 共 12 项版本，实际均保持不变。
+`PYTHONNOUSERSITE=1 python -m pip check` 通过。
+
+### 官方资源与可用范围
+
+下载官方 [zhouxueyang/LIBERO-Pro](https://huggingface.co/datasets/zhouxueyang/LIBERO-Pro)
+数据集的经典兼容 revision
+`bcaa82b85c591fc04151499ba61bfdba4bf55eb0`，仅获取 `bddl_files/**`、
+`init_files/**`，不下载训练 demonstrations。共 **160 个 BDDL + 160 个初态文件**，
+合计 1,085,336 字节；逐文件核验官方 Git blob SHA1/大小，并记录本地 SHA256。
+数据复制到 Pro 自身的 `libero/libero/bddl_files`、`init_files` 下，
+遇到已有但内容不一致的文件会拒绝覆盖。
+
+四个基础 suite 均为 `libero_spatial`、`libero_object`、`libero_goal`、`libero_10`，
+每套每类 10 个任务：
+
+| 扰动类别 | suite 后缀 | 本次准备状态 |
+| --- | --- | --- |
+| Object / 物体替换 | `_object` | 40 个任务，各有 50 条官方固定初态 |
+| Position / 位置交换 | `_swap` | 40 个任务，各有 50 条官方固定初态 |
+| Semantic / 语言改写 | `_lan` | 40 个任务，各有 50 条官方固定初态 |
+| Task / 目标变化 | `_task` | 40 个任务，各有 50 条官方固定初态 |
+| Environment / 环境替换 | `_env` | 生成器及运行环境可用；官方资源未预打包这一类的 BDDL/固定初态 |
+
+**不能据此宣称五类正式评测资源已经齐全。** `_env` 注册类存在不等于文件已生成；
+正式评测仍需先生成完整的环境替换 BDDL 和每任务 50 条固定初态，并检查数量与有效性。
+对应上游代码是 `perturbation.py` 和 `notebooks/generate_init_states.py`。
+该固定源码的 `EnvironmentReplacePerturbator` 实际将目标环境硬编码为
+`living_room_table`，不是随机候选采样；本次保留上游行为，没有自行修改它。
+本次只为每个基础 suite 生成 1 个临时环境替换 BDDL 做 fresh-reset smoke，
+不复用原始任务初态，也没有批量生成正式评测初态。
+
+不直接下载 Hugging Face 最新 revision：其新增七类扩展包含视角、遮挡、纹理等，
+BDDL 使用额外的 `:perturbation_config` 字段，需要配套 parser/评测集成，
+不是此固定 GitHub 源码已经支持的经典五类，不能混入当前评测。
+
+### 配置隔离与验收
+
+原 LIBERO、Plus、Pro 都使用 `libero==0.1.0` / `libero.libero`。
+安装 Pro 后，环境中默认 editable 指向 Pro，**每个工具仍须明确选取源码和配置，
+并在独立 Python 进程中运行**。安装器不修改 `~/.libero/config.yaml`，
+而是在 Pro 的 `.setup/config/config.yaml` 保存独立路径；安装前后共享配置 SHA256 一致。
+独立使用上游 Pro 工具时显式设置：
+
+```bash
+LIBERO_CONFIG_PATH=/home/v-wangxiaofa/lzl/LIBERO_PRO/.setup/config \
+PYTHONPATH=/home/v-wangxiaofa/lzl/LIBERO_PRO \
+PYTHONNOUSERSITE=1 python -c \
+  'import libero.libero as libero; print(libero.__file__); print(libero.get_libero_path("bddl_files"))'
+```
+
+原 LIBERO 和 Plus 的现有评测入口仍通过各自 `--libero-root` 选择对应源码、创建独立配置；
+Pro 安装后，二者各自独立进程的原生 OSMesa reset、官方初态加载、双相机和 step 均通过。
+**本次没有新增 Pro 策略评测入口。** 后续适配不能只把原 evaluator 的 root 换成 Pro：
+尤其 `_lan` 的真实语言位于 BDDL 的 `:language` 中，
+应读取 `get_problem_info(bddl_path)["language_instruction"]`，
+不能只用按未改名文件名推断的 `task.language`；
+物体/目标扰动也必须加载对应扰动 suite 的初态，而不是原任务的状态。
+
+CPU 验收通过全部 **160 个官方初态文件**，每个文件均有 50 条有限值状态；
+原生环境 smoke 共 **24 个 case**，覆盖四套的四类预打包扰动、四个原任务及四个环境替换。
+每例 reset、恢复官方第 0 初态（环境替换例除外），执行 3 步 dummy action，
+检查双路 `256×256` RGB、图像非空及末端位置有限值；OSMesa 渲染，不使用 GPU。
+这只是安装验收，不是策略成功率测试。
+独立回归为 **167 passed、3 skipped**，包含上面的原 LIBERO/Plus 回归文件及新增 Pro 检查。
+
+本机可追溯工件都保存在 `/home/v-wangxiaofa/lzl/LIBERO_PRO/.setup/`：
+`installation.json`、`assets.json`、`verification.json`、
+`environment-before.txt` / `environment-after.txt`、`protected-runtime.json`、
+`original-config-sha256.txt` 和独立 `config/`。
+下载缓存位于 Pro 的 `.downloads/`；smoke BDDL 位于 `.setup/environment_smoke_bddl/`。
+本次 `assets.json` SHA256 为
+`035fbadfd43a5efc532af366b8d39bb9c62b9d2f1a66c57f18df9a7533987992`，
+`verification.json` SHA256 为
+`e30ba1f47147dcfc09d05924a70bdbf756c7a020f06d8c9e31e606fbf0b9fcee`。
 
 ## 历史评测设置
 
@@ -1947,6 +2230,350 @@ LIBERO 的此处 `on(bowl, plate)` 判据不仅要求接触，
 这些观察优先指向抓取/提取稳定性、失败后的恢复及放置对准，
 不能单凭本次诊断将根因归结为 shift5、过拟合或模型容量。
 
+### 1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2：8k，单卡困难任务与 Object 全套
+
+按用户要求，使用该实验的 `step8k/model`，仅在物理 GPU 3 上按
+Goal、Spatial、Object 严格串行评测，不并行运行多个 suite。
+沿用 Goal `[0, 3, 4, 9]`（80 次）、Spatial `[4, 6, 9]`（60 次）和
+Object `[0..9]`（200 次），每任务使用前 20 个固定初态，
+共 17 个任务、340 次 rollout。只有 Object 是完整 suite；
+混合汇总不是三套全量 600 次 benchmark 成绩。
+
+首次预检发现上传的是 Robodojo 三视角配置及 16 个模型分片，未启动评测。
+用户更换配置和权重后重新核验，正式使用 LIBERO 双视角、`shifted_uniform`、
+`time_sampling_shift=2.0` 的保存配置及 32 个 BF16 DCP 分片。
+2,560 个 tensor 的 storage 引用范围检查通过，共 12,585,116,005 个元素；
+相对于 shift5 8k，唯一 schema 差异为 `model.generation.task_embedding.weight`
+从 `(3, 4096)` 变为 `(1, 4096)`，与保存的单任务列表一致。
+没有填充或重映射该权重；三个抽查可训练参数 SHA256 均与 shift5 8k 不同。
+缺少 trainer metadata，8k 步数按目录标注，训练 `world_size` 未独立核验。
+
+沿用 BF16、`primary` + `wrist`、RGB 256、预测 32 步、执行 10 步、Flow 20 步，
+以及 Goal 300、Spatial 220、Object 280 步控制上限。
+各 suite 独立进程，仅在启动时设置一次 `seed=0`，
+任务、episode 和 replanning 之间不 reseed；训练 shift 不施加到推理积分网格。
+首个真实 rollout 的启动核验时间为 `2026-11-01T13:15:45Z`，
+最终完成汇总时间为 `2026-11-01T18:13:18Z`。
+三套 worker 均正常退出且没有重试，串行日志时间顺序已核验；
+340 个唯一任务/固定初态、有限 7D 动作、66 个非空失败视频和输入指纹全部通过检查。
+评测结束后 GPU 3 的模型显存已释放。
+
+下表只比较相同 17 个任务、相同固定初态和评测协议下的两个 8k：
+
+| 匹配范围 | v4 shift5 8k | 本轮 v4 shift2 8k | 数值差异 |
+| --- | --- | --- | --- |
+| Goal，任务 0/3/4/9 | 83.75%（67/80） | 72.5%（58/80） | -11.25 个百分点 |
+| Spatial，任务 4/6/9 | 68.33%（41/60） | 60.0%（36/60） | -8.33 个百分点 |
+| Object，完整 suite | 93.5%（187/200） | 90.0%（180/200） | -3.50 个百分点 |
+| 所选 17 任务混合汇总 | 86.76%（295/340） | **80.59%（274/340）** | -6.18 个百分点 |
+
+**这不是仅改变 shift 的受控消融。** 保存配置同时将训练任务从
+`forward_dynamics / inverse_dynamics / joint_prediction` 的 `0.1 / 0.1 / 0.8`
+混合改为仅 `joint_prediction`、权重 `1.0`；
+`weight_resume` 从 `true` 变为 `false`，初始化是否相同未独立核验。
+保存的训练期 generation-eval 每数据集 episode 数由 2 变为 8，
+`save_freq` 由 2,000 变为 1,000。相同 8k 标签也不能替代训练曝光量核验。
+连续 RNG 下，相同初态不保证逐 trial 扩散噪声配对；
+没有多随机种子重复，不能将当前差异直接归因于 shift2。
+
+逐任务结果如下，每项均为成功次数 / 20：
+
+| Suite | 任务编号与描述 | shift5 8k | 本轮 shift2 8k |
+| --- | --- | --- | --- |
+| Goal | 0：打开中层抽屉 | 20/20 | 13/20 |
+| Goal | 3：打开上层抽屉并放碗 | 11/20 | 7/20 |
+| Goal | 4：碗放到柜顶 | 17/20 | 20/20 |
+| Goal | 9：酒瓶放酒架 | 19/20 | 18/20 |
+| Spatial | 4：上层抽屉取碗 | 10/20 | 5/20 |
+| Spatial | 6：cookie box 旁取碗 | 17/20 | 14/20 |
+| Spatial | 9：木柜上取碗 | 14/20 | 17/20 |
+| Object | 0：alphabet soup 放入篮子 | 19/20 | 19/20 |
+| Object | 1：cream cheese 放入篮子 | 20/20 | 20/20 |
+| Object | 2：salad dressing 放入篮子 | 19/20 | 18/20 |
+| Object | 3：bbq sauce 放入篮子 | 19/20 | 20/20 |
+| Object | 4：ketchup 放入篮子 | 18/20 | 16/20 |
+| Object | 5：tomato sauce 放入篮子 | 16/20 | 17/20 |
+| Object | 6：butter 放入篮子 | 20/20 | 16/20 |
+| Object | 7：milk 放入篮子 | 16/20 | 17/20 |
+| Object | 8：chocolate pudding 放入篮子 | 20/20 | 19/20 |
+| Object | 9：orange juice 放入篮子 | 20/20 | 18/20 |
+
+本轮共失败 66/340 次：Goal 22 次、Spatial 24 次、Object 20 次；
+比 shift5 8k 少成功 21 次。Goal 两个抽屉任务从 31/40 降为 20/40，
+Spatial 抽屉取碗从 10/20 降为 5/20，是主要数值短板；
+但 Spatial 木柜取碗从 14/20 提高到 17/20，并非所有任务都下降。
+尚未对本轮失败视频做额外逐例诊断，不推断具体失败阶段。
+
+本轮工件前缀为
+`libero_v4_4nodes_8gpu_wo_rotate_high_noise_shift2_8k_weak_tasks_single_gpu_run_seeded`；
+汇总 SHA256 为 `bdc27199a62ce0bd56d71a9c067f13c731bd0396ec2599fb585695903268bfd6`。
+原始结果文件的 SHA256：
+
+| Suite | `results.json` SHA256 |
+| --- | --- |
+| Goal | `15926c8c47d43621d156a09ac5fe1acb5e5d5bc6a7117d21e6de8e060af62582` |
+| Spatial | `35acd51ebbd983b8afb0751b0cc5e4ab096d35ebd1ee2562621e721198321bde` |
+| Object | `4fed60992dfe9db8823a8ffcae5ffdd37bb20d0012c5fa8919ceee4c4524e2ff` |
+
+### 1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2：12k，三卡困难任务与 Object 全套
+
+使用同一 shift2 实验的 `step12k/model`，按用户最新要求改为三卡并行：
+GPU 0 跑 Goal `[0, 3, 4, 9]`（80 次），GPU 1 跑 Spatial `[4, 6, 9]`（60 次），
+GPU 3 跑 Object `[0..9]`（200 次）。每套固定独占其指定 worker GPU 池，
+不跨卡回退；三套独立进程并行，不拆分 suite 内任务或改变连续 RNG 顺序。
+共 17 个任务、340 次 rollout，只有 Object 是完整 suite；
+以下混合汇总不是三套全量 600 次 benchmark 成绩。
+
+保存的策略配置字节及训练配置指纹与该实验 8k 评测时相同：
+LIBERO 双视角、`shifted_uniform`、`time_sampling_shift=2.0`，
+仅训练 `joint_prediction`、权重 `1.0`。
+32 个 BF16 DCP 分片、2,560 个 tensor 的 storage 引用范围检查通过，
+共 12,585,116,005 个元素；三个抽查可训练参数 SHA256 均区别于归档的 8k。
+原 8k 权重目录已被移除，不能再现场复核其权重；
+本次保留并核验其原有配置、identity、已验证汇总及全部原始结果 SHA256。
+当前 schema 对照仍可读的 shift5 12k，只存在已审计的
+`model.generation.task_embedding.weight` 从 `(3, 4096)` 到 `(1, 4096)` 差异，
+与归档的 shift2 8k 单任务架构审计一致；没有填充或重映射权重。
+缺少 checkpoint-local trainer metadata，8k/12k 按目录标签，
+训练 update step、`world_size` 和曝光量未独立核验。
+
+沿用 BF16、`primary` + `wrist`、RGB 256、预测 32 步、执行 10 步、Flow 20 步，
+Goal 300、Spatial 220、Object 280 步控制上限，每任务前 20 个固定初态。
+每套仅在进程启动时设置一次 `seed=0`，后续任务和 rollout 连续使用 RNG；
+三卡只改变 suite 调度，不将训练 shift 应用到推理积分网格。
+三卡首个真实 rollout 全部通过启动核验的时间为 `2026-11-02T01:57:31Z`，
+最终完成汇总时间为 `2026-11-02T04:31:03Z`。
+三套 worker 均正常退出且没有重试，340 个唯一固定初态 rollout、
+有限 7D 动作、33 个非空失败视频和输入指纹全部核验通过。
+评测结束后 GPU 0、1、3 的模型显存均已释放，未调整其他任务。
+
+下表比较完全匹配的 17 个任务与 340 次固定初态范围：
+
+| 匹配范围 | shift2 8k | 本轮 shift2 12k | shift5 12k（跨实验参考） |
+| --- | --- | --- | --- |
+| Goal，任务 0/3/4/9 | 72.5%（58/80） | 85.0%（68/80） | 93.75%（75/80） |
+| Spatial，任务 4/6/9 | 60.0%（36/60） | 70.0%（42/60） | 73.33%（44/60） |
+| Object，完整 suite | 90.0%（180/200） | 98.5%（197/200） | 97.5%（195/200） |
+| 所选 17 任务混合汇总 | 80.59%（274/340） | **90.29%（307/340）** | 92.35%（314/340） |
+
+相对同实验 8k，三套分别多成功 10、6、17 次，总计多成功 33 次、
+提高 9.71 个百分点。相对 shift5 12k 的相同范围，Goal 少成功 7 次、
+Spatial 少 2 次、Object 多 2 次，总计仍少成功 7 次、低 2.06 个百分点。
+**shift5 与 shift2 不是仅改变 shift 的受控消融：**
+训练任务混合由 `0.1 / 0.1 / 0.8` 的三任务改为仅 `joint_prediction`，
+保存的 `weight_resume` 从 `true` 变为 `false`，初始化等价性未独立确认；
+训练期 generation-eval 和保存频率也不同。
+这里只与 shift5 12k 的 314/340 相比，不与其分批全任务覆盖的 567/600 混比。
+连续 RNG 下相同初态不保证逐 trial 扩散噪声配对，没有多随机种子重复，
+不能仅凭当前数值把差异归因于 shift。
+
+逐任务结果如下，每项均为成功次数 / 20：
+
+| Suite | 任务编号与描述 | shift2 8k | 本轮 shift2 12k | shift5 12k |
+| --- | --- | --- | --- | --- |
+| Goal | 0：打开中层抽屉 | 13/20 | 20/20 | 19/20 |
+| Goal | 3：打开上层抽屉并放碗 | 7/20 | 11/20 | 17/20 |
+| Goal | 4：碗放到柜顶 | 20/20 | 20/20 | 20/20 |
+| Goal | 9：酒瓶放酒架 | 18/20 | 17/20 | 19/20 |
+| Spatial | 4：上层抽屉取碗 | 5/20 | 6/20 | 13/20 |
+| Spatial | 6：cookie box 旁取碗 | 14/20 | 16/20 | 17/20 |
+| Spatial | 9：木柜上取碗 | 17/20 | 20/20 | 14/20 |
+| Object | 0：alphabet soup 放入篮子 | 19/20 | 19/20 | 19/20 |
+| Object | 1：cream cheese 放入篮子 | 20/20 | 20/20 | 20/20 |
+| Object | 2：salad dressing 放入篮子 | 18/20 | 20/20 | 20/20 |
+| Object | 3：bbq sauce 放入篮子 | 20/20 | 20/20 | 19/20 |
+| Object | 4：ketchup 放入篮子 | 16/20 | 20/20 | 20/20 |
+| Object | 5：tomato sauce 放入篮子 | 17/20 | 19/20 | 19/20 |
+| Object | 6：butter 放入篮子 | 16/20 | 20/20 | 19/20 |
+| Object | 7：milk 放入篮子 | 17/20 | 19/20 | 19/20 |
+| Object | 8：chocolate pudding 放入篮子 | 19/20 | 20/20 | 20/20 |
+| Object | 9：orange juice 放入篮子 | 18/20 | 20/20 | 20/20 |
+
+本轮失败 33/340 次，分布为 Goal 12、Spatial 18、Object 3；
+其中 Goal 3 和 Spatial 4 两个抽屉相关任务共失败 23 次，占全部失败的 69.7%。
+Spatial 木柜取碗已达 20/20，但抽屉取碗仍只有 6/20。
+这些是按任务的失败统计，尚未对本轮视频逐例诊断，不推断具体失败阶段。
+
+本轮工件前缀为
+`libero_v4_4nodes_8gpu_wo_rotate_high_noise_shift2_12k_weak_tasks_three_gpu_run_seeded`；
+汇总 SHA256 为 `15f8108b69cccc1087ccb456a2a161d685d78daf0741e4379d03a2716b948d87`。
+原始结果文件的 SHA256：
+
+| Suite | `results.json` SHA256 |
+| --- | --- |
+| Goal | `7ea9d99117dd682c88aa506126de51bf6e1146c56d42c60e9891c29be961c9ed` |
+| Spatial | `cee12fe697f893b0dcb34dc3fedd595a36c400cdba28de39e3f219ad53dc2147` |
+| Object | `6ab4765e7845fecdabe67d4d91d01862009cffc36e7d63a79f49e87e448da223` |
+
+### 1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2：14k，双卡困难任务与 Object 全套
+
+使用同一 shift2 实验的 `step14k/model`，按用户要求只用物理 GPU 2、3：
+GPU 2 跑 Object `[0..9]`（200 次），GPU 3 先跑 Spatial `[4, 6, 9]`（60 次），
+完成后接续 Goal `[0, 3, 4, 9]`（80 次）。
+Spatial worker 完成于 `2026-11-02T15:02:16Z`，
+Goal 首条运行日志为 `2026-11-02T15:03:24Z`，不存在同卡双 suite 重叠执行。
+三套均为独立进程，保留各自任务、trial 顺序与连续 RNG，不拆分 suite。
+共 17 个任务、340 次 rollout，只有 Object 是完整 suite；
+以下混合汇总不是三套全量 600 次 benchmark 成绩。
+
+保存的策略配置、训练配置指纹、推理代码及归一化与同实验 12k 一致：
+`shifted_uniform`、`time_sampling_shift=2.0`，仅训练 `joint_prediction`。
+32 个 BF16 DCP 分片、2,560 个 tensor、12,585,116,005 个元素的 schema
+与仍可读的 shift2 12k 完全相同，storage 引用范围检查通过；
+三个抽查可训练参数的 SHA256 均区别于已核验的 12k 权重。
+先前 shift5 参考的 `train_config.json` 和 `step12k/model/.metadata` 已不存在，
+已单独记录，不将其作为本轮现场 schema 对照或受控比较依据。
+缺少 checkpoint-local trainer metadata，12k/14k 仍按目录标签，
+训练 update step、`world_size` 和曝光量未独立核验。
+
+沿用 BF16、`primary` + `wrist`、RGB 256、预测 32 步、执行 10 步、Flow 20 步，
+10 步静置，Goal 300、Spatial 220、Object 280 步控制上限，
+每任务前 20 个固定初态。每套仅在进程启动时设置一次 `seed=0`，
+后续任务和 rollout 连续使用 RNG；训练 shift 不改变推理积分网格。
+最终完成汇总时间为 `2026-11-02T18:34:14Z`。
+三套 worker 均正常退出且没有重试，340 个唯一固定初态 rollout、
+有限 7D 动作、37 个非空失败视频和输入指纹全部核验通过。
+16k 在完整汇总验证后于 `2026-11-02T18:34:38Z` 自动接续；
+该后续运行不计入本节的 14k 正式结果。
+
+下表比较完全匹配的 17 个任务与 340 次固定初态范围：
+
+| 匹配范围 | shift2 12k | 本轮 shift2 14k | 变化 |
+| --- | --- | --- | --- |
+| Goal，任务 0/3/4/9 | 85.0%（68/80） | 83.75%（67/80） | -1.25 个百分点 |
+| Spatial，任务 4/6/9 | 70.0%（42/60） | 66.67%（40/60） | -3.33 个百分点 |
+| Object，完整 suite | 98.5%（197/200） | 98.0%（196/200） | -0.50 个百分点 |
+| 所选 17 任务混合汇总 | 90.29%（307/340） | **89.12%（303/340）** | **-1.18 个百分点** |
+
+相对 12k 总计少成功 4 次，本轮没有表现出整体提升。
+Spatial 木柜上取碗从 20/20 降至 14/20，是最大的单任务变化；
+同套抽屉取碗与 cookie box 旁取碗则各增加 2 次成功，合计仍少成功 2 次。
+Goal 少成功的 1 次来自打开中层抽屉，Object 少成功的 1 次来自 bbq sauce。
+这些是单随机种子观察；相同初态不保证逐 trial 扩散噪声配对，
+不能据此认定模型稳定退化或推断具体失败机制。
+
+逐任务结果如下，每项均为成功次数 / 20：
+
+| Suite | 任务编号与描述 | shift2 12k | 本轮 shift2 14k |
+| --- | --- | --- | --- |
+| Goal | 0：打开中层抽屉 | 20/20 | 19/20 |
+| Goal | 3：打开上层抽屉并放碗 | 11/20 | 11/20 |
+| Goal | 4：碗放到柜顶 | 20/20 | 20/20 |
+| Goal | 9：酒瓶放酒架 | 17/20 | 17/20 |
+| Spatial | 4：上层抽屉取碗 | 6/20 | 8/20 |
+| Spatial | 6：cookie box 旁取碗 | 16/20 | 18/20 |
+| Spatial | 9：木柜上取碗 | 20/20 | 14/20 |
+| Object | 0：alphabet soup 放入篮子 | 19/20 | 19/20 |
+| Object | 1：cream cheese 放入篮子 | 20/20 | 20/20 |
+| Object | 2：salad dressing 放入篮子 | 20/20 | 20/20 |
+| Object | 3：bbq sauce 放入篮子 | 20/20 | 19/20 |
+| Object | 4：ketchup 放入篮子 | 20/20 | 20/20 |
+| Object | 5：tomato sauce 放入篮子 | 19/20 | 19/20 |
+| Object | 6：butter 放入篮子 | 20/20 | 20/20 |
+| Object | 7：milk 放入篮子 | 19/20 | 19/20 |
+| Object | 8：chocolate pudding 放入篮子 | 20/20 | 20/20 |
+| Object | 9：orange juice 放入篮子 | 20/20 | 20/20 |
+
+本轮失败 37/340 次，分布为 Goal 13、Spatial 20、Object 4；
+Goal 3 与 Spatial 4 两个抽屉相关任务共失败 21 次，占全部失败的 56.76%。
+这些是任务级统计，未对本轮失败视频逐例诊断。
+
+本轮工件前缀为
+`libero_v4_4nodes_8gpu_wo_rotate_high_noise_shift2_14k_weak_tasks_two_gpu_run_seeded`；
+汇总 SHA256 为 `79abd244780520c88fbc057ce05827bd9ee6f95f216409c2ee0ed444d4596937`。
+原始结果文件的 SHA256：
+
+| Suite | `results.json` SHA256 |
+| --- | --- |
+| Goal | `8f5819b05d524328b850017905cd71c8a0f7d34df612a91f168256d4c2f8935c` |
+| Spatial | `e3b88401e3f490fe0850a896481030982b52adc8fa59776c502e5b33110292a9` |
+| Object | `477f1452611b8e95f746c6958d4ef934dd4e2a2ee104a3a356dc575f29658278` |
+
+### 1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2：16k，双卡困难任务与 Object 全套
+
+使用同一 shift2 实验的 `step16k/model`，按用户要求在 14k 完整评测及汇总校验通过后
+自动接续，队列释放时间为 `2026-11-02T18:34:38Z`。
+只用物理 GPU 2、3：GPU 2 跑 Object `[0..9]`（200 次），
+GPU 3 先跑 Spatial `[4, 6, 9]`（60 次），完成后接续 Goal `[0, 3, 4, 9]`（80 次）。
+Spatial worker 完成于 `2026-11-02T19:27:02Z`，
+Goal 首条运行日志为 `2026-11-02T19:28:10Z`，同卡不同 suite 不重叠执行，
+也未与上一轮 14k 策略执行重叠。
+共 17 个任务、340 次 rollout，只有 Object 是完整 suite；
+以下混合汇总不是三套全量 600 次 benchmark 成绩。
+
+队列启动前检查全部 32 个 BF16 DCP 分片的 storage 引用范围，
+2,560 个 tensor、12,585,116,005 个元素的 schema 与 14k 完全相同；
+三个抽查可训练参数 SHA256 均区别于已核验的 14k 权重。
+保存的策略配置、训练配置指纹、推理代码、归一化与 14k 一致，
+仍为 `shifted_uniform`、`time_sampling_shift=2.0`，仅训练 `joint_prediction`。
+缺少 checkpoint-local trainer metadata，14k/16k 按目录标签，
+训练 update step、`world_size` 和曝光量未独立核验。
+
+沿用 BF16、`primary` + `wrist`、RGB 256、预测 32 步、执行 10 步、Flow 20 步，
+10 步静置，Goal 300、Spatial 220、Object 280 步控制上限，
+每任务前 20 个固定初态。每套为独立进程，仅启动时设置一次 `seed=0`，
+后续任务和 rollout 连续使用 RNG；训练 shift 不改变推理积分网格。
+最终完成汇总时间为 `2026-11-02T21:15:19Z`。
+三套 worker、双卡 scheduler 和接续队列均正常退出，没有重试；
+340 个唯一固定初态 rollout、有限 7D 动作、33 个非空失败视频、
+输入指纹与原始结果 SHA256 全部核验通过。
+评测结束后本轮 evaluator 进程均已退出，GPU 2、3 的模型显存已释放，
+未调整 GPU 0、1 上的其他任务。
+
+下表比较完全匹配的 17 个任务与 340 次固定初态范围：
+
+| 匹配范围 | shift2 12k | shift2 14k | 本轮 shift2 16k |
+| --- | --- | --- | --- |
+| Goal，任务 0/3/4/9 | 85.0%（68/80） | 83.75%（67/80） | 83.75%（67/80） |
+| Spatial，任务 4/6/9 | 70.0%（42/60） | 66.67%（40/60） | 68.33%（41/60） |
+| Object，完整 suite | 98.5%（197/200） | 98.0%（196/200） | 99.5%（199/200） |
+| 所选 17 任务混合汇总 | 90.29%（307/340） | 89.12%（303/340） | **90.29%（307/340）** |
+
+相对 14k 总计多成功 4 次、提高 1.18 个百分点：Object 多成功 3 次，
+Spatial 多成功 1 次，Goal 总数不变。
+相对 12k，总成功数相同；Object 多成功 2 次，Goal 与 Spatial 各少成功 1 次。
+Object 本轮只有 alphabet soup 任务失败 1 次，但困难任务没有整体超过 12k。
+这些是单随机种子观察；相同初态不保证逐 trial 扩散噪声配对，
+不能据此认定已经收敛或推断稳定的训练趋势。
+
+逐任务结果如下，每项均为成功次数 / 20：
+
+| Suite | 任务编号与描述 | shift2 12k | shift2 14k | 本轮 shift2 16k |
+| --- | --- | --- | --- | --- |
+| Goal | 0：打开中层抽屉 | 20/20 | 19/20 | 19/20 |
+| Goal | 3：打开上层抽屉并放碗 | 11/20 | 11/20 | 11/20 |
+| Goal | 4：碗放到柜顶 | 20/20 | 20/20 | 19/20 |
+| Goal | 9：酒瓶放酒架 | 17/20 | 17/20 | 18/20 |
+| Spatial | 4：上层抽屉取碗 | 6/20 | 8/20 | 8/20 |
+| Spatial | 6：cookie box 旁取碗 | 16/20 | 18/20 | 17/20 |
+| Spatial | 9：木柜上取碗 | 20/20 | 14/20 | 16/20 |
+| Object | 0：alphabet soup 放入篮子 | 19/20 | 19/20 | 19/20 |
+| Object | 1：cream cheese 放入篮子 | 20/20 | 20/20 | 20/20 |
+| Object | 2：salad dressing 放入篮子 | 20/20 | 20/20 | 20/20 |
+| Object | 3：bbq sauce 放入篮子 | 20/20 | 19/20 | 20/20 |
+| Object | 4：ketchup 放入篮子 | 20/20 | 20/20 | 20/20 |
+| Object | 5：tomato sauce 放入篮子 | 19/20 | 19/20 | 20/20 |
+| Object | 6：butter 放入篮子 | 20/20 | 20/20 | 20/20 |
+| Object | 7：milk 放入篮子 | 19/20 | 19/20 | 20/20 |
+| Object | 8：chocolate pudding 放入篮子 | 20/20 | 20/20 | 20/20 |
+| Object | 9：orange juice 放入篮子 | 20/20 | 20/20 | 20/20 |
+
+本轮失败 33/340 次，分布为 Goal 13、Spatial 19、Object 1；
+Goal 3 与 Spatial 4 两个抽屉相关任务共失败 21 次，占全部失败的 63.64%。
+相对 14k，这两项成功数均未改变，仍是主要短板。
+这些是任务级统计，未对本轮失败视频逐例诊断。
+
+本轮工件前缀为
+`libero_v4_4nodes_8gpu_wo_rotate_high_noise_shift2_16k_weak_tasks_two_gpu_run_seeded`；
+汇总 SHA256 为 `e97858b0f91f848699d302923741b0b28c5cdfe5c5a62f4da3352ea5dabc8106`。
+原始结果文件的 SHA256：
+
+| Suite | `results.json` SHA256 |
+| --- | --- |
+| Goal | `b97858568f8d67042aeaddc871deca9c0eba4a62ba8d150f8d16fa0ab07f6a16` |
+| Spatial | `4da3f27b46ebcff8855b48a3fdf2af0bb4db2286ba80446c9a40f3fbf9cf241a` |
+| Object | `8cecd9da85013cdfa3a76478e028806e0778e694a88db1ea575320a55502e671` |
+
 ### 误拷权重评测：曾标作 8k（不计入正式结果）
 
 **2026-10-24 用户确认 `step8k/model` 拷贝了错误权重。**
@@ -2032,6 +2659,8 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5`（12k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5/step12k/model` |
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5`（14k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5/step14k/model` |
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5`（16k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5/step16k/model` |
+| `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2`（8k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2/step8k/model` |
+| `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2`（12k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2/step12k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -2167,6 +2796,12 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5` | 16k | Spatial（任务 4/6/9，60 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift5_step16k_weak_tasks_run_seeded_spatial_20trials_20261030/results.json` |
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5` | 12k | Goal（补测任务 1/2/5/6/7/8，120 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift5_step12k_remaining_tasks_run_seeded_goal_20trials_20261031/results.json` |
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5` | 12k | Spatial（补测任务 0/1/2/3/5/7/8，140 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift5_step12k_remaining_tasks_run_seeded_spatial_20trials_20261031/results.json` |
+| `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 8k | Goal（任务 0/3/4/9，单卡串行，80 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step8k_weak_tasks_single_gpu_run_seeded_goal_20trials_20261101/results.json` |
+| `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 8k | Spatial（任务 4/6/9，单卡串行，60 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step8k_weak_tasks_single_gpu_run_seeded_spatial_20trials_20261101/results.json` |
+| `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 8k | Object（全套，单卡串行，200 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step8k_weak_tasks_single_gpu_run_seeded_object_20trials_20261101/results.json` |
+| `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 12k | Goal（任务 0/3/4/9，三卡并行，80 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step12k_weak_tasks_three_gpu_run_seeded_goal_20trials_20261102/results.json` |
+| `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 12k | Spatial（任务 4/6/9，三卡并行，60 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step12k_weak_tasks_three_gpu_run_seeded_spatial_20trials_20261102/results.json` |
+| `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 12k | Object（全套，三卡并行，200 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step12k_weak_tasks_three_gpu_run_seeded_object_20trials_20261102/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 

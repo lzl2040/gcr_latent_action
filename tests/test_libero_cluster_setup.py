@@ -19,6 +19,7 @@ from lerobot.evaluation.eval_qwen3vl_mot_libero import (
     policy_inference_context,
     sampling_fingerprint,
 )
+from lerobot.evaluation.scripts import verify_libero_pro as pro_verification
 from lerobot.evaluation.scripts import verify_libero_qwen3vl as verification
 
 SCRIPT = Path(__file__).resolve().parents[1] / "lerobot/evaluation/scripts/setup_libero_qwen3vl.sh"
@@ -444,6 +445,52 @@ def test_installer_shell_syntax_help_and_explicit_unknown_option_failure():
     assert "never loads the policy or runs model tests" in result.stdout
     result = subprocess.run(["bash", str(SCRIPT), "--unknown"], capture_output=True, text=True)
     assert result.returncode != 0 and "Unknown installer option" in result.stderr
+
+
+@pytest.mark.parametrize(("argument", "success"), [("--help", True), ("--unknown", False)])
+def test_pro_installer_help_and_invalid_arguments_have_no_installation_side_effects(
+    tmp_path, argument, success
+):
+    script = SCRIPT.with_name("setup_libero_pro.sh")
+    root = tmp_path / "LIBERO_PRO"
+    env = {**os.environ, "PYTHON": str(tmp_path / "missing-python"), "LIBERO_PRO_ROOT": str(root)}
+    subprocess.run(["bash", "-n", str(script)], check=True)
+    result = subprocess.run(["bash", str(script), argument], capture_output=True, text=True, env=env)
+    assert (result.returncode == 0) == success
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("previous", [None, "0", "1"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_pro_trusted_initial_state_loading_restores_torch_environment(monkeypatch, previous, fails):
+    key = "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"
+    if previous is None:
+        monkeypatch.delenv(key, raising=False)
+    else:
+        monkeypatch.setenv(key, previous)
+    states = object()
+
+    def load(index):
+        assert index == 3 and os.environ[key] == "1"
+        if fails:
+            raise ValueError("Invalid trusted initial-state archive")
+        return states
+
+    suite = SimpleNamespace(get_task_init_states=load)
+    if fails:
+        with pytest.raises(ValueError, match="Invalid trusted initial-state archive"):
+            pro_verification.trusted_initial_states(suite, 3)
+    else:
+        assert pro_verification.trusted_initial_states(suite, 3) is states
+    assert os.environ.get(key) == previous
+
+
+def test_pro_verifier_rejects_missing_isolated_config_before_importing_simulator(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["verify_libero_pro.py", "--libero-root", str(tmp_path)])
+    with pytest.raises(SystemExit) as error:
+        pro_verification.main()
+    assert error.value.code == 2
+    assert not (tmp_path / ".setup").exists()
 
 
 @pytest.mark.parametrize(
