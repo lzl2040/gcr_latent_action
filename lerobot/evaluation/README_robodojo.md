@@ -1266,7 +1266,7 @@ SHA256 fingerprints are retained alongside checkpoint fingerprints:
 `outputs/evaluation/robodojo/runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step12k.json`.
 Preparation is verified; actual native startup and final results are pending.
 
-The planned instrumented command is:
+The actual instrumented command was:
 
 ```bash
 conda activate wam
@@ -1306,8 +1306,49 @@ all three bowls and the expected robot/camera roles are present, with no
 black input or obvious role swap. Policy port19185 is reachable and
 inference is active. Startup report:
 `outputs/evaluation/robodojo/stack_bowls_delta_alltask_shift5_decay25k_step12k_sampling10_20261103_v1/startup_validation.json`.
-All three results and final numerical/source/data/camera/video audits
-remain pending; successful startup is not a success-rate result.
+Startup alone was not a success-rate result; the subsequently completed
+three-episode evaluation and final audits are recorded below.
+
+**Final result: 0/3 successful, scores0/0/0, aggregate0/100.**
+All three ordinary layouts reached 800 controls, with no first-failure
+stopping or policy restart. Native wall time was2439.76s (40.66min);
+shared-machine timing is not a causal inference-speed comparison.
+
+| Layout | Success | Score | Controls | Visual observation |
+| --- | --- | --- | --- | --- |
+| 0 | No | 0 | 800 | Left arm contacts the left bowl, then stays around it; all bowls remain separate. |
+| 1 | No | 0 | 800 | Arms approach the two outer bowls; no sustained transfer or valid nesting. |
+| 2 | No | 0 | 800 | Left arm contacts/repositions the left bowl; three bowls remain separate. |
+
+Visual review covered all 240 conditioning head images and exact final
+decoded frames from all nine native videos. No completed stack or valid
+retained pair was observed. Input/camera sanity passed: 51 passive
+snapshots, zero head/static-scene drift, wrist-to-EE transform errors
+below1e-6, and render bindings matching their camera prims.
+Initial measured states match the bowl-subset reference in all three
+layouts. The reference shift5_1102 step12k scored1/0/0.15 with1/3 success;
+this full-task checkpoint performed worse on these specific three
+layouts, not evidence that full-task finetuning generally hurts.
+
+All 240 chunks are finite, full-task delta denormalization error is zero,
+independent integration discrepancies are below9e-8, and all saved
+prediction actions exactly match adapter outputs. Checkpoint and full-task
+data/metadata SHA256 fingerprints remained unchanged. Physical target
+tracking position errors (previous chunk step9 target versus next measured
+anchor) had left/right medians0.284/0.256mm and maxima8.588/15.986mm.
+The native process exited successfully and owned policy port19185 closed.
+Final audited report:
+`outputs/evaluation/robodojo/stack_bowls_delta_alltask_shift5_decay25k_step12k_sampling10_20261103_v1/final_adapter_audit.json`.
+
+Artifacts: 720 predicted videos, 7920 prediction/conditioning PNGs and
+nine actual videos, each801frames,640x480,25FPS. Actual videos:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_delta_alltask_shift5_decay25k_step12k_sampling10_20261103_v1/simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_alltask_shift5_decay25k_step12k_sampling10_20261103_v1/
+```
+
+Predicted videos are under the same run root's `policy/predictions/`.
+Final nine-view sheet: `diagnostics/native_final_frames.jpg`.
 
 ## Qwen shift5_1102 step16k ordinary bowls (2026-11-02)
 
