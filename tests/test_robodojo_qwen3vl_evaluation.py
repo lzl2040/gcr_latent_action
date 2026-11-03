@@ -229,7 +229,8 @@ def test_model_preserves_requested_env_order_and_resets(adapter, tmp_path):
         model.get_action_batch([3])
 
 
-def test_matching_futures_share_one_sample_and_preserve_next_replan_rng(adapter, tmp_path):
+@pytest.mark.parametrize("joint_task", ["joint_prediction", "va_prediction"])
+def test_matching_futures_share_one_sample_and_preserve_next_replan_rng(adapter, tmp_path, joint_task):
     import imageio.v2 as imageio
 
     class Policy:
@@ -254,7 +255,9 @@ def test_matching_futures_share_one_sample_and_preserve_next_replan_rng(adapter,
         def generate_validation(self, batch, *, seed):
             assert seed is None
             self.joint_calls += 1
-            self.prediction = {"action_normalized": self._sample(), "state_normalized": torch.ones(1, 9, 40)}
+            self.prediction = {"action_normalized": self._sample()}
+            if joint_task == "joint_prediction":
+                self.prediction["state_normalized"] = torch.ones(1, 9, 40)
             return self.prediction
 
     class Writer:
@@ -272,6 +275,9 @@ def test_matching_futures_share_one_sample_and_preserve_next_replan_rng(adapter,
             return {"directory": str(directory)}
 
     plain_policy, export_policy = Policy(), Policy()
+    Policy.config.task_names = tuple(
+        joint_task if name == "joint_prediction" else name for name in Policy.config.task_names
+    )
     writer = Writer(export_policy)
     outputs = []
     for name, policy, exporter in (("plain", plain_policy, None), ("export", export_policy, writer)):
@@ -317,7 +323,10 @@ def test_matching_futures_share_one_sample_and_preserve_next_replan_rng(adapter,
             )
     with np.load(tmp_path / "export/chunks/chunk_000000_env_000.npz") as data:
         np.testing.assert_array_equal(data["current_state"], state_to_canonical(observation()))
-        np.testing.assert_array_equal(data["normalized_predicted_states"], np.ones((1, 9, 40)))
+        if joint_task == "joint_prediction":
+            np.testing.assert_array_equal(data["normalized_predicted_states"], np.ones((1, 9, 40)))
+        else:
+            assert "normalized_predicted_states" not in data
     records = [
         json.loads(line) for line in (tmp_path / "export/chunks/inference.jsonl").read_text().splitlines()
     ]
@@ -906,11 +915,12 @@ def test_diagnostic_samples_include_configured_validation_and_check_episode_boun
         diagnostic_samples(dataset, [0], [100])
 
 
-def test_conditional_losses_fix_noise_levels_and_restore_rng_and_sampler():
+@pytest.mark.parametrize("joint_task", ["joint_prediction", "va_prediction"])
+def test_conditional_losses_fix_noise_levels_and_restore_rng_and_sampler(joint_task):
     from lerobot.evaluation.robodojo_diagnostics import conditional_losses
 
     class Policy:
-        config = SimpleNamespace(task_names=("joint_prediction", "inverse_dynamics"))
+        config = SimpleNamespace(task_names=(joint_task, "inverse_dynamics"))
 
         def _sample_sigma(self, size, device):
             return torch.rand(size, device=device)
@@ -926,6 +936,7 @@ def test_conditional_losses_fix_noise_levels_and_restore_rng_and_sampler():
     results = conditional_losses(policy, {}, 42, torch.device("cpu"))
     torch.testing.assert_close(torch.random.get_rng_state(), before)
     assert len(results) == 6
+    assert [row["task"] for row in results] == [joint_task] * 3 + ["inverse_dynamics"] * 3
     assert [row["action_prediction_reconstruction_loss"] for row in results] == pytest.approx(
         [0.1, 0.5, 0.9] * 2
     )

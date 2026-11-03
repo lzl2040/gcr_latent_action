@@ -24,6 +24,7 @@ from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import (
 )
 from lerobot.common.policies.qwen3vl_mot.stage1_transfer import TransferReport, transfer_matching_module
 from lerobot.common.policies.qwen3vl_mot.tasks import (
+    DEFAULT_TASK_WEIGHTS,
     TASK_SPECS,
     ModalityRole,
     resolve_task_specs,
@@ -58,6 +59,9 @@ def test_task_family_has_requested_directional_roles():
     assert TASK_SPECS["joint_prediction"].video is ModalityRole.FUTURE_NOISY
     assert TASK_SPECS["joint_prediction"].state is ModalityRole.FUTURE_NOISY
     assert TASK_SPECS["joint_prediction"].action is ModalityRole.NOISY
+    assert TASK_SPECS["va_prediction"].video is ModalityRole.FUTURE_NOISY
+    assert TASK_SPECS["va_prediction"].state is ModalityRole.CURRENT_ONLY
+    assert TASK_SPECS["va_prediction"].action is ModalityRole.NOISY
     assert TASK_SPECS["forward_dynamics"].action is ModalityRole.CLEAN
     assert TASK_SPECS["forward_dynamics"].state is ModalityRole.ABSENT
     assert TASK_SPECS["inverse_dynamics"].video is ModalityRole.CLEAN
@@ -124,14 +128,24 @@ def test_direct_model_loading_rejects_old_task_contract_before_construction(
         assert not requests
 
 
-def test_current_hub_task_contract_reuses_downloaded_config(tmp_path, monkeypatch):
+@pytest.mark.parametrize("task_names", [
+    None, ("forward_dynamics", "inverse_dynamics", "joint_prediction"), ("va_prediction",),
+])
+def test_current_hub_task_contract_reuses_downloaded_config(tmp_path, monkeypatch, task_names):
+    import json
+
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
 
-    config = Qwen3VLMoTConfig(
-        task_names=("forward_dynamics", "inverse_dynamics", "joint_prediction"),
-        task_weights=(0.3, 0.3, 0.4),
+    config = Qwen3VLMoTConfig() if task_names is None else Qwen3VLMoTConfig(
+        task_names=task_names,
+        task_weights=(1.0,) * len(task_names),
     )
     config._save_pretrained(tmp_path)
+    if task_names is None:
+        config_path = tmp_path / "config.json"
+        payload = json.loads(config_path.read_text())
+        del payload["task_names"]
+        config_path.write_text(json.dumps(payload))
     monkeypatch.setattr(stage2, "hf_hub_download", lambda **kwargs: str(tmp_path / "config.json"))
     result = object()
 
@@ -159,13 +173,14 @@ def test_direct_model_loading_rejects_overridden_task_order(tmp_path, monkeypatc
         Qwen3VLMoTPolicy.from_pretrained(tmp_path, config=config)
 
 
-def test_task_selection_redistributes_unavailable_tactile_weight():
+@pytest.mark.parametrize("unavailable_task", ["tactile_prediction", "va_prediction"])
+def test_task_selection_redistributes_unavailable_weight(unavailable_task):
     policy = Qwen3VLMoTPolicy.__new__(Qwen3VLMoTPolicy)
     nn.Module.__init__(policy)
     policy.config = SimpleNamespace(tactile_generation_target="spatial_patches")
     policy.task_specs = (
         TASK_SPECS["i2v"],
-        TASK_SPECS["tactile_prediction"],
+        TASK_SPECS[unavailable_task],
     )
     policy.task_weights = (0.01, 0.99)
     batch = {
@@ -176,6 +191,8 @@ def test_task_selection_redistributes_unavailable_tactile_weight():
         "tactile_signal_mask": torch.zeros(2),
         "tactile_image_mask": torch.zeros(2, 2),
     }
+    if unavailable_task == "va_prediction":
+        batch["state_mask"].zero_()
 
     task, valid_rows = policy._select_task(batch, forced_task=None)
 
@@ -1072,6 +1089,8 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         time_sampling_distribution=time_distribution,
         time_sampling_shift=3.0,
         inference_steps=3,
+        task_names=tuple(TASK_SPECS),
+        task_weights=(*DEFAULT_TASK_WEIGHTS, 0.0),
     )
     policy = stage2.Qwen3VLMoTPolicy(config)
     if generation_kind != "random":
@@ -1153,22 +1172,26 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
             assert policy.understanding.last_view_arguments["view_names"] == config.rgb_views
         if task_name == "t2v":
             assert metrics["video_target_elements"] == (144 if multiview else 96)
-        elif task_name in ("i2v", "joint_prediction", "forward_dynamics"):
+        elif task_name in ("i2v", "joint_prediction", "va_prediction", "forward_dynamics"):
             assert metrics["video_target_elements"] == (96 if multiview else 64)
         if task_name in ("joint_prediction", "state_prediction"):
             assert metrics["state_target_elements"] == (32 if flow_space == "embedding" else 24)
         if task_name in (
             "joint_prediction",
+            "va_prediction",
             "inverse_dynamics",
             "action_prediction",
         ):
             assert metrics["action_target_elements"] == 32
         assert "action_reconstruction_loss" not in metrics
         assert "state_reconstruction_loss" not in metrics
-        if task_name == "joint_prediction":
+        if task_name in ("joint_prediction", "va_prediction"):
             assert sigma_calls == [2]
             for name in ("action", "state"):
-                torch.testing.assert_close(generation_inputs[name][1], generation_inputs["video"][1])
+                if TASK_SPECS[task_name].role(name).is_target:
+                    torch.testing.assert_close(generation_inputs[name][1], generation_inputs["video"][1])
+                else:
+                    assert not generation_inputs[name][1].any()
         for name in ("action", "state"):
             if flow_space == "embedding" and TASK_SPECS[task_name].role(name).is_target:
                 assert len(decoder_inputs[name]) == 1
@@ -1208,12 +1231,32 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
                 assert policy.physical_decoders["state"][-1].weight.grad is None
         if task_name == "joint_prediction" and flow_space == "raw":
             torch.testing.assert_close(policy.physical_encoder.last_state[:, 0], batch["observation.state"][:, 0])
-        if task_name == "action_prediction" or (task_name == "joint_prediction" and flow_space == "embedding"):
+        if task_name in ("action_prediction", "va_prediction") or (
+            task_name == "joint_prediction" and flow_space == "embedding"
+        ):
             torch.testing.assert_close(
                 policy.physical_encoder.input_history[-2]["observation.state"]
                 if flow_space == "embedding" else policy.physical_encoder.last_state,
                 batch["observation.state"][:, :1].expand(-1, 4, -1),
             )
+        if task_name == "va_prediction":
+            assert "state_flow_loss" not in metrics
+            assert "state_target_elements" not in metrics
+            changed = copy.deepcopy(batch)
+            changed["observation.state"][:, 1:] = float("nan")
+            torch.set_rng_state(rng)
+            changed_loss, changed_metrics = policy(changed, task_type=task_name)
+            torch.testing.assert_close(changed_loss, loss)
+            assert changed_metrics == metrics
+            policy.zero_grad(set_to_none=True)
+            changed_loss.backward()
+            assert policy.generation.output_heads["state"].weight.grad is None
+            assert policy.generation.output_heads["action"].weight.grad is not None
+            video_head = policy.generation.output_heads["video"].weight
+            assert (video_head.grad is not None) == video_head.requires_grad
+            if flow_space == "embedding":
+                assert policy.physical_decoders["state"][-1].weight.grad is None
+                assert policy.physical_decoders["action"][-1].weight.grad is not None
         if task_name == "tactile_prediction":
             assert metrics["tactile_target_elements"] == 64
             assert policy.physical_encoder.include_tactile_history == (
@@ -1641,7 +1684,7 @@ def test_physical_flow_corrupts_clean_isolated_embeddings_not_encoder_inputs():
 
 
 @pytest.mark.parametrize("task_name", [
-    "action_prediction", "joint_prediction", "inverse_dynamics",
+    "action_prediction", "joint_prediction", "va_prediction", "inverse_dynamics",
     "forward_dynamics", "state_prediction",
 ])
 def test_clean_physical_conditions_do_not_leak_target_trajectories(task_name):
@@ -1757,7 +1800,8 @@ def test_embedding_euler_updates_latents_and_decodes_only_after_integration():
 @pytest.mark.parametrize("flow_space", ["raw", "embedding"])
 @pytest.mark.parametrize("multiview", [False, True])
 @pytest.mark.parametrize("zero_weight_action", [False, True])
-def test_three_task_joint_sampling_uses_only_current_conditions(flow_space, multiview, zero_weight_action):
+@pytest.mark.parametrize("task_name", ["joint_prediction", "va_prediction"])
+def test_joint_video_sampling_uses_only_current_conditions(flow_space, multiview, zero_weight_action, task_name):
     class CurrentVideoVAE(nn.Module):
         def __init__(self):
             super().__init__()
@@ -1774,8 +1818,15 @@ def test_three_task_joint_sampling_uses_only_current_conditions(flow_space, mult
     if flow_space == "raw":
         policy.config.physical_hidden_dim = 12
         policy.physical_encoder = _FakePhysical(groups=2, hidden=12, tactile_tokens=4)
-    policy.config.task_names = ("forward_dynamics", "inverse_dynamics", "joint_prediction")
-    policy.config.task_weights = (1 / 3, 1 / 3, 1 / 3)
+    if task_name == "va_prediction":
+        policy.config.task_names = (task_name,)
+        policy.config.task_weights = (1.0,)
+        policy.physical_decoders["state"].register_forward_pre_hook(
+            lambda *args: pytest.fail("va_prediction must not decode future state.")
+        )
+    else:
+        policy.config.task_names = ("forward_dynamics", "inverse_dynamics", "joint_prediction")
+        policy.config.task_weights = (1 / 3, 1 / 3, 1 / 3)
     if zero_weight_action:
         policy.config.task_names += ("action_prediction",)
         policy.config.task_weights += (0.0,)
@@ -1812,18 +1863,33 @@ def test_three_task_joint_sampling_uses_only_current_conditions(flow_space, mult
 
     def record_streams(module, args):
         recorded.append({stream.name: stream.values.clone() for stream in args[0]})
+        assert args[3] == task_name
+        if task_name == "va_prediction":
+            streams = {stream.name: stream for stream in args[0]}
+            assert not streams["state"].sigma.any()
+            torch.testing.assert_close(streams["action"].sigma, streams["video"].sigma)
+            if streams["state"].noise_mask is not None:
+                assert not streams["state"].noise_mask.any()
 
     policy.generation.register_forward_pre_hook(record_streams)
     prediction = policy.generate_validation(batch, seed=47)
     assert len(recorded) == policy.config.inference_steps
     assert all(set(streams) == {"video", "state", "action"} for streams in recorded)
     assert prediction["action_normalized"].shape == (2, 4, 4)
-    assert prediction["state_normalized"].shape == (2, 4, 4)
     assert prediction["video_latents"].shape == (2, 4, 3, 2, 2)
-    torch.testing.assert_close(
-        prediction["state_normalized"][:, 0], batch["observation.state"][:, 0] * batch["state_mask"]
-    )
-    assert not prediction["state_normalized"][0, :, 2].any()
+    if task_name == "va_prediction":
+        assert "state_normalized" not in prediction
+        expected = batch["observation.state"][:, :1].expand(-1, 4, -1) * batch["state_mask"][:, None]
+        for encoded in policy.physical_encoder.input_history:
+            torch.testing.assert_close(encoded["observation.state"], expected)
+        torch.manual_seed(47)
+        torch.testing.assert_close(policy.sample_canonical_action(batch), prediction["action_normalized"])
+    else:
+        assert prediction["state_normalized"].shape == (2, 4, 4)
+        torch.testing.assert_close(
+            prediction["state_normalized"][:, 0], batch["observation.state"][:, 0] * batch["state_mask"]
+        )
+        assert not prediction["state_normalized"][0, :, 2].any()
     assert not prediction["action_normalized"][0, :, 1].any()
     assert prediction["tactile_decoded_z"].numel() == 0
     assert not prediction["tactile_mask"].any()
@@ -1833,7 +1899,7 @@ def test_three_task_joint_sampling_uses_only_current_conditions(flow_space, mult
         assert prediction["video_latents_views"].shape == (2, 3, 4, 3, 2, 2)
         assert not prediction["video_latents_views"][~batch["image_view_mask"]].any()
     if flow_space == "embedding":
-        assert len(policy.physical_encoder.input_history) == 1
+        assert len(policy.physical_encoder.input_history) == (2 if task_name == "va_prediction" else 1)
         encoded = policy.physical_encoder.input_history[0]
         assert not encoded["action"].any()
         assert not encoded["action_mask"].any()
@@ -1843,6 +1909,8 @@ def test_three_task_joint_sampling_uses_only_current_conditions(flow_space, mult
         )
         for streams in recorded[1:]:
             torch.testing.assert_close(streams["state"][:, -1], recorded[0]["state"][:, -1])
+            if task_name == "va_prediction":
+                torch.testing.assert_close(streams["state"], recorded[0]["state"])
 
     changed = copy.deepcopy(batch)
     changed["observation.state"][:, 1:] = -999

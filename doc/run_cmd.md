@@ -679,11 +679,35 @@ STAGE2_TASK_NAMES
 STAGE2_TASK_WEIGHTS
 ```
 
-可用任务名按默认顺序为：
+默认任务列表和顺序保持为：
 
 ```text
 t2v,i2v,joint_prediction,forward_dynamics,inverse_dynamics,action_prediction,state_prediction,tactile_prediction
 ```
+
+另外支持显式启用 `va_prediction`，不自动加入默认列表。它联合预测未来 video 和完整
+action chunk，state 只使用当前第 0 帧作为干净条件，不预测未来 state，
+也没有 state flow/reconstruction loss。video/action 共用采样的 sigma；
+Understanding latent-action 蒸馏及 embedding 模式下的 action reconstruction 保留。
+例如只训练该任务，使用新的实验输出目录：
+
+```bash
+STAGE2_TASK_NAMES=va_prediction \
+STAGE2_TASK_WEIGHTS=1 \
+DATA_MIX=libero \
+TRAINING_STAGE=finetune \
+WEIGHT_RESUME=false \
+JOB_NAME=qwen3vl_mot_libero_va \
+OUTPUT_DIR=/path/to/new/libero_va \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+同样的两个任务环境变量也适用于 `train_qwen3vl_mot_local.sh`；其余模型路径、
+噪声分布与训练参数沿用自己的配置。已有 checkpoint 不允许改名或增删 task names 后直接
+resume；需要启用 va 的新实验应从 Stage 1 初始化。只启用 va 也支持动作推理与生成验证，
+在同一轮 Euler 积分中生成匹配的 video/action，不要求额外启用 i2v 或 action_prediction，
+不返回 `state_normalized`，也不导出未来 state 预测或误差。
+若同时启用正权重的 joint 和 va，生成验证优先使用原有 joint；只需 va 时请明确设置列表。
 
 先只训练当前 RGB 条件的视频生成和触觉图像生成时，推荐**保留完整任务列表**，把暂不训练的
 任务设为 0：

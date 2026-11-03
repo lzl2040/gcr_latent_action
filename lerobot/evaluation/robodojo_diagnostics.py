@@ -184,7 +184,7 @@ def clean_action_autoencoding(policy, batch: dict) -> torch.Tensor:
 @torch.inference_mode()
 def conditional_losses(policy, batch: dict, seed: int, device: torch.device) -> list[dict]:
     rows = []
-    for task in ("joint_prediction", "inverse_dynamics"):
+    for task in ("joint_prediction", "va_prediction", "inverse_dynamics"):
         if task not in policy.config.task_names:
             continue
         for sigma in (0.1, 0.5, 0.9):

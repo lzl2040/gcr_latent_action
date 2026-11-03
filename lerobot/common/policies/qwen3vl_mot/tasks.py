@@ -97,9 +97,25 @@ TASK_SPECS: dict[str, TaskSpec] = {
         action=ModalityRole.CLEAN,
         tactile=ModalityRole.NOISY,
     ),
+    "va_prediction": TaskSpec(
+        name="va_prediction",
+        understanding_image=True,
+        video=ModalityRole.FUTURE_NOISY,
+        state=ModalityRole.CURRENT_ONLY,
+        action=ModalityRole.NOISY,
+    ),
 }
 
-DEFAULT_TASK_NAMES = tuple(TASK_SPECS)
+DEFAULT_TASK_NAMES = (
+    "t2v",
+    "i2v",
+    "joint_prediction",
+    "forward_dynamics",
+    "inverse_dynamics",
+    "action_prediction",
+    "state_prediction",
+    "tactile_prediction",
+)
 DEFAULT_TASK_WEIGHTS = (0.10, 0.20, 0.0, 0.20, 0.15, 0.15, 0.10, 0.10)
 
 

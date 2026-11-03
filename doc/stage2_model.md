@@ -749,6 +749,7 @@ lerobot/common/policies/qwen3vl_mot/tasks.py
 | `t2v` | text | 无 | 完整 video |
 | `i2v` | image + available text | video 当前 latent frame | 未来 video |
 | `joint_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action + 未来 state |
+| `va_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action，不预测 state |
 | `forward_dynamics` | image + available text | video 当前 latent frame + action | 未来 video |
 | `inverse_dynamics` | image + available text | 完整窗口 video | 该窗口的 action |
 | `action_prediction` | image + available text | current state | action |
@@ -767,6 +768,13 @@ action_prediction   0.15
 state_prediction    0.10
 tactile_prediction  0.10
 ```
+
+`va_prediction` 为显式启用的新任务，不加入上述默认任务列表或改变已有权重。
+它只取 state chunk 的第 0 帧并重复到整个 chunk；不把未来 GT state 作为条件或目标，
+state 的 sigma 始终为 0，没有 state flow loss 或 state decoder 重建 loss。
+video/action 共用每个样本的 sigma，分别采样独立高斯噪声。
+原有 Understanding latent-action 蒸馏仍保留，embedding 模式的 action prediction
+reconstruction 仍按配置启用；`joint_prediction` 的三模态监督不变。
 
 forward/inverse 的 state role 为 `ABSENT`：不输入 Generation，也不参与 Physical Encoder
 的 action 编码，既没有 `state_flow_loss`，也没有 `state_prediction_reconstruction_loss`。
@@ -932,7 +940,7 @@ state 只监督未来帧，已知第 0 帧不计入数值重建；只取 8 个�
 不把追加的 current-state 条件 token 交给 decoder。
 
 日志名为 `action_prediction_reconstruction_loss` / `state_prediction_reconstruction_loss`，
-记录未乘权重的 MSE。inverse、joint、独立 action_prediction 有 action 重建；
+记录未乘权重的 MSE。inverse、joint、va、独立 action_prediction 有 action 重建；
 joint、独立 state_prediction 有未来 state 重建。forward 的 action 是干净条件，
 不增加预测 action loss，也不引入 state。干净条件模态不调用对应 decoder。
 原 flow 和蒸馏损失保留，干净 GT codec 重建已移除。
@@ -983,8 +991,10 @@ $$
 
 这里的 `x` 是 action embedding。旧 raw-space checkpoint 仍在 `(B,32,40)` 原始空间
 更新，每次重新经过 Physical Encoder；新旧采样器按保存的模式选择。
-若没有启用 `action_prediction` 或其权重为 0，而 joint 的权重为正，则执行 joint 联合
-采样并返回其中的 action，避免使用未训练的 action task embedding。
+若没有启用 `action_prediction` 或其权重为 0，则优先选择正权重的 joint，
+其次选择正权重的 `va_prediction`，执行对应联合采样并返回 action，
+避免使用未训练的 action task embedding。va 同时积分 video/action，current state 始终为
+干净条件，不初始化、积分或 decode 未来 state。
 
 ### 11.1 尚未实现的部署层
 
@@ -1005,7 +1015,9 @@ embedding 模式的额外 current-state token（raw 模式的第 0 帧）在积�
 第 0 帧保留输入 current state，其余帧为预测。可只提供当前 RGB/current state 及 canonical
 维度 masks，不必提供 future video/state/action 或触觉。
 
-joint 未启用时沿用固定 seed 的 action、i2v 分别采样路径；可解码触觉单独采样，
+joint 未启用且 va 权重为正时，改为使用 `va_prediction` 联合生成 video/action，
+返回结果不含 `state_normalized`，也不导出 state 预测图或 state MAE。
+两种联合任务均未启用时沿用固定 seed 的 action、i2v 分别采样路径；可解码触觉单独采样，
 未配置 tactile task 或没有有效触觉图像时跳过。
 视频从当前 RGB 独立 VAE 编码和未来 Gaussian noise 开始做 Euler 更新，
 每一路的首 temporal latent 始终固定，不读取未来图像作为推理条件。

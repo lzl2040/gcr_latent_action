@@ -205,9 +205,13 @@ class RoboDojoModel:
         self.seed = seed
         if prediction_writer is not None:
             weights = dict(zip(policy.config.task_names, policy.config.task_weights, strict=True))
-            if weights.get("joint_prediction", 0) <= 0 or weights.get("action_prediction", 0) > 0:
+            if (
+                max(weights.get("joint_prediction", 0), weights.get("va_prediction", 0)) <= 0
+                or weights.get("action_prediction", 0) > 0
+            ):
                 raise ValueError(
-                    "Matched future export requires joint-only action sampling, not an action-only task."
+                    "Matched future export requires joint-only action sampling "
+                    "(joint_prediction or va_prediction), not an action-only task."
                 )
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
