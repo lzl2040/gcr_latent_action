@@ -819,6 +819,53 @@ def test_delta_entrypoint_defaults_and_training_action_mode_guard(tmp_path):
         validate_training_action_mode(args)
 
 
+@pytest.mark.parametrize("invalid", [None, "subset", "contract", "statistics"])
+def test_full_task_delta_requires_matching_data_and_delta_statistics(delta_adapter, tmp_path, invalid):
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo import validate_training_action_mode
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta import build_parser as delta_parser
+
+    checkpoint = tmp_path / "step12k/model"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / ".metadata").touch()
+    policy = {"type": "qwen3vl_mot"}
+    (tmp_path / "config.json").write_text(json.dumps(policy))
+    (tmp_path / "train_config.json").write_text(
+        json.dumps(
+            {
+                "policy": policy,
+                "stage": "finetune",
+                "data_mix": "robodojo",
+                "dataset": {"dataset_size_one_epoch": 1856102},
+            }
+        )
+    )
+    root = tmp_path / "delta"
+    info_path = root / "meta/info.json"
+    info = json.loads(info_path.read_text())
+    info["total_frames"] = 44774 if invalid == "subset" else 1856102
+    if invalid == "contract":
+        info["delta_action_contract"]["reference"] = "consecutive_action_target"
+    info_path.write_text(json.dumps(info))
+    if invalid == "statistics":
+        stats_path = root / "meta/stats.json"
+        stats = json.loads(stats_path.read_text())
+        del stats["delta_action.ee_ort6d_pos"]
+        stats_path.write_text(json.dumps(stats))
+    args = delta_parser().parse_args(
+        ["eval", "--checkpoint", str(checkpoint.parent), "--dataset-root", str(root)]
+    )
+    if invalid:
+        with pytest.raises((ValueError, KeyError)):
+            validate_training_action_mode(args)
+    else:
+        report = validate_training_action_mode(args)
+        assert report["training_configuration_verified"] and report["data_mix"] == "robodojo"
+        assert report["dataset_root"] == str(root.resolve())
+        assert report["stats_sha256"]
+        args.action_mode = "absolute"
+        assert validate_training_action_mode(args)["action_mode"] == "absolute"
+
+
 def test_delta_contract_is_required_and_not_replaced_by_absolute_statistics(delta_adapter, tmp_path):
     root = tmp_path / "delta"
     path = root / "meta/info.json"

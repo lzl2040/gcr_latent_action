@@ -139,12 +139,26 @@ def validate_training_action_mode(args) -> dict:
         return {"action_mode": args.action_mode, "training_configuration_verified": False}
     training_path = matching_training_config(args)
     saved = json.loads(training_path.read_text())
-    expected = {"absolute": "robodojo", "delta": "delta_robodojo_stack_bowl"}[args.action_mode]
-    if saved["data_mix"] != expected or saved["stage"] != "finetune":
+    expected = {
+        "absolute": ("robodojo",),
+        "delta": ("delta_robodojo_stack_bowl", "robodojo"),
+    }[args.action_mode]
+    if saved["data_mix"] not in expected or saved["stage"] != "finetune":
         raise ValueError(
-            f"Action mode {args.action_mode!r} requires finetuning data_mix={expected!r}; "
+            f"Action mode {args.action_mode!r} requires finetuning data_mix in {expected!r}; "
             f"checkpoint declares {saved['data_mix']!r}/{saved['stage']!r}."
         )
+    if args.action_mode == "delta" and saved["data_mix"] == "robodojo":
+        from lerobot.evaluation.robodojo_qwen3vl import RoboDojoAdapter
+
+        RoboDojoAdapter.from_dataset(args.dataset_root, action_mode="delta")
+        info = json.loads((args.dataset_root / "meta/info.json").read_text())
+        training_frames = saved.get("dataset", {}).get("dataset_size_one_epoch")
+        if not training_frames or info.get("total_frames") != training_frames:
+            raise ValueError(
+                "Full-task delta evaluation requires the training dataset frame count; "
+                "do not substitute stack-bowls subset statistics."
+            )
     stats_path = args.dataset_root / "meta/stats.json"
     return {
         "action_mode": args.action_mode,

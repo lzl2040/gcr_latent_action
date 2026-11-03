@@ -1226,6 +1226,64 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 `--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
 conftest; the dataset tools do not require robot hardware or a simulator.
 
+## Qwen all-task shift5 decay25k step12k ordinary bowls (2026-11-03)
+
+Requested full-task checkpoint:
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step12k`.
+The actual experiment directory ends in `decay_25k`, not `decay_25`.
+Saved policy and training policy match, declaring finetuning on `robodojo`,
+1,856,102 frames, shifted_uniform shift5 and LR decay25k. Saved beta fields
+are inactive. Evaluate ordinary `stack_bowls` layouts0/1/2 once each, with
+BF16, seed0, one environment, sampling10, prediction32/execution10 and one
+uninterrupted policy RNG. Do not stop after a failed first episode.
+
+The user confirmed **delta actions** and the full-task dataset:
+`/data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video`.
+Its newly synchronized metadata and parquet now contain the 20D
+`delta_action.ee_ort6d_pos` feature and the measured-next-state increment
+contract. Full-task statistics SHA256:
+`94d978e4177fa8db22a1a48daedcffda28c8d24a325210a488d4c9006c1778e1`.
+**Use its own absolute-state and delta-action statistics, never the
+44,774-frame bowl-subset statistics.** Do not infer absolute semantics from
+`data_mix=robodojo`: both older absolute and newer full-task delta recipes
+use that name. Explicitly select the action mode matching training.
+
+The evaluator now accepts `data_mix=robodojo` with `--action-mode delta`
+only when the dataset has the verified delta contract, 20D delta feature,
+usable state/delta statistics, and the saved training frame count.
+Existing absolute and bowl-subset delta behavior is preserved. Regression
+validation: 46 evaluator tests passed; Ruff lint and format checks passed.
+Source/data preflight, actual native startup and final results are pending.
+
+The planned instrumented command is:
+
+```bash
+conda activate wam
+cd /home/jianf/lzl_project/gcr_latent_action
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$PWD" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+export ROBODOJO_EVAL_MODULE=lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+ENTRY=/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py
+python "$ENTRY" eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step12k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task stack_bowls --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video --port 19185 --timeout 7200 \
+  --output-dir outputs/evaluation/robodojo/stack_bowls_delta_alltask_shift5_decay25k_step12k_sampling10_20261103_v1
+```
+
+Save actual/future videos and passive camera observations. The bowl-subset
+shift5_1102 step12k run is only an initial-layout/evaluation-protocol
+reference; training data, normalization and LR schedule differ. Three
+fixed layouts do not estimate full-benchmark performance or establish a
+causal effect of full-task finetuning.
+
 ## Qwen shift5_1102 step16k ordinary bowls (2026-11-02)
 
 Evaluate the same newly supplied shift5_1102 experiment's checkpoint
