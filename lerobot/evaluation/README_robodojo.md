@@ -1285,7 +1285,82 @@ training window (episode102, global frame59928), including10/20-step
 sampling, hold-current and clean-codec baselines, and conditioned losses.
 Training-batch versus deployment-input action sampling has exact tensor
 parity. The owned policy process was verified live on physical GPU1.
-Final28-window sampling and error results remain pending.
+
+**Completed results:** all28 windows finished; training/deployment action
+and future-state sampling tensors match exactly in every window. Source
+checkpoint SHA256 and all dataset metadata SHA256 fingerprints match
+preflight after sampling. Independent cumulative-translation calculations
+also reproduce the reported physical action errors. All28 primary
+conditioning images were visually reviewed: the eight configured windows
+show their respective tasks; the20 added windows show bowl demonstrations
+at multiple phases, with varying bowl appearances and no black primary
+images. This visual check does not claim review of all wrist images.
+The owned sampling process exited and released its GPU allocation.
+Saved `fsdp.fp8=false`; no FP8 transformation was applied.
+
+The following are equal-weight means over the **20 bowl training windows**.
+Position errors are predicted versus demonstrated integrated absolute
+targets, not simulator target-tracking errors. Prefix10 is the portion
+that would be executed before replanning.
+
+| Method | Normalized action MSE,32 steps | Prefix10 XYZ error, left/right cm | All32 XYZ error, left/right cm |
+| --- | ---: | --- | --- |
+| Free-running,10 denoising steps | 0.20664 | 1.174 / 1.274 | 2.692 / 3.412 |
+| Free-running,20 denoising steps | 0.20300 | 1.254 / 1.322 | 2.721 / 3.565 |
+| Hold current pose, zero-motion deltas | 0.45826 | 1.989 / 2.735 | 5.784 / 7.578 |
+| Clean GT action embedding -> current decoder | 0.10583 | 1.057 / 1.187 | 2.581 / 2.478 |
+
+For10-step sampling, prefix normalized MSE is0.18438, prefix angular
+errors average2.555/2.979degrees and clipped gripper MAEs0.00808/0.03090
+(native0..1 units). Across the200 prefix positions per arm, XYZ-error
+medians are0.320/0.414cm,90th percentiles3.482/3.807cm and maxima
+7.005/9.418cm. Thus the mean does not imply every position is wrong by
+several centimeters. The largest window-mean prefix XYZ errors are
+4.041cm on the left (episode3000,offset128) and3.691cm on the right
+(episode3099,offset64).
+
+Sampling beats hold-current prefix normalized MSE on17/20 windows;
+prefix XYZ is better on8/20 left and13/20 right windows. Restricting
+each arm to windows whose demonstrated mean prefix motion exceeds5mm
+leaves9 left and14 right windows. Mean XYZ errors are then
+**2.373/1.730cm**, versus hold-current4.419/3.907cm. This supports
+learning useful motion while retaining meaningful training-example
+deviations; it is not evidence that the policy is simply motionless.
+Initial bowl windows (five demonstrations) have prefix XYZ errors
+0.510/2.086cm; the15 noninitial windows have1.396/1.004cm.
+
+The eight configured training-validation windows are **other tasks**,
+not extra bowl demonstrations. Their mean action MSE is0.40133 and
+prefix XYZ0.520/1.028cm at10 steps, versus hold-current
+MSE1.31112 and XYZ1.408/2.228cm. Do not mix their MSE with the bowl
+subset or label them a35-task benchmark.
+
+**Interpretation and limits.** Doubling sampler steps did not reduce
+mean prefix physical error on this paired selection. More importantly,
+clean ground-truth actions passed through the frozen physical encoder
+and the current action decoder already have centimeter-scale integrated
+reconstruction error. This decoder is the separate
+`physical_decoders["action"]` head; `physical_tuning_mode="frozen"`
+freezes the encoder, not this head. The clean-codec probe does not run
+the denoising model, but its result is **not a proven irreducible error
+floor**, nor proof that all free-running or native-rollout errors come
+from the codec.
+
+At sigma0.5, the bowl windows' mean joint ground-truth-conditioned action
+reconstruction loss is0.01537 and embedding flow loss0.92210. These are
+different objectives/conditioning from free-running action MSE0.20664;
+a small training reconstruction number does not demonstrate accurate
+generation from noise. These offline deviations exist with genuine
+training images/states and no simulator, but alternative valid actions,
+single-seed sampling, limited windows and closed-loop distribution shifts
+prevent assigning the native0/3 result to one cause.
+
+Artifacts in the run root:
+`sampling/diagnostics.json`, per-sample `sampling/sample_*/actions.npz`
+and `metrics.json`, `training_error_summary.json`,
+`training_conditioning_sheet.jpg`, `diagnostic.log` and `summary.log`.
+The summary separates bowl/other-task, initial/noninitial, moving-arm
+groups, normalized components, means/medians/tails and baselines.
 
 ## Qwen all-task shift5 decay25k step16k ordinary bowls (2026-11-04)
 
