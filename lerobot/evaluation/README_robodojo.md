@@ -1272,11 +1272,20 @@ CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
   --inference-steps 10 --replan-steps 10 --seed 0 \
   --diagnostic-episodes 3000 3025 3050 3075 3099 \
   --diagnostic-frames 0 64 128 192 --diagnostic-inference-steps 20 \
-  --output-dir "$RUN"
+  --output-dir "$RUN/sampling"
 ```
 
-Preflight: `$RUN/training_error_preflight.json`. Final sampling and error
-results are pending; loader/input parity alone does not establish accuracy.
+Preflight: `$RUN/training_error_preflight.json`. The CLI requires a fresh
+output directory, so sampling writes into the new `$RUN/sampling/`
+subdirectory. An initial launch stopped at this directory guard before
+loading a model; its log is retained separately.
+
+**Verified startup:** the restored policy completed the first real
+training window (episode102, global frame59928), including10/20-step
+sampling, hold-current and clean-codec baselines, and conditioned losses.
+Training-batch versus deployment-input action sampling has exact tensor
+parity. The owned policy process was verified live on physical GPU1.
+Final28-window sampling and error results remain pending.
 
 ## Qwen all-task shift5 decay25k step16k ordinary bowls (2026-11-04)
 
