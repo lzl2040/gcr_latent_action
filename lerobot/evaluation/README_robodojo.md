@@ -1295,8 +1295,50 @@ show the expected bowls, grippers and camera roles without black input
 or obvious role swap. Owned policy port19186 is reachable and native
 inference is active. Startup report:
 `outputs/evaluation/robodojo/stack_bowls_delta_alltask_shift5_decay25k_step16k_sampling10_20261104_v1/startup_validation.json`.
-Final results and complete source/data/action/camera/video/visual audits
-remain pending; successful startup is not a success-rate result.
+Successful startup alone was not a success-rate result. The subsequent
+completed run and final audits are recorded below.
+
+**Final result: 0/3 successful, scores0/0/0, aggregate0/100.**
+All three layouts reached 800 controls without a policy restart or
+first-failure stopping. Native wall time was2607.11s (43.45min).
+On these same three layouts, step16k does not improve the success rate
+or score over this all-task experiment's step12k (also0/3, scores0/0/0).
+This is not a full-benchmark or generalization conclusion.
+
+| Layout | Success | Score | Controls | Visual observation |
+| --- | --- | --- | --- | --- |
+| 0 | No | 0 | 800 | Left arm contacts/repositions the left bowl, then remains nearby; bowls stay separate. |
+| 1 | No | 0 | 800 | Right bowl is brought next to the middle bowl, but no retained nested pair forms; final bowls are separate. |
+| 2 | No | 0 | 800 | Right arm contacts/repositions the right bowl; no valid nesting and three separate final bowls. |
+
+Reviewed all 240 conditioning head images and exact final frames from
+all nine actual videos. Camera/input sanity passed. All three initial
+states match the evaluated all-task step12k exactly. The 51 passive
+camera snapshots show zero head/static-scene drift and wrist-to-EE
+transform errors below1e-6; render bindings match their camera prims.
+
+All 240 chunks are finite; full-task delta denormalization error is
+zero, independent integration discrepancies are below1.1e-7, and all
+prediction-export actions exactly match adapter outputs. All source
+checkpoint and full-task dataset/metadata SHA256 fingerprints remain
+unchanged. Physical tracking errors (previous chunk step9 target versus
+next measured anchor) have left/right medians0.181/0.191mm and
+maxima51.785/5.327mm. **The left maximum occurs in layout1 at
+controls490->500; passing numerical adapter checks does not mean
+perfect physical tracking.** The cause and its contribution to failure
+are not established. The run exited successfully and owned port19186 closed.
+
+Artifacts: 720 predicted videos, 7920 prediction/conditioning PNGs and
+nine actual videos, each801frames,640x480,25FPS. Final audit:
+`outputs/evaluation/robodojo/stack_bowls_delta_alltask_shift5_decay25k_step16k_sampling10_20261104_v1/final_adapter_audit.json`.
+Actual videos:
+
+```text
+outputs/evaluation/robodojo/stack_bowls_delta_alltask_shift5_decay25k_step16k_sampling10_20261104_v1/simulator/eval_result/RoboDojo/stack_bowls/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/stack_bowls_delta_alltask_shift5_decay25k_step16k_sampling10_20261104_v1/
+```
+
+Predicted videos are in the same run root's `policy/predictions/`.
+Final nine-view sheet: `diagnostics/native_final_frames.jpg`.
 
 ## Qwen all-task shift5 decay25k step12k ordinary bowls (2026-11-03)
 
