@@ -1226,6 +1226,67 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 `--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
 conftest; the dataset tools do not require robot hardware or a simulator.
 
+## Qwen all-task step16k put-bottles-into-dustbin (2026-11-04)
+
+Evaluate `put_bottles_into_dustbin` with the **same uploaded all-task
+step16k** used in the latest ordinary-bowls rollout:
+
+```text
+/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step16k
+```
+
+Preflight rehashed all19 source files and the saved full-task
+metadata/parquet fingerprints against that evaluation's provenance.
+All match. Continue using the full1,856,102-frame delta dataset and its
+own normalization, not the bowl-only subset. This task is present in
+training:100 demonstrations, full-task episodes2700..2799,
+41,816frames. Native instruction:
+`Pick up the bottles and throw them into the dustbin, using handover when needed.`
+
+Use native layouts0/1/2, seed0, one environment, BF16,
+sampling10/prediction32/execution10 and continuous policy RNG.
+Run all three even if the first fails. Preserve the task's own
+**700-control-step limit** (not the bowl task's800); no reward, horizon,
+physics or skill modifications. Each saved layout contains four bottles,
+the dustbin and the camera stand. Their native task/config/layout and
+used asset files were verified and fingerprinted; native USD and USDZ
+asset formats are both accepted. Preflight:
+
+```text
+outputs/evaluation/robodojo/runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/put_bottles_into_dustbin_step16k_preflight_20261104.json
+```
+
+The previous bowl rollout is only a settings reference. These are
+different tasks/layouts: robot initial-state differences are descriptive,
+not an equality requirement, and success rates are not matched-layout
+checkpoint comparisons. Three layouts are not a full-task benchmark.
+
+```bash
+RUN=outputs/evaluation/robodojo/put_bottles_into_dustbin_delta_alltask_shift5_decay25k_step16k_sampling10_20261104_v1
+CACHE=outputs/evaluation/robodojo/runtime_assets
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$PWD" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+export ROBODOJO_EVAL_MODULE=lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta
+/home/jianf/miniforge3/envs/wam/bin/python \
+  /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step16k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --task put_bottles_into_dustbin --eval-num 3 --num-envs 1 \
+  --gpu 0 --sim-gpu 1 --replan-steps 10 --seed 0 \
+  --inference-steps 10 --save-predicted-video \
+  --port 19187 --timeout 7200 --output-dir "$RUN"
+```
+
+Save actual and predicted three-camera videos and passive camera
+snapshots; independently audit delta denormalization/integration, action
+exports, physical target tracking, episode completeness and file
+fingerprints. Actual first-chunk startup, final results and visual
+review are pending.
+
 ## Qwen all-task step16k training-action error diagnostic (2026-11-04)
 
 This diagnostic investigates the same uploaded all-task step16k that scored
