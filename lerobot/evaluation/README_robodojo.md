@@ -1284,7 +1284,19 @@ export ROBODOJO_EVAL_MODULE=lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta
 Save actual and predicted three-camera videos and passive camera
 snapshots; independently audit delta denormalization/integration, action
 exports, physical target tracking, episode completeness and file
-fingerprints. Actual first-chunk startup, final results and visual
+fingerprints.
+
+**Verified actual startup:** the12.585B restored policy is executing
+`joint_prediction` with three RGB views and10 denoising steps. The first
+finite32x20 delta chunk uses full-task inverse normalization and its
+anchor exactly matches the measured native camera-state snapshot.
+The first three conditioning views were visually checked: the native
+four bottles and left-side dustbin are present, wrist views match their
+arms, and no black input or obvious camera-role swap is visible.
+Policy port19187 is live and native control has advanced beyond the
+first chunk. Only task/output/port differ from the prior bowl command.
+Native task/layout/asset hashes match preflight. The run is active;
+final scores, complete numerical/camera/video audits and final visual
 review are pending.
 
 ## Qwen all-task step16k training-action error diagnostic (2026-11-04)
