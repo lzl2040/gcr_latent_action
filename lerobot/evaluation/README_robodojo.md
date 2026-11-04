@@ -1295,9 +1295,56 @@ four bottles and left-side dustbin are present, wrist views match their
 arms, and no black input or obvious camera-role swap is visible.
 Policy port19187 is live and native control has advanced beyond the
 first chunk. Only task/output/port differ from the prior bowl command.
-Native task/layout/asset hashes match preflight. The run is active;
-final scores, complete numerical/camera/video audits and final visual
-review are pending.
+Native task/layout/asset hashes match preflight. Startup alone did not
+establish a success rate; the subsequently completed results and final
+audits are recorded below.
+
+**Final result:1/3 successful, success rate33.33%, aggregate score50/100.**
+The subsequent completed run preserved the original three layouts and
+continuous RNG, with no first-failure stopping or policy restart.
+Native wall time was3155.48s (52.59min).
+
+| Layout | Success | Native score | Controls | Visual observation |
+| --- | --- | ---: | ---: | --- |
+| 0 | No | 0.25 | 700 | Pink/yellow bottles are removed toward the bin; white-bottle manipulation/transfer does not finish, and two bottles remain outside the bin. |
+| 1 | Yes | 1.00 | 619 | Sequential bottle pickup/disposal includes a two-arm transfer of the last yellow bottle; final table is clear and wrist view shows bin contents. |
+| 2 | No | 0.25 | 700 | Blue/pale-pink bottles are removed; green-bottle transfer/disposal remains unfinished, with green and cream bottles left on the table. |
+
+Reviewed all202 conditioning head images and exact final frames of
+all nine actual videos. Native scoring and the visual observations
+are consistent: one completed task and two partial-progress episodes.
+The same checkpoint can perform pickup, transfer and disposal on this
+task; the prior bowl0/3 result does not mean all learned actions are
+ineffective. Conversely, these three layouts do not establish this
+task's benchmark success rate or broader generalization.
+
+All202 chunks are finite; independent denormalization error is0,
+translation integration discrepancy is at most5.97e-8, rotation-matrix
+discrepancy at most1.01e-7 and gripper discrepancy below3e-8.
+All prediction-export actions exactly match adapter outputs. All source
+checkpoint, full-task metadata/parquet and selected native task/layout/
+asset SHA256 fingerprints remain unchanged.
+
+The43 passive camera snapshots have zero head/static-world drift,
+correct render-product bindings and wrist-to-EE errors below3.2e-7.
+Physical target tracking has left/right median XYZ errors0.906/0.146mm
+and maxima30.956/11.617mm. Both maxima occur in layout0 at
+controls310->320; numerical adapter correctness is not a guarantee of
+perfect physical tracking, and the failure cause is not established.
+The evaluator exited successfully and owned policy port19187 closed.
+
+Saved202 chunks,606 predicted videos and6666 prediction/conditioning
+PNGs. The nine native videos are640x480 at25FPS; layouts0/1/2 have
+701/620/701 frames per view, exactly controls+1. Actual video directory:
+
+```text
+outputs/evaluation/robodojo/put_bottles_into_dustbin_delta_alltask_shift5_decay25k_step16k_sampling10_20261104_v1/simulator/eval_result/RoboDojo/put_bottles_into_dustbin/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/put_bottles_into_dustbin_delta_alltask_shift5_decay25k_step16k_sampling10_20261104_v1/
+```
+
+Successful head video: `episode_0000001_cam_head_success.mp4`.
+The run root also contains `final_adapter_audit.json`,
+`diagnostics/native_final_frames.jpg`, all conditioning-head sheets and
+predicted videos under `policy/predictions/`.
 
 ## Qwen all-task step16k training-action error diagnostic (2026-11-04)
 
