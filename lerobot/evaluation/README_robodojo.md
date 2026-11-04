@@ -1226,6 +1226,58 @@ OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 `--noconftest` avoids unrelated robot-hardware fixtures in the repository-wide
 conftest; the dataset tools do not require robot hardware or a simulator.
 
+## Qwen all-task step16k training-action error diagnostic (2026-11-04)
+
+This diagnostic investigates the same uploaded all-task step16k that scored
+0/3 on ordinary bowls. No model parameters or training data are modified.
+The existing `diagnose` mode uses the authentic saved training loader and
+full-task delta statistics, without random RGB augmentation. All 19 source
+files were rehashed against the completed native evaluation's provenance;
+all hashes match. The full-task statistics SHA256 is unchanged:
+`94d978e4177fa8db22a1a48daedcffda28c8d24a325210a488d4c9006c1778e1`.
+
+The fixed selection has20 bowl windows: full-task episodes3000,3025,3050,
+3075,3099, at offsets0,64,128,192. It also retains the eight configured
+generation-validation windows (episodes102,609,1663,2017,2339,2970,3174,
+3429). All28 windows have32 real, unpadded action targets. Finetuning
+retains all3500 episodes, so these are **training examples**, not a
+held-out split. They are a diagnostic sample, not the whole training set;
+the fixed offsets do not cover every phase of the longer demonstrations.
+Representative three-camera/mask/instruction/sample-rate inputs match
+deployment exactly; normalized current-state roundtrip errors are below
+5e-7.
+
+Run BF16 as in the native evaluation,10-step sampling and a paired20-step
+ablation, each with prediction32 and measured prefix10. Seed0 plus sample
+index is shared between training/deployment input comparisons and between
+the10/20-step samples. Compare free-running action errors against both a
+zero-motion hold-current-pose baseline and clean physical-codec
+autoencoding. Also report ground-truth-conditioned joint losses at
+sigma0.1/0.5/0.9 separately: they are not free-running prediction errors.
+Delta targets and predictions are integrated from the same measured
+anchor before measuring position/rotation/gripper error.
+
+```bash
+RUN=outputs/evaluation/robodojo/alltask_shift5_decay25k_step16k_training_error_sampling10_20261104_v1
+CACHE=outputs/evaluation/robodojo/runtime_assets
+CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
+  HF_HUB_OFFLINE=1 PYTHONPATH="$PWD" \
+  /home/jianf/miniforge3/envs/wam/bin/python \
+  -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta diagnose \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step16k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --inference-steps 10 --replan-steps 10 --seed 0 \
+  --diagnostic-episodes 3000 3025 3050 3075 3099 \
+  --diagnostic-frames 0 64 128 192 --diagnostic-inference-steps 20 \
+  --output-dir "$RUN"
+```
+
+Preflight: `$RUN/training_error_preflight.json`. Final sampling and error
+results are pending; loader/input parity alone does not establish accuracy.
+
 ## Qwen all-task shift5 decay25k step16k ordinary bowls (2026-11-04)
 
 Evaluate the user's newly uploaded full-task checkpoint:
