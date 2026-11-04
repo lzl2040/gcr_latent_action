@@ -1283,6 +1283,21 @@ the same all-task experiment's step12k: 0/3 successful, scores0/0/0,
 not the full benchmark or a causal inference-speed comparison.
 Preparation is verified; actual native startup and final results are pending.
 
+The actual native rollout subsequently started successfully. The loader
+reported 12.585B parameters, joint_prediction, all three RGB views and
+ten denoising steps. Independent first-chunk checks verified finite
+`[32,20]` deltas, full-task inverse normalization and a measured-state
+integration anchor exactly matching the native camera snapshot.
+Layout0's initial state matches the evaluated all-task step12k exactly;
+only checkpoint, output and port differ in the CLI settings.
+Primary and both wrist conditioning images were visually reviewed and
+show the expected bowls, grippers and camera roles without black input
+or obvious role swap. Owned policy port19186 is reachable and native
+inference is active. Startup report:
+`outputs/evaluation/robodojo/stack_bowls_delta_alltask_shift5_decay25k_step16k_sampling10_20261104_v1/startup_validation.json`.
+Final results and complete source/data/action/camera/video/visual audits
+remain pending; successful startup is not a success-rate result.
+
 ## Qwen all-task shift5 decay25k step12k ordinary bowls (2026-11-03)
 
 Requested full-task checkpoint:
