@@ -4354,3 +4354,16 @@ Preparation validation: **56 focused tests passed**, with Ruff lint and
 format checks passing. The generic audit also passed on the completed
 real bottles run: 202 chunks, 43 passive camera snapshots, nine actual
 videos, and independent integration errors below 1.1e-7.
+
+Startup was verified for the output directory in the command above:
+checkpoint/data full-hash preflight passed, the persisted manifest has
+42 non-random tasks / 126 episodes and native caps200--1900 (98,400
+maximum controls), and the first task `align_blocks` advanced from
+control0 to control10. Its first delta chunk is finite with shape32x20,
+the task-specific alignment instruction and all three conditioning
+images are saved, and the policy server is responsive on port19188.
+The sweep is running detached as `nonrandom42-alltask16k-eval`; coordinator
+log is
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/nonrandom42_alltask16k_suite.log`.
+No full-sweep success rate is available at startup; use the live
+`progress.json` and `results.csv` rather than extrapolating old task results.
