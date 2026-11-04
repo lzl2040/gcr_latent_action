@@ -4270,3 +4270,87 @@ denoising metrics should be tracked separately from the training average.
 Full probe values and valid-element counts are retained in
 `conditional_state_loss_sigma_probe.json` under the state/action
 diagnostic output above.
+
+## All non-random tasks: full-task shift5 step16k
+
+The sequential suite entry point is
+`python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite eval`.
+For the installed native RoboDojo checkout this selects **42 tasks**, excluding
+all 12 `*_random` definitions, and evaluates native layouts **0, 1, 2** for
+each task: **126 episodes**. Bowls and bottles are rerun from scratch; older
+individual results are not mixed into this sweep.
+
+The checkpoint is
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step16k`.
+The protocol remains seed0, one environment, sampling10, prediction32,
+execution10, and BF16, with actual three-camera videos and predicted videos.
+Each task runs in its own evaluator process with policy GPU0 and simulator
+GPU1; RNG is continuous across that task's three layouts. Original native
+task horizons are retained, from 200 to 1900 controls, rather than imposing
+the bowls task's 800-control cap. The maximum scheduled total is 98,400
+controls. This is a long, sequential shared-machine run, not a short smoke
+test or the official 50-episode-per-task benchmark.
+
+Run from the repository root using the existing environments and cached
+pretrained assets:
+
+```bash
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$PWD" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+/home/jianf/miniforge3/envs/wam/bin/python -u \
+  -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step16k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$PWD/outputs/evaluation/robodojo/runtime_assets/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$PWD/outputs/evaluation/robodojo/runtime_assets/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$PWD/outputs/evaluation/robodojo/runtime_assets/pretrained/siglip2-base-patch16-224" \
+  --checkpoint-provenance "$PWD/outputs/evaluation/robodojo/runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step16k.json" \
+  --camera-wrapper /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py \
+  --gpu 0 --sim-gpu 1 --port 19188 --seed 0 \
+  --inference-steps 10 --replan-steps 10 \
+  --save-predicted-video --timeout 14400 \
+  --output-dir "$PWD/outputs/evaluation/robodojo/nonrandom42_alltask_shift5_decay25k_step16k_sampling10_20261104_v1"
+```
+
+`--camera-wrapper` points to the existing passive camera instrumentation;
+it can be omitted for an uninstrumented run. `--tasks TASK ...` selects an
+explicit non-random subset, but is deliberately omitted for this sweep.
+The output directory must be fresh. To resume an interrupted sweep, repeat
+the **identical command** with `--resume`, using the same wrapper, output
+directory, code, task/layout sources, checkpoint, and dataset.
+
+The output root contains:
+
+| Artifact | Meaning |
+|---|---|
+| `manifest.json` | Exact protocol, checkpoint/data provenance, task horizons/layout hashes, and runtime code hashes |
+| `progress.json` | Durable task states, attempts, completed-episode denominator, successes and aggregate score |
+| `results.csv` | One row per task with success count out of three, native score, output path and any error |
+| `tasks/TASK/attempt_001/` | Independent native evaluator output, policy chunks, predictions, and actual videos |
+| `tasks/TASK/attempt_001.log` | Preserved evaluator startup/runtime log |
+| `tasks/TASK/attempt_001/suite_audit.json` | Episode, chunk integration/export, camera, tracking and video audits |
+| `tasks/TASK/attempt_001/native_final_frames.jpg` | Exact final frames of all nine native videos for visual review |
+
+Infrastructure errors are recorded separately and excluded from the
+completed-episode success denominator, **not reported as policy 0/3**.
+The suite continues to other tasks, but exits incomplete if any task lacks
+three valid episodes. Resume skips audited completed tasks (including
+genuine policy failures), retains earlier error attempts, and starts a
+new attempt only for incomplete tasks. There are no automatic retries or
+success-based result selection. The final sweep is complete only with
+42 valid task results / 126 evaluated episodes.
+
+Full checkpoint/data SHA256 checks run at both ends; source size/mtime,
+small metadata hashes, task/layout hashes, and runtime code hashes are
+rechecked between tasks. Source changes or less than 10 GiB free disk
+stop the sweep without deleting files. A coordinator lock prevents
+duplicate runs. Actual video frame counts must equal controls+1 at
+640x480/25FPS; predicted exports must match every logged chunk.
+Automatic audits do not claim human visual review:
+`visual_review_pending` remains true.
+
+Preparation validation: **56 focused tests passed**, with Ruff lint and
+format checks passing. The generic audit also passed on the completed
+real bottles run: 202 chunks, 43 passive camera snapshots, nine actual
+videos, and independent integration errors below 1.1e-7.

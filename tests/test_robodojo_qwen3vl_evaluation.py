@@ -971,3 +971,242 @@ def test_simulator_subprocess_uses_its_own_environment_bin(tmp_path, monkeypatch
     monkeypatch.setattr(subprocess, "check_output", check_output)
     with pytest.raises(PreflightReachedError):
         evaluate(args)
+
+
+def test_suite_discovers_nonrandom_tasks_and_preserves_long_native_horizons(tmp_path):
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite import task_specs
+
+    directory = tmp_path / "task/RoboDojo"
+    (directory / "config").mkdir(parents=True)
+    (directory / "tasks").mkdir()
+    layouts = tmp_path / "Assets/Eval_Layout/RoboDojo/arx_x5/0"
+    layouts.mkdir(parents=True)
+    (directory / "config/_task.yml").write_text("{}")
+    for task, limit in (("short", 200), ("long", 1900), ("short_random", 200)):
+        (directory / "config" / f"{task}.yml").write_text("{}")
+        (directory / "tasks" / f"{task}.py").write_text(f"self.step_lim = {limit}\n")
+        for layout in range(3):
+            (layouts / f"{task}_{layout}.json").write_text("{}")
+    specs = task_specs(tmp_path, 0)
+    assert [(s["task"], s["control_limit"]) for s in specs] == [("long", 1900), ("short", 200)]
+    with pytest.raises(ValueError, match="non-random"):
+        task_specs(tmp_path, 0, ["short_random"])
+    (layouts / "short_2.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        task_specs(tmp_path, 0)
+
+
+def test_suite_validates_native_caps_without_truncating_long_tasks():
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite import validate_episode_profile
+
+    result = {"score": 50, "details": {str(i): {"score": score} for i, score in enumerate([0, 0.5, 1])}}
+    profile = {
+        "batches": [
+            {"layout_ids": [i], "unstable_episodes": 0, "control_steps": [steps]}
+            for i, steps in enumerate([1900, 1899, 1000])
+        ]
+    }
+    assert validate_episode_profile(result, profile, 1900) == [1900, 1899, 1000]
+    with pytest.raises(ValueError, match="Invalid native"):
+        validate_episode_profile(result, profile, 800)
+    profile["batches"][1]["layout_ids"] = [3]
+    with pytest.raises(ValueError, match="layouts"):
+        validate_episode_profile(result, profile, 1900)
+
+
+def test_suite_progress_excludes_infrastructure_errors_from_success_denominator(tmp_path):
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite import update_progress
+
+    records = [
+        {
+            "task": "valid",
+            "status": "completed",
+            "result": {
+                "details": {"0": {"success": False}, "1": {"success": True}, "2": {"success": False}},
+                "success_rate": 1 / 3,
+                "score": 50,
+            },
+        },
+        {"task": "broken", "status": "error", "error": "Simulator failed"},
+        {"task": "waiting", "status": "pending"},
+    ]
+    update_progress(tmp_path, records, "incomplete")
+    result = json.loads((tmp_path / "progress.json").read_text())
+    assert result["planned_episodes"] == 9 and result["evaluated_episodes"] == 3
+    assert result["success_rate_completed_only"] == pytest.approx(1 / 3)
+    assert result["error_tasks"] == 1 and not result["suite_complete"]
+    assert "broken,error,,,,,," in (tmp_path / "results.csv").read_text()
+
+
+def test_suite_timeout_interrupts_owned_evaluator_for_child_cleanup(tmp_path, monkeypatch):
+    import signal
+
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite import run_child
+
+    signals = []
+
+    class Process:
+        def wait(self, *, timeout=None):
+            if not signals:
+                raise subprocess.TimeoutExpired("owned-evaluator", timeout)
+            return 0
+
+        def poll(self):
+            return None
+
+        def send_signal(self, value):
+            signals.append(value)
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: Process())
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_child(["owned-evaluator"], tmp_path / "task.log", {}, 5)
+    assert signals == [signal.SIGINT]
+
+
+def test_suite_continues_after_error_and_resume_retries_only_incomplete_task(tmp_path, monkeypatch):
+    from lerobot.evaluation import eval_qwen3vl_mot_robodojo_suite as suite
+
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text("{}")
+    args = SimpleNamespace(
+        mode="eval",
+        action_mode="delta",
+        eval_num="3",
+        num_envs=1,
+        inference_steps=10,
+        replan_steps=10,
+        timeout=100,
+        startup_timeout=100,
+        seed=0,
+        gpu=0,
+        sim_gpu=1,
+        output_dir=tmp_path / "suite",
+        resume=False,
+        robodojo_root=tmp_path,
+        tasks=None,
+        checkpoint_provenance=provenance,
+    )
+    specs = [{"task": name, "control_limit": 1900, "native_files": []} for name in ("broken", "ok")]
+    monkeypatch.setattr(suite, "task_specs", lambda *args: specs)
+    monkeypatch.setattr(suite, "validate_training_action_mode", lambda args: {})
+    monkeypatch.setattr(suite, "verify_sources", lambda *args, **kwargs: None)
+    monkeypatch.setattr(suite.shutil, "disk_usage", lambda path: SimpleNamespace(free=100 * 1024**3))
+    monkeypatch.setattr(suite, "task_command", lambda args, spec, output: [spec["task"]])
+    ran, skipped = [], []
+
+    def run(command, *other):
+        ran.append(command[0])
+        if command[0] == "broken" and not args.resume:
+            raise RuntimeError("Infrastructure failure, not a policy failure")
+
+    result = {
+        "score": 100,
+        "success_rate": 1,
+        "details": {str(i): {"success": True, "score": 1} for i in range(3)},
+    }
+    monkeypatch.setattr(suite, "run_child", run)
+    monkeypatch.setattr(suite, "audit_task", lambda *args: {"native_result": result})
+    monkeypatch.setattr(suite, "completed_result", lambda root, spec: skipped.append(spec["task"]))
+    suite.run_suite(args)
+    progress = json.loads((args.output_dir / "progress.json").read_text())
+    assert ran == ["broken", "ok"] and progress["status"] == "incomplete"
+    assert progress["evaluated_episodes"] == 3 and progress["error_tasks"] == 1
+    args.resume = True
+    suite.run_suite(args)
+    progress = json.loads((args.output_dir / "progress.json").read_text())
+    assert ran == ["broken", "ok", "broken"] and skipped == ["ok"]
+    assert progress["status"] == "completed" and progress["evaluated_episodes"] == 6
+    assert len(progress["tasks"][0]["attempts"]) == 2
+    assert len(progress["tasks"][1]["attempts"]) == 1
+
+
+@pytest.mark.parametrize("corrupt", [None, "translation", "video"])
+def test_suite_audit_checks_real_chunk_integration_and_video_length(tmp_path, monkeypatch, corrupt):
+    import imageio_ffmpeg
+
+    from lerobot.evaluation import eval_qwen3vl_mot_robodojo_suite as suite
+
+    result = {
+        "success_rate": 1,
+        "eval_time": 3,
+        "score": 100,
+        "details": {str(i): {"layout_id": i, "success": True, "score": 1} for i in range(3)},
+    }
+    native = tmp_path / "native"
+    native.mkdir()
+    result_path = native / "_result.json"
+    result_path.write_text(json.dumps(result))
+    (native / "_physics_profile.json").write_text(
+        json.dumps(
+            {"batches": [{"layout_ids": [i], "unstable_episodes": 0, "control_steps": [1]} for i in range(3)]}
+        )
+    )
+    (tmp_path / "summary.json").write_text('{"status":"completed","evaluation_complete":true}')
+    chunks = tmp_path / "policy/chunks"
+    chunks.mkdir(parents=True)
+    rows = []
+    for layout in range(3):
+        raw = np.zeros((32, 20), dtype=np.float32)
+        raw[:, [3, 6, 13, 16]] = 1
+        raw[:, 0] = 0.001
+        state = np.zeros(20, dtype=np.float32)
+        state[[3, 6, 13, 16]] = 1
+        normalized = np.zeros((1, 32, 40), dtype=np.float32)
+        normalized[0, :, :20] = raw
+        left = np.zeros((32, 7), dtype=np.float32)
+        left[:, 0] = raw[:, 0].cumsum()
+        left[:, 3] = 1
+        right = left.copy()
+        right[:, 0] = 0
+        if corrupt == "translation":
+            left[0, 0] += 0.01
+        path = chunks / f"chunk_{layout:06d}_env_000.npz"
+        np.savez(
+            path,
+            normalized_actions=normalized,
+            unnormalized_actions=raw,
+            current_state=state,
+            left_ee_pose=left,
+            right_ee_pose=right,
+            left_ee_joint_state=np.zeros((32, 1)),
+            right_ee_joint_state=np.zeros((32, 1)),
+        )
+        rows.append(
+            {
+                "reset_index": layout,
+                "env_idx": 0,
+                "control_step": 0,
+                "action_mode": "delta",
+                "executed_chunk_steps": 10,
+                "action_path": str(path),
+            }
+        )
+        for camera in ("head", "left_wrist", "right_wrist"):
+            (native / f"episode_{layout:07d}_cam_{camera}_success.mp4").write_bytes(b"fixture")
+    (chunks / "inference.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    monkeypatch.setattr(suite, "validate_result", lambda *args: (result_path, result))
+    monkeypatch.setattr(
+        RoboDojoAdapter,
+        "from_dataset",
+        lambda *args, **kwargs: SimpleNamespace(action_mean=torch.zeros(20), action_std=torch.ones(20)),
+    )
+
+    def frames(*args, **kwargs):
+        yield {"size": (640, 480), "fps": 25}
+        for _ in range(3 if corrupt == "video" else 2):
+            yield bytes(640 * 480 * 3)
+
+    monkeypatch.setattr(imageio_ffmpeg, "read_frames", frames)
+    args = SimpleNamespace(dataset_root=tmp_path, camera_wrapper=None, save_predicted_video=False)
+    spec = {"task": "example", "control_limit": 1900}
+    if corrupt:
+        with pytest.raises(ValueError, match="integration|video"):
+            suite.audit_task(tmp_path, spec, args)
+    else:
+        audit = suite.audit_task(tmp_path, spec, args)
+        assert audit["audit_passed"] and audit["control_steps"] == [1, 1, 1]
+        assert len(audit["native_videos"]) == 9
+        assert suite.completed_result(tmp_path, spec)["native_result"] == result
+        (tmp_path / "summary.json").write_text('{"status":"failed","evaluation_complete":false}')
+        with pytest.raises(ValueError, match="artifacts"):
+            suite.completed_result(tmp_path, spec)
