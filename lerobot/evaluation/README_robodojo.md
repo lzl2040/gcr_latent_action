@@ -4382,3 +4382,63 @@ finish graceful child cleanup within the timeout; the remaining owned
 policy/simulator processes were stopped explicitly, with the simulator
 requiring forced termination. GPU memory release was verified, and
 unrelated GPU jobs were left running. No automatic restart is scheduled.
+
+## Full-task shift5 step18k: bowls and bottles
+
+The requested step18k comparison is limited to **`stack_bowls` and
+`put_bottles_into_dustbin`, three native layouts each**, not a restart of
+the paused 42-task step16k sweep. The checkpoint is the same experiment's
+`robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step18k`.
+Keep seed0, one environment, BF16, sampling10, prediction32, execution10,
+actual/predicted videos, and native horizons800/700 respectively.
+For reference, the completed individual step16k runs gave bowls0/3
+(scores0/0/0) and bottles1/3 (scores0.25/1/0.25); these are comparison
+baselines, not part of the new six-episode denominator.
+
+Preparation waits for all 16 DCP shards and `.metadata` to be complete
+and stable, hashes the checkpoint and dataset, checks metadata tensor
+keys/shapes/dtypes and storage byte ranges against evaluated step16k,
+and verifies the two tasks' layouts/assets. It produces
+`runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step18k.json`
+and `two_tasks_step18k_preflight_20261105.json`.
+No model weights are copied and no training is performed.
+
+From the repository root, use the same environment exports as the full
+suite above:
+
+```bash
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$PWD" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+/home/jianf/miniforge3/envs/wam/bin/python -u -c \
+  'import runpy, signal; signal.signal(signal.SIGINT, signal.default_int_handler); runpy.run_module("lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite", run_name="__main__")' \
+  eval \
+  --tasks stack_bowls put_bottles_into_dustbin \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step18k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$PWD/outputs/evaluation/robodojo/runtime_assets/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$PWD/outputs/evaluation/robodojo/runtime_assets/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$PWD/outputs/evaluation/robodojo/runtime_assets/pretrained/siglip2-base-patch16-224" \
+  --checkpoint-provenance "$PWD/outputs/evaluation/robodojo/runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step18k.json" \
+  --camera-wrapper /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py \
+  --gpu 0 --sim-gpu 1 --port 19189 --seed 0 \
+  --inference-steps 10 --replan-steps 10 \
+  --save-predicted-video --timeout 14400 \
+  --output-dir "$PWD/outputs/evaluation/robodojo/two_tasks_alltask_shift5_decay25k_step18k_sampling10_20261105_v1"
+```
+
+The entry prefix restores SIGINT handling before starting the suite,
+including for its evaluator children, rather than inheriting an ignored
+interrupt from a detached shell. This changes neither policy sampling
+nor native task behavior. Interrupt inheritance was checked with an
+actual child Python process before launch. The existing suite retains
+its separate per-task logs, attempts, audits, final-frame sheets, videos,
+`progress.json`, and `results.csv`; infrastructure errors remain excluded
+from the valid-episode success denominator.
+
+Preflight passed: 19 checkpoint/config files, 25,200,777,551 bytes,
+2560 tensors and 16,908 valid storage references. All 16 shard hashes
+differ from evaluated step16k; saved configs and all five full-task
+dataset file hashes are unchanged. The earlier complete dataset delta
+audit is therefore reused rather than rerunning the 1,856,102-row
+derivation. Both tasks' layouts/assets and original horizons passed.
