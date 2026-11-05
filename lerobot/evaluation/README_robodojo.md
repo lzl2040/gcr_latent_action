@@ -4442,3 +4442,17 @@ differ from evaluated step16k; saved configs and all five full-task
 dataset file hashes are unchanged. The earlier complete dataset delta
 audit is therefore reused rather than rerunning the 1,856,102-row
 derivation. Both tasks' layouts/assets and original horizons passed.
+
+Startup verified in
+`two_tasks_alltask_shift5_decay25k_step18k_sampling10_20261105_v1`:
+the persisted manifest selects exactly these two tasks / six episodes,
+full-source preflight passed, and `stack_bowls` advanced control0 to10
+with the correct instruction, finite32x20 delta actions and all three
+conditioning camera images. Policy port19189 is responsive. Actual
+coordinator/evaluator/policy/simulator Python processes were checked not
+to ignore SIGINT; the previous step16k full sweep remains paused.
+Detached shell is `alltask18k-two-eval` (coordinator PID1685270).
+Coordinator log is
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/alltask18k_two_suite.log`.
+Success counts are pending; live results are in the new output root's
+`progress.json` and `results.csv`.
