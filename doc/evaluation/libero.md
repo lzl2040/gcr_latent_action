@@ -1,11 +1,11 @@
 # LIBERO 评测记录
 
-更新日期：2026-11-04。
+更新日期：2026-11-05。
 
-本文汇总已完成的有效正式评测，共 133 份结果、21,380 次 rollout：
-91 份完整 suite 评测、18,200 次，以及 42 份已完成的任务子集评测、3,180 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 91 份、12,980 次，
-包括 49 份完整 suite 和 42 份任务子集，分开记录。
+本文汇总已完成的有效正式评测，共 135 份结果、21,520 次 rollout：
+91 份完整 suite 评测、18,200 次，以及 44 份已完成的任务子集评测、3,320 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 93 份、13,120 次，
+包括 49 份完整 suite 和 44 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -2703,6 +2703,90 @@ Goal 3 与 Spatial 4 两个抽屉相关任务共失败 23 次，占全部失败�
 | Spatial | `1d5782cce47ddd67a3ff59f4cdba396246636adf25124c4a53802ae7611eac58` |
 | Object | `d383e21c2a4555caa36c7ad1c45c27d5c554d027706ca177430fbd607c5c3162` |
 
+### 1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred：12k，VA-only，仅 Spatial 与 Goal
+
+本轮权重为
+`/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred/step12k/model`。
+2026-11-05 启动后，按用户要求停止 Object 及原 17 任务队列，
+保留 Spatial 原进程和连续 RNG，不重跑、不拼接中断轨迹；
+Goal 随后在空出的 GPU 2 独立启动。Object 已完成的 4 次部分 rollout 保留，
+但不计入本节成绩、正式结果份数或本文 rollout 总数。
+最终范围仅为 Spatial `[4, 6, 9]`（60 次）和 Goal `[0, 3, 4, 9]`（80 次），
+共 **7 任务、140 次**，不是完整 suite，也不包含 Object 成绩。
+
+Spatial 使用 GPU 3，首条运行日志为 `2026-11-05T02:46:50Z`，
+于 `2026-11-05T03:36:33Z` 完成；Goal 使用 GPU 2，
+首条运行日志为 `2026-11-05T02:53:51Z`，于 `2026-11-05T04:05:11Z` 完成。
+两卡均在无其他计算进程、稳定空闲 60 秒后加载；
+140 次最终汇总校验完成于 `2026-11-05T04:05:14Z`，
+结束后 GPU 2、3 的模型显存已释放，未调整其他任务。
+原始 340 次协议 manifest 不变，另建 140 次范围 manifest，
+明确记录已接管的两套 worker、原 manifest 和 Object 排除说明。
+
+上传的 32 个 DCP 分片完整，BF16 tensor schema 与 v5 12k 一致：
+2,560 个 tensor、12,585,116,005 个元素，抽查参数与 v5 不同。
+保存的策略和训练配置均为 `task_names=["va_prediction"]`、`task_weights=[1.0]`，
+`time_sampling_shift=5.0`；未为兼容旧工具改名为 `joint_prediction`。
+推理使用提交 `7aacd9eb358785fba6e461994d74a4b1f082eb12` 的隔离源码，
+实际两套日志均确认加载 `tasks=('va_prediction',)`。
+VA 联合去噪 video/action，state 只作当前状态条件，不积分、解码或输出未来 state。
+该推理语义不同于历史 joint-only 快照，不能声称推理代码与旧对照相同。
+缺少 checkpoint-local trainer metadata，12k 仍是目录标签，不根据 32 个分片推断训练卡数。
+
+外部 rollout 协议仍为 BF16、primary+wrist、RGB 256、预测 32 步/执行 10 步、
+Flow 20 步、静置 10 步，Spatial/Goal 控制上限分别为 220/300 步。
+每套仅启动时设置一次 `seed=0`，每任务使用前 20 个固定初态，
+后续连续消耗 RNG，不逐 trial 重置。
+140 个唯一任务/初态组合、有限 `(steps, 7)` 动作、36 个非空失败视频、
+两套 evaluator 的零退出码、worker 完成状态、输入指纹及原始结果 SHA256 均核验通过。
+准备阶段另通过 VA 采样 8 例、任务/来源审计 7 例、范围裁剪与保留进程检查 9 例及 Ruff。
+
+以下所有模型都只取相同 7 任务，不将旧模型的 340 次总分与本轮 140 次直接比较：
+
+| 匹配范围 | v4 shift5 12k | v4 shift2 12k | v5 shift2 12k | 本轮 v6 shift5 VA-only 12k |
+| --- | --- | --- | --- | --- |
+| Spatial，任务 4/6/9 | 73.33%（44/60） | 70.00%（42/60） | 61.67%（37/60） | 65.00%（39/60） |
+| Goal，任务 0/3/4/9 | 93.75%（75/80） | 85.00%（68/80） | 77.50%（62/80） | 81.25%（65/80） |
+| 所选 7 任务汇总 | 85.00%（119/140） | 78.57%（110/140） | 70.71%（99/140） | **74.29%（104/140）** |
+
+v6 相比 v4 shift5 同范围少成功 15 次、低 10.71 个百分点；
+相比 v4 shift2 少 6 次、低 4.29 个百分点，相比 v5 多 5 次、高 3.57 个百分点。
+旧 v4 参考取自此前已认证汇总的对应任务，没有声称重新读取已缺失的旧轨迹。
+相对 v4 shift5，保存的策略差异为任务集合与权重：
+`forward_dynamics/inverse_dynamics/joint_prediction` 的 `0.1/0.1/0.8`
+改为单独 `va_prediction` 的 `1.0`。
+这是跨任务、训练版本及推理语义的数值参考，不是严格的单因素任务或 shift 消融；
+单 seed 与相同初态也不保证逐 trial 扩散噪声配对。
+
+逐任务成功次数如下，每项分母均为 20：
+
+| Suite | 任务编号与描述 | v4 shift5 12k | 本轮 v6 12k |
+| --- | --- | --- | --- |
+| Spatial | 4：上层抽屉取碗 | 13/20 | 8/20 |
+| Spatial | 6：cookie box 旁取碗 | 17/20 | 15/20 |
+| Spatial | 9：木柜上取碗 | 14/20 | 16/20 |
+| Goal | 0：打开中层抽屉 | 19/20 | 14/20 |
+| Goal | 3：打开上层抽屉并放碗 | 17/20 | 13/20 |
+| Goal | 4：碗放到柜顶 | 20/20 | 20/20 |
+| Goal | 9：酒瓶放酒架 | 19/20 | 18/20 |
+
+本轮 Spatial 失败 21 次、Goal 失败 15 次。相对 v4 shift5，
+Spatial 4 与 Goal 0/3 三个抽屉相关任务合计少成功 14 次；
+这些只是任务统计，尚未逐例诊断失败阶段，不能据此认定不预测 state 是具体失败原因。
+
+工件目录为 session files 下的 `libero_v6_va12k_20261105/`，前缀为
+`libero_v6_1104_shift5_va_prediction_12k_weak_tasks_two_gpu_run_seeded`。
+最终汇总 SHA256 为
+`b9cf95c5ff14fdb32cfb1c5eb0667b79b9636ffedf0fa641e10a58113f8c105b`；
+`_spatial_goal_only_preflight.json` 的 SHA256 为
+`8c8b4914b90504a3fd92a4bea1831f15dd72f90fde6efe97f3371bac9964b9aa`。
+原始结果文件的 SHA256：
+
+| Suite | `results.json` SHA256 |
+| --- | --- |
+| Spatial | `fe857f94772c4220cbb12d996e07a083b78b4aba2a475d4cbf97ea43a3d67ff9` |
+| Goal | `7752582bd9bc2ad9b15d65bcd5185228ad4abf12d2dbf95d056496e37c80e8d7` |
+
 ### 误拷权重评测：曾标作 8k（不计入正式结果）
 
 **2026-10-24 用户确认 `step8k/model` 拷贝了错误权重。**
@@ -2790,6 +2874,7 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5`（16k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1029v4_4nodes_8gpu_wo_rotate_high_noise_shift5/step16k/model` |
 | `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2`（8k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2/step8k/model` |
 | `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2`（12k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2/step12k/model` |
+| `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred`（12k，VA-only） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred/step12k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -2931,6 +3016,8 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 12k | Goal（任务 0/3/4/9，三卡并行，80 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step12k_weak_tasks_three_gpu_run_seeded_goal_20trials_20261102/results.json` |
 | `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 12k | Spatial（任务 4/6/9，三卡并行，60 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step12k_weak_tasks_three_gpu_run_seeded_spatial_20trials_20261102/results.json` |
 | `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 12k | Object（全套，三卡并行，200 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step12k_weak_tasks_three_gpu_run_seeded_object_20trials_20261102/results.json` |
+| `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 12k | Spatial（VA-only，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_12k_weak_tasks_two_gpu_run_seeded_spatial_20trials_20261105/results.json` |
+| `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 12k | Goal（VA-only，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_12k_weak_tasks_two_gpu_run_seeded_goal_20trials_20261105/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 
