@@ -291,10 +291,20 @@ def _load_stage2_resume_policy_config(
         raise ValueError(
             f"Expected a qwen3vl_mot config in {config_path}, got {saved_policy.type!r}."
         )
-    if saved_policy.stage1_policy_config is None:
+    if (
+        saved_policy.physical_encoder_type == "stage1_transformer"
+        and saved_policy.stage1_policy_config is None
+    ):
         raise ValueError(
             "The saved stage-two config does not embed its stage-one architecture. Resume "
             "this older checkpoint with the original stage-one checkpoint available."
+        )
+    if (
+        parser.parse_arg("policy.physical_encoder_type", args) is not None
+        and runtime_policy.physical_encoder_type != saved_policy.physical_encoder_type
+    ):
+        raise ValueError(
+            "Cannot change `policy.physical_encoder_type` while resuming; start a fresh output directory."
         )
     for field_name in ("qwen3vl_dir", "cosmos3_dir"):
         runtime_path = getattr(runtime_policy, field_name)

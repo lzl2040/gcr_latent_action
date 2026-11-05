@@ -21,6 +21,7 @@ from lerobot.configs.policies import PreTrainedConfig
 
 from .configuration_qwen3vl_mot import Qwen3VLMoTConfig
 from .modeling_generation import GenerationExpert, GenerationStream
+from .modeling_physical import PhysicalMLP
 from .modeling_understanding import Qwen3VLUnderstandingExpert, _base_qwen
 from .stage1_transfer import merge_peft_module, transfer_stage1_perception
 from .tasks import (
@@ -194,6 +195,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             raise ValueError(
                 "Cannot change `policy.task_names` when loading a checkpoint: task embedding order must match."
             )
+        if config.physical_encoder_type != saved_config.get("physical_encoder_type", "stage1_transformer"):
+            raise ValueError("Cannot change `policy.physical_encoder_type` when loading a checkpoint.")
         return super().from_pretrained(pretrained_name_or_path, config=config, **kwargs)
 
     def __init__(self, config: Qwen3VLMoTConfig, dataset_stats=None):
@@ -202,7 +205,9 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         config.validate_features()
 
         restoring_embedded = not config.initialize_from_stage1
-        if restoring_embedded:
+        mlp_baseline = config.physical_encoder_type == "mlp"
+        teacher = None
+        if not mlp_baseline and restoring_embedded:
             if config.stage1_policy_config is None:
                 raise ValueError(
                     "A stage-two restore requires the embedded `stage1_policy_config`; "
@@ -223,7 +228,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             teacher.perception_encoder.text_backbone = merge_peft_module(
                 teacher.perception_encoder.text_backbone
             )
-        else:
+        elif not mlp_baseline:
             if not config.stage1_checkpoint:
                 raise ValueError(
                     "`stage1_checkpoint` must point to an exported RoboContrast policy when "
@@ -256,12 +261,13 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                     f"{missing_prefixes}."
                 )
             config.stage1_policy_config = _encode_stage1_config(teacher.config)
-        if teacher.physical_encoder is None:
+        if teacher is not None and teacher.physical_encoder is None:
             raise ValueError(
                 "The stage-one checkpoint was saved with perception_only=True and has no "
                 "physical transformer to transfer into stage two."
             )
-        self._validate_stage1_contract(teacher.config)
+        if teacher is not None:
+            self._validate_stage1_contract(teacher.config)
 
         # Load the stock Qwen checkpoint first, overwrite every compatible stage-one tensor,
         # and only then attach new LoRA adapters. This preserves the actual stage-one weights
@@ -293,7 +299,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 f"{config.generation_num_kv_heads} KV heads and "
                 f"{config.generation_hidden_dim // config.generation_num_heads}-dim heads."
             )
-        if not restoring_embedded:
+        if teacher is not None and not restoring_embedded:
             vision_report, text_report = transfer_stage1_perception(
                 teacher.perception_encoder,
                 _base_qwen(self.understanding.model),
@@ -335,21 +341,27 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
             self.understanding.tuning_mode = requested_tuning
 
-        # The physical module itself becomes the stage-two conditioner; it is not copied.
-        # Moving it out of the teacher avoids holding two 200M-parameter physical towers.
-        self.physical_encoder = teacher.physical_encoder
-        teacher.physical_encoder = None
+        if mlp_baseline:
+            self.physical_encoder = PhysicalMLP(config)
+            self.teacher_perception = None
+            logger.info(
+                "MLP baseline: original pretrained Qwen, trainable action/state MLPs, no stage-one teacher."
+            )
+        else:
+            # Move the physical tower rather than holding a second 200M-parameter copy.
+            self.physical_encoder = teacher.physical_encoder
+            teacher.physical_encoder = None
+            self.teacher_perception = teacher.perception_encoder
+            self.teacher_perception.predictor = None
+            self.teacher_perception.vae = None
+            for parameter in self.teacher_perception.parameters():
+                parameter.requires_grad_(False)
+            self.teacher_perception.eval()
         for parameter in self.physical_encoder.parameters():
             parameter.requires_grad_(config.physical_tuning_mode == "full")
         if self.physical_embedding_flow:
             self.physical_encoder.eval()
 
-        self.teacher_perception = teacher.perception_encoder
-        self.teacher_perception.predictor = None
-        self.teacher_perception.vae = None
-        for parameter in self.teacher_perception.parameters():
-            parameter.requires_grad_(False)
-        self.teacher_perception.eval()
         del teacher
 
         from lerobot.common.policies.ace.cosmos3_encoders import build_cosmos3_vae
@@ -379,12 +391,14 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             persistent=False,
         )
 
-        self.latent_action_projection = nn.Sequential(
-            nn.LayerNorm(self.understanding.hidden_dim),
-            nn.Linear(self.understanding.hidden_dim, config.latent_action_dim),
-            nn.LayerNorm(config.latent_action_dim),
+        self.latent_action_projection = (
+            None if mlp_baseline else nn.Sequential(
+                nn.LayerNorm(self.understanding.hidden_dim),
+                nn.Linear(self.understanding.hidden_dim, config.latent_action_dim),
+                nn.LayerNorm(config.latent_action_dim),
+            )
         )
-        if config.tactile_generation_target == "spatial_patches":
+        if not mlp_baseline and config.tactile_generation_target == "spatial_patches":
             if (
                 self.physical_encoder.use_ftp1_tactile
                 or self.physical_encoder.use_anytouch_tactile
@@ -479,7 +493,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
     def _load_as_safetensor(cls, model, model_file, map_location, strict):
         return super()._load_as_safetensor(
             model, model_file, map_location,
-            strict=strict or model.config.generation_backbone != "random",
+            strict=(
+                strict or model.config.generation_backbone != "random"
+                or getattr(model.config, "physical_encoder_type", "stage1_transformer") == "mlp"
+            ),
         )
 
     def _validate_stage1_contract(self, stage1_config) -> None:
@@ -523,11 +540,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        self.teacher_perception.eval()
+        if self.teacher_perception is not None:
+            self.teacher_perception.eval()
         self.video_vae.eval()
         if self.config.physical_tuning_mode == "frozen":
             self.physical_encoder.eval()
-        if self.config.tactile_generation_target == "spatial_patches":
+        if (
+            self.config.physical_encoder_type != "mlp"
+            and self.config.tactile_generation_target == "spatial_patches"
+        ):
             self.physical_encoder.tactile_cnn.eval()
             self.physical_encoder.tactile_recon.eval()
         return self
@@ -2015,13 +2036,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
         task, valid_rows = self._select_task(batch, forced_task)
         understanding = self._understand_batch(batch, with_image=task.understanding_image)
-        projection_dtype = next(self.latent_action_projection.parameters()).dtype
-        predicted_latent_action = self.latent_action_projection(
-            understanding.latent_queries.to(projection_dtype)
-        )
+        predicted_latent_action = None
+        if self.latent_action_projection is not None:
+            projection_dtype = next(self.latent_action_projection.parameters()).dtype
+            predicted_latent_action = self.latent_action_projection(
+                understanding.latent_queries.to(projection_dtype)
+            )
         latent_target, latent_rows = self._latent_action_target(
             batch,
-            enabled=task.understanding_image,
+            enabled=task.understanding_image and self.teacher_perception is not None,
         )
 
         streams: list[GenerationStream] = []
@@ -2078,7 +2101,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             "state": self.config.state_loss_weight,
             "tactile": self.config.tactile_loss_weight,
         }
-        loss = predicted_latent_action.sum() * 0.0
+        loss = (
+            predicted_latent_action.sum() * 0.0
+            if predicted_latent_action is not None
+            else understanding.latent_queries.sum() * 0.0
+        )
+        if self.config.physical_encoder_type == "mlp" and not physical_streams:
+            loss = loss + sum(
+                parameter.reshape(-1)[0] * 0.0 for parameter in self.physical_encoder.parameters()
+            )
         loss_dict = {f"task_{name}": float(name == task.name) for name in self.config.task_names}
         for name in ("action", "state"):
             loss_dict[f"{name}_prediction_reconstruction_loss"] = 0.0
@@ -2112,7 +2143,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             loss_dict[f"{name}_prediction_reconstruction_loss"] = metric
             loss_dict[f"{name}_prediction_reconstruction_elements"] = count
 
-        if task.understanding_image:
+        if task.understanding_image and latent_target is not None:
             latent_loss, metric, count = self._distributed_mse(
                 predicted_latent_action,
                 latent_target,

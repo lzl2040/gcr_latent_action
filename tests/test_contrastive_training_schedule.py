@@ -347,6 +347,53 @@ def test_stage2_resume_uses_saved_embedded_stage1_config(tmp_path) -> None:
     assert cfg.scheduler.num_decay_steps == 77_000
 
 
+def test_stage2_mlp_resume_needs_no_embedded_teacher_and_rejects_architecture_swap(tmp_path):
+    baseline = Qwen3VLMoTConfig(
+        physical_encoder_type="mlp",
+        physical_tuning_mode="full",
+        physical_flow_space="raw",
+        latent_action_loss_weight=0,
+        task_names=("va_prediction",),
+        task_weights=(1.0,),
+        initialize_from_stage1=False,
+    )
+    baseline._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True,
+        output_dir=tmp_path,
+        policy=Qwen3VLMoTConfig(),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.physical_encoder_type == "mlp"
+    assert cfg.policy.physical_tuning_mode == "full"
+    assert cfg.policy.stage1_policy_config is None
+    assert cfg.policy.latent_action_loss_weight == 0
+    assert not cfg.policy.initialize_from_stage1
+    cfg.policy = Qwen3VLMoTConfig()
+    with pytest.raises(ValueError, match="physical_encoder_type"):
+        _load_stage2_resume_policy_config(cfg, args=["--policy.physical_encoder_type=stage1_transformer"])
+
+
+def test_stage2_mlp_resume_rejects_enabling_tactile_curriculum(tmp_path):
+    baseline = Qwen3VLMoTConfig(
+        physical_encoder_type="mlp",
+        physical_tuning_mode="full",
+        latent_action_loss_weight=0,
+        task_names=("va_prediction", "tactile_prediction"),
+        task_weights=(1.0, 0.0),
+    )
+    baseline._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True,
+        output_dir=tmp_path,
+        use_policy_training_preset=False,
+        policy=Qwen3VLMoTConfig(task_names=baseline.task_names, task_weights=(0.0, 1.0)),
+    )
+    with pytest.raises(ValueError, match="MLP baseline supports action/state only"):
+        _load_stage2_resume_policy_config(cfg, args=["--policy.task_weights=[0.0,1.0]"])
+
+
 def test_stage2_resume_allows_task_weight_curriculum(tmp_path) -> None:
     checkpoint_root = tmp_path / "run"
     checkpoint_root.mkdir()

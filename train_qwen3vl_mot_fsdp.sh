@@ -45,6 +45,7 @@ STAGE2_TASK_WEIGHTS="${STAGE2_TASK_WEIGHTS:-}"
 RGB_VIEWS="${RGB_VIEWS:-}"
 RGB_AUG_ENABLED="${RGB_AUG_ENABLED:-false}"
 PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
+PHYSICAL_ENCODER_TYPE="${PHYSICAL_ENCODER_TYPE:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
 STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
 TIME_SAMPLING_DISTRIBUTION="${TIME_SAMPLING_DISTRIBUTION:-}"
@@ -252,7 +253,24 @@ if [[ "$WEIGHT_RESUME" == "true" ]]; then
 else
     echo "resume: disabled explicitly; starting a fresh Stage 2 run"
 fi
-if [[ "$WEIGHT_RESUME" != "true" && -z "$STAGE1_CHECKPOINT" ]]; then
+if [[ -z "$PHYSICAL_ENCODER_TYPE" && "$WEIGHT_RESUME" != "true" ]]; then
+    PHYSICAL_ENCODER_TYPE=stage1_transformer
+fi
+BASELINE_ARGS=()
+if [[ -n "$PHYSICAL_ENCODER_TYPE" ]]; then
+    [[ "$PHYSICAL_ENCODER_TYPE" == "stage1_transformer" || "$PHYSICAL_ENCODER_TYPE" == "mlp" ]] \
+        || die "PHYSICAL_ENCODER_TYPE must be stage1_transformer or mlp"
+    BASELINE_ARGS+=(--policy.physical_encoder_type="$PHYSICAL_ENCODER_TYPE")
+fi
+if [[ "$PHYSICAL_ENCODER_TYPE" == "mlp" ]]; then
+    PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-raw}"
+    PHYSICAL_TUNING_MODE="${PHYSICAL_TUNING_MODE:-full}"
+    LATENT_ACTION_LOSS_WEIGHT="${LATENT_ACTION_LOSS_WEIGHT:-0}"
+fi
+if [[ -n "${LATENT_ACTION_LOSS_WEIGHT:-}" ]]; then
+    BASELINE_ARGS+=(--policy.latent_action_loss_weight="$LATENT_ACTION_LOSS_WEIGHT")
+fi
+if [[ "$WEIGHT_RESUME" != "true" && "$PHYSICAL_ENCODER_TYPE" != "mlp" && -z "$STAGE1_CHECKPOINT" ]]; then
     die "STAGE1_CHECKPOINT is required for a fresh stage-two run"
 fi
 PHYSICAL_FLOW_ARGS=()
@@ -324,7 +342,7 @@ if [[ "$CHECK_PATHS" == "true" ]]; then
     if [[ -n "$PARENT_DIR_EXTRA" ]]; then
         require_dir "dataset parent_dir_extra" "$PARENT_DIR_EXTRA"
     fi
-    if [[ "$WEIGHT_RESUME" != "true" ]]; then
+    if [[ "$WEIGHT_RESUME" != "true" && "$PHYSICAL_ENCODER_TYPE" != "mlp" ]]; then
         require_path "Stage 1 checkpoint" "$STAGE1_CHECKPOINT"
         if [[ -n "$STAGE1_CONFIG" ]]; then
             require_file "Stage 1 config" "$STAGE1_CONFIG"
@@ -395,17 +413,17 @@ fi
 
 STAGE1_CONFIG_ARGS=()
 STAGE1_CHECKPOINT_ARGS=()
-if [[ "$WEIGHT_RESUME" != "true" && -n "$STAGE1_CHECKPOINT" ]]; then
+if [[ "$WEIGHT_RESUME" != "true" && "$PHYSICAL_ENCODER_TYPE" != "mlp" && -n "$STAGE1_CHECKPOINT" ]]; then
     STAGE1_CHECKPOINT_ARGS+=(--policy.stage1_checkpoint="${STAGE1_CHECKPOINT}")
 fi
-if [[ "$WEIGHT_RESUME" != "true" && -n "$STAGE1_CONFIG" ]]; then
+if [[ "$WEIGHT_RESUME" != "true" && "$PHYSICAL_ENCODER_TYPE" != "mlp" && -n "$STAGE1_CONFIG" ]]; then
     STAGE1_CONFIG_ARGS+=(--policy.stage1_config="${STAGE1_CONFIG}")
 fi
 
 echo "stage2 paths:"
 echo "  qwen3vl=${QWEN3VL_DIR}"
 echo "  cosmos3=${COSMOS3_DIR}"
-if [[ "$WEIGHT_RESUME" != "true" ]]; then
+if [[ "$WEIGHT_RESUME" != "true" && "$PHYSICAL_ENCODER_TYPE" != "mlp" ]]; then
     echo "  stage1=${STAGE1_CHECKPOINT}"
 fi
 echo "  data_v21=${PARENT_DIR_V21}"
@@ -427,6 +445,7 @@ echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "  rgb_augmentation=${RGB_AUG_ENABLED} (training only; crop 90-100%, mild color jitter; no rotation)"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
+echo "  physical_encoder=${PHYSICAL_ENCODER_TYPE:-<from checkpoint>} (mlp: no stage1, trainable raw-space inputs)"
 echo "  predicted_recon_weights: action=${ACTION_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} state=${STATE_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} (no clean codec loss)"
 echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} shift=${TIME_SAMPLING_SHIFT:-<saved config; default 1>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"
 echo "  generation_backbone=${GENERATION_BACKBONE:-<from checkpoint>} pretrained=${GENERATION_PRETRAINED_DIR:-<not required on resume>}"
@@ -465,6 +484,7 @@ CMD=(
     "${EPOCH_ARGS[@]}"
     --policy.qwen3vl_dir="${QWEN3VL_DIR}"
     --policy.cosmos3_dir="${COSMOS3_DIR}"
+    "${BASELINE_ARGS[@]}"
     "${GENERATION_ARGS[@]}"
     --policy.understanding_tuning_mode="${UNDERSTANDING_TUNING_MODE:-full}"
     --policy.understanding_lora_rank="${UNDERSTANDING_LORA_RANK:-16}"

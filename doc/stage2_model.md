@@ -2,7 +2,7 @@
 
 > **维护约定**
 >
-> 本文是 `qwen3vl_mot_pretrained_generation` 分支的模型结构权威说明。凡是修改以下任一内容，
+> 本文是本分支 Qwen3-VL MoT Stage 2 的模型结构权威说明。凡是修改以下任一内容，
 > 必须在同一个提交中同步更新本文：
 >
 > - 模型模块、维度、参数量或冻结范围；
@@ -12,7 +12,8 @@
 > - action/video 推理接口；
 > - FSDP、FP8 或 optimizer 对模型训练语义的影响。
 >
-> 当前说明覆盖 Edge/Nano 预训练生成、多视角生成与 physical embedding-space flow。
+> 当前说明覆盖 Edge/Nano 预训练生成、多视角生成、physical embedding-space flow，
+> 以及可选的无 Stage 1、独立 MLP 物理编码 baseline。未指定新选项时，原模型不变。
 
 ---
 
@@ -43,6 +44,8 @@ Transformer，信息只从 Understanding 单向流向 Generation。
 ---
 
 ## 2. 总体结构
+
+以下为默认 `physical_encoder_type="stage1_transformer"` 结构；无 Stage 1 的 MLP baseline 见 2.1。
 
 ```text
 current RGB images (primary / optional secondary / wrist) + language
@@ -81,6 +84,52 @@ state/action/tactile ──> Stage 1 Physical Encoder ──> physical tokens   
 4. Qwen 永远不会读取 Generation tokens，因此不存在 Generation 信息泄漏回 Understanding。
 
 ---
+
+### 2.1 无 Stage 1 的 MLP baseline
+
+设置 `physical_encoder_type="mlp"` 后，Understanding 直接使用
+`qwen3vl_dir` 中原始 Qwen3-VL 预训练权重，仍按原配置进行 frozen/LoRA/full tuning；
+不构造 RoboContrast、Stage 1 perception teacher 或 Physical Transformer，
+也不读取 Stage 1 checkpoint/config。Generation Expert 的 Edge/Nano 预训练初始化不变。
+
+物理侧只有独立、随机初始化且可训练的 `state_mlp` 和 `action_mlp`：
+每 4 帧的 canonical 值与有效维度 mask 拼接后，经
+`Linear(320,1024) → GELU → Linear(1024,1024) → LayerNorm`
+得到一个 group token。默认每种模态输出 `(B,8,1024)`，
+两套 MLP 共 2,760,704 个参数；没有 CLS、跨 group/跨模态 attention 或触觉编码器。
+缺失维度先清零，缺失模态 token 与 keep mask 均为零。
+Generation 内的 Transformer/MoT 不移除，物理 token 仍进入原生成路径。
+
+该 baseline 使用 `physical_flow_space="raw"`、`physical_tuning_mode="full"`：
+在归一化的原始 action/state 空间加噪并预测 velocity，MLP 编码 noisy/condition 输入，
+不是冻结随机 MLP 后继续做 embedding-space flow。
+无 Stage 1 因而关闭 change-query 蒸馏（`latent_action_loss_weight=0`）及其 projection；
+raw-space flow 不再使用物理 embedding decoder 或 prediction reconstruction 辅助损失。
+视频 loss、任务配比、视角、时间采样/shift、canonical 空间和数据采样仍沿用传入配置。
+`va_prediction` 仍只输入当前 state，不预测未来 state。
+该变体只支持非触觉任务；启用 tactile task/conditioning、Stage 1 路径、
+非零蒸馏权重或 frozen/embedding 物理路径会显式报错。
+
+两个现有 launcher 均支持 `PHYSICAL_ENCODER_TYPE=mlp`，
+自动给出上述 raw/full/零蒸馏默认值，并跳过 Stage 1 路径检查与参数。
+在当前训练命令上加该选项，并使用全新输出目录；其余实验参数照旧。
+例如保留 VA-only、Nano、双视角与 shift5：
+
+```bash
+PHYSICAL_ENCODER_TYPE=mlp WEIGHT_RESUME=false \
+OUTPUT_DIR=/path/to/new_baseline_run \
+GENERATION_BACKBONE=nano RGB_VIEWS=primary,wrist \
+STAGE2_TASK_NAMES=va_prediction STAGE2_TASK_WEIGHTS=1.0 \
+TIME_SAMPLING_DISTRIBUTION=shifted_uniform TIME_SAMPLING_SHIFT=5 \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+预训练模型与数据目录沿用已有 `WEIGHTS_ROOT`、`PARENT_DIR_*` 等设置。
+原始任务默认值包含触觉，因此 fresh baseline 须明确提供已有实验的非触觉任务配比，
+不能为了启动而静默改变任务。续训从保存配置恢复 MLP 结构，不需要 Stage 1 配置；
+可使用原命令的 `WEIGHT_RESUME=true`，未显式传入的物理模式从 checkpoint 读取。
+不允许在同一输出目录将 Physical Transformer 与 MLP 相互替换。
+LIBERO 及复用其加载器的评测同样支持该自包含 baseline，无需 Stage 1 text 资源。
 
 ## 3. 输入数据契约
 

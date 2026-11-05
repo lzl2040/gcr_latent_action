@@ -76,6 +76,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     max_state_dim: int = 40
     max_tactile_signal_dim: int = 32
     physical_hidden_dim: int = 1024
+    physical_encoder_type: str = "stage1_transformer"
     physical_tuning_mode: str = "frozen"
     # Saved configs without this field retain the original raw-space flow contract.
     physical_flow_space: str = "raw"
@@ -311,6 +312,10 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
                 "primary, secondary, wrist."
             )
         resolve_task_specs(self.task_names, self.task_weights)
+        if self.physical_encoder_type not in ("stage1_transformer", "mlp"):
+            raise ValueError("`physical_encoder_type` must be 'stage1_transformer' or 'mlp'.")
+        if self.physical_encoder_type == "mlp":
+            self.validate_features()
 
     @property
     def num_groups(self) -> int:
@@ -336,6 +341,21 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
             )
         ):
             raise ValueError("Predicted physical reconstruction requires embedding-space physical flow.")
+        if self.physical_encoder_type == "mlp":
+            if self.physical_flow_space != "raw" or self.physical_tuning_mode != "full":
+                raise ValueError("The MLP baseline requires raw-space flow and physical_tuning_mode='full'.")
+            if self.latent_action_loss_weight != 0:
+                raise ValueError("The no-stage1 MLP baseline requires latent_action_loss_weight=0.")
+            if self.stage1_checkpoint or self.stage1_config or self.stage1_policy_config is not None:
+                raise ValueError("The MLP baseline must not specify a stage1 checkpoint or configuration.")
+            task_specs, task_weights = resolve_task_specs(self.task_names, self.task_weights)
+            if self.use_tactile_conditioning or any(
+                task.tactile.is_present and weight > 0
+                for task, weight in zip(task_specs, task_weights, strict=True)
+            ):
+                raise ValueError(
+                    "The MLP baseline supports action/state only; disable tactile tasks and conditioning."
+                )
         return None
 
     def get_optimizer_preset(self) -> AdamW8bitConfig:

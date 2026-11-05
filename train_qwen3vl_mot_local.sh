@@ -6,10 +6,31 @@ set -euo pipefail
 #   STAGE1_CHECKPOINT=/path/to/exported_robo_contrast \
 #     CUDA_VISIBLE_DEVICES=0,1 bash train_qwen3vl_mot_local.sh
 #
-# For a fresh run, the stage-one path must contain config.json and model.safetensors.
-# A stage-two resume reads the embedded stage-one architecture from its saved config.
+# The default fresh run requires an exported stage-one policy.
+# PHYSICAL_ENCODER_TYPE=mlp uses no stage-one weights; select non-tactile tasks explicitly.
+# A stage-two resume reads its architecture from the saved config.
 WEIGHT_RESUME="${WEIGHT_RESUME:-false}"
-if [[ "${WEIGHT_RESUME}" != "true" ]]; then
+PHYSICAL_ENCODER_TYPE="${PHYSICAL_ENCODER_TYPE:-}"
+if [[ -z "$PHYSICAL_ENCODER_TYPE" && "$WEIGHT_RESUME" != "true" ]]; then
+    PHYSICAL_ENCODER_TYPE=stage1_transformer
+fi
+BASELINE_ARGS=()
+if [[ -n "$PHYSICAL_ENCODER_TYPE" ]]; then
+    case "$PHYSICAL_ENCODER_TYPE" in
+        stage1_transformer|mlp) ;;
+        *) echo "Error: PHYSICAL_ENCODER_TYPE must be stage1_transformer or mlp" >&2; exit 1 ;;
+    esac
+    BASELINE_ARGS+=(--policy.physical_encoder_type="$PHYSICAL_ENCODER_TYPE")
+fi
+if [[ "$PHYSICAL_ENCODER_TYPE" == "mlp" ]]; then
+    PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-raw}"
+    PHYSICAL_TUNING_MODE="${PHYSICAL_TUNING_MODE:-full}"
+    LATENT_ACTION_LOSS_WEIGHT="${LATENT_ACTION_LOSS_WEIGHT:-0}"
+fi
+if [[ -n "${LATENT_ACTION_LOSS_WEIGHT:-}" ]]; then
+    BASELINE_ARGS+=(--policy.latent_action_loss_weight="$LATENT_ACTION_LOSS_WEIGHT")
+fi
+if [[ "${WEIGHT_RESUME}" != "true" && "$PHYSICAL_ENCODER_TYPE" != "mlp" ]]; then
     : "${STAGE1_CHECKPOINT:?Set STAGE1_CHECKPOINT for a fresh stage-two run}"
 fi
 OUTPUT_DIR="${OUTPUT_DIR:-qwen3vl_mot}"
@@ -175,10 +196,10 @@ fi
 MASTER_PORT="${MASTER_PORT:-$(python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")}"
 STAGE1_CONFIG_ARGS=()
 STAGE1_CHECKPOINT_ARGS=()
-if [[ -n "${STAGE1_CHECKPOINT:-}" ]]; then
+if [[ "$PHYSICAL_ENCODER_TYPE" != "mlp" && -n "${STAGE1_CHECKPOINT:-}" ]]; then
     STAGE1_CHECKPOINT_ARGS+=(--policy.stage1_checkpoint="${STAGE1_CHECKPOINT}")
 fi
-if [[ -n "${STAGE1_CONFIG:-}" ]]; then
+if [[ "$PHYSICAL_ENCODER_TYPE" != "mlp" && -n "${STAGE1_CONFIG:-}" ]]; then
     STAGE1_CONFIG_ARGS+=(--policy.stage1_config="${STAGE1_CONFIG}")
 fi
 
@@ -189,6 +210,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     "${EPOCH_ARGS[@]}" \
     --policy.qwen3vl_dir="${QWEN3VL_DIR}" \
     --policy.cosmos3_dir="${COSMOS3_DIR}" \
+    "${BASELINE_ARGS[@]}" \
     "${GENERATION_ARGS[@]}" \
     --policy.understanding_tuning_mode="${UNDERSTANDING_TUNING_MODE:-lora}" \
     --policy.understanding_lora_rank="${UNDERSTANDING_LORA_RANK:-16}" \

@@ -334,16 +334,20 @@ def load_policy(args):
     model_dir, config_file = checkpoint_paths(args.checkpoint, args.policy_config)
     payload = json.loads(config_file.read_text())
     validate_saved_task_contract(payload)
-    if payload.pop("type", None) != "qwen3vl_mot" or not payload.get("stage1_policy_config"):
+    if payload.pop("type", None) != "qwen3vl_mot":
+        raise ValueError("Expected a self-contained qwen3vl_mot policy configuration.")
+    needs_stage1 = payload.get("physical_encoder_type", "stage1_transformer") != "mlp"
+    if needs_stage1 and not payload.get("stage1_policy_config"):
         raise ValueError("Expected a self-contained qwen3vl_mot policy configuration.")
     for field, path in (("qwen3vl_dir", args.qwen3vl_dir), ("cosmos3_dir", args.cosmos3_dir)):
         if not path.is_dir():
             raise FileNotFoundError(f"Local pretrained asset directory does not exist: {path}.")
         payload[field] = str(path.resolve())
-    if not args.stage1_text_dir.is_dir():
-        raise FileNotFoundError(f"Stage 1 text asset directory does not exist: {args.stage1_text_dir}.")
-    payload["stage1_policy_config"]["text_model_name"] = str(args.stage1_text_dir.resolve())
-    payload["stage1_policy_config"]["tactile_pretrained"] = False
+    if needs_stage1:
+        if not args.stage1_text_dir.is_dir():
+            raise FileNotFoundError(f"Stage 1 text asset directory does not exist: {args.stage1_text_dir}.")
+        payload["stage1_policy_config"]["text_model_name"] = str(args.stage1_text_dir.resolve())
+        payload["stage1_policy_config"]["tactile_pretrained"] = False
     payload["initialize_from_stage1"] = False
     if args.inference_steps is not None:
         payload["inference_steps"] = args.inference_steps

@@ -205,6 +205,56 @@ def test_dcp_single_process_strict_load(tmp_path):
         load_dcp_model(torch.nn.Sequential(torch.nn.Linear(3, 2)), tmp_path)
 
 
+def test_mlp_evaluation_load_needs_no_stage1_assets(tmp_path, monkeypatch):
+    import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as modeling
+    import lerobot.evaluation.eval_qwen3vl_mot_libero as evaluator
+    from lerobot.common.policies.qwen3vl_mot.configuration_qwen3vl_mot import Qwen3VLMoTConfig
+
+    checkpoint = tmp_path / "step12k"
+    (checkpoint / "model").mkdir(parents=True)
+    (checkpoint / "model/.metadata").touch()
+    config = Qwen3VLMoTConfig(
+        physical_encoder_type="mlp",
+        physical_tuning_mode="full",
+        latent_action_loss_weight=0,
+        task_names=("va_prediction",),
+        task_weights=(1.0,),
+    )
+    config._save_pretrained(tmp_path)
+    qwen, cosmos = tmp_path / "qwen", tmp_path / "cosmos"
+    qwen.mkdir()
+    cosmos.mkdir()
+    loaded_configs, loaded_models = [], []
+
+    def construct(cfg):
+        loaded_configs.append(cfg)
+        model = torch.nn.Linear(1, 1)
+        model.config = cfg
+        return model
+
+    monkeypatch.setattr(modeling, "Qwen3VLMoTPolicy", construct)
+    monkeypatch.setattr(evaluator, "load_dcp_model", lambda model, path: loaded_models.append(path))
+    policy = evaluator.load_policy(
+        SimpleNamespace(
+            precision="bf16",
+            fp8_training_config=None,
+            device="cpu",
+            checkpoint=checkpoint,
+            policy_config=None,
+            qwen3vl_dir=qwen,
+            cosmos3_dir=cosmos,
+            stage1_text_dir=tmp_path / "missing-stage1-text",
+            inference_steps=None,
+            replan_steps=10,
+        )
+    )
+    assert loaded_configs[0].stage1_policy_config is None
+    assert loaded_configs[0].physical_encoder_type == "mlp"
+    assert loaded_configs[0].initialize_from_stage1 is False
+    assert loaded_models == [checkpoint / "model"]
+    assert not policy.training
+
+
 def test_checkpoint_config_discovery_and_missing_config(tmp_path):
     model = tmp_path / "step12k/model"
     model.mkdir(parents=True)

@@ -944,6 +944,273 @@ def test_spatial_tactile_target_and_generation_are_decodable():
     )
 
 
+def _mlp_baseline_config(**overrides):
+    values = {
+        "physical_encoder_type": "mlp",
+        "physical_tuning_mode": "full",
+        "physical_flow_space": "raw",
+        "latent_action_loss_weight": 0,
+        "understanding_tuning_mode": "frozen",
+        "num_latent_queries": 2,
+        "latent_action_dim": 8,
+        "physical_hidden_dim": 8,
+        "generation_hidden_dim": 16,
+        "generation_depth": 1,
+        "generation_num_heads": 4,
+        "generation_num_kv_heads": 4,
+        "generation_intermediate_dim": 32,
+        "understanding_kv_layers": 1,
+        "generation_gradient_checkpointing": False,
+        "video_latent_dim": 4,
+        "chunk_size": 4,
+        "group_size": 2,
+        "n_action_steps": 2,
+        "video_image_size": 16,
+        "max_action_dim": 4,
+        "max_state_dim": 4,
+        "max_tactile_signal_dim": 3,
+        "max_tactile_views": 2,
+        "tactile_frames": 2,
+        "tactile_img_size": 8,
+        "task_names": ("va_prediction",),
+        "task_weights": (1.0,),
+        "inference_steps": 2,
+    }
+    return Qwen3VLMoTConfig(**(values | overrides))
+
+
+@pytest.mark.parametrize("generation_kind", ["random", "nano"])
+def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_restore(
+    tmp_path, monkeypatch, generation_kind
+):
+    import lerobot.common.policies.ace.cosmos3_encoders as vae_module
+    import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
+    from lerobot.common.policies.qwen3vl_mot.cosmos3_pretrained import (
+        COSMOS_GENERATION_CONFIGS,
+        generation_checkpoint_mapping,
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("The baseline must not construct, load or transfer stage-one modules.")
+
+    monkeypatch.setattr(stage2, "RoboContrast", forbidden)
+    monkeypatch.setattr(stage2, "_load_stage1_policy", forbidden)
+    monkeypatch.setattr(stage2, "transfer_stage1_perception", forbidden)
+
+    def pretrained_understanding(*args, **kwargs):
+        model = _FakeUnderstanding(*args, **kwargs)
+        with torch.no_grad():
+            model.model.weight.fill_(0.375)
+        return model
+
+    monkeypatch.setattr(stage2, "Qwen3VLUnderstandingExpert", pretrained_understanding)
+    monkeypatch.setattr(
+        vae_module,
+        "build_cosmos3_vae",
+        lambda *args, **kwargs: (_FakeVAE(4), 4, 4, torch.zeros(4), torch.ones(4)),
+    )
+    generator_dir = tmp_path / "cosmos"
+    source_file = None
+    if generation_kind == "nano":
+        import json
+
+        native = {
+            **COSMOS_GENERATION_CONFIGS["nano"],
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "head_dim": 4,
+            "intermediate_size": 32,
+            "rope_axes_dim": [1, 1, 0],
+            "latent_channel": 4,
+            "patch_latent_dim": 16,
+        }
+        monkeypatch.setitem(COSMOS_GENERATION_CONFIGS, "nano", native)
+        (generator_dir / "transformer").mkdir(parents=True)
+        (generator_dir / "vae").mkdir()
+        (generator_dir / "transformer/config.json").write_text(json.dumps(native))
+        (generator_dir / "vae/config.json").write_text(json.dumps({"z_dim": 4}))
+        source = GenerationExpert(
+            understanding_dim=12,
+            hidden_dim=16,
+            depth=1,
+            num_heads=4,
+            num_kv_heads=4,
+            intermediate_dim=32,
+            hidden_act=native["hidden_act"],
+            dropout=0,
+            input_dims={"video": 16},
+            output_dims={"video": 16},
+            task_names=("i2v",),
+            gradient_checkpointing=False,
+            cosmos_config=native,
+        )
+        parameters = dict(source.named_parameters())
+        source_file = generator_dir / "transformer/diffusion_pytorch_model.safetensors"
+        save_file(
+            {
+                original: parameters[target].detach().contiguous()
+                for target, original in generation_checkpoint_mapping(source).items()
+            },
+            source_file,
+        )
+    names = ("t2v", "joint_prediction", "forward_dynamics", "inverse_dynamics", "va_prediction")
+    config = _mlp_baseline_config(
+        generation_backbone=generation_kind,
+        generation_pretrained_dir=str(generator_dir),
+        cosmos3_dir=str(generator_dir),
+        task_names=names,
+        task_weights=(0.2,) * len(names),
+        tactile_generation_target="spatial_patches",
+        rgb_views=("primary", "wrist"),
+    )
+    policy = stage2.Qwen3VLMoTPolicy(config).train()
+    assert policy.teacher_perception is None and policy.latent_action_projection is None
+    assert config.stage1_policy_config is None
+    torch.testing.assert_close(policy.understanding.model.weight, torch.full((1, 1), 0.375))
+    assert not any(isinstance(module, nn.MultiheadAttention) for module in policy.physical_encoder.modules())
+    if generation_kind == "nano":
+        assert policy.generation_load_report.copied_tensors > 0
+    with torch.no_grad():
+        for name in ("action", "state"):
+            policy.generation.output_heads[name].weight.normal_(std=0.02)
+    batch = {
+        "image_t0": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
+        "video": torch.zeros(2, 9, 3, 8, 8, dtype=torch.uint8),
+        "task": ["move", "place"],
+        "has_text": torch.ones(2),
+        "pair_is_valid": torch.ones(2),
+        "observation.state": torch.randn(2, 4, 4),
+        "state_mask": torch.ones(2, 4),
+        "action": torch.randn(2, 4, 4),
+        "action_mask": torch.tensor([[1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0]]),
+        "tactile_signal_mask": torch.zeros(2),
+        "tactile_image_mask": torch.zeros(2, 2),
+        "images_t0": torch.zeros(2, 2, 3, 8, 8, dtype=torch.uint8),
+        "image_view_mask": torch.ones(2, 2, dtype=torch.bool),
+        "video_views": torch.zeros(2, 2, 9, 3, 8, 8, dtype=torch.uint8),
+        "video_view_mask": torch.ones(2, 2, dtype=torch.bool),
+    }
+    optimizer = torch.optim.AdamW(policy.get_optim_params(), lr=1e-3)
+    before = policy.physical_encoder.action_mlp[0].weight.detach().clone()
+    for task in names:
+        optimizer.zero_grad(set_to_none=True)
+        loss, metrics = policy(batch, task_type=task)
+        assert torch.isfinite(loss)
+        assert metrics["latent_action_loss"] == metrics["latent_action_elements"] == 0
+        assert metrics["action_prediction_reconstruction_loss"] == 0
+        assert metrics["state_prediction_reconstruction_loss"] == 0
+        loss.backward()
+        assert all(
+            p.grad is not None and torch.isfinite(p.grad).all() for p in policy.physical_encoder.parameters()
+        )
+        if task == "va_prediction":
+            assert policy.physical_encoder.action_mlp[0].weight.grad.abs().sum() > 0
+            assert policy.physical_encoder.state_mlp[0].weight.grad.abs().sum() > 0
+            assert "state_flow_loss" not in metrics
+        optimizer.step()
+    assert not torch.equal(before, policy.physical_encoder.action_mlp[0].weight)
+    policy.config.task_weights = (0.0, 0.0, 0.0, 0.0, 1.0)
+    policy.eval()
+    expected = policy.generate_validation(batch, seed=17)
+    assert expected["action_normalized"].shape == (2, 2, 4)
+    assert not expected["action_normalized"][0, :, 2:].any()
+    assert "state_normalized" not in expected
+    changed = copy.deepcopy(batch)
+    changed["observation.state"][:, 1:] += 1000
+    changed["action"] += 1000
+    changed["video_views"][:, :, 1:] = 255
+    repeated = policy.generate_validation(changed, seed=17)
+    for name in expected:
+        torch.testing.assert_close(expected[name], repeated[name])
+    checkpoint = tmp_path / "baseline"
+    checkpoint.mkdir()
+    policy._save_pretrained(checkpoint)
+    if source_file is not None:
+        source_file.unlink()
+    restored = stage2.Qwen3VLMoTPolicy.from_pretrained(checkpoint).eval()
+    assert restored.config.stage1_policy_config is None
+    for name, value in policy.state_dict().items():
+        torch.testing.assert_close(value, restored.state_dict()[name])
+    actual = restored.generate_validation(batch, seed=17)
+    for name in expected:
+        torch.testing.assert_close(expected[name], actual[name])
+
+
+def test_mlp_physical_tokens_respect_masks_groups_and_independent_modalities():
+    from lerobot.common.policies.qwen3vl_mot.modeling_physical import PhysicalMLP
+
+    config = _mlp_baseline_config()
+    encoder = PhysicalMLP(config)
+    batch = {
+        "observation.state": torch.randn(2, 4, 4),
+        "action": torch.randn(2, 4, 4),
+        "state_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0], [0.0, 0.0, 0.0, 0.0]]),
+        "action_mask": torch.ones(2, 4),
+    }
+
+    def encode(values):
+        return encoder(
+            values,
+            return_tokens=True,
+            apply_modality_dropout=False,
+            include_tactile=False,
+            compute_reconstruction=False,
+        )
+
+    tokens, keep, _ = encode(batch)
+    changed = copy.deepcopy(batch)
+    changed["observation.state"][:, :, 3] = float("nan")
+    changed["observation.state"][1] = float("nan")
+    torch.testing.assert_close(encode(changed)[0], tokens)
+    assert not tokens[1, : config.num_groups].any() and not keep[1, : config.num_groups].any()
+    changed = copy.deepcopy(batch)
+    changed["action"][:, 2:] += 100
+    actual = encode(changed)[0]
+    torch.testing.assert_close(tokens[:, :3], actual[:, :3])
+    assert not torch.allclose(tokens[:, 3], actual[:, 3])
+    (tokens.square().sum()).backward()
+    assert encoder.state_mlp[0].weight.grad is not None
+    assert encoder.action_mlp[0].weight.grad is not None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"physical_flow_space": "embedding", "physical_tuning_mode": "frozen"},
+        {"latent_action_loss_weight": 1},
+        {"task_names": ("tactile_prediction",)},
+        {"stage1_checkpoint": "/must/not/load/stage1"},
+    ],
+)
+def test_mlp_baseline_rejects_incompatible_stage1_and_flow_contracts(overrides):
+    with pytest.raises(ValueError, match="MLP baseline"):
+        _mlp_baseline_config(**overrides)
+
+
+@pytest.mark.parametrize("saved_mlp", [False, True])
+def test_checkpoint_loading_cannot_swap_physical_architecture(tmp_path, monkeypatch, saved_mlp):
+    baseline = _mlp_baseline_config()
+    legacy = Qwen3VLMoTConfig(task_names=baseline.task_names, task_weights=baseline.task_weights)
+    saved, runtime = (baseline, legacy) if saved_mlp else (legacy, baseline)
+    saved._save_pretrained(tmp_path)
+    if not saved_mlp:
+        import json
+
+        path = tmp_path / "config.json"
+        payload = json.loads(path.read_text())
+        del payload["physical_encoder_type"]
+        path.write_text(json.dumps(payload))
+    monkeypatch.setattr(
+        Qwen3VLMoTPolicy,
+        "__init__",
+        lambda *args, **kwargs: pytest.fail("An architecture mismatch must fail before model construction."),
+    )
+    with pytest.raises(ValueError, match="physical_encoder_type"):
+        Qwen3VLMoTPolicy.from_pretrained(tmp_path, config=runtime)
+
+
 @pytest.mark.parametrize("multiview", [False, True])
 @pytest.mark.parametrize("flow_space", ["raw", "embedding"])
 @pytest.mark.parametrize("generation_variant", ["random", "edge", "nano", "edge_frozen"])
