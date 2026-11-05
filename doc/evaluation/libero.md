@@ -2787,6 +2787,56 @@ Spatial 4 与 Goal 0/3 三个抽屉相关任务合计少成功 14 次；
 | Spatial | `fe857f94772c4220cbb12d996e07a083b78b4aba2a475d4cbf97ea43a3d67ff9` |
 | Goal | `7752582bd9bc2ad9b15d65bcd5185228ad4abf12d2dbf95d056496e37c80e8d7` |
 
+### 重复权重核验：目录标作 v5 16k，内容与 v4 shift2 16k 相同（不计入新增正式结果）
+
+2026-11-05 按用户要求，对
+`/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1104v5_4nodes_8gpu_wo_rotate_und_lr_scale_1e_2_shift_2/step16k/model`
+运行困难任务：GPU 2 跑 Goal `[0, 3, 4, 9]`，GPU 3 跑 Spatial `[4, 6, 9]`，
+每任务 20 次，共 140 次，不测 Object。
+使用与此前 v5 12k 相同的 `45fc4ee` 隔离推理代码、保存策略配置、
+BF16 双视角、Flow 20 步、执行 10 步、固定初态及每套一次 `seed=0` 的连续 RNG。
+32 个分片与完整 BF16 schema 通过检查，抽查参数区别于 v5 12k。
+Spatial 于 `2026-11-05T15:49:49Z` 完成，Goal 于 `2026-11-05T16:09:25Z` 完成，
+worker 与汇总 monitor 均零退出；140 条唯一 trial、有限 7D 动作、
+32 个非空失败视频和输入指纹已独立复核。结束后两卡模型显存已释放。
+
+但在完成审计时发现，其七个任务的成功 trial 列表与历史 v4 shift2 16k 全部一致，
+三个抽查的可训练 tensor SHA256 也全部相同。
+随后对两个目录的 **全部 32 个 DCP 分片及 `.metadata`** 分别计算 SHA256，
+于 `2026-11-05T16:14:09Z` 确认 **33/33 个文件内容完全相同**。
+参考目录为
+`/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2/step16k/model`，
+其所有文件的 size/mtime 指纹与历史已审计记录一致。
+两实验根目录的策略 JSON 只差 `understanding_lr_scale=1.0/0.01`；
+该训练学习率字段不改变推理，不能证明加载了不同的训练结果。
+
+本轮实际观察值如下，**只是给定目录中这份重复权重的结果，不是独立的 v5 16k 成绩**：
+
+| 范围 | 成功数 / rollout 数 | 成功率 |
+| --- | --- | --- |
+| Goal，任务 0/3/4/9 | 67/80 | 83.75% |
+| Spatial，任务 4/6/9 | 41/60 | 68.33% |
+| 所选 7 任务合计 | 108/140 | 77.14% |
+
+逐任务成功数为 Goal `[19, 11, 19, 18]`、Spatial `[8, 17, 16]`，每项分母均为 20。
+这些数字不能用于声称“v5 从 12k 训练到 16k 提升了 6.43 个百分点”，
+也不能用于归因 Understanding 学习率倍率的效果。
+需提供正确、非重复的 v5 16k 权重后，用新工件前缀重测；原始结果不覆盖。
+本轮不增加本文开头的有效正式评测数量或 rollout 总数。
+
+工件前缀为
+`libero_v5_1104_und_lr_scale_1e_2_shift2_16k_weak_tasks_two_gpu_run_seeded`。
+`_invalidation.json` 已标记该 checkpoint 标签无效，
+汇总保留真实 rollout 数值，但设置 `valid_as_labeled_checkpoint=false`、
+`all_artifacts_valid=false`，禁止后续将它当作有效 v5 对照。
+标签复核后的 `_summary.json` SHA256 为
+`abc61d315bf997781f971b452b06120b96fe863fae2178c59239ff08f3d6da38`；
+`_full_weight_comparison_vs_v4_16k.json` SHA256 为
+`b4a53863845122059688904f0da30b7f4af3b2416cccfe030702cfcc499db71e`。
+原始 Goal/Spatial `results.json` SHA256 分别为
+`6bc442337a194f40ed9e80e5fa1fea03e053814b5533d21f3fa4cce32a059b8a`、
+`4b2f94d60252028366f50ca6c00a67ff7158556aabc8ef5bfe2370a929ee0409`。
+
 ### 误拷权重评测：曾标作 8k（不计入正式结果）
 
 **2026-10-24 用户确认 `step8k/model` 拷贝了错误权重。**
