@@ -4367,3 +4367,18 @@ log is
 `/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/nonrandom42_alltask16k_suite.log`.
 No full-sweep success rate is available at startup; use the live
 `progress.json` and `results.csv` rather than extrapolating old task results.
+
+The sweep was **paused at the user's request on 2026-11-05**. At pause,
+11 tasks had completed with **0/33 successes**; two tasks remained errors:
+`fill_egg_holder` encountered unstable scene settling, and `fold_clothes`
+failed garment rest-mesh initialization. Neither error is counted as 0/3.
+`imitate_sorting_sequence` was interrupted mid-episode and is not included
+in the valid-episode denominator. All existing attempts, results and
+videos are retained; `progress.json` has status `interrupted`, and a later
+explicit resume can retain the completed tasks.
+
+The coordinator exited and port19188 is closed. Its evaluator did not
+finish graceful child cleanup within the timeout; the remaining owned
+policy/simulator processes were stopped explicitly, with the simulator
+requiring forced termination. GPU memory release was verified, and
+unrelated GPU jobs were left running. No automatic restart is scheduled.
