@@ -4456,3 +4456,54 @@ Coordinator log is
 `/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/alltask18k_two_suite.log`.
 Success counts are pending; live results are in the new output root's
 `progress.json` and `results.csv`.
+
+### Completed step18k results
+
+The two-task run exited0 with **six valid episodes, zero infrastructure
+errors and 0/6 successes**. All three native layouts ran to the original
+task horizons; there were no retries, substituted layouts or RNG restarts
+within a task.
+
+| Task | Step16k successes | Step18k successes | Step18k scores, layouts0/1/2 | Step18k aggregate score /100 |
+|---|---:|---:|---|---:|
+| `stack_bowls` | 0/3 | 0/3 | 0 / 0.15 / 0 | 5 |
+| `put_bottles_into_dustbin` | 1/3 | 0/3 | 0.4 / 0.4 / 0.25 | 35 |
+
+Compared with the matched individual step16k runs, bowls gains a small
+partial score but still never completes a stack; bottles loses the
+previous layout1 success. These three-layout observations do not show
+an improvement at step18k and are too small to establish a reliable
+overall checkpoint ranking.
+
+Bowls used controls800/800/800, 240 chunks and 3315.84 seconds;
+bottles used700/700/700, 210 chunks and 3106.23 seconds. These per-task
+times include evaluator startup but exclude suite-level hash preflight.
+All 450 chunks passed numerical integration/export audits, with maximum
+integration-component errors below1.1e-7. The completed coordinator
+verified full checkpoint/data SHA256 at the end; native asset, layout
+and runtime code hashes and completed-result artifacts were independently
+rechecked afterward. All 96 passive camera observations passed.
+
+Artifacts total **1350 predicted-camera MP4s, 14,850 prediction/conditioning
+PNGs and 18 actual-camera MP4s**. All nine bowls native videos have801
+frames; all nine bottles native videos have701 frames, at640x480/25FPS.
+Per-task actual videos are under
+`tasks/TASK/attempt_001/simulator/eval_result/RoboDojo/TASK/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/attempt_001/`;
+predictions are under `tasks/TASK/attempt_001/policy/predictions/`.
+
+Both `native_final_frames.jpg` sheets were visually reviewed: all18 exact
+final camera frames, not the complete rollout videos or all conditioning
+images. Bowls layout1 has overlapping bowls near the left gripper, with
+the third still separate; no layout completes the three-bowl stack.
+Bottles remain outside the bin in every final layout. The review scope
+and matched step16k comparison are recorded in `completion_review.json`;
+the generic audit's broader `visual_review_pending` flag is not cleared
+to imply complete video review.
+
+Physical target tracking remains distinct from numerical integration:
+maximum sampled translation discrepancies were left/right0.899/5.111mm
+for bowls and6.539/7.744mm for bottles. Correct export and these sampled
+tracking measurements do not prove accurate contact, grasping or task
+completion, nor do the final frames establish the failure mechanism.
+Policy port19189 is closed, evaluation GPU memory is released, unrelated
+jobs remain running, and the previous step16k full sweep stays paused.
