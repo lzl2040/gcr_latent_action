@@ -1,11 +1,11 @@
 # LIBERO 评测记录
 
-更新日期：2026-11-05。
+更新日期：2026-11-06。
 
-本文汇总已完成的有效正式评测，共 135 份结果、21,520 次 rollout：
-91 份完整 suite 评测、18,200 次，以及 44 份已完成的任务子集评测、3,320 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 93 份、13,120 次，
-包括 49 份完整 suite 和 44 份任务子集，分开记录。
+本文汇总已完成的有效正式评测，共 139 份结果、21,800 次 rollout：
+91 份完整 suite 评测、18,200 次，以及 48 份已完成的任务子集评测、3,600 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 97 份、13,400 次，
+包括 49 份完整 suite 和 48 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -2703,6 +2703,88 @@ Goal 3 与 Spatial 4 两个抽屉相关任务共失败 23 次，占全部失败�
 | Spatial | `1d5782cce47ddd67a3ff59f4cdba396246636adf25124c4a53802ae7611eac58` |
 | Object | `d383e21c2a4555caa36c7ad1c45c27d5c554d027706ca177430fbd607c5c3162` |
 
+### 1104v5 shift2：更正上传后的 16k 与 18k，仅困难任务（2026-11-06）
+
+本轮沿用上文
+`1104v5_4nodes_8gpu_wo_rotate_und_lr_scale_1e_2_shift_2` 根目录，
+分别加载新上传的 `step16k/model` 和 `step18k/model`。
+这不是下方保留的 2026-11-05 重复权重评测；旧的无效工件与 108/140 数值不复用。
+两个 checkpoint 均有完整的 32 个 BF16 DCP 分片，
+schema 为 2,560 个 tensor、12,585,116,005 个元素；
+全部分片及元数据已分别计算 SHA256 留档。
+三组可训练参数的内容核验确认：两者彼此不同，且均不同于 v5 12k、
+v4 shift2 16k 和 v4 shift2 18k。
+
+保存的策略配置与此前有效 v5 12k 相同，仍为 `joint_prediction`、
+`understanding_lr_scale=0.01`；不是 MLP baseline，也不是 VA-only。
+沿用固定 `45fc4ee` 隔离推理代码、相同归一化、BF16、primary/wrist 双视角，
+Flow 20 步、每次执行 10 步、每套启动时一次 `seed=0`，
+每任务使用前 20 个固定初态与连续 RNG。
+仅测 Goal `[0,3,4,9]` 的 80 次和 Spatial `[4,6,9]` 的 60 次，
+每个 checkpoint 共 140 次；不测 Object，不能当作完整 suite 成绩。
+目录步数仍未通过 checkpoint-local trainer metadata 独立核验。
+
+全程只使用 GPU 2、3：Goal 在 GPU 2，Spatial 在 GPU 3，
+先完成并审计 16k，再自动接续 18k。
+16k 从 `2026-11-06T11:36:40Z` 启动，最终校验完成于 `2026-11-06T12:48:24Z`；
+18k 随后启动，最终校验完成于 `2026-11-06T13:59:55Z`。
+两轮均核验双卡首个真实 rollout、完整任务/初态覆盖、输入指纹、
+原始结果 SHA256、有限 7D 动作以及非空失败视频。
+共 280 个唯一 checkpoint/task/trial 组合、71 个失败视频，
+四个 suite worker 与总队列均零退出，结束后两卡显存已释放。
+
+下表全部只统计相同的七个困难任务。v5 12k 的 Object 结果不混入分母；
+v4 两行使用此前已认证的匹配任务汇总，未重新运行，也不增加本轮计数。
+
+| 模型 / checkpoint | Goal，任务 0/3/4/9 | Spatial，任务 4/6/9 | 所选 7 任务合计 |
+| --- | --- | --- | --- |
+| v5 12k，既有有效结果 | 77.50%（62/80） | 61.67%（37/60） | 70.71%（99/140） |
+| v5 16k，更正上传 | 80.00%（64/80） | 63.33%（38/60） | **72.86%（102/140）** |
+| v5 18k，新上传 | 85.00%（68/80） | 65.00%（39/60） | **76.43%（107/140）** |
+| v4 shift2 16k，历史参考 | 83.75%（67/80） | 68.33%（41/60） | 77.14%（108/140） |
+| v4 shift2 18k，历史参考 | 93.75%（75/80） | 63.33%（38/60） | 80.71%（113/140） |
+
+v5 18k 相比本次有效 16k 多成功 5 次，提高 3.57 个百分点；
+相比同实验 12k 多成功 8 次，提高 5.71 个百分点。
+两轮 v5 相对各自同一步数的 v4 历史参考均少成功 6 次，低 4.29 个百分点。
+这是单 seed 的所选任务观察值，不能据此认定稳定训练趋势，
+也不能将跨实验差异严格归因为 Understanding 学习率倍率。
+
+逐任务成功数如下，每项分母均为 20：
+
+| Suite | 任务编号与描述 | v5 12k | 本轮 v5 16k | 本轮 v5 18k |
+| --- | --- | --- | --- | --- |
+| Goal | 0：打开中层抽屉 | 18 | 20 | 18 |
+| Goal | 3：打开上层抽屉并放碗 | 10 | 7 | 14 |
+| Goal | 4：碗放到柜顶 | 20 | 19 | 19 |
+| Goal | 9：酒瓶放酒架 | 14 | 18 | 17 |
+| Spatial | 4：上层抽屉取碗 | 7 | 8 | 7 |
+| Spatial | 6：cookie box 旁取碗 | 16 | 15 | 16 |
+| Spatial | 9：木柜上取碗 | 14 | 15 | 16 |
+
+失败数为 16k Goal 16、Spatial 22，18k Goal 12、Spatial 21。
+Goal 3 从 16k 的 7/20 到 18k 的 14/20，是本轮改善的主要任务；
+该计数不包含对具体失败阶段的判断。
+
+本轮工件前缀分别为
+`libero_v5_1104_und_lr_scale_1e_2_shift2_16k_weak_tasks_two_gpu_run_seeded_reupload_20261106`、
+`libero_v5_1104_und_lr_scale_1e_2_shift2_18k_weak_tasks_two_gpu_run_seeded_reupload_20261106`，
+包括各自的 `_preflight.json`、`_identity.json`、`_readiness.json`、
+suite 状态与日志、`_summary.json`。
+原始结果位于 `outputs/evaluation/libero/<对应工件前缀>_<goal|spatial>_20trials/results.json`。
+两个汇总 SHA256 分别为
+`ca65761b614b9c7e389451076a77a719418b5cc13f242d02c973c739069c8544`、
+`e6f6182038ee7d7dcaf9208efcb004c527376ebcbbdb23f84f5a743f541a9d20`。
+独立完成审计为 `libero_v5_shift2_16k_18k_weak_two_gpu_20261106_completion_audit.json`，
+SHA256 为 `4e2e3f4b8146db8cc384dc9b6ea89591e452f3539ede0c649906e8938720677a`。
+
+| Checkpoint / suite | `results.json` SHA256 |
+| --- | --- |
+| 16k Goal | `adfebc58103a3c93f51af9fae66c45756e2d7af2ba75a204298c6a7e9c523382` |
+| 16k Spatial | `56f36b62e29106b14256a17beefb61c13f6ec63058ab1f16ad270833439dc527` |
+| 18k Goal | `8734b22cd3ac1f6ef3ee17c78569e9dcba048b94e5213aa5be4487ff0470dfa1` |
+| 18k Spatial | `1563710903697428f11e7d13612b002637d5e98dfdd05503d4f458d7c1b0dcdc` |
+
 ### 1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred：12k，VA-only，仅 Spatial 与 Goal
 
 本轮权重为
@@ -2821,8 +2903,9 @@ worker 与汇总 monitor 均零退出；140 条唯一 trial、有限 7D 动作�
 逐任务成功数为 Goal `[19, 11, 19, 18]`、Spatial `[8, 17, 16]`，每项分母均为 20。
 这些数字不能用于声称“v5 从 12k 训练到 16k 提升了 6.43 个百分点”，
 也不能用于归因 Understanding 学习率倍率的效果。
-需提供正确、非重复的 v5 16k 权重后，用新工件前缀重测；原始结果不覆盖。
-本轮不增加本文开头的有效正式评测数量或 rollout 总数。
+2026-11-06 已收到更正上传的 v5 16k，并用新工件前缀完成重测，见上方
+“更正上传后的 16k 与 18k”小节；本节原始结果不覆盖，仍保持无效标签。
+本节旧评测不增加本文开头的有效正式评测数量或 rollout 总数。
 
 工件前缀为
 `libero_v5_1104_und_lr_scale_1e_2_shift2_16k_weak_tasks_two_gpu_run_seeded`。
