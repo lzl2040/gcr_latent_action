@@ -2,10 +2,10 @@
 
 更新日期：2026-11-06。
 
-本文汇总已完成的有效正式评测，共 139 份结果、21,800 次 rollout：
-91 份完整 suite 评测、18,200 次，以及 48 份已完成的任务子集评测、3,600 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 97 份、13,400 次，
-包括 49 份完整 suite 和 48 份任务子集，分开记录。
+本文汇总已完成的有效正式评测，共 143 份结果、22,080 次 rollout：
+91 份完整 suite 评测、18,200 次，以及 52 份已完成的任务子集评测、3,880 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 101 份、13,680 次，
+包括 49 份完整 suite 和 52 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -2872,6 +2872,85 @@ Spatial 4 与 Goal 0/3 三个抽屉相关任务合计少成功 14 次；
 | Spatial | `fe857f94772c4220cbb12d996e07a083b78b4aba2a475d4cbf97ea43a3d67ff9` |
 | Goal | `7752582bd9bc2ad9b15d65bcd5185228ad4abf12d2dbf95d056496e37c80e8d7` |
 
+### 1104v6 shift5 VA-only：14k 与 16k，困难任务补测（2026-11-06）
+
+只补测
+`1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred/step14k/model`
+和 `step16k/model`，不重跑已完成的 12k。
+每份权重仅测 Goal `[0, 3, 4, 9]` 的 80 次和 Spatial `[4, 6, 9]` 的 60 次，
+每任务 20 个固定初态，共 **140 次**；本轮合计新增 **4 份结果、280 次 rollout**。
+没有 Object 或完整 suite 评测，不能作为完整 LIBERO benchmark 成绩。
+
+保存的策略与训练配置、归一化文件以及推理代码均与上节 v6 12k 相同。
+两份新权重各有完整的 32 个 DCP 分片，BF16 tensor schema 与 v6 12k 一致；
+抽查训练参数指纹区别于 12k，14k 与 16k 也不相同。
+准备阶段逐文件计算完整 SHA256，保存于各自 `_identity.json`，
+结束后核验 checkpoint 文件指纹、配置与冻结输入未变化。
+14k/16k 仍是目录标签，没有独立 trainer metadata 可确认训练 step 或 world size。
+
+沿用提交 `7aacd9eb358785fba6e461994d74a4b1f082eb12` 的隔离 VA 推理快照，
+而不是当前工作分支；四份日志均确认 `tasks=('va_prediction',)`。
+VA 联合生成 video/action，state 仅作当前状态条件，不生成未来 state。
+**本轮没有应用新加入的 latent-action 关闭开关，也没有重训**，不是该开关的消融结果。
+仍为 BF16、primary/wrist 双视角、预测 32 步/执行 10 步、Flow 20 步、静置 10 步，
+Goal/Spatial 控制上限为 300/220 步。
+每套仅在启动时设置一次 `seed=0`，每任务使用前 20 个固定初态，随后连续消耗 RNG；
+不逐 trial 重置，也不保证不同 checkpoint 的逐 trial 扩散噪声配对。
+
+GPU 2 跑 Goal，GPU 3 跑 Spatial，无跨卡回退；每次加载前均要求两卡各自稳定空闲 60 秒。
+队列于 `2026-11-06T16:28:30Z` 启动，14k 全部审计于 `17:39:41Z` 完成后才启动 16k，
+最终于 `18:53:43Z` 完成。
+四个 evaluator 和整个队列均零退出，280 个唯一的 checkpoint/任务/初态组合、
+有限 `(steps, 7)` 动作、65 个非空失败视频和原始结果 SHA256 已复核；
+GPU 2/3 的模型显存已释放，未调整其他用户任务。
+
+下表全部比较同一实验、相同七个困难任务，不混入 Object：
+
+| 匹配范围 | v6 12k（历史结果） | v6 14k | v6 16k |
+| --- | --- | --- | --- |
+| Goal，任务 0/3/4/9 | 81.25%（65/80） | 85.00%（68/80） | 76.25%（61/80） |
+| Spatial，任务 4/6/9 | 65.00%（39/60） | 71.67%（43/60） | 71.67%（43/60） |
+| 所选 7 任务汇总 | 74.29%（104/140） | **79.29%（111/140）** | 74.29%（104/140） |
+
+14k 比 12k 多成功 7 次、提高 5.00 个百分点，是当前 v6 已测三个 checkpoint
+在该匹配范围内的最好结果。16k 相比 14k 少成功 7 次、降低 5.00 个百分点，
+净下降均来自 Goal，Spatial 总成功次数不变但逐任务分布发生变化。
+16k 总分与 12k 相同，不表示逐任务表现或模型权重相同。
+这些是单 seed 的有限样本结果，不能直接断言继续训练导致过拟合。
+
+逐任务成功次数如下，每项分母均为 20：
+
+| Suite | 任务编号与描述 | v6 12k | v6 14k | v6 16k |
+| --- | --- | --- | --- | --- |
+| Goal | 0：打开中层抽屉 | 14/20 | 18/20 | 15/20 |
+| Goal | 3：打开上层抽屉并放碗 | 13/20 | 18/20 | 14/20 |
+| Goal | 4：碗放到柜顶 | 20/20 | 20/20 | 17/20 |
+| Goal | 9：酒瓶放酒架 | 18/20 | 12/20 | 15/20 |
+| Spatial | 4：上层抽屉取碗 | 8/20 | 6/20 | 10/20 |
+| Spatial | 6：cookie box 旁取碗 | 15/20 | 19/20 | 14/20 |
+| Spatial | 9：木柜上取碗 | 16/20 | 18/20 | 19/20 |
+
+工件目录为 session files 下的 `libero_v6_va14k_16k_20261106/`，
+前缀为 `libero_v6_1104_shift5_va_prediction_{14,16}k_weak_tasks_two_gpu_run_seeded_20261106`。
+`plan.json` 固定顺序、GPU 分配及 manifest SHA256，`status.json` 保存两轮完成状态；
+每轮另保留 `_readiness.json`、两套 worker/evaluator 日志、`_identity.json`、
+原样复制的策略配置与最终汇总。
+最终汇总和 preflight 的 SHA256：
+
+| Checkpoint | `_summary.json` SHA256 | `_preflight.json` SHA256 |
+| --- | --- | --- |
+| 14k | `3919b50cdf9b4ce579dc62b2724f2fe90fbf99a5d07e33e9d878610b4fa20c0f` | `6b8d511dc76ead2957332f13e52507921edb45cbe2696c85c95d7f3ca8f34f95` |
+| 16k | `211d785680170e4d50623a98c8fd26bbf2e30f3125124eb484b85da0ecac4d40` | `c4c3546eee4bc6fa6f3970ddc17f6a17d596318e10449ae985dba83b44f209c7` |
+
+原始结果文件的 SHA256：
+
+| Checkpoint | Suite | `results.json` SHA256 |
+| --- | --- | --- |
+| 14k | Goal | `3115f4f3de3c49fe2485e8ac436c7569f263358d2ddc88bef2a19e5595a91f9a` |
+| 14k | Spatial | `72e210f821f1cc302c8d023d73a865e063d736a6fc342b5adf1fc1ee262c190a` |
+| 16k | Goal | `e748385f49c74f80db2d467dbeb49a93bec739d91604738fd4992f966a070e47` |
+| 16k | Spatial | `be58ddac8784b24bde04db6e615ced341753900d1ce6e6a2cb0260c492a50bc7` |
+
 ### 重复权重核验：目录标作 v5 16k，内容与 v4 shift2 16k 相同（不计入新增正式结果）
 
 2026-11-05 按用户要求，对
@@ -3011,6 +3090,8 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2`（8k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2/step8k/model` |
 | `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2`（12k） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2/step12k/model` |
 | `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred`（12k，VA-only） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred/step12k/model` |
+| `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred`（14k，VA-only） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred/step14k/model` |
+| `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred`（16k，VA-only） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred/step16k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -3154,6 +3235,10 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1031v4_4nodes_8gpu_wo_rotate_high_noise_shift2` | 12k | Object（全套，三卡并行，200 次） | `outputs/evaluation/libero/v4_4nodes_8gpu_wo_rotate_high_noise_shift2_step12k_weak_tasks_three_gpu_run_seeded_object_20trials_20261102/results.json` |
 | `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 12k | Spatial（VA-only，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_12k_weak_tasks_two_gpu_run_seeded_spatial_20trials_20261105/results.json` |
 | `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 12k | Goal（VA-only，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_12k_weak_tasks_two_gpu_run_seeded_goal_20trials_20261105/results.json` |
+| `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 14k | Goal（VA-only，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_14k_weak_tasks_two_gpu_run_seeded_20261106_goal_20trials/results.json` |
+| `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 14k | Spatial（VA-only，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_14k_weak_tasks_two_gpu_run_seeded_20261106_spatial_20trials/results.json` |
+| `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 16k | Goal（VA-only，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_16k_weak_tasks_two_gpu_run_seeded_20261106_goal_20trials/results.json` |
+| `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 16k | Spatial（VA-only，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_16k_weak_tasks_two_gpu_run_seeded_20261106_spatial_20trials/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 
