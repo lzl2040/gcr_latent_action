@@ -43,6 +43,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     understanding_max_text_tokens: int = 64
     understanding_kv_layers: int = 8
 
+    latent_action_prediction_enabled: bool = True
     num_latent_queries: int = 16
     latent_action_dim: int = 1024
     latent_action_loss_weight: float = 1.0
@@ -136,6 +137,8 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if not self.latent_action_prediction_enabled:
+            self.latent_action_loss_weight = 0.0
         if self.task_contract_version != TASK_CONTRACT_VERSION:
             raise ValueError(
                 "Unsupported task contract version. Use a fresh experiment with the current task definitions."

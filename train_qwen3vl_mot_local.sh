@@ -9,6 +9,14 @@ set -euo pipefail
 # For a fresh run, the stage-one path must contain config.json and model.safetensors.
 # A stage-two resume reads the embedded stage-one architecture from its saved config.
 WEIGHT_RESUME="${WEIGHT_RESUME:-false}"
+LATENT_ACTION_ARGS=()
+if [[ -n "${LATENT_ACTION_PREDICTION_ENABLED:-}" ]]; then
+    case "$LATENT_ACTION_PREDICTION_ENABLED" in
+        true|false) ;;
+        *) echo "Error: LATENT_ACTION_PREDICTION_ENABLED must be true or false" >&2; exit 1 ;;
+    esac
+    LATENT_ACTION_ARGS+=(--policy.latent_action_prediction_enabled="$LATENT_ACTION_PREDICTION_ENABLED")
+fi
 if [[ "${WEIGHT_RESUME}" != "true" ]]; then
     : "${STAGE1_CHECKPOINT:?Set STAGE1_CHECKPOINT for a fresh stage-two run}"
 fi
@@ -189,6 +197,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     "${EPOCH_ARGS[@]}" \
     --policy.qwen3vl_dir="${QWEN3VL_DIR}" \
     --policy.cosmos3_dir="${COSMOS3_DIR}" \
+    "${LATENT_ACTION_ARGS[@]}" \
     "${GENERATION_ARGS[@]}" \
     --policy.understanding_tuning_mode="${UNDERSTANDING_TUNING_MODE:-lora}" \
     --policy.understanding_lora_rank="${UNDERSTANDING_LORA_RANK:-16}" \

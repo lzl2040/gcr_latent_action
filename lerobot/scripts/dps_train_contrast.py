@@ -296,6 +296,14 @@ def _load_stage2_resume_policy_config(
             "The saved stage-two config does not embed its stage-one architecture. Resume "
             "this older checkpoint with the original stage-one checkpoint available."
         )
+    if (
+        parser.parse_arg("policy.latent_action_prediction_enabled", args) is not None
+        and runtime_policy.latent_action_prediction_enabled != saved_policy.latent_action_prediction_enabled
+    ):
+        raise ValueError(
+            "Cannot change `policy.latent_action_prediction_enabled` while resuming; "
+            "start a fresh output directory."
+        )
     for field_name in ("qwen3vl_dir", "cosmos3_dir"):
         runtime_path = getattr(runtime_policy, field_name)
         if runtime_path:

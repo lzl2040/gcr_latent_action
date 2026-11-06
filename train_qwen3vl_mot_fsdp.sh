@@ -252,6 +252,12 @@ if [[ "$WEIGHT_RESUME" == "true" ]]; then
 else
     echo "resume: disabled explicitly; starting a fresh Stage 2 run"
 fi
+LATENT_ACTION_ARGS=()
+if [[ -n "${LATENT_ACTION_PREDICTION_ENABLED:-}" ]]; then
+    [[ "$LATENT_ACTION_PREDICTION_ENABLED" == "true" || "$LATENT_ACTION_PREDICTION_ENABLED" == "false" ]] \
+        || die "LATENT_ACTION_PREDICTION_ENABLED must be true or false"
+    LATENT_ACTION_ARGS+=(--policy.latent_action_prediction_enabled="$LATENT_ACTION_PREDICTION_ENABLED")
+fi
 if [[ "$WEIGHT_RESUME" != "true" && -z "$STAGE1_CHECKPOINT" ]]; then
     die "STAGE1_CHECKPOINT is required for a fresh stage-two run"
 fi
@@ -465,6 +471,7 @@ CMD=(
     "${EPOCH_ARGS[@]}"
     --policy.qwen3vl_dir="${QWEN3VL_DIR}"
     --policy.cosmos3_dir="${COSMOS3_DIR}"
+    "${LATENT_ACTION_ARGS[@]}"
     "${GENERATION_ARGS[@]}"
     --policy.understanding_tuning_mode="${UNDERSTANDING_TUNING_MODE:-full}"
     --policy.understanding_lora_rank="${UNDERSTANDING_LORA_RANK:-16}"
