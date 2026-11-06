@@ -10,6 +10,9 @@
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
 
+官方 Cosmos3/LaWAM 对照、实际微调配置与性能归因限制，见
+[LIBERO 微调审计](../libero_finetuning_audit.md)；该审计不增加正式 rollout 计数。
+
 ## LIBERO-Plus 环境安装
 
 2026-11-02 将官方源码安装到 `/home/v-wangxiaofa/lzl/LIBERO_PLUS`，
