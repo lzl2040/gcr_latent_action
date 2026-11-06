@@ -4507,3 +4507,61 @@ tracking measurements do not prove accurate contact, grasping or task
 completion, nor do the final frames establish the failure mechanism.
 Policy port19189 is closed, evaluation GPU memory is released, unrelated
 jobs remain running, and the previous step16k full sweep stays paused.
+
+## Full-task shift5 step20k: bowls and bottles
+
+The step20k comparison uses the same experiment and the same two tasks as
+step18k: **`stack_bowls` and `put_bottles_into_dustbin`, three native
+layouts each**. It does not resume the paused step16k full sweep.
+Keep seed0, one environment, BF16, sampling10, prediction32, execution10,
+continuous RNG across each task's layouts, passive camera audits, and
+actual/predicted videos. Original native horizons remain800/700.
+
+Preparation checks a complete, stable 16-shard DCP checkpoint and metadata,
+all storage byte ranges and tensor keys/shapes/dtypes, and hashes every
+checkpoint/config and full-task dataset file. Compare the new shard
+hashes against evaluated step18k and require unchanged saved configs and
+dataset statistics before making a matched comparison. Task layouts,
+assets and the measured-state delta contract are checked as before.
+Evidence is saved in
+`runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step20k.json`
+and `two_tasks_step20k_preflight_20261106.json`.
+
+Run from the repository root:
+
+```bash
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$PWD" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+/home/jianf/miniforge3/envs/wam/bin/python -u -c \
+  'import runpy, signal; signal.signal(signal.SIGINT, signal.default_int_handler); runpy.run_module("lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite", run_name="__main__")' \
+  eval \
+  --tasks stack_bowls put_bottles_into_dustbin \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step20k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$PWD/outputs/evaluation/robodojo/runtime_assets/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$PWD/outputs/evaluation/robodojo/runtime_assets/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$PWD/outputs/evaluation/robodojo/runtime_assets/pretrained/siglip2-base-patch16-224" \
+  --checkpoint-provenance "$PWD/outputs/evaluation/robodojo/runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step20k.json" \
+  --camera-wrapper /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py \
+  --gpu 0 --sim-gpu 1 --port 19190 --seed 0 \
+  --inference-steps 10 --replan-steps 10 \
+  --save-predicted-video --timeout 14400 \
+  --output-dir "$PWD/outputs/evaluation/robodojo/two_tasks_alltask_shift5_decay25k_step20k_sampling10_20261106_v1"
+```
+
+The safe interrupt entry prefix and existing audit/error semantics are
+unchanged from step18k. Use a fresh output directory; native videos,
+predictions, task audits and final-frame sheets remain under each
+`tasks/TASK/attempt_001/`. Follow `progress.json` and `results.csv` in the
+new root. Do not mix the earlier step16k/18k outcomes into this run's
+six-episode denominator.
+
+Preflight passed: 19 checkpoint/config files, 25,200,777,551 bytes,
+2560 tensors and16,908 valid storage references. All16 new shard hashes
+differ from evaluated step18k; saved configs and all five dataset file
+hashes are unchanged. The two-task native layout/config/asset fingerprints
+and evaluation protocol exactly match the step18k preflight. Existing
+full-dataset delta derivation evidence is reused based on matching hashes.
+Preparation helpers passed Ruff lint and format checks. No inference,
+training or simulator source code was changed.
