@@ -247,6 +247,10 @@ Generation 接收 Qwen 原生 K/V，其中包括 query token 的对应位置；
 “预测 latent→未来特征→动作条件”的路径和对应的未来特征监督。**
 
 Stage 1 曾有的重建目标，也不等于 Stage 2 当前这个 Qwen predictor 已经保留同样的重建约束。
+后续已增加独立消融开关 `LATENT_ACTION_PREDICTION_ENABLED=false`：
+关闭现有 latent prediction/蒸馏，并移除 query 对 Generation 的条件，保留原 physical flow。
+具体契约和新目录运行方式见 [Stage 2 模型说明](stage2_model.md#关闭-latent-action-预测的独立消融)。
+默认行为不变；该开关不等于实现了 LaWAM 的未来特征路径。
 可以先验证 query 是否真的提供控制相关信息，再设计独立实验：
 保留预测 query，在 action 条件中 mask/shuffle 其 K/V 位置，观察动作误差与闭环变化；
 若增加未来特征预测，应明确 decoder 初始化/冻结、teacher stop-grad、是否 detach action 条件、

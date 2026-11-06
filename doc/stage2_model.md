@@ -393,7 +393,7 @@ vision_end]`，然后拼接指令与 latent queries；三视角最大约 302 tok
 各 rank 都执行视觉塔；无有效图像的 rank 使用零贡献 dummy forward，保持 FSDP collective
 和反向调用一致。
 
-### 5.3 16 个 latent queries
+### 5.3 默认启用的 16 个 latent queries
 
 Qwen 最终 norm 后，取最后 16 个 query hidden states：
 
@@ -423,6 +423,39 @@ target_latent_action: (B,16,1024)
 
 两者计算 MSE。这个损失保证 Qwen query 保留 Stage 1 已学到的视觉变化和物理变化语义，
 而不是只依赖视频生成 loss。
+
+#### 关闭 latent-action 预测的独立消融
+
+`policy.latent_action_prediction_enabled` 默认 `true`；旧配置缺少该字段也按 `true` 读取，
+保留原 query、teacher、projection 和 Generation 条件行为。
+两个 Stage 2 launcher 均支持 `LATENT_ACTION_PREDICTION_ENABLED=false`。
+例如在原训练环境变量保持不变的前提下，使用新目录启动 FSDP 对照：
+
+```bash
+LATENT_ACTION_PREDICTION_ENABLED=false \
+WEIGHT_RESUME=false \
+OUTPUT_DIR=/path/to/new_run_without_latent_action \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+关闭时：
+
+- 不向 Qwen 序列追加 latent query tokens，导出的各层 K/V、attention mask、
+  RoPE 和 position IDs 也不包含它们；Generation 只保留正常的图像/语言 K/V 条件。
+- 不保留或调用 Stage 1 perception teacher，不保留 latent-action projection；
+  `latent_action_loss_weight` 自动规范为 `0`，蒸馏 loss/element 日志均为 `0`。
+- Stage 1 physical encoder、其 embedding-space flow、physical decoders、
+  action/state/video losses、任务与噪声配置保持原设置，**不是切换成无 Stage 1 MLP baseline**。
+- fresh 初始化仍按原设置读取 Stage 1 physical 权重并迁移兼容的 Qwen 权重，
+  所以原有 Stage 1 checkpoint 要求不变。只在构造时消耗与开启状态相同的 query/projection
+  初始化 RNG，不保存这些模块，以保持其他 Generation/physical 模块同 seed 的初始化不变。
+
+单独设置 `LATENT_ACTION_LOSS_WEIGHT=0` 与此开关不同：它不会移除 query 对 Generation 的条件。
+MLP baseline 本来没有 teacher/projection，但默认仍有 learnable queries；
+新开关关闭时也移除这些 queries。
+恢复时自动读取保存的开关值；不能跨开关值直接恢复训练或加载 checkpoint，
+因为 query、teacher、projection 及 optimizer 参数集合不同。消融应新建输出目录，
+不要在已有目录上切换或续训旧的有-query checkpoint。
 
 ### 5.4 原生 Qwen K/V 导出
 
@@ -954,7 +987,7 @@ state   1.0
 tactile 0.25
 ```
 
-所有包含当前图像的任务还加入：
+开启 latent-action 预测时，所有包含当前图像的任务还加入：
 
 $$
 L_\mathrm{latent}

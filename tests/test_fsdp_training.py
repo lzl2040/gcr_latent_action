@@ -409,7 +409,8 @@ def test_fsdp_launcher_resolves_complete_checkpoint(tmp_path, fsdp_checkpoint_fa
 
 
 @pytest.mark.parametrize("launcher", ["fsdp", "local"])
-def test_mlp_baseline_launchers_skip_stage1_and_configure_raw_flow(tmp_path, launcher):
+@pytest.mark.parametrize("latent_enabled", [None, "false"])
+def test_mlp_baseline_launchers_skip_stage1_and_configure_raw_flow(tmp_path, launcher, latent_enabled):
     root = Path(__file__).resolve().parents[1]
     weights = tmp_path / "weights"
     qwen = weights / "Qwen3-VL-4B-Instruct"
@@ -474,8 +475,11 @@ def test_mlp_baseline_launchers_skip_stage1_and_configure_raw_flow(tmp_path, lau
         "LATENT_ACTION_LOSS_WEIGHT",
         "ACTION_PRED_RECON_WEIGHT",
         "STATE_PRED_RECON_WEIGHT",
+        "LATENT_ACTION_PREDICTION_ENABLED",
     ):
         env.pop(key, None)
+    if latent_enabled is not None:
+        env["LATENT_ACTION_PREDICTION_ENABLED"] = latent_enabled
     result = subprocess.run(
         ["bash", str(root / f"train_qwen3vl_mot_{launcher}.sh")],
         cwd=root,
@@ -495,6 +499,10 @@ def test_mlp_baseline_launchers_skip_stage1_and_configure_raw_flow(tmp_path, lau
         assert flag in result.stdout
     assert "--policy.stage1_checkpoint=" not in result.stdout
     assert "--policy.stage1_config=" not in result.stdout
+    if latent_enabled is None:
+        assert "--policy.latent_action_prediction_enabled=" not in result.stdout
+    else:
+        assert f"--policy.latent_action_prediction_enabled={latent_enabled}" in result.stdout
 
 
 def test_restore_replicated_frozen_parameters_uses_canonical_fsdp_names() -> None:

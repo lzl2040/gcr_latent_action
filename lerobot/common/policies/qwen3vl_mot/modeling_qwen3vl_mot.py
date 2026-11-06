@@ -197,6 +197,11 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
         if config.physical_encoder_type != saved_config.get("physical_encoder_type", "stage1_transformer"):
             raise ValueError("Cannot change `policy.physical_encoder_type` when loading a checkpoint.")
+        if config.latent_action_prediction_enabled != saved_config.get("latent_action_prediction_enabled", True):
+            raise ValueError(
+                "Cannot change `policy.latent_action_prediction_enabled` when loading a checkpoint; "
+                "start a fresh output directory."
+            )
         return super().from_pretrained(pretrained_name_or_path, config=config, **kwargs)
 
     def __init__(self, config: Qwen3VLMoTConfig, dataset_stats=None):
@@ -285,6 +290,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             text_lora_layers=config.understanding_text_lora_layers,
             vision_lora_layers=config.understanding_vision_lora_layers,
             gradient_checkpointing=config.understanding_gradient_checkpointing,
+            use_latent_queries=config.latent_action_prediction_enabled,
         )
         qwen_text_config = _base_qwen(self.understanding.model).config.text_config
         qwen_kv_heads = int(qwen_text_config.num_key_value_heads)
@@ -351,12 +357,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             # Move the physical tower rather than holding a second 200M-parameter copy.
             self.physical_encoder = teacher.physical_encoder
             teacher.physical_encoder = None
-            self.teacher_perception = teacher.perception_encoder
-            self.teacher_perception.predictor = None
-            self.teacher_perception.vae = None
-            for parameter in self.teacher_perception.parameters():
-                parameter.requires_grad_(False)
-            self.teacher_perception.eval()
+            self.teacher_perception = (
+                teacher.perception_encoder if config.latent_action_prediction_enabled else None
+            )
+            if self.teacher_perception is not None:
+                self.teacher_perception.predictor = None
+                self.teacher_perception.vae = None
+                for parameter in self.teacher_perception.parameters():
+                    parameter.requires_grad_(False)
+                self.teacher_perception.eval()
         for parameter in self.physical_encoder.parameters():
             parameter.requires_grad_(config.physical_tuning_mode == "full")
         if self.physical_embedding_flow:
@@ -398,6 +407,13 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 nn.LayerNorm(config.latent_action_dim),
             )
         )
+        if not config.latent_action_prediction_enabled:
+            # Preserve the initialization RNG of the unchanged Generation/decoder modules.
+            self.latent_action_projection = None
+            logger.info(
+                "Latent-action prediction disabled: no queries, teacher, projection or distillation; "
+                "Generation retains image/language K/V and the unchanged physical streams."
+            )
         if not mlp_baseline and config.tactile_generation_target == "spatial_patches":
             if (
                 self.physical_encoder.use_ftp1_tactile
@@ -496,6 +512,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             strict=(
                 strict or model.config.generation_backbone != "random"
                 or getattr(model.config, "physical_encoder_type", "stage1_transformer") == "mlp"
+                or not model.config.latent_action_prediction_enabled
             ),
         )
 

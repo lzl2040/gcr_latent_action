@@ -270,6 +270,11 @@ fi
 if [[ -n "${LATENT_ACTION_LOSS_WEIGHT:-}" ]]; then
     BASELINE_ARGS+=(--policy.latent_action_loss_weight="$LATENT_ACTION_LOSS_WEIGHT")
 fi
+if [[ -n "${LATENT_ACTION_PREDICTION_ENABLED:-}" ]]; then
+    [[ "$LATENT_ACTION_PREDICTION_ENABLED" == "true" || "$LATENT_ACTION_PREDICTION_ENABLED" == "false" ]] \
+        || die "LATENT_ACTION_PREDICTION_ENABLED must be true or false"
+    BASELINE_ARGS+=(--policy.latent_action_prediction_enabled="$LATENT_ACTION_PREDICTION_ENABLED")
+fi
 if [[ "$WEIGHT_RESUME" != "true" && "$PHYSICAL_ENCODER_TYPE" != "mlp" && -z "$STAGE1_CHECKPOINT" ]]; then
     die "STAGE1_CHECKPOINT is required for a fresh stage-two run"
 fi

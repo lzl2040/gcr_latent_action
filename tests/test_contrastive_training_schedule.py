@@ -543,6 +543,32 @@ def test_stage2_resume_preserves_physical_flow_space_and_rejects_changes(tmp_pat
         _load_stage2_resume_policy_config(cfg, args=[f"--policy.physical_flow_space={other}"])
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_stage2_resume_preserves_latent_prediction_switch_and_rejects_changes(tmp_path, enabled):
+    saved = Qwen3VLMoTConfig(
+        stage1_policy_config={"vision_backbone": "qwen3vl"},
+        initialize_from_stage1=False, latent_action_prediction_enabled=enabled,
+    )
+    saved._save_pretrained(tmp_path)
+    if enabled:
+        path = tmp_path / "config.json"
+        payload = json.loads(path.read_text())
+        del payload["latent_action_prediction_enabled"]
+        path.write_text(json.dumps(payload))
+    cfg = SimpleNamespace(
+        weight_resume=True, output_dir=tmp_path, policy=Qwen3VLMoTConfig(),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.latent_action_prediction_enabled == enabled
+    assert cfg.policy.latent_action_loss_weight == (1.0 if enabled else 0.0)
+    cfg.policy = Qwen3VLMoTConfig(latent_action_prediction_enabled=not enabled)
+    with pytest.raises(ValueError, match="latent_action_prediction_enabled"):
+        _load_stage2_resume_policy_config(
+            cfg, args=[f"--policy.latent_action_prediction_enabled={str(not enabled).lower()}"]
+        )
+
+
 def test_old_stage2_config_without_physical_flow_field_restores_raw_contract(tmp_path):
     Qwen3VLMoTConfig(
         stage1_policy_config={"vision_backbone": "qwen3vl"}, initialize_from_stage1=False

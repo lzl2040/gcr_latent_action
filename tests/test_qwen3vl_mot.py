@@ -409,14 +409,17 @@ def test_native_kv_checkpointing_matches_non_checkpointed_gradients():
 
 
 @pytest.mark.parametrize("multiview", [False, True])
-def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients(multiview):
+def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients(multiview, monkeypatch):
+    from transformers import AutoTokenizer
     from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
-    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+        Qwen3VLForConditionalGeneration,
+        Qwen3VLModel,
+    )
 
     from lerobot.common.policies.qwen3vl_mot.modeling_understanding import (
         Qwen3VLUnderstandingExpert,
         _base_qwen,
-        _selected_layers,
     )
 
     config = Qwen3VLConfig(
@@ -463,22 +466,26 @@ def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients(multiview):
             keep[:, :2] = 1
             return {"input_ids": ids, "attention_mask": keep}
 
-    expert = object.__new__(Qwen3VLUnderstandingExpert)
-    nn.Module.__init__(expert)
-    expert.model = Qwen3VLModel(config)
-    for parameter in expert.model.parameters():
-        parameter.requires_grad_(False)
-    expert.model.gradient_checkpointing_enable(
-        gradient_checkpointing_kwargs={"use_reentrant": False}
+    monkeypatch.setattr(
+        Qwen3VLForConditionalGeneration, "from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(model=Qwen3VLModel(config)),
     )
-    expert.tokenizer = _Tokenizer()
-    expert.num_queries = 2
-    expert.max_text_tokens = 4
-    expert.query_tokens = nn.Parameter(torch.randn(2, 32) * 0.02)
-    expert.selected_layer_indices = _selected_layers(2, 2)
-    expert.gradient_checkpointing = True
-    expert.tuning_mode = "frozen"
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *args, **kwargs: _Tokenizer())
+    options = {
+        "num_queries": 2, "max_text_tokens": 4, "kv_layers": 2, "tuning_mode": "frozen",
+        "lora_rank": 2, "lora_alpha": 2, "lora_dropout": 0, "text_lora_layers": 0,
+        "vision_lora_layers": 0, "gradient_checkpointing": True,
+    }
+    initial_rng = torch.get_rng_state()
+    expert = Qwen3VLUnderstandingExpert("unused", **options)
+    expected_rng = torch.get_rng_state()
+    torch.set_rng_state(initial_rng)
+    without_queries = Qwen3VLUnderstandingExpert("unused", **options, use_latent_queries=False)
+    assert torch.equal(torch.get_rng_state(), expected_rng)
+    assert without_queries.query_tokens is None
+    assert "query_tokens" not in without_queries.state_dict()
     expert.eval()
+    without_queries.eval()
     output = expert(torch.full((1, 3, 32, 32), 255, dtype=torch.uint8), ["move"])
     float_output = expert(torch.ones(1, 3, 32, 32), ["move"])
     torch.testing.assert_close(float_output.latent_queries, output.latent_queries)
@@ -503,6 +510,29 @@ def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients(multiview):
         empty = expert(images, ["move"] * 3, image_mask=torch.zeros_like(mask), view_names=names)
         assert empty.attention_mask.sum(dim=1).tolist() == [4, 4, 4]
         assert torch.isfinite(empty.latent_queries).all()
+    query_free = (
+        without_queries(images, ["move"] * 3, **kwargs)
+        if multiview else without_queries(torch.ones(1, 3, 32, 32), ["move"])
+    )
+    assert query_free.latent_queries.shape == (3 if multiview else 1, 0, 32)
+    torch.testing.assert_close(query_free.attention_mask, output.attention_mask[:, :-2])
+    torch.testing.assert_close(query_free.position_ids, output.position_ids[..., :-2])
+    for (key, value), (reference_key, reference_value) in zip(
+        query_free.key_values, output.key_values, strict=True
+    ):
+        torch.testing.assert_close(key, reference_key[:, :, :-2])
+        torch.testing.assert_close(value, reference_value[:, :, :-2])
+    assert without_queries(None, ["move"]).key_values[0][0].shape[2] == 4
+    without_queries.train()
+    query_free_vision = next(without_queries.model.visual.parameters())
+    query_free_vision.requires_grad_(True)
+    query_free = (
+        without_queries(images, ["move"] * 3, **kwargs)
+        if multiview else without_queries(torch.zeros(1, 3, 32, 32), ["move"])
+    )
+    sum(value.float().square().mean() for _, value in query_free.key_values).backward()
+    assert torch.isfinite(query_free_vision.grad).all()
+    assert query_free_vision.grad.abs().sum() > 0
     expert.train()
     vision_parameter = next(expert.model.visual.parameters())
     vision_parameter.requires_grad_(True)
@@ -768,7 +798,7 @@ class _FakePhysical(nn.Module):
 
 
 class _FakeUnderstanding(nn.Module):
-    def __init__(self, _model_dir, *, num_queries, **kwargs):
+    def __init__(self, _model_dir, *, num_queries, use_latent_queries=True, **kwargs):
         super().__init__()
         del kwargs
         from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig
@@ -788,7 +818,10 @@ class _FakeUnderstanding(nn.Module):
             )
         )
         self.query_tokens = nn.Parameter(torch.randn(num_queries, 12))
-        self.num_queries = num_queries
+        self.num_queries = num_queries if use_latent_queries else 0
+        self.prefix_tokens = 5 - num_queries
+        if not use_latent_queries:
+            self.query_tokens = None
         self.tuning_mode = "frozen"
 
     @property
@@ -801,14 +834,18 @@ class _FakeUnderstanding(nn.Module):
         from lerobot.common.policies.qwen3vl_mot.modeling_understanding import UnderstandingOutput
 
         batch_size = len(texts)
-        hidden = self.query_tokens.new_zeros(batch_size, 5, 12)
-        queries = self.query_tokens.unsqueeze(0).expand(batch_size, -1, -1)
-        hidden = hidden + queries.mean() * 0
-        key = hidden.new_zeros(batch_size, 4, 5, 4)
+        length = self.prefix_tokens + self.num_queries
+        hidden = self.model.weight.new_zeros(batch_size, length, 12)
+        queries = (
+            self.query_tokens.unsqueeze(0).expand(batch_size, -1, -1)
+            if self.query_tokens is not None else hidden[:, :0]
+        )
+        hidden = hidden + queries.sum() * 0
+        key = hidden.new_zeros(batch_size, 4, length, 4)
         return UnderstandingOutput(
             hidden_states=[],
             key_values=[(key, key.clone())],
-            attention_mask=torch.ones(batch_size, 5, dtype=torch.bool, device=hidden.device),
+            attention_mask=torch.ones(batch_size, length, dtype=torch.bool, device=hidden.device),
             latent_queries=queries.to(torch.bfloat16),
         )
 
@@ -1211,12 +1248,61 @@ def test_checkpoint_loading_cannot_swap_physical_architecture(tmp_path, monkeypa
         Qwen3VLMoTPolicy.from_pretrained(tmp_path, config=runtime)
 
 
+@pytest.mark.parametrize("saved_enabled", [False, True])
+def test_checkpoint_loading_cannot_toggle_latent_prediction(tmp_path, monkeypatch, saved_enabled):
+    import json
+
+    Qwen3VLMoTConfig(latent_action_prediction_enabled=saved_enabled)._save_pretrained(tmp_path)
+    if saved_enabled:
+        path = tmp_path / "config.json"
+        payload = json.loads(path.read_text())
+        del payload["latent_action_prediction_enabled"]
+        path.write_text(json.dumps(payload))
+    runtime = Qwen3VLMoTConfig(latent_action_prediction_enabled=not saved_enabled)
+    monkeypatch.setattr(
+        Qwen3VLMoTPolicy, "__init__",
+        lambda *args, **kwargs: pytest.fail("A query architecture mismatch must fail before construction."),
+    )
+    with pytest.raises(ValueError, match="latent_action_prediction_enabled"):
+        Qwen3VLMoTPolicy.from_pretrained(tmp_path, config=runtime)
+
+
 @pytest.mark.parametrize("multiview", [False, True])
 @pytest.mark.parametrize("flow_space", ["raw", "embedding"])
 @pytest.mark.parametrize("generation_variant", ["random", "edge", "nano", "edge_frozen"])
 @pytest.mark.parametrize("time_distribution", ["uniform", "beta", "mixed", "shifted_uniform"])
 def test_policy_runs_all_task_routes_with_lightweight_backends(
     tmp_path, monkeypatch, multiview, flow_space, generation_variant, time_distribution
+):
+    _check_policy_routes_and_roundtrip(
+        tmp_path, monkeypatch, multiview, flow_space, generation_variant, time_distribution
+    )
+
+
+@pytest.mark.parametrize("multiview,flow_space,generation_variant", [
+    (False, "raw", "random"),
+    (True, "embedding", "edge"),
+])
+def test_policy_without_latent_prediction_keeps_physical_flow_and_roundtrips(
+    tmp_path, monkeypatch, multiview, flow_space, generation_variant
+):
+    initial_states = []
+    for enabled in (True, False):
+        root = tmp_path / str(enabled)
+        root.mkdir()
+        torch.manual_seed(271)
+        with monkeypatch.context() as case_patch:
+            initial_states.append(_check_policy_routes_and_roundtrip(
+                root, case_patch, multiview, flow_space, generation_variant, "shifted_uniform",
+                latent_action_prediction_enabled=enabled,
+            ))
+    for name in initial_states[0]:
+        torch.testing.assert_close(initial_states[0][name], initial_states[1][name])
+
+
+def _check_policy_routes_and_roundtrip(
+    tmp_path, monkeypatch, multiview, flow_space, generation_variant, time_distribution,
+    *, latent_action_prediction_enabled=True,
 ):
     import lerobot.common.policies.ace.cosmos3_encoders as cosmos3_encoders
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
@@ -1327,6 +1413,7 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         understanding_tuning_mode="frozen",
         num_latent_queries=2,
         latent_action_dim=8,
+        latent_action_prediction_enabled=latent_action_prediction_enabled,
         generation_hidden_dim=16,
         generation_depth=1,
         generation_num_heads=4,
@@ -1360,6 +1447,18 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         task_weights=(*DEFAULT_TASK_WEIGHTS, 0.0),
     )
     policy = stage2.Qwen3VLMoTPolicy(config)
+    initial_state = {
+        name: tensor.clone()
+        for name, tensor in policy.state_dict().items()
+        if name.startswith(("generation.", "physical_encoder.", "physical_decoders."))
+    }
+    if not latent_action_prediction_enabled:
+        assert policy.teacher_perception is None and policy.latent_action_projection is None
+        assert policy.understanding.query_tokens is None
+        assert policy.config.latent_action_loss_weight == 0
+        assert not any(name.startswith((
+            "teacher_perception.", "latent_action_projection.", "understanding.query_tokens"
+        )) for name in policy.state_dict())
     if generation_kind != "random":
         assert policy.generation_load_report.copied_tensors > 0
         assert policy.generation.output_heads["video"].weight.count_nonzero() > 0
@@ -1382,6 +1481,8 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         "tactile_image_mask": torch.ones(2, 2),
         "sample_rate": torch.full((2,), 10, dtype=torch.long),
     }
+    if not latent_action_prediction_enabled:
+        del batch["image_t1"]
     if multiview:
         batch.update({
             "images_t0": batch["image_t0"][:, None].expand(-1, 3, -1, -1, -1).clone(),
@@ -1430,6 +1531,8 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         rng = torch.get_rng_state()
         loss, metrics = policy(batch, task_type=task_name)
         assert torch.isfinite(loss)
+        if not latent_action_prediction_enabled:
+            assert metrics["latent_action_loss"] == metrics["latent_action_elements"] == 0
         assert metrics[f"task_{task_name}"] == 1.0
         assert policy.understanding.last_images is (
             None if task_name == "t2v" else batch["images_t0" if multiview else "image_t0"]
@@ -1542,9 +1645,10 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
             if flow_space == "raw":
                 loss.backward()
             assert policy.generation.video_view_embedding.weight.grad is not None
-            assert policy.teacher_perception.anchor.grad is None
-            torch.testing.assert_close(policy.teacher_perception.last_images[0], batch["image_t0"])
-            torch.testing.assert_close(policy.teacher_perception.last_images[1], batch["image_t1"])
+            if latent_action_prediction_enabled:
+                assert policy.teacher_perception.anchor.grad is None
+                torch.testing.assert_close(policy.teacher_perception.last_images[0], batch["image_t0"])
+                torch.testing.assert_close(policy.teacher_perception.last_images[1], batch["image_t1"])
     if flow_space == "embedding":
         old_action_weight = policy.config.action_loss_weight
         old_latent_weight = policy.config.latent_action_loss_weight
@@ -1691,6 +1795,7 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
     assert restored.config.rgb_views == config.rgb_views
     assert restored.config.physical_flow_space == flow_space
     assert restored.config.generation_backbone == generation_kind
+    assert restored.config.latent_action_prediction_enabled == latent_action_prediction_enabled
     if generation_kind != "random":
         assert not hasattr(restored, "generation_load_report")
         for name, parameter in policy.generation.named_parameters():
@@ -1704,6 +1809,7 @@ def test_policy_runs_all_task_routes_with_lightweight_backends(
         torch.testing.assert_close(restored.sample_canonical_action(batch), expected_action)
     else:
         assert not hasattr(restored, "physical_decoders")
+    return initial_state
 
 
 def test_multiview_dataset_keeps_padded_tails_and_masks_missing_duplicate_or_invalid_views(monkeypatch):
