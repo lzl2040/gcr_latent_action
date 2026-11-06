@@ -4582,3 +4582,54 @@ Coordinator log is
 `/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/alltask20k_two_suite.log`.
 Success counts are pending; live results are in the new output root's
 `progress.json` and `results.csv`.
+
+### Completed step20k results
+
+The two-task run exited0 with **six valid episodes, zero infrastructure
+errors and 1/6 successes**. Bowls remains0/3; bottles succeeds on layout1,
+restoring the layout that succeeded at step16k but failed at step18k.
+There were no retries, substituted layouts or RNG restarts within a task.
+
+| Task | Step16k successes | Step18k successes | Step20k successes | Step20k scores, layouts0/1/2 |
+|---|---:|---:|---:|---|
+| `stack_bowls` | 0/3 | 0/3 | 0/3 | 0 / 0 / 0 |
+| `put_bottles_into_dustbin` | 1/3 | 0/3 | 1/3 | 0.4 / 1 / 0.25 |
+
+Step20k aggregate native scores are0/100 for bowls and55/100 for bottles
+(versus50/100 at step16k and35/100 at step18k for bottles). This is an
+improvement over step18k on these three bottles layouts, not evidence of
+a statistically reliable overall checkpoint ranking. Bowls loses the
+small layout1 partial score seen at step18k and still does not stack.
+
+Bowls used controls800/800/800, 240 chunks and3494.71 seconds.
+Bottles used700/456/700, 186 chunks and2951.20 seconds; layout1 stopped
+successfully after456 controls. These per-task times include evaluator
+startup but exclude suite-level hash preflight. The shorter successful
+episode ends mid-prefix, so its native video length is457 frames and
+its final replan is not required to execute a complete ten-action prefix.
+
+All426 chunks passed numerical integration/export audits, with maximum
+integration-component errors below1.2e-7. The coordinator verified full
+checkpoint/data SHA256 at the end; native asset, layout and runtime code
+hashes and completed-result artifacts were independently rechecked
+afterward. All91 passive camera observations passed.
+Artifacts total **1278 predicted-camera MP4s, 14,058 prediction/conditioning
+PNGs and18 actual-camera MP4s**. Bowls videos have801 frames each;
+bottles videos have701/457/701 frames per layout, each with three
+camera views at640x480/25FPS.
+
+Both `native_final_frames.jpg` sheets were visually reviewed: all18 exact
+final camera frames, not the complete rollout videos or all conditioning
+images. Bowls remain separate in all final layouts. The successful bottles
+layout1 has a cleared tabletop; layouts0 and2 still have bottles outside
+the bin. Review scope and exact16k/18k/20k native score comparisons are in
+`completion_review.json`. The broader `visual_review_pending` audit flag
+remains true rather than implying complete video review.
+
+Maximum sampled left/right target tracking discrepancies were5.299/11.768mm
+for bowls and4.507/3.986mm for bottles. Numerical correctness does not
+guarantee physical tracking, and these checks do not establish the failure
+mechanism. The successful head video is
+`tasks/put_bottles_into_dustbin/attempt_001/simulator/eval_result/RoboDojo/put_bottles_into_dustbin/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/attempt_001/episode_0000001_cam_head_success.mp4`.
+Policy port19190 is closed and evaluation GPU memory is released; unrelated
+jobs remain running and the previous step16k full sweep stays paused.
