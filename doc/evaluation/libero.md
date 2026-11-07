@@ -1,11 +1,11 @@
 # LIBERO 评测记录
 
-更新日期：2026-11-06。
+更新日期：2026-11-07。
 
-本文汇总已完成的有效正式评测，共 143 份结果、22,080 次 rollout：
-91 份完整 suite 评测、18,200 次，以及 52 份已完成的任务子集评测、3,880 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 101 份、13,680 次，
-包括 49 份完整 suite 和 52 份任务子集，分开记录。
+本文汇总已完成的有效正式评测，共 146 份结果、22,420 次 rollout：
+92 份完整 suite 评测、18,400 次，以及 54 份已完成的任务子集评测、4,020 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 104 份、14,020 次，
+包括 50 份完整 suite 和 54 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -2951,6 +2951,111 @@ GPU 2/3 的模型显存已释放，未调整其他用户任务。
 | 16k | Goal | `e748385f49c74f80db2d467dbeb49a93bec739d91604738fd4992f966a070e47` |
 | 16k | Spatial | `be58ddac8784b24bde04db6e615ced341753900d1ce6e6a2cb0260c492a50bc7` |
 
+### 1107v7_4nodes_8gpu_wo_latent：10k，关闭 latent-action，Object 全套与困难任务
+
+本轮权重为
+`/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107v7_4nodes_8gpu_wo_latent/step10k/model`。
+Object 全部 10 个任务各 20 次，共 200 次；
+Spatial `[4, 6, 9]` 共 60 次、Goal `[0, 3, 4, 9]` 共 80 次。
+合计 **17 任务、340 次 rollout**，新增 1 份完整 suite 和 2 份任务子集结果，
+不是三套全量 600 次，也不是官方四套 benchmark 的完整成绩。
+
+保存的策略与训练配置均明确设为 `latent_action_prediction_enabled=false`、
+`latent_action_loss_weight=0`，且仅启用 `joint_prediction`、权重 `1.0`。
+**这是联合预测 video/state/action 的无 latent-action 版本，不是 v6 的 VA-only**。
+理解侧 query 不再输入 Qwen，也不进入 Generation K/V；teacher/projection 已移除。
+Stage 1 physical Transformer、embedding-space flow 和 video VAE latent 仍保留，
+`physical_tuning_mode=frozen`，不是无 Stage 1 的 MLP baseline。
+
+32 个 DCP 分片完整，保存 1,800 个 BF16 tensor、11,843,459,157 个元素。
+tensor schema 恰好等于 v6 单任务架构去除全部 teacher、projection 和 query 参数后的集合，
+没有残留 latent-action 参数，也没有额外缺失或 shape 不匹配。
+准备阶段抽查 Qwen、Generation 与 action decoder 参数，计算所有 checkpoint 文件的
+完整 SHA256；运行结束后复核文件指纹、保存配置、归一化和冻结源码未变化。
+10k 是目录标签，没有独立 trainer metadata 可确认实际训练 step 或 world size。
+
+推理使用提交 `f169a6f08c20eec3ab50f1cf25d31a90a2c4afcc` 的隔离快照，
+三套日志均确认 latent-action 已关闭和 `tasks=('joint_prediction',)`，
+没有为兼容旧 checkpoint 再加回 query。
+外部协议沿用 BF16、primary/wrist、预测 32 步/执行 10 步、Flow 20 步、
+静置 10 步，Object/Spatial/Goal 控制上限为 280/220/300 步。
+每套只在启动时设一次 `seed=0`，每任务使用前 20 个固定初态；
+后续连续消耗 RNG，不逐 trial 重置，不保证与历史模型逐 trial 扩散噪声配对。
+
+GPU 2 跑 Object，GPU 3 跑 Spatial；Spatial 于 `2026-11-07T17:02:09Z`
+完成后，Goal 在稳定空闲 60 秒的 GPU 3 上接续，首条日志时间为 `17:03:18Z`，
+于 `18:14:32Z` 完成。
+Object 于 `18:55:09Z` 完成，最终汇总于 `18:55:20Z` 通过。
+三套 evaluator 和队列均零退出；340 个唯一任务/初态组合、有限 `(steps, 7)` 动作、
+61 个非空失败视频及原始结果 SHA256 已复核。GPU 2/3 的模型显存已释放。
+
+| 本轮范围 | 成功次数 | 成功率 |
+| --- | --- | --- |
+| Object，全 10 任务 | 186/200 | 93.00% |
+| Spatial，任务 4/6/9 | 27/60 | 45.00% |
+| Goal，任务 0/3/4/9 | 66/80 | 82.50% |
+| 仅七个困难任务 | 93/140 | 66.43% |
+| 所选 17 任务合计 | 279/340 | 82.06% |
+
+Spatial 是本轮主要短板：任务 4 的 3/20 和任务 6 的 10/20 合计贡献 27/33 次失败。
+Goal 的任务 3、9 合计贡献 13/14 次失败；这些是结果统计，
+尚未逐例诊断具体失败阶段，不能直接解释为 query 去掉后丢失了某类控制能力。
+
+以下 v4 shift5 12k 仅作相同范围的历史参考：
+
+| 匹配范围 | v4 shift5 12k | v7 无 latent-action 10k | 差值 |
+| --- | --- | --- | --- |
+| Object，全 10 任务 | 97.50%（195/200） | 93.00%（186/200） | -4.50 pp |
+| Spatial，任务 4/6/9 | 73.33%（44/60） | 45.00%（27/60） | -28.33 pp |
+| Goal，任务 0/3/4/9 | 93.75%（75/80） | 82.50%（66/80） | -11.25 pp |
+| 仅七个困难任务 | 85.00%（119/140） | 66.43%（93/140） | -18.57 pp |
+| 所选 17 任务合计 | 92.35%（314/340） | 82.06%（279/340） | -10.29 pp |
+
+这不是严格的单因素消融：除 latent-action 条件变化外，
+旧 v4 使用 forward/inverse/joint 三任务混合 `0.1/0.1/0.8`，
+v7 只训练 joint，且比较的是 12k 与 10k。
+保存的主模型配置其余字段一致，不代表训练样本暴露量或所有训练过程完全相同。
+因此不能仅凭这次差值断定关闭 latent-action 是下降原因，也不能直接与 v6 VA-only 作因果比较。
+历史参考来自已认证汇总；没有重建或声称重新核验已缺失的旧轨迹。
+
+逐任务成功次数如下，每项分母均为 20：
+
+| Suite | 任务编号与描述 | v7 10k |
+| --- | --- | --- |
+| Object | 0：alphabet soup 放入篮子 | 18/20 |
+| Object | 1：cream cheese 放入篮子 | 20/20 |
+| Object | 2：salad dressing 放入篮子 | 19/20 |
+| Object | 3：BBQ sauce 放入篮子 | 19/20 |
+| Object | 4：ketchup 放入篮子 | 17/20 |
+| Object | 5：tomato sauce 放入篮子 | 18/20 |
+| Object | 6：butter 放入篮子 | 19/20 |
+| Object | 7：milk 放入篮子 | 18/20 |
+| Object | 8：chocolate pudding 放入篮子 | 20/20 |
+| Object | 9：orange juice 放入篮子 | 18/20 |
+| Spatial | 4：上层抽屉取碗 | 3/20 |
+| Spatial | 6：cookie box 旁取碗 | 10/20 |
+| Spatial | 9：木柜上取碗 | 14/20 |
+| Goal | 0：打开中层抽屉 | 20/20 |
+| Goal | 3：打开上层抽屉并放碗 | 12/20 |
+| Goal | 4：碗放到柜顶 | 19/20 |
+| Goal | 9：酒瓶放酒架 | 15/20 |
+
+工件目录为 session files 下的 `libero_v7_nolatent_10k_20261107/`，
+前缀为 `libero_v7_1107_wo_latent_10k_object_and_weak_tasks_two_gpu_run_seeded_20261107`。
+保存 preflight/receipt、原样策略配置、`_identity.json` 的逐文件 SHA256、
+三套 worker/evaluator 日志、`_readiness.json`、队列状态和最终汇总。
+最终汇总 SHA256 为
+`494f614ea397249e129370fdfbd120563d0016f2c4cd7aa2895c52b30dea7ca6`，
+preflight SHA256 为
+`20b5c746a84cab703e86d2a0fb60739f671f96be55a885cea662a109680001fe`。
+原始结果文件的 SHA256：
+
+| Suite | `results.json` SHA256 |
+| --- | --- |
+| Object | `a5deb31cac6dacc5d750ac5153274319fd2c6760277bf0c937c8dc968b6a30d8` |
+| Spatial | `77398aef5b17233744877985fd0f156924155bbb4f7c2d4a900950fa7ebc685f` |
+| Goal | `68ef2b8d82ed420b43e1d6fcbee224e6299e6e83875896d075c31222206952b0` |
+
 ### 重复权重核验：目录标作 v5 16k，内容与 v4 shift2 16k 相同（不计入新增正式结果）
 
 2026-11-05 按用户要求，对
@@ -3092,6 +3197,7 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred`（12k，VA-only） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred/step12k/model` |
 | `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred`（14k，VA-only） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred/step14k/model` |
 | `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred`（16k，VA-only） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred/step16k/model` |
+| `1107v7_4nodes_8gpu_wo_latent`（10k，关闭 latent-action） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107v7_4nodes_8gpu_wo_latent/step10k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -3239,6 +3345,9 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 14k | Spatial（VA-only，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_14k_weak_tasks_two_gpu_run_seeded_20261106_spatial_20trials/results.json` |
 | `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 16k | Goal（VA-only，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_16k_weak_tasks_two_gpu_run_seeded_20261106_goal_20trials/results.json` |
 | `1104v6_4nodes_8gpu_wo_rotate_shift_5_va_pred` | 16k | Spatial（VA-only，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_v6_1104_shift5_va_prediction_16k_weak_tasks_two_gpu_run_seeded_20261106_spatial_20trials/results.json` |
+| `1107v7_4nodes_8gpu_wo_latent` | 10k | Object（关闭 latent-action，全套，200 次） | `outputs/evaluation/libero/libero_v7_1107_wo_latent_10k_object_and_weak_tasks_two_gpu_run_seeded_20261107_object_20trials/results.json` |
+| `1107v7_4nodes_8gpu_wo_latent` | 10k | Spatial（关闭 latent-action，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_v7_1107_wo_latent_10k_object_and_weak_tasks_two_gpu_run_seeded_20261107_spatial_20trials/results.json` |
+| `1107v7_4nodes_8gpu_wo_latent` | 10k | Goal（关闭 latent-action，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_v7_1107_wo_latent_10k_object_and_weak_tasks_two_gpu_run_seeded_20261107_goal_20trials/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 
