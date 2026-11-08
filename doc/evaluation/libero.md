@@ -2,10 +2,10 @@
 
 更新日期：2026-11-08。
 
-本文汇总已完成的有效正式评测，共 152 份结果、23,100 次 rollout：
-94 份完整 suite 评测、18,800 次，以及 58 份已完成的任务子集评测、4,300 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 110 份、14,700 次，
-包括 52 份完整 suite 和 58 份任务子集，分开记录。
+本文汇总已完成的有效正式评测，共 155 份结果、23,440 次 rollout：
+95 份完整 suite 评测、19,000 次，以及 60 份已完成的任务子集评测、4,440 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 113 份、15,040 次，
+包括 53 份完整 suite 和 60 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -3243,6 +3243,128 @@ identity SHA256 为
 | Spatial | `718a90fcd729f65b595a0662bfd90be17b7a8bc2bed844bb39e923cdf7fd8fbb` |
 | Goal | `eea608548e69991c5bbd8fb2e530ea3c7ce249eee86612e721da01c15b2c65e5` |
 
+### 1107_basline_4nodes_8gpu：12k，无 Stage 1 的可训练 MLP/raw-space baseline
+
+本轮权重为
+`/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step12k/model`，
+保留原目录的 `basline` 拼写。
+沿用之前的 Object 全 10 任务 200 次、Spatial `[4, 6, 9]` 60 次、
+Goal `[0, 3, 4, 9]` 80 次，每任务 20 个固定初态，
+共 **17 任务、340 次 rollout**，新增 1 份完整 suite 和 2 份任务子集结果。
+这是我们自定义的 Qwen3VL-MoT MLP baseline，不是官方原生 Cosmos3 的复现，
+也不是三套全量 600 次或官方四套完整 benchmark。
+
+保存配置明确为 `physical_encoder_type=mlp`、
+`physical_flow_space=raw`、`physical_tuning_mode=full`；
+Stage 1 路径为空、`stage1_policy_config=null`、`initialize_from_stage1=false`。
+理解侧从原始 Qwen 预训练权重初始化，没有 Stage 1 感知迁移。
+action/state 使用各自独立、可训练的分组 MLP；
+Generation 直接输出每组 4 帧的 canonical raw action/state（各 160 维），
+不是回归 1,024 维物理 embedding 后再经 embedding-flow decoder 解码。
+仍使用 Nano Generation、primary/wrist 双视角、`joint_prediction` 单任务、权重 `1.0`。
+
+**这份 baseline 保留 learnable queries，不是 wo_latent 消融**：
+`latent_action_prediction_enabled=true`、`num_latent_queries=16`，
+但 `latent_action_loss_weight=0`，没有 teacher/projection 或 Stage 1 蒸馏。
+queries 仍进入 Qwen 和 Generation K/V，接收生成目标的梯度，
+不能把“latent loss 为 0”解释为“query 已关闭”。
+action/state predicted reconstruction 权重均为 0，触觉条件关闭。
+
+32 个 DCP 分片完整，共 1,358 个 BF16 tensor、11,649,769,232 个元素；
+元素数是 checkpoint 存储量，不等同可训练参数量。
+全部 tensor schema 精确匹配独立 PhysicalMLP、raw-space heads 与其余共享主干，
+保留 `(16, 2560)` 的 query 参数，没有 Stage 1 physical Transformer、
+teacher/projection 或 embedding-flow decoders。
+Qwen、Generation、action MLP 和 raw action head 参数探针均有限，
+完整逐文件 SHA256 保存于 `_identity.json`。
+真实加载严格恢复全部模型参数；结束时 checkpoint 指纹、配置、源码与归一化未变化。
+12k 是目录标签，无独立 trainer metadata 确认实际 step 或 world size。
+
+推理使用独立 baseline 分支提交
+`250d71684480abbef7c72735944b5ea347358547` 的隔离快照，
+没有切换工作分支或把 MLP 代码合入 `qwen3vl_mot_pretrained_generation`。
+相对 v7 16k 的冻结源码，只改变已审计的配置、policy、evaluator 三个文件，
+并新增 PhysicalMLP；外部评测设置和归一化保持同口径。
+BF16、RGB 256、预测 32 步/执行 10 步、Flow 20 步、静置 10 步，
+Object/Spatial/Goal 控制上限为 280/220/300 步。
+每套只在启动时设一次 `seed=0`，连续消耗 RNG，不逐 trial 重置。
+
+GPU 2 跑 Object，GPU 3 跑 Spatial；Spatial 于 `2026-11-08T13:43:06Z` 完成后，
+Goal 在稳定空闲 60 秒的 GPU 3 上接续，首条日志时间为 `13:44:16Z`，
+于 `14:36:07Z` 完成。
+Object 于 `15:16:22Z` 完成，最终汇总于 `15:16:27Z` 通过。
+三套 evaluator 和队列均零退出，日志确认 MLP baseline 与 `joint_prediction`，
+未关闭保存的 queries。
+340 个唯一任务/初态组合、有限 `(steps, 7)` 动作、3 个非空失败视频、
+原始结果 SHA256 和冻结输入均通过检查；GPU 2/3 模型显存已释放。
+
+| 匹配范围 | 历史 v4 shift5 12k | v7 wo_latent 16k | 本轮 MLP baseline 12k |
+| --- | --- | --- | --- |
+| Object，全 10 任务 | 97.50%（195/200） | 97.00%（194/200） | **99.50%（199/200）** |
+| Spatial，任务 4/6/9 | 73.33%（44/60） | 61.67%（37/60） | **96.67%（58/60）** |
+| Goal，任务 0/3/4/9 | 93.75%（75/80） | 92.50%（74/80） | **100.00%（80/80）** |
+| 仅七个困难任务 | 85.00%（119/140） | 79.29%（111/140） | **98.57%（138/140）** |
+| 所选 17 任务合计 | 92.35%（314/340） | 89.71%（305/340） | **99.12%（337/340）** |
+
+**本轮是当前已记录、同一七个困难任务口径下的最好结果**。
+相对历史最好 v4 shift5 12k，困难任务多成功 19 次，提高 13.57 个百分点；
+相对 v7 wo_latent 16k，困难任务多成功 27 次，提高 19.29 个百分点，
+全部所选任务多成功 32 次，提高 9.41 个百分点。
+Spatial 上层抽屉取碗达到 18/20，cookie box 旁和木柜上取碗均为 20/20；
+四个 Goal 困难任务均为 20/20。
+仅有三次失败：Object 任务 3 trial 4，以及 Spatial 任务 4 trial 1、15
+（任务/trial 编号均从 0 开始）。尚未逐例回放诊断具体失败阶段。
+
+这些是整体方案对照，不是单因素结论：MLP/Stage 1 Transformer、
+raw/embedding flow、理解侧初始化、teacher/辅助损失、query 条件及名义 step 均有差异。
+v4 还使用 forward/inverse/joint 三任务混合，baseline 只训练 joint。
+baseline 与 v7 保存的图像/腕部增强字段相同，
+但 baseline 的 `weight_resume=true`、v7 为 `false`；这不证明实际恢复起点相同或不同。
+不能仅凭目录标签确认训练预算，不能将收益单独归因为去掉 Stage 1、
+关闭 latent loss 或改用 raw-space，也不能将该分数直接对比官方完整 benchmark。
+只有一个评测 seed，连续 RNG 不保证逐 trial 噪声配对；
+这些初态还被反复用于 checkpoint 筛选，不是独立的最终多 seed 验证。
+
+逐任务成功次数如下，每项分母均为 20：
+
+| Suite | 任务编号与描述 | v7 wo_latent 16k | MLP baseline 12k |
+| --- | --- | --- | --- |
+| Object | 0：alphabet soup 放入篮子 | 17/20 | 20/20 |
+| Object | 1：cream cheese 放入篮子 | 20/20 | 20/20 |
+| Object | 2：salad dressing 放入篮子 | 20/20 | 20/20 |
+| Object | 3：BBQ sauce 放入篮子 | 18/20 | 19/20 |
+| Object | 4：ketchup 放入篮子 | 20/20 | 20/20 |
+| Object | 5：tomato sauce 放入篮子 | 20/20 | 20/20 |
+| Object | 6：butter 放入篮子 | 20/20 | 20/20 |
+| Object | 7：milk 放入篮子 | 19/20 | 20/20 |
+| Object | 8：chocolate pudding 放入篮子 | 20/20 | 20/20 |
+| Object | 9：orange juice 放入篮子 | 20/20 | 20/20 |
+| Spatial | 4：上层抽屉取碗 | 6/20 | 18/20 |
+| Spatial | 6：cookie box 旁取碗 | 14/20 | 20/20 |
+| Spatial | 9：木柜上取碗 | 17/20 | 20/20 |
+| Goal | 0：打开中层抽屉 | 19/20 | 20/20 |
+| Goal | 3：打开上层抽屉并放碗 | 15/20 | 20/20 |
+| Goal | 4：碗放到柜顶 | 20/20 | 20/20 |
+| Goal | 9：酒瓶放酒架 | 20/20 | 20/20 |
+
+工件目录为 session files 下的 `libero_baseline_mlp_12k_20261108/`，
+前缀为 `libero_baseline_1107_no_stage1_mlp_12k_object_and_weak_tasks_two_gpu_run_seeded_20261108`。
+保存 preflight/receipt、原样策略配置、identity、三套 worker/evaluator 日志、
+readiness、队列状态和最终汇总；汇总标记 `mlp_baseline_evaluation_verified=true`。
+最终汇总 SHA256 为
+`fbe7046b4b2812d0beaf20f63e41a69e97b8a8b0fb3de6a1f2efebe04a1b7464`，
+preflight SHA256 为
+`1563de669d518fa00b94de6a0fdb91776131b50cd429b3bc5888d3c6c85662ed`，
+identity SHA256 为
+`8eb21238323a61c5cc236a2e16615c9c430623d6afe7bc0db659f3ef9f3cbfa1`。
+原始结果文件的 SHA256：
+
+| Suite | `results.json` SHA256 |
+| --- | --- |
+| Object | `3458be26814cd207aefe46ef762c622283a1769dda0f020a9dd68fe85fdf1dba` |
+| Spatial | `85e191d04eb8a5d5b61073bfb9e7cf0a3c75f823c35888434bd9b29a538b8a57` |
+| Goal | `6ed751b7614129ff6c879cd439f8d6e1c22eeb565ae00cb180f03a831345a895` |
+
 ### 重复权重核验：目录标作 v5 16k，内容与 v4 shift2 16k 相同（不计入新增正式结果）
 
 2026-11-05 按用户要求，对
@@ -3387,6 +3509,7 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1107v7_4nodes_8gpu_wo_latent`（10k，关闭 latent-action） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107v7_4nodes_8gpu_wo_latent/step10k/model` |
 | `1107v7_4nodes_8gpu_wo_latent`（16k，关闭 latent-action） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107v7_4nodes_8gpu_wo_latent/step16k/model` |
 | `1107v7_4nodes_8gpu_wo_latent`（18k，关闭 latent-action） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107v7_4nodes_8gpu_wo_latent/step18k/model` |
+| `1107_basline_4nodes_8gpu`（12k，MLP/raw-space baseline，保留 queries） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step12k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -3543,6 +3666,9 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1107v7_4nodes_8gpu_wo_latent` | 18k | Object（关闭 latent-action，全套，200 次） | `outputs/evaluation/libero/libero_v7_1107_wo_latent_18k_object_and_weak_tasks_two_gpu_run_seeded_20261108_object_20trials/results.json` |
 | `1107v7_4nodes_8gpu_wo_latent` | 18k | Spatial（关闭 latent-action，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_v7_1107_wo_latent_18k_object_and_weak_tasks_two_gpu_run_seeded_20261108_spatial_20trials/results.json` |
 | `1107v7_4nodes_8gpu_wo_latent` | 18k | Goal（关闭 latent-action，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_v7_1107_wo_latent_18k_object_and_weak_tasks_two_gpu_run_seeded_20261108_goal_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 12k | Object（MLP baseline，全套，200 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_12k_object_and_weak_tasks_two_gpu_run_seeded_20261108_object_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 12k | Spatial（MLP baseline，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_12k_object_and_weak_tasks_two_gpu_run_seeded_20261108_spatial_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 12k | Goal（MLP baseline，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_12k_object_and_weak_tasks_two_gpu_run_seeded_20261108_goal_20trials/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 
