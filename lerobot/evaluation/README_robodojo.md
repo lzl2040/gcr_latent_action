@@ -4633,3 +4633,59 @@ mechanism. The successful head video is
 `tasks/put_bottles_into_dustbin/attempt_001/simulator/eval_result/RoboDojo/put_bottles_into_dustbin/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/attempt_001/episode_0000001_cam_head_success.mp4`.
 Policy port19190 is closed and evaluation GPU memory is released; unrelated
 jobs remain running and the previous step16k full sweep stays paused.
+
+## Full-task shift5 step25k: bowls and bottles
+
+The step25k comparison keeps **`stack_bowls` and
+`put_bottles_into_dustbin`, three native layouts each**, from the same
+`robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k` experiment. Keep seed0,
+one environment, BF16, sampling10, prediction32, execution10, original
+native horizons800/700, continuous RNG within each task, and actual/
+predicted videos with passive camera audits. The paused step16k full
+sweep is not resumed.
+
+Reuse the existing checkpoint preflight with step25k and evaluated
+step20k as reference: check a complete stable16-shard DCP upload,
+metadata tensor keys/shapes/dtypes and storage byte ranges, full-source/
+dataset SHA256, the measured-state delta contract and native assets.
+Evidence is saved in
+`runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step25k.json`
+and `two_tasks_step25k_preflight_20261108.json`.
+
+Run from the repository root:
+
+```bash
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$PWD" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+/home/jianf/miniforge3/envs/wam/bin/python -u -c \
+  'import runpy, signal; signal.signal(signal.SIGINT, signal.default_int_handler); runpy.run_module("lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite", run_name="__main__")' \
+  eval --tasks stack_bowls put_bottles_into_dustbin \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step25k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --checkpoint-provenance "$CACHE/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step25k.json" \
+  --camera-wrapper /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py \
+  --gpu 0 --sim-gpu 1 --port 19191 --seed 0 \
+  --inference-steps 10 --replan-steps 10 \
+  --save-predicted-video --timeout 14400 \
+  --output-dir "$PWD/outputs/evaluation/robodojo/two_tasks_alltask_shift5_decay25k_step25k_sampling10_20261108_v1"
+```
+
+Use a fresh output directory and preserve the same safe interrupt,
+per-task attempt, audit and infrastructure-error semantics as step20k.
+The new root's `progress.json` and `results.csv` contain live outcomes;
+videos and final-frame sheets are under `tasks/TASK/attempt_001/`.
+Earlier checkpoints are comparison baselines only, not part of this
+run's six-episode denominator. No training or inference/simulator code
+changes are needed.
+
+Preflight passed: 19 checkpoint/config files, 25,200,777,551 bytes,
+2560 tensors and16,908 valid storage references. All16 shard hashes
+differ from evaluated step20k; saved configs and all five dataset file
+hashes are unchanged. The native task/layout/asset fingerprints and
+evaluation protocol exactly match the step20k preflight. The prior
+full-dataset delta derivation audit is reused based on identical hashes.
