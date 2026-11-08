@@ -4836,3 +4836,59 @@ Coordinator log is
 `/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/25k_five_tasks_suite.log`.
 No five-task success rate is available at startup; follow the new root's
 `progress.json` and `results.csv`.
+
+### Completed five-task step25k results
+
+The selected five-task run exited0 with **15 valid episodes, zero
+infrastructure errors and0/15 successes**. Every native episode score
+is0, and every episode ran to its original task horizon. There were no
+retries, substituted layouts or RNG restarts within a task.
+
+| Task | Successes | Scores, layouts0/1/2 | Controls per layout |
+|---|---:|---|---|
+| `stack_blocks` | 0/3 | 0 / 0 / 0 | 550 / 550 / 550 |
+| `general_pickup` | 0/3 | 0 / 0 / 0 | 200 / 200 / 200 |
+| `insert_tubes` | 0/3 | 0 / 0 / 0 | 500 / 500 / 500 |
+| `hang_mugs` | 0/3 | 0 / 0 / 0 | 800 / 800 / 800 |
+| `pack_objects_into_box` | 0/3 | 0 / 0 / 0 | 1300 / 1300 / 1300 |
+
+All10,050 controls and1005 chunks were retained. Per-task wall times were
+2157.92, 837.95, 1977.89, 3119.02 and4858.51 seconds in the order above;
+the total is12,951.28 seconds (215.85 minutes), including per-task startup
+but excluding suite-level hash preflight.
+
+Full checkpoint/data SHA256 passed at completion. Native task/layout,
+all140 asset/config and evaluation/model runtime hashes were rechecked
+afterward, as were completed native results and artifact counts.
+All1005 chunk integration/export audits passed with numerical component
+errors below1.1e-7; all216 passive camera snapshots passed.
+There are **3015 predicted MP4s, 33,165 prediction/conditioning PNGs and
+45 actual camera MP4s**. Native videos have551/201/501/801/1301 frames for
+the five tasks respectively, three cameras per layout, at640x480/25FPS.
+
+Native instructions were checked for all15 layouts. General pickup
+correctly requests the mint green scissors, lavender plastic shovel and
+conch shell for layouts0/1/2 rather than leaving a target placeholder.
+All45 exact final camera frames in the five sheets were visually
+reviewed, not complete videos or all conditioning images. Stacking,
+insertion and hanging remain incomplete; packing retains objects outside
+the box. Final pickup frames alone do not establish the full lift history.
+Scope and per-task outcomes are saved in `completion_review.json`;
+the broader `visual_review_pending` audit flag remains true.
+
+**Physical tracking caveat:** packing has a sampled left-arm discrepancy
+of327.598mm on layout1, controls1270->1280. Its previous ten-action
+prefix commands only about4.2mm cumulative XYZ displacement, but the
+next measured position is32.8cm from its target endpoint. Exact measured/
+target positions and the two chunk paths are retained in the completion
+review. The cause has not been established; numerical integration/export
+parity does not guarantee physical tracking, and this outlier must not
+be silently treated as a32cm requested translation or proof of a specific
+model/controller failure mechanism. Other sampled maximum left/right
+translation discrepancies in mm are16.633/10.344 (stacking),
+2.525/0.157 (pickup), 2.739/8.454 (insertion), 7.429/10.754 (hanging)
+and327.598/15.302 (packing).
+
+Policy port19192 is closed and evaluation GPU processes exited; unrelated
+jobs remain running. The step16k full sweep stays paused. These15 episodes
+are a selected-task diagnostic, not the complete RoboDojo benchmark.
