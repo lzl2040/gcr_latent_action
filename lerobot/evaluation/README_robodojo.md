@@ -4755,3 +4755,66 @@ The successful head video is
 `tasks/put_bottles_into_dustbin/attempt_001/simulator/eval_result/RoboDojo/put_bottles_into_dustbin/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/attempt_001/episode_0000001_cam_head_success.mp4`.
 Policy port19191 is closed, owned evaluation Python/GPU processes exited,
 and unrelated GPU jobs remain running. The step16k full sweep stays paused.
+
+## Step25k: five additional non-random tasks
+
+The user selected the following five tasks, evaluated afresh in this order
+with native layouts0/1/2 each: **15 episodes**, using the same full-task
+step25k checkpoint and protocol as the completed bowls/bottles run.
+
+| Task | Original native control limit per episode |
+|---|---:|
+| `stack_blocks` | 550 |
+| `general_pickup` | 200 |
+| `insert_tubes` | 500 |
+| `hang_mugs` | 800 |
+| `pack_objects_into_box` | 1300 |
+
+The maximum planned total is10,050 controls; the long packing task is
+not truncated to800. Keep seed0, one environment, BF16, sampling10,
+prediction32, execution10, continuous RNG within each task, passive
+camera audits and actual/predicted videos. No random task is selected,
+the step16k full sweep remains paused, and old results are not mixed into
+this new denominator.
+
+Preparation passed using the existing verified25k provenance: checkpoint/
+dataset sizes, mtimes, small metadata hashes and the delta contract match
+the just-completed run; evaluation/model runtime hashes are unchanged.
+The coordinator will repeat full-source SHA256 before the first task and
+after the last. All15 layout files, original task horizons and140 native
+asset/config files passed preflight. `general_pickup` cluttered objects
+resolve under `Assets/Object/RoboDojo/Clutter/`, following the native
+layout loader rather than treating their physical `Rigid` group as the
+asset folder. No native asset or simulator source was changed.
+Evidence is
+`runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/five_tasks_step25k_preflight_20261108.json`.
+The preparation helper passed Ruff lint and was formatted.
+
+Run from the repository root:
+
+```bash
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$PWD" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+CACHE="$PWD/outputs/evaluation/robodojo/runtime_assets"
+/home/jianf/miniforge3/envs/wam/bin/python -u -c \
+  'import runpy, signal; signal.signal(signal.SIGINT, signal.default_int_handler); runpy.run_module("lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite", run_name="__main__")' \
+  eval --tasks stack_blocks general_pickup insert_tubes hang_mugs pack_objects_into_box \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/step25k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --stage1-text-dir "$CACHE/pretrained/siglip2-base-patch16-224" \
+  --checkpoint-provenance "$CACHE/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k/checkpoint_provenance_step25k.json" \
+  --camera-wrapper /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py \
+  --gpu 0 --sim-gpu 1 --port 19192 --seed 0 \
+  --inference-steps 10 --replan-steps 10 \
+  --save-predicted-video --timeout 14400 \
+  --output-dir "$PWD/outputs/evaluation/robodojo/five_tasks_alltask_shift5_decay25k_step25k_sampling10_20261108_v1"
+```
+
+Reuse the existing per-task attempt/audit semantics. Infrastructure errors
+are separate from genuine0/3 policy outcomes; completed tasks are not
+retried for a better score. Live results are in the new root's
+`progress.json` and `results.csv`; each task saves its logs, predictions,
+native videos, `suite_audit.json` and exact-final-frame sheet.
