@@ -4689,3 +4689,20 @@ differ from evaluated step20k; saved configs and all five dataset file
 hashes are unchanged. The native task/layout/asset fingerprints and
 evaluation protocol exactly match the step20k preflight. The prior
 full-dataset delta derivation audit is reused based on identical hashes.
+
+Startup verified in
+`two_tasks_alltask_shift5_decay25k_step25k_sampling10_20261108_v1`:
+the persisted manifest selects exactly these two tasks / six episodes,
+full-source preflight passed, and `stack_bowls` advanced control0 to10
+with the correct instruction, finite32x20 delta actions and all three
+conditioning camera images. Policy port19191 is responsive.
+Saved settings differ from step20k only in checkpoint, provenance path,
+output directory and port; native task specifications and pinned
+evaluation/model runtime code hashes are identical. Actual owned Python
+processes were checked not to ignore SIGINT; the step16k full sweep
+remains paused.
+Detached shell is `alltask25k-two-eval` (coordinator PID3930741).
+Coordinator log is
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/alltask25k_two_suite.log`.
+Success counts are pending; live outcomes are in the new root's
+`progress.json` and `results.csv`.
