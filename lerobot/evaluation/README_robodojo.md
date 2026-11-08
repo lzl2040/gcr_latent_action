@@ -4706,3 +4706,52 @@ Coordinator log is
 `/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/alltask25k_two_suite.log`.
 Success counts are pending; live outcomes are in the new root's
 `progress.json` and `results.csv`.
+
+### Completed step25k results
+
+The two-task run exited0 with **six valid episodes, zero infrastructure
+errors and1/6 successes**. Success counts and aggregate task scores match
+step20k on these layouts; no improvement is established by this small
+three-layout-per-task comparison.
+
+| Task | Step16k | Step18k | Step20k | Step25k | Step25k scores, layouts0/1/2 |
+|---|---:|---:|---:|---:|---|
+| `stack_bowls` | 0/3 | 0/3 | 0/3 | 0/3 | 0 / 0 / 0 |
+| `put_bottles_into_dustbin` | 1/3 | 0/3 | 1/3 | 1/3 | 0.25 / 1 / 0.4 |
+
+Native aggregate scores are0/100 for bowls and55/100 for bottles.
+Bottles again succeeds on layout1, at497 controls versus456 at step20k;
+layout0 loses partial score0.4 to0.25 while layout2 gains0.25 to0.4.
+This does not establish a general checkpoint ranking.
+
+Bowls used controls800/800/800, 240 chunks and2411.94 seconds;
+bottles used700/497/700, 190 chunks and2092.80 seconds. Per-task times
+include startup but exclude suite-level hash preflight. GPU sharing
+conditions differed from earlier runs, so wall-time differences must
+not be interpreted as checkpoint inference-speed improvements.
+There were no retries, substituted layouts or RNG restarts within a task.
+
+All430 chunks passed integration/export audits, with numerical component
+errors below1.1e-7. The coordinator verified full checkpoint/data SHA256
+at the end; native asset/layout/runtime hashes and completed artifacts
+were independently rechecked afterward. The initial head-camera and
+static-scene transforms also match step20k on all six layouts.
+All91 passive camera snapshots passed. Artifacts total **1290 predicted
+MP4s, 14,190 prediction/conditioning PNGs and18 actual camera MP4s**:
+bowls videos have801 frames each, and bottles have701/498/701 frames per
+layout, three views each at640x480/25FPS.
+
+Both final-frame sheets were visually reviewed:18 exact final camera
+frames, not complete videos or all conditioning images. No bowls layout
+completes a three-bowl stack. Bottles layout1 clears the tabletop; layouts0
+and2 retain bottles outside the bin. Scope and exact checkpoint comparisons
+are retained in `completion_review.json`; the broader audit flag
+`visual_review_pending` remains true.
+Maximum sampled left/right target tracking discrepancies are22.089/6.122mm
+for bowls and3.681/3.121mm for bottles. Passing numerical checks does not
+guarantee physical contact/grasping accuracy or establish why a task failed.
+
+The successful head video is
+`tasks/put_bottles_into_dustbin/attempt_001/simulator/eval_result/RoboDojo/put_bottles_into_dustbin/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/attempt_001/episode_0000001_cam_head_success.mp4`.
+Policy port19191 is closed, owned evaluation Python/GPU processes exited,
+and unrelated GPU jobs remain running. The step16k full sweep stays paused.
