@@ -4818,3 +4818,21 @@ are separate from genuine0/3 policy outcomes; completed tasks are not
 retried for a better score. Live results are in the new root's
 `progress.json` and `results.csv`; each task saves its logs, predictions,
 native videos, `suite_audit.json` and exact-final-frame sheet.
+
+Startup verified in
+`five_tasks_alltask_shift5_decay25k_step25k_sampling10_20261108_v1`:
+the manifest selects exactly the five tasks above /15 episodes, with
+native horizons550/200/500/800/1300. Full-source SHA256 preflight passed.
+`stack_blocks` advanced control0 to10 with instruction
+"Stack the three blocks with different textures.", finite32x20 delta
+actions and all three conditioning images; policy port19192 is responsive.
+Checkpoint/provenance and pinned runtime hashes are identical to the
+completed25k bowls/bottles run. Actual saved settings differ only in
+task selection, output directory and port.
+Owned Python processes were checked not to ignore SIGINT; the step16k
+full sweep remains paused.
+Detached shell is `25k-five-tasks-eval` (coordinator PID4053433).
+Coordinator log is
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/25k_five_tasks_suite.log`.
+No five-task success rate is available at startup; follow the new root's
+`progress.json` and `results.csv`.
