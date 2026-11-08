@@ -296,6 +296,90 @@ CPU 验收通过全部 **160 个官方初态文件**，每个文件均有 50 条
 `verification.json` SHA256 为
 `e30ba1f47147dcfc09d05924a70bdbf756c7a020f06d8c9e31e606fbf0b9fcee`。
 
+## LIBERO-Pro 五类固定初态评测入口
+
+2026-11-08 新增 `lerobot/evaluation/eval_qwen3vl_mot_libero_pro.py`，
+使用上面固定版本的经典五类单因素扰动，不混入最新版七类扩展。
+入口覆盖四套 × 五类 × 十个任务；每任务默认取前十个固定初态，共 **2,000 条**。
+这是用户指定的诊断次数，**不是官方每任务 50 次、共 10,000 条的标准成绩**。
+尚未完成的模型队列不计入本文开头的原版 LIBERO 结果数量。
+
+四类预打包扰动使用各自官方 `.pruned_init`，不能替换为原任务初态；
+指令统一从实际 BDDL 的 `language_instruction` 读取，尤其 `_lan` 不能使用文件名推断的
+原指令。Environment 类先用固定上游 `EnvironmentReplacePerturbator` 生成全部四十个
+BDDL，再在对应新环境中 reset，保存每个任务十个新的有限值模拟器状态为 `.npy`；
+不复制原任务状态，也不把 fresh-reset smoke 当正式初态。
+生成种子为 `seed + suite_index * 100000 + task_id * 1000 + trial`，
+BDDL、状态文件、上游生成器及 YAML 均保存 SHA256 和固定清单。
+保留上游将目标环境硬编码为 `living_room_table` 的行为，
+清单记录原环境、目标环境以及 BDDL 是否改变，总结果另报 Environment 无变化任务数。
+这些初态是本地按固定方法生成，不是下载的官方 Environment 初态，
+因此也不能将本轮分数表述为官方预打包五类评测的复现。
+
+CPU 准备和全量固定初态检查：
+
+```bash
+conda activate libero_lerobot_qwen3vl
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' \
+python -m lerobot.evaluation.eval_qwen3vl_mot_libero_pro \
+    --prepare-environment --render-backend osmesa --trials-per-task 10 \
+    --seed 0 --output-dir /path/to/new/environment_assets
+PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES='' \
+python -m lerobot.evaluation.eval_qwen3vl_mot_libero_pro \
+    --dry-run --render-backend osmesa --trials-per-task 10 \
+    --environment-assets /path/to/new/environment_assets \
+    --output-dir /path/to/new/preflight
+```
+
+正式入口与原版沿用同一策略加载器、原始训练 mean/std 和 canonical 40D→native 7D
+动作适配，不使用 Pro 测试轨迹统计。双 RGB 为 `256×256`，20 Hz，完整静置十步后才开始
+判定成功与策略控制；Spatial/Object/Goal/Long 上限为 220/280/300/520，执行十步后重规划，
+Flow 步数取保存配置。默认 BF16、只保存失败视频、不解码预测视频。
+每进程只在加载模型前初始化一次 Torch RNG；每次 trial 的环境使用 `seed(0)`，
+恢复其对应的固定初态，Torch 不逐 trial 重置，不保证三分片与单进程扩散噪声配对。
+输出目录必须不存在，不覆盖已完成或部分完成的评测。
+
+三卡按规范的二百个任务变体清单取 `catalog[shard_index::3]`，
+每个变体完整执行十个初态，三分片分别为 670/670/660 条，互不重叠。
+CLI 使用相同模型和 `--environment-assets`，传 `--num-shards 3` 及各自
+`--shard-index 0/1/2`、物理 EGL 卡号、独立输出目录。
+运行时逐 trial 原子更新 `results.json`，保存真实指令、BDDL/初态来源及 hash、
+动作数组和失败视频；汇总区分完成所选分片与完整五类任务覆盖，
+十次诊断不会标记 `official_50_trials_per_task=true`。
+
+本轮 baseline 队列固定使用 GPU **1/2/3**：先测 16k、18k 的 Object 全套、
+Spatial 4/6/9 和 Goal 0/3/4/9，和既有 12k 比较三个范围成功率的**等权平均**，
+不是 340 条的次数加权总分；同分优先困难成功数，再优先较早的 checkpoint。
+最好权重随后补测 Spatial 0/1/2/3/5/7/8、Goal 1/2/5/6/7/8 与 LIBERO-10 全套，
+共 460 条；Goal/Spatial 全套是两个独立启动 seed0 的子集结果拼接，不冒充一次连续 RNG
+的完整 suite 运行。全部原版结果验证后，同一权重才接续 Pro 2,000 条，不再按 Pro 分数选权重。
+
+baseline 的 MLP/raw-space 源码仍在独立分支，没有合入本分支：
+原版队列复用隔离的 `250d71684480abbef7c72735944b5ea347358547` runtime；
+Pro 使用另一个同提交的隔离 runtime，额外拷入本入口，保留其严格 DCP 加载器与保存的
+MLP、原始 Qwen 初始化、零 latent loss、仍开启的十六个 query 契约。
+直接在当前分支加载 MLP baseline 并不受支持，不能为此修改保存配置或关闭 query。
+队列、任务清单、预检 receipt、固定源码及原始结果的关联均在 session 持久工件中保存：
+`files/libero_baseline_mlp_16k18k_select_20261108/` 和
+`files/libero_baseline_pro_10trials_20261108/`。
+
+本机 CPU 验收已完成：四十个 Environment 任务生成 **400 个新固定初态**，
+全部二百个变体的 **2,000 个初态**通过实际读取与有限值检查；
+二十个原生环境 case 覆盖四套 × 五类，恢复各自初态、完整静置十步、
+双 `256×256` RGB 与两步 dummy 控制均通过，未使用 GPU、未加载模型。
+四个 Semantic case 的 BDDL 指令均不同于文件名推断的指令。
+上游固定生成器产生 **5/40 个 Environment BDDL 无变化任务**，保留并明确记录；
+这五个任务不能解释为发生了环境变化。新增四项固定初态/汇总回归通过，
+既有 LIBERO/Plus/安装回归为 167 passed、3 skipped，Ruff 检查通过。
+模型 Pro 队列等待原版结果完整认证后才启动，不是这次 CPU 验收的成绩。
+关键验收工件 SHA256：
+
+```text
+Environment manifest: 902b84ecd85094b3b995655bfe9b5ba2b06037826b0731cad084c21eccdcd30e
+200-task catalog:     1ff0f9374c8fc0f6df65e5eb70e59aad72311e7559856b073d1428ae6f943d20
+Native CPU report:    7cf99fa7b2fc0945f6f126c1f1e242b5c94e0874e958b85f8686f5d5222059a9
+```
+
 ## 历史评测设置
 
 下表及“旧协议结果汇总”使用旧协议：每个 episode 前按
