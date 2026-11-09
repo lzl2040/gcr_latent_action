@@ -21,6 +21,8 @@ The isolated environment is `/Data/lzl/venvs/lerobot_cosmos3`, built with
 `--system-site-packages` from `libero_lerobot_qwen3vl`.
 It uses Python 3.12, PyTorch 2.9.1+cu130, Transformers 5.22.0, diffusers 0.38.0,
 accelerate 1.15.0, TorchCodec 0.8.1 and bitsandbytes 0.50.2.
+The shared local dataset imports also require polars 2.1.0 and qwen-vl-utils
+0.0.14; these are included in the `cosmos3` extra.
 Install the `cosmos3` extra only in a separate environment, never together with
 `contrast` or `pi0`.
 
@@ -139,3 +141,5 @@ score** and is excluded from the separate 800-episode evaluation.
 Synthetic-image inference is only a loader/finite-output check, not a real
 rollout or success-rate measurement. Benchmark results must come from complete
 `results.json` episode records; no upstream reported score is a local result.
+Native/FSDP tests: 107 passed, two optional FP8-dependency skips. Existing
+Transformers-4 training-schedule/MoT regression tests: 225 passed in `lerobot_v2`.

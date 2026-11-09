@@ -15,6 +15,44 @@
 官方 Cosmos3/LaWAM 对照、实际微调配置与性能归因限制，见
 [LIBERO 微调审计](../libero_finetuning_audit.md)；该审计不增加正式 rollout 计数。
 
+## 原生 Cosmos3 Nano：官方 LIBERO 权重评测（运行中）
+
+2026-11-09 在当前 `qwen3vl_mot_pretrained_generation` 分支完成官方原生模型移植，
+并启动独立评测。这不是本文的 Qwen3VL-MoT MLP baseline，也不是使用 Cosmos 视频编码器的自定义模型。
+**正式评测尚未完成，不并入上方 164 份 / 24,580 次已完成记录。**
+
+权重为四套联合训练的官方 EMA checkpoint：
+`lerobot/Cosmos3-Nano-Policy-LIBERO@29563132da0815a4e034435ca55aaaf061ecb5ba`，
+本地目录 `/Data/lzl/huggingface/Cosmos3-Nano-Policy-LIBERO`。
+模型及处理器来自官方 LeRobot commit `81b8c5bfdd5591ec59e512cfc7ac6db8151c70ee`；
+正式评测代码 commit 为 `4d864788e947f36bc2629e4b0326ed200f78fa13`。
+移植、训练及完整使用说明见 [Cosmos3 说明](../cosmos3.md)。
+
+先完成真实 Spatial task 0 验收：固定初态 0、1 均成功，分别执行 75、77 个控制步。
+该 **2/2 仅为验收，不计入下方 800 次正式评测**；
+不是合成图推理，也没有缩短 220 步任务时限。
+
+正式协议：每套十任务、每任务二十次，seed 1000，原版 LIBERO 固定初态 0–19；
+20Hz、十步 settling、双 256 RGB 旋转 180°；
+原生分位数归一化、16 步 chunk 且执行全部 16 步、30 步 UniPC、sampling shift 5、guidance 1。
+空间/物体/目标/长程任务时限分别为 220/280/300/520。
+旋转采用原生列式 rot6d 经 SVD 投影转 axis-angle，gripper 为连续
+`clamp(1-2*g,-1,1)`，不套用旧 MoT 的 Euler/符号阈值适配器。
+
+三个 GPU 进程均已实际输出有限原生动作并推进环境，不只是创建了输出目录。
+每批十个独立环境，成功或终止后活跃 batch 缩小，因此采样 RNG 序列不与旧单环境评测逐条等价。
+
+| Suite | 计划次数 | GPU | 状态 | 输出目录 |
+|---|---:|---:|---|---|
+| Spatial | 200 | 1 | 运行中 | `20261109_official_spatial_20` |
+| Object | 200 | 2 | 运行中 | `20261109_official_object_20` |
+| Goal | 200 | 3 | 运行中 | `20261109_official_goal_20` |
+| LIBERO-10 | 200 | 1 | Spatial 完成后自动接续 | `20261109_official_10_20` |
+
+目录共同前缀为 `/Data/lzl/cosmos3_evaluation/`；各目录的 `results.json` 原子更新。
+每条轨迹保留实际执行动作、原生预测 chunk，失败时另存观察视频。
+完整初态哈希、权重下载哈希认证、采样及精度设置写入结果，最终成绩只按完整记录计算。
+
 ## LIBERO-Plus 环境安装
 
 2026-11-02 将官方源码安装到 `/home/v-wangxiaofa/lzl/LIBERO_PLUS`，
