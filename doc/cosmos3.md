@@ -96,6 +96,11 @@ Repeat for `libero_object`, `libero_goal` and `libero_10`: 40 tasks x 20 trials 
 deleted. Use `--task-ids 0 --trials-per-task 2 --batch-size 2` for a real full-horizon
 smoke test, not a benchmark score.
 
+The evaluator loads checkpoint tensors on CPU before transferring the module to
+CUDA. This avoids the direct-CUDA safetensors startup error observed when the
+queued LIBERO-10 worker started. Tensor values, native precision and sampling
+configuration are unchanged.
+
 Protocol: original fixed LIBERO initial states, task order 0, first 20 initial
 states per task, seed 1000, 20Hz, 10 settling steps, dual 256 RGB rotated 180
 degrees, native quantile normalization, 16 executed actions per chunk, 30 UniPC
