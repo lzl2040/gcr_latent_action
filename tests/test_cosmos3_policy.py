@@ -185,3 +185,33 @@ def test_fsdp_resume_restores_saved_shape_and_rejects_contract_changes(config, t
     cfg.policy = deepcopy(config)
     with pytest.raises(ValueError, match="max_action_dim"):
         _load_cosmos3_resume_policy_config(cfg, args=["--policy.max_action_dim=64"])
+
+
+def test_dcp_eval_restores_changed_action_width_and_training_processor(config, stats, tmp_path, monkeypatch):
+    import torch.distributed.checkpoint as dcp
+
+    from lerobot.evaluation.eval_cosmos3_libero import load_policy
+
+    monkeypatch.setattr(modeling, "OmniMoTModel", TinyModel)
+    source = tmp_path / "source"
+    source.mkdir()
+    modeling.Cosmos3NanoPolicy(config, dataset_stats=stats)._save_pretrained(source)
+    adapted = deepcopy(config)
+    adapted.max_action_dim = 20
+    adapted.load_action_modules = False
+    trained = modeling.Cosmos3NanoPolicy.from_pretrained(source, config=adapted)
+    with torch.no_grad():
+        trained.model.network.action2llm.fc.weight.fill_(0.25)
+    trained.get_processor().stats["action"]["q01"] = torch.full((10,), -5.0)
+    trained.get_processor().stats["action"]["q99"] = torch.full((10,), 5.0)
+    run = tmp_path / "run"
+    run.mkdir()
+    trained.config._save_pretrained(run)
+    trained.save_processor(run)
+    checkpoint = run / "checkpoint_00000001"
+    dcp.save({"model": trained.state_dict()}, checkpoint_id=checkpoint / "model", no_dist=True)
+    restored = load_policy(run, torch.device("cpu"), checkpoint)
+    torch.testing.assert_close(
+        restored.model.network.action2llm.fc.weight, trained.model.network.action2llm.fc.weight,
+    )
+    torch.testing.assert_close(restored.predict_action_chunk(raw_batch()), torch.zeros(2, 16, 10))
