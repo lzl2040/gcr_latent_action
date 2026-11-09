@@ -11,16 +11,17 @@
 以及下方单独保留的误拷权重评测。
 另有已完成的 **LIBERO-Pro 2,000 条诊断评测**，见下方独立记录，
 不并入上述原版 LIBERO 份数、rollout 数或原版成功率。
-原生 Cosmos3 的独立批量协议已完成三套、600 次，另见下一节，不混入上述历史统计。
+原生 Cosmos3 的独立批量协议已完成四套、800 次，另见下一节，不混入上述历史统计。
 
 官方 Cosmos3/LaWAM 对照、实际微调配置与性能归因限制，见
 [LIBERO 微调审计](../libero_finetuning_audit.md)；该审计不增加正式 rollout 计数。
 
-## 原生 Cosmos3 Nano：官方 LIBERO 权重评测（三套完成，LIBERO-10 运行中）
+## 原生 Cosmos3 Nano：官方 LIBERO 权重评测（四套完成）
 
 2026-11-09 在当前 `qwen3vl_mot_pretrained_generation` 分支完成官方原生模型移植，
-并启动独立评测。这不是本文的 Qwen3VL-MoT MLP baseline，也不是使用 Cosmos 视频编码器的自定义模型。
-**800 次计划尚未全部完成，原生模型结果独立统计，不并入上方历史自定义模型记录。**
+并完成独立评测。这不是本文的 Qwen3VL-MoT MLP baseline，也不是使用 Cosmos 视频编码器的自定义模型。
+**40 个任务 × 每任务二十次，800 次全部完成：792/800，99.00%。**
+原生模型结果独立统计，不并入上方历史自定义模型记录。
 
 权重为四套联合训练的官方 EMA checkpoint：
 `lerobot/Cosmos3-Nano-Policy-LIBERO@29563132da0815a4e034435ca55aaaf061ecb5ba`，
@@ -44,28 +45,33 @@ LIBERO-10 使用加载修复 commit `7dba50a493aadeaea860fa3fa595671cdff99a3e`�
 启动时三个 GPU 进程均已实际输出有限原生动作并推进环境，不只是创建了输出目录。
 每批十个独立环境，成功或终止后活跃 batch 缩小，因此采样 RNG 序列不与旧单环境评测逐条等价。
 
-| Suite | 计划次数 | GPU | 状态 | 输出目录 |
+| Suite | 正式次数 | GPU | 最终结果 | 输出目录 |
 |---|---:|---:|---|---|
 | Spatial | 200 | 1 | 已完成：200/200，100.00% | `20261109_official_spatial_20` |
 | Object | 200 | 2 | 已完成：198/200，99.00% | `20261109_official_object_20` |
 | Goal | 200 | 3 | 已完成：197/200，98.50% | `20261109_official_goal_20` |
-| LIBERO-10 | 200 | 1 | 启动加载故障修复后运行中 | `20261109_official_10_20_cpu_load` |
+| LIBERO-10 | 200 | 1 | 已完成：197/200，98.50% | `20261109_official_10_20_cpu_load` |
+| 合计 | 800 | 1/2/3 | 792/800，99.00% | 四套完整结果 |
 
-目录共同前缀为 `/Data/lzl/cosmos3_evaluation/`；各目录的 `results.json` 原子更新。
+目录共同前缀为 `/Data/lzl/cosmos3_evaluation/`；各目录的 `results.json` 均已完整写入。
 每条轨迹保留实际执行动作、原生预测 chunk，失败时另存观察视频。
 完整初态哈希、权重下载哈希认证、采样及精度设置写入结果，最终成绩只按完整记录计算。
 
-Spatial 于 18:10:31 UTC、Goal 于 18:10:56 UTC、Object 于 18:21:30 UTC 完成。
+Spatial 于 18:10:31 UTC、Goal 于 18:10:56 UTC、Object 于 18:21:30 UTC、
+LIBERO-10 于 20:27:39 UTC 完成；最终汇总核验时间为 20:28:05 UTC。
 已核验各十任务 × 二十唯一初态、全部动作/原生 chunk 有限、失败视频存在，
-600 条轨迹重新解码后的控制量与保存的实际控制量最大误差为 0。
+800 条轨迹重新解码后的控制量与保存的实际控制量最大误差为 0。
 Goal 失败为 task 3 两次、task 4 一次；Object 失败为 task 3、task 7 各一次。
-前三套合计 595/600（99.1667%），不是四套完整成绩；LIBERO-10 尚未完成，不报告最终均值。
+LIBERO-10 失败为 task 0 的 trial 4、14，以及 task 2 的 trial 17，
+均达到 520 步时限。四套各二百次，因此 suite 等权平均与总成功率均为 99.00%。
+最终核验包含完整权重 revision/SHA256、四十任务的初态覆盖及所有轨迹产物；
+两次验收和零 rollout 的加载失败均不计入八百次。
 
 LIBERO-10 首次接续在权重加载时遇到 safetensors 直接 CUDA 加载的
 `CUDA error: invalid argument`，尚未产生任何 rollout。
 现改为 CPU 读取后迁移到 CUDA，模型权重、推理精度、seed、初态与采样协议不变。
 失败目录 `20261109_official_10_20` 和日志保留用于诊断，不计入结果；
-新目录已验证实际执行了原生动作，未重跑已完成的 Spatial/Goal。
+新目录已完成全部二百次正式评测，未重跑已完成的 Spatial/Goal。
 
 ## LIBERO-Plus 环境安装
 

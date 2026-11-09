@@ -137,6 +137,12 @@ states 0/1 both succeeded, in 75/77 control steps, using the full 220-step
 horizon and all 30 sampling steps. This **2/2 acceptance check is not a benchmark
 score** and is excluded from the separate 800-episode evaluation.
 
+The official checkpoint completed all 40 tasks x 20 trials: **792/800 (99.00%)**.
+Spatial 200/200, Object 198/200, Goal 197/200, LIBERO-10 197/200.
+All 800 fixed-state records and action traces were audited; native action
+re-decoding matched executed controls exactly. Full results and the loader
+recovery history are recorded in [the evaluation log](evaluation/libero.md).
+
 ```bash
 /Data/lzl/venvs/lerobot_cosmos3/bin/python -m pytest -q \
   tests/test_cosmos3_policy.py tests/test_cosmos3_dataset.py \
