@@ -98,6 +98,7 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         text_lora_layers: int,
         vision_lora_layers: int,
         gradient_checkpointing: bool,
+        use_latent_queries: bool = True,
     ):
         super().__init__()
         from transformers import AutoTokenizer
@@ -119,6 +120,10 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         self.max_text_tokens = max_text_tokens
         hidden_dim = int(self.model.config.text_config.hidden_size)
         self.query_tokens = nn.Parameter(torch.randn(num_queries, hidden_dim) * 0.02)
+        if not use_latent_queries:
+            # Consume the same initialization RNG without retaining query parameters.
+            self.num_queries = 0
+            self.query_tokens = None
         self.selected_layer_indices = _selected_layers(
             int(self.model.config.text_config.num_hidden_layers),
             kv_layers,
@@ -413,7 +418,11 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         input_ids, text_keep = self._tokenize(texts, device)
         batch = input_ids.shape[0]
         text_embeddings = embedding(input_ids)
-        query_embeddings = self.query_tokens.to(dtype).unsqueeze(0).expand(batch, -1, -1)
+        query_embeddings = (
+            self.query_tokens.to(dtype).unsqueeze(0).expand(batch, -1, -1)
+            if self.query_tokens is not None
+            else text_embeddings[:, :0]
+        )
         query_ids = torch.full(
             (batch, self.num_queries),
             self.tokenizer.pad_token_id,
@@ -572,7 +581,9 @@ class Qwen3VLUnderstandingExpert(nn.Module):
             hidden_states=[],
             key_values=selected_key_values,
             attention_mask=attention_keep.to(torch.bool),
-            latent_queries=hidden_states[:, -self.num_queries :],
+            latent_queries=(
+                hidden_states[:, -self.num_queries :] if self.num_queries else hidden_states[:, :0]
+            ),
             rotary_embeddings=position_embeddings,
             position_ids=position_ids,
         )

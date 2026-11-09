@@ -408,6 +408,106 @@ def test_fsdp_launcher_resolves_complete_checkpoint(tmp_path, fsdp_checkpoint_fa
         assert "--weight_resume=true" in result.stdout
 
 
+@pytest.mark.parametrize("launcher", ["fsdp", "local"])
+@pytest.mark.parametrize("latent_enabled", [None, "false"])
+def test_stage2_launchers_forward_optional_latent_prediction_switch(tmp_path, launcher, latent_enabled):
+    root = Path(__file__).resolve().parents[1]
+    weights = tmp_path / "weights"
+    qwen = weights / "Qwen3-VL-4B-Instruct"
+    cosmos = weights / "Cosmos3-Edge"
+    generation = weights / "Cosmos3-Nano"
+    for path in (qwen, cosmos / "vae", generation / "transformer"):
+        path.mkdir(parents=True)
+        (path / "config.json").write_text("{}")
+    (qwen / "model.safetensors").write_bytes(b"dry-run only")
+    (generation / "transformer/model.safetensors").write_bytes(b"dry-run only")
+    stage1 = tmp_path / "stage1"
+    stage1.mkdir()
+    (stage1 / "config.json").write_text("{}")
+    (stage1 / "model.safetensors").write_bytes(b"dry-run only")
+    data = tmp_path / "data"
+    data.mkdir()
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    deepspeed = binaries / "deepspeed"
+    deepspeed.write_text(f"#!{sys.executable}\nimport sys\nprint('\\n'.join(sys.argv[1:]))\n")
+    deepspeed.chmod(0o755)
+    python = binaries / "python-cache-stub"
+    python.write_text(
+        f"#!{sys.executable}\nimport os, sys\n"
+        "if sys.argv[1:3] == ['-m', 'lerobot.common.utils.stage2_model_cache']:\n"
+        "    print(os.environ['QWEN3VL_DIR'])\n"
+        "    print(os.environ['COSMOS3_DIR'])\n"
+        "    print(os.environ['GENERATION_PRETRAINED_DIR'])\n"
+        "else:\n"
+        f"    os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n"
+    )
+    python.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{binaries}:{os.environ['PATH']}",
+        "WEIGHTS_ROOT": str(weights),
+        "QWEN3VL_DIR": str(qwen),
+        "COSMOS3_DIR": str(cosmos),
+        "GENERATION_BACKBONE": "nano",
+        "GENERATION_PRETRAINED_DIR": str(generation),
+        "PARENT_DIR_V21": str(data),
+        "PARENT_DIR_V30": str(data),
+        "PARENT_DIR_EXTRA": "",
+        "OUTPUT_DIR": str(tmp_path / "output"),
+        "LOG_DIR": str(tmp_path / "logs"),
+        "JOB_NAME": "latent_ablation",
+        "WEIGHT_RESUME": "false",
+        "STAGE1_CHECKPOINT": str(stage1),
+        "STAGE1_CONFIG": str(stage1 / "config.json"),
+        "STAGE2_TASK_NAMES": "va_prediction",
+        "STAGE2_TASK_WEIGHTS": "1.0",
+        "DRY_RUN": "true",
+        "CHECK_PATHS": "true",
+        "MODEL_AUTO_DOWNLOAD": "false",
+        "PYTHON_BIN": str(python) if launcher == "local" else sys.executable,
+        "TORCHRUN_BIN": sys.executable,
+        "MASTER_PORT": "29599",
+        "NNODES": "1",
+        "NODE_RANK": "0",
+        "NPROC_PER_NODE": "1",
+    }
+    for key in (
+        "PHYSICAL_ENCODER_TYPE",
+        "PHYSICAL_FLOW_SPACE",
+        "PHYSICAL_TUNING_MODE",
+        "LATENT_ACTION_LOSS_WEIGHT",
+        "ACTION_PRED_RECON_WEIGHT",
+        "STATE_PRED_RECON_WEIGHT",
+        "LATENT_ACTION_PREDICTION_ENABLED",
+    ):
+        env.pop(key, None)
+    if latent_enabled is not None:
+        env["LATENT_ACTION_PREDICTION_ENABLED"] = latent_enabled
+    result = subprocess.run(
+        ["bash", str(root / f"train_qwen3vl_mot_{launcher}.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    for flag in (
+        "--policy.physical_flow_space=embedding",
+        "--policy.physical_tuning_mode=frozen",
+        "--policy.generation_backbone=nano",
+        f"--policy.stage1_checkpoint={stage1}",
+        f"--policy.stage1_config={stage1 / 'config.json'}",
+    ):
+        assert flag in result.stdout
+    assert "--policy.physical_encoder_type=" not in result.stdout
+    if latent_enabled is None:
+        assert "--policy.latent_action_prediction_enabled=" not in result.stdout
+    else:
+        assert f"--policy.latent_action_prediction_enabled={latent_enabled}" in result.stdout
+
+
 def test_restore_replicated_frozen_parameters_uses_canonical_fsdp_names() -> None:
     inner = nn.Module()
     inner.weight = nn.Parameter(torch.zeros(2, 3), requires_grad=False)

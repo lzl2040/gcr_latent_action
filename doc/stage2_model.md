@@ -14,6 +14,9 @@
 >
 > 当前说明覆盖 Edge/Nano 预训练生成、多视角生成与 physical embedding-space flow。
 
+LIBERO 实际微调配置、与官方 Cosmos3/LaWAM 的差异和待验证风险，见
+[LIBERO 微调审计](libero_finetuning_audit.md)。
+
 ---
 
 ## 1. 设计目标
@@ -92,7 +95,7 @@ state/action/tactile ──> Stage 1 Physical Encoder ──> physical tokens   
 | `image_t1` | `(B,3,H,W)` | 时间窗口末端 primary 图像 |
 | `video` | `(B,9,3,H,W)` | 同一窗口内均匀采样的 9 帧 primary 视频 |
 | `task` | `list[str]` | 语言指令 |
-| `pair_is_valid` | `(B,)` | 未来端点是否未被 episode 边界截断 |
+| `pair_is_valid` | `(B,)` | 当前图像是否存在且有效；尾部重复末帧的窗口也可有效 |
 | `observation.state` | `(B,32,40)` | canonical state trajectory |
 | `state_mask` | `(B,40)` | 当前机器人有效的 state 维度 |
 | `action` | `(B,32,40)` | canonical action chunk |
@@ -104,7 +107,10 @@ state/action/tactile ──> Stage 1 Physical Encoder ──> physical tokens   
 
 Stage 2 训练入口默认 `TRAINING_STAGE=auto`：纯 LIBERO mixture 使用下游 `finetune`，
 其他 mixture 使用原 `pretrain`。下游模式禁用持久化/降采样 sample pools，每个 epoch
-遍历全部有效完整窗口起点；保留所有 episode，仅最终 global batch 可能重复补齐。
+遍历每个 episode 的所有帧起点，包括不足完整窗口的尾帧；图像/state 重复末帧，
+action 按数据集 padding 约定补齐，LIBERO 为零位移、identity rotation、保持最后 gripper。
+这些尾部目标仍参与监督，当前 mask 不单独排除 padded 时间位置。
+保留所有 episode，仅最终 global batch 可能重复补齐。
 该模式忽略人为的 `SAMPLES_PER_EPOCH` 截断与 mixture 相对采样比例，零权重源除外。
 Stage 1 对比学习采样不变。
 
@@ -145,7 +151,7 @@ world_video_frames = 9
 | `images_t0` | `(B,V,3,H,W)` | 按 `rgb_views` 顺序排列的当前图像 |
 | `image_view_mask` | `(B,V)` | 当前图像存在且未 padding |
 | `video_views` | `(B,V,9,3,H,W)` | 各相机同一窗口的视频 |
-| `video_view_mask` | `(B,V)` | 整个视频窗口完整、没有 padding |
+| `video_view_mask` | `(B,V)` | 当前视角有效且读取到预期帧数；允许末尾重复帧，不等于无 padding |
 
 缺失相机和重复映射到同一源 key 的后续槽位被 mask，不参与 Qwen 条件注意力和视频 loss。
 Qwen 读取有效视角当前图像与相机角色文本；VAE 分别编码各相机，Generation 联合注意各路
@@ -161,8 +167,9 @@ video tokens，并使用独立可训练 camera embedding 区分视角，时间�
 
 Stage 2 的 `dataset.image_transforms.enable` 默认 `false`，两个 launcher 通过
 `RGB_AUG_ENABLED=true` 开启固定轻量 preset。每个相机窗口随机裁剪约 `90%-100%`
-面积并恢复原尺寸，旋转 `[-5,5]` 度，再做 brightness/contrast `0.9-1.1` 和
-saturation `0.95-1.05` 抖动；不改变 hue，不翻转，不做大角度旋转。
+面积并恢复原尺寸，再做 brightness/contrast `0.9-1.1` 和
+saturation `0.95-1.05` 抖动；不改变 hue，不翻转，不旋转。
+这里调用固定的 `make_temporal_rgb_transform`，不使用通用 transforms 配置里的 rotation 项。
 
 首尾帧和 video 一起作为 uint8 时序 stack 送入 torchvision v2，
 **一次调用只采一组参数**，避免逐帧随机增强制造假的视觉变化。
@@ -337,7 +344,7 @@ vision_end]`，然后拼接指令与 latent queries；三视角最大约 302 tok
 各 rank 都执行视觉塔；无有效图像的 rank 使用零贡献 dummy forward，保持 FSDP collective
 和反向调用一致。
 
-### 5.3 16 个 latent queries
+### 5.3 默认启用的 16 个 latent queries
 
 Qwen 最终 norm 后，取最后 16 个 query hidden states：
 
@@ -367,6 +374,39 @@ target_latent_action: (B,16,1024)
 
 两者计算 MSE。这个损失保证 Qwen query 保留 Stage 1 已学到的视觉变化和物理变化语义，
 而不是只依赖视频生成 loss。
+
+#### 关闭 latent-action 预测的独立消融
+
+`policy.latent_action_prediction_enabled` 默认 `true`；旧配置缺少该字段也按 `true` 读取，
+保留原 query、teacher、projection 和 Generation 条件行为。
+两个 Stage 2 launcher 均支持 `LATENT_ACTION_PREDICTION_ENABLED=false`。
+例如在原训练环境变量保持不变的前提下，使用新目录启动 FSDP 对照：
+
+```bash
+LATENT_ACTION_PREDICTION_ENABLED=false \
+WEIGHT_RESUME=false \
+OUTPUT_DIR=/path/to/new_run_without_latent_action \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+关闭时：
+
+- 不向 Qwen 序列追加 latent query tokens，导出的各层 K/V、attention mask、
+  RoPE 和 position IDs 也不包含它们；Generation 只保留正常的图像/语言 K/V 条件。
+- 不保留或调用 Stage 1 perception teacher，不保留 latent-action projection；
+  `latent_action_loss_weight` 自动规范为 `0`，蒸馏 loss/element 日志均为 `0`。
+- Stage 1 physical encoder、其 embedding-space flow、physical decoders、
+  action/state/video losses、任务与噪声配置保持原设置，**不是切换成无 Stage 1 MLP baseline**。
+- fresh 初始化仍按原设置读取 Stage 1 physical 权重并迁移兼容的 Qwen 权重，
+  所以原有 Stage 1 checkpoint 要求不变。只在构造时消耗与开启状态相同的 query/projection
+  初始化 RNG，不保存这些模块，以保持其他 Generation/physical 模块同 seed 的初始化不变。
+
+单独设置 `LATENT_ACTION_LOSS_WEIGHT=0` 与此开关不同：它不会移除 query 对 Generation 的条件。
+MLP baseline 本来没有 teacher/projection，但默认仍有 learnable queries；
+新开关关闭时也移除这些 queries。
+恢复时自动读取保存的开关值；不能跨开关值直接恢复训练或加载 checkpoint，
+因为 query、teacher、projection 及 optimizer 参数集合不同。消融应新建输出目录，
+不要在已有目录上切换或续训旧的有-query checkpoint。
 
 ### 5.4 原生 Qwen K/V 导出
 
@@ -507,8 +547,10 @@ state/action embedding (B,8,1024)
   -> reshape (B,32,40)
 ```
 
-它们由干净 embedding 的 canonical 重建 MSE 训练，缺失 canonical 维度和无效样本不计算
-重建 loss。总输出是 **8 组 × 每组 160 维**，不是整段只有 `4×40`。
+它们由预测干净 embedding `z0_pred = z_sigma - sigma * predicted_velocity` 的 canonical
+重建 MSE 训练，不是单独对干净 GT embedding 做 codec 重建。
+缺失 canonical 维度和无效样本不计算重建 loss；future-state 任务也排除当前 state 位置。
+总输出是 **8 组 × 每组 160 维**，不是整段只有 `4×40`。
 两个 decoder 共增加 2,431,296 参数。Stage 1 没有 state/action decoder，因此这些层从
 Stage 2 开始训练，不假设已有可靠的逆映射。
 
@@ -896,7 +938,7 @@ state   1.0
 tactile 0.25
 ```
 
-所有包含当前图像的任务还加入：
+开启 latent-action 预测时，所有包含当前图像的任务还加入：
 
 $$
 L_\mathrm{latent}
