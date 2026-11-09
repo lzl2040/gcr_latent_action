@@ -5,7 +5,7 @@ import math
 import os
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from pprint import pformat
 
@@ -29,6 +29,7 @@ from lerobot.common.policies.qwen3vl_mot.generation_eval import (
 from lerobot.common.utils.fsdp_training import (
     FSDPCheckpointIOConfig,
     FSDPTrainingConfig,
+    clip_fsdp_sharded_grad_norm_,
     convert_policy_to_fp8,
     create_checkpoint_process_group,
     load_fsdp_checkpoint,
@@ -42,6 +43,7 @@ from lerobot.common.utils.random_utils import set_seed
 from lerobot.common.utils.utils import format_big_number
 from lerobot.common.utils.wandb_utils import WandBLogger
 from lerobot.configs import parser
+from lerobot.configs.policies import PreTrainedConfig
 from lerobot.scripts.dps_train_contrast import (
     ContrastiveTrainPipelineConfig,
     _compute_epoch_schedule,
@@ -161,17 +163,50 @@ def _planned_update_steps(
     return min(natural_update_steps, configured_steps)
 
 
+def _load_cosmos3_resume_policy_config(cfg, args=None):
+    if not cfg.weight_resume:
+        return
+    import draccus
+
+    runtime = cfg.policy
+    saved = PreTrainedConfig.from_pretrained(Path(cfg.output_dir))
+    if saved.type != runtime.type:
+        raise ValueError(f"Cannot resume {runtime.type} from a {saved.type} checkpoint.")
+    for spec in fields(saved):
+        name = spec.name
+        if name in ("pretrained_path", "device") or parser.parse_arg(f"policy.{name}", args) is None:
+            continue
+        if draccus.encode(getattr(saved, name)) != draccus.encode(getattr(runtime, name)):
+            raise ValueError(f"Cannot change policy.{name} when resuming Cosmos3.")
+    if runtime.pretrained_path:
+        saved.pretrained_path = runtime.pretrained_path
+    saved.device = runtime.device
+    cfg.policy = saved
+    if cfg.use_policy_training_preset:
+        cfg.optimizer = saved.get_optimizer_preset()
+        cfg.scheduler = saved.get_scheduler_preset()
+
+
 def _train(cfg: FSDPTrainPipelineConfig) -> None:
     cfg.validate()
-    _load_stage2_resume_policy_config(cfg)
+    is_cosmos3 = cfg.policy.type in ("cosmos3_nano", "cosmos3_edge")
+    if is_cosmos3:
+        _load_cosmos3_resume_policy_config(cfg)
+        if cfg.generation_eval.enabled:
+            raise ValueError("The MoT generation evaluator is not compatible with Cosmos3.")
+        if cfg.fsdp.fp8 is True:
+            raise ValueError("The Cosmos3 backport supports BF16, not the MoT-specific FP8 conversion.")
+        cfg.fsdp.fp8 = False
+    else:
+        _load_stage2_resume_policy_config(cfg)
     cfg.fsdp.validate()
     cfg.stage = resolve_stage2_training_stage(cfg.stage, cfg.data_mix)
     cfg.generation_eval.resolve_datasets(cfg.data_mix, cfg.stage)
     cfg.generation_eval.validate(cfg.eval_freq)
-    if cfg.policy.type != "qwen3vl_mot":
+    if cfg.policy.type not in ("qwen3vl_mot", "cosmos3_nano", "cosmos3_edge"):
         raise ValueError(
             "fsdp_train_contrast.py is stage-two-specific and requires "
-            "`policy.type=qwen3vl_mot`."
+            "`policy.type=qwen3vl_mot`, `cosmos3_nano` or `cosmos3_edge`."
         )
     if not isinstance(cfg.optimizer, AdamW8bitConfig):
         raise ValueError(
@@ -190,7 +225,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     rank, local_rank, world_size, device, checkpoint_process_group = (
         _initialize_distributed()
     )
-    logger = init_logger(cfg, subdir="qwen3vl_mot_fsdp")
+    logger = init_logger(cfg, subdir=f"{cfg.policy.type}_fsdp")
     cfg.fsdp.fp8 = resolve_fp8_mode(cfg.fsdp, device)
     logger.info(
         "Distributed collective timeout: %s minutes",
@@ -220,7 +255,13 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     if cfg.seed is not None:
         set_seed(cfg.seed + rank)
 
-    dataset = MultiModalContrastiveDataset(
+    if is_cosmos3:
+        from lerobot.common.datasets.cosmos3_dataset import Cosmos3LiberoDataset
+
+        dataset_class = Cosmos3LiberoDataset
+    else:
+        dataset_class = MultiModalContrastiveDataset
+    dataset = dataset_class(
         cfg=cfg,
         data_mix=cfg.data_mix,
         seed=cfg.seed,
@@ -313,19 +354,27 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     model_seed = cfg.seed if cfg.seed is not None else 0
     set_seed(model_seed)
     logger.info("Creating stage-two policy...")
+    if is_cosmos3 and cfg.weight_resume:
+        # Bootstrap even a changed action width; strict DCP restoration replaces all tensors below.
+        cfg.policy.load_action_modules = False
     policy = make_policy(
         cfg=cfg.policy,
         device="cpu",
         ds_meta=dataset.meta,
         weight_pt_path=cfg.policy.pretrained_path,
     )
-    policy.to(device=device, dtype=torch.bfloat16)
+    if is_cosmos3:
+        policy.to(device=device)
+    else:
+        policy.to(device=device, dtype=torch.bfloat16)
 
     output_path = Path(cfg.output_dir)
     if rank == 0:
         output_path.mkdir(parents=True, exist_ok=True)
         cfg.policy._save_pretrained(output_path)
         cfg._save_pretrained(output_path)
+        if is_cosmos3:
+            policy.save_processor(output_path)
     dist.barrier(device_ids=[local_rank])
 
     converted_fp8 = convert_policy_to_fp8(policy, cfg.fsdp, device)
@@ -351,11 +400,12 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
         )
         logger.info(
             "FP8 Linear: enabled=%s scope=%s recipe=%s converted=%d; master "
-            "parameters and optimizer-facing gradients remain BF16",
+            "parameters and optimizer-facing gradients use %s",
             cfg.fsdp.fp8,
             cfg.fsdp.fp8_scope,
             cfg.fsdp.fp8_recipe,
             len(converted_fp8),
+            "BF16 with native FP32 timestep weights" if is_cosmos3 else "BF16",
         )
         logger.info(
             "Parameters visible after FSDP sharding on rank 0: %s",
@@ -490,7 +540,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
                     mix,
                 )
 
-            batch = move_batch(batch, device)
+            batch = move_batch(batch, device, dtype=torch.float32 if is_cosmos3 else torch.bfloat16)
             cycle_position = micro_step % cfg.gradient_accumulation_steps
             cycle_start = micro_step - cycle_position
             accumulation_target = min(
@@ -517,7 +567,11 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
             fwd_bwd_time += time.perf_counter() - fwd_bwd_start
 
             if should_update:
-                grad_norm = model.clip_grad_norm_(cfg.optimizer.grad_clip_norm)
+                grad_norm = (
+                    clip_fsdp_sharded_grad_norm_(model, cfg.optimizer.grad_clip_norm)
+                    if is_cosmos3
+                    else model.clip_grad_norm_(cfg.optimizer.grad_clip_norm)
+                )
                 optimizer.step()
                 if lr_scheduler is not None:
                     lr_scheduler.step()

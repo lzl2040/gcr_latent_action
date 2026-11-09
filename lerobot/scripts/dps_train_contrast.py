@@ -18,7 +18,6 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any, Sequence
 
-import deepspeed
 import torch
 from termcolor import colored
 from torch import distributed as dist
@@ -361,6 +360,8 @@ def _load_stage2_resume_policy_config(
 
 @parser.wrap()
 def train(cfg: ContrastiveTrainPipelineConfig):
+    import deepspeed
+
     cfg.validate()
     _load_stage2_resume_policy_config(cfg)
     if cfg.policy.type == "qwen3vl_mot":

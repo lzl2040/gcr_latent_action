@@ -332,6 +332,14 @@ def wrap_policy_with_fsdp(
 ) -> tuple[FullyShardedDataParallel, FSDPWrapSummary]:
     config.validate()
     wrap_modules = find_fsdp_wrap_modules(policy, config.min_wrap_params)
+    is_cosmos3 = getattr(getattr(policy, "config", None), "type", None) in ("cosmos3_nano", "cosmos3_edge")
+    fp32_wrap_ids = set()
+    if is_cosmos3:
+        # Native timestep projections explicitly disable autocast and must keep FP32 weights.
+        timestep_name = "model.network.time_embedder"
+        timestep_module = policy.get_submodule(timestep_name)
+        wrap_modules = (*wrap_modules, (timestep_name, timestep_module))
+        fp32_wrap_ids.add(id(timestep_module))
     wrap_ids = {id(module) for _, module in wrap_modules}
     frozen_parameters = tuple(
         parameter for parameter in policy.parameters() if not parameter.requires_grad
@@ -348,12 +356,25 @@ def wrap_policy_with_fsdp(
     mixed_precision = MixedPrecision(
         param_dtype=torch.bfloat16,
         reduce_dtype=torch.bfloat16,
-        buffer_dtype=torch.bfloat16,
+        buffer_dtype=None if is_cosmos3 else torch.bfloat16,
         keep_low_precision_grads=True,
     )
+
+    def wrapping_policy(module):
+        if id(module) in fp32_wrap_ids:
+            return {
+                "mixed_precision": MixedPrecision(
+                    param_dtype=None,
+                    reduce_dtype=torch.float32,
+                    buffer_dtype=None,
+                    keep_low_precision_grads=True,
+                )
+            }
+        return id(module) in wrap_ids
+
     fsdp_model = FullyShardedDataParallel(
         policy,
-        auto_wrap_policy=CustomPolicy(lambda module: id(module) in wrap_ids),
+        auto_wrap_policy=CustomPolicy(wrapping_policy),
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
         mixed_precision=mixed_precision,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
@@ -371,6 +392,29 @@ def wrap_policy_with_fsdp(
         replicated_frozen_parameters=replicated_frozen_parameters,
     )
     return fsdp_model, summary
+
+
+@torch.no_grad()
+def clip_fsdp_sharded_grad_norm_(
+    model: FullyShardedDataParallel,
+    max_norm: float,
+) -> torch.Tensor:
+    """Clip fully sharded trainable gradients, including native FP32 timestep weights."""
+    gradients = [
+        parameter.grad
+        for parameter in model.parameters()
+        if parameter.requires_grad and parameter.grad is not None
+    ]
+    device = next(model.parameters()).device
+    squared_norm = torch.zeros((), device=device, dtype=torch.float32)
+    for gradient in gradients:
+        squared_norm.add_(torch.linalg.vector_norm(gradient, dtype=torch.float32).square())
+    dist.all_reduce(squared_norm, op=dist.ReduceOp.SUM, group=model.process_group)
+    norm = squared_norm.sqrt()
+    coefficient = (max_norm / (norm + 1e-6)).clamp(max=1.0)
+    for gradient in gradients:
+        gradient.mul_(coefficient)
+    return norm
 
 
 def _checkpoint_options() -> StateDictOptions:

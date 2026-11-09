@@ -33,6 +33,7 @@ from lerobot.common.utils.fsdp_training import (
     _run_checkpoint_phase,
     _verify_fsdp_checkpoint,
     _verify_model_checkpoint,
+    clip_fsdp_sharded_grad_norm_,
     convert_policy_to_fp8,
     create_checkpoint_process_group,
     find_fsdp_wrap_modules,
@@ -80,6 +81,29 @@ class _Policy(nn.Module):
 class _LocalShard:
     def __init__(self, tensor: torch.Tensor) -> None:
         self.tensor = tensor
+
+
+def test_mixed_precision_sharded_gradient_norm_reduces_before_clipping(monkeypatch):
+    model = nn.Module()
+    model.a = nn.Parameter(torch.zeros(1, dtype=torch.bfloat16))
+    model.b = nn.Parameter(torch.zeros(1, dtype=torch.float32))
+    model.a.grad = torch.tensor([3.0], dtype=torch.bfloat16)
+    model.b.grad = torch.tensor([4.0], dtype=torch.float32)
+    model.process_group = object()
+
+    def reduce_shards(value, *, op, group):
+        assert value.dtype == torch.float32
+        assert value.item() == 25.0
+        assert op == torch.distributed.ReduceOp.SUM
+        assert group is model.process_group
+        value.mul_(2)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", reduce_shards)
+    norm = clip_fsdp_sharded_grad_norm_(model, 1.0)
+    torch.testing.assert_close(norm, torch.tensor(50.0).sqrt())
+    scale = 1 / (50.0**0.5 + 1e-6)
+    torch.testing.assert_close(model.a.grad, torch.tensor([3 * scale], dtype=torch.bfloat16))
+    torch.testing.assert_close(model.b.grad, torch.tensor([4 * scale]))
 
 
 class _ShardedTensorLike(torch.Tensor):

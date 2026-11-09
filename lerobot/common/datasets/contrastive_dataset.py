@@ -164,7 +164,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         policy_cfg = cfg.policy
         self.rgb_augmentation = None
         if (
-            getattr(policy_cfg, "type", None) == "qwen3vl_mot"
+            getattr(policy_cfg, "type", None) in ("qwen3vl_mot", "cosmos3_nano", "cosmos3_edge")
             and cfg.dataset.image_transforms.enable
         ):
             self.rgb_augmentation = make_temporal_rgb_transform(cfg.dataset.image_transforms.img_size)
@@ -173,7 +173,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 "no rotation; shared over each camera window, disabled for validation."
             )
         self.full_training_coverage = False
-        if getattr(policy_cfg, "type", None) == "qwen3vl_mot":
+        if getattr(policy_cfg, "type", None) in ("qwen3vl_mot", "cosmos3_nano", "cosmos3_edge"):
             cfg.stage = resolve_stage2_training_stage(getattr(cfg, "stage", "auto"), data_mix)
             self.full_training_coverage = cfg.stage == "finetune"
         self.validation_split = "training" if self.full_training_coverage else "heldout"
@@ -518,10 +518,13 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         )
         if self.full_training_coverage:
             logger.info(
-                "Full-coverage finetuning: %d windows including padded episode tails, "
+                "Full-coverage finetuning: %d windows (%s), "
                 "%d episodes; validation_split=training. "
                 "Validation episodes remain in training; metrics are not held-out generalization.",
-                self.total_pool_anchors, self.total_source_episodes,
+                self.total_pool_anchors,
+                "unpadded native windows" if cfg.policy.type in ("cosmos3_nano", "cosmos3_edge")
+                else "including padded episode tails",
+                self.total_source_episodes,
             )
         logger.info(
             "Sample-start pool: fingerprint=%s anchors=%d source_frames=%d table=%s",

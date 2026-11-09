@@ -1,5 +1,7 @@
 import json
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -166,3 +168,20 @@ def test_strict_meta_loading_action_reinit_and_saved_resume(config, stats, tmp_p
     save_file(state, saved / "model.safetensors")
     with pytest.raises(RuntimeError, match="strict load"):
         modeling.Cosmos3NanoPolicy.from_pretrained(saved)
+
+
+def test_fsdp_resume_restores_saved_shape_and_rejects_contract_changes(config, tmp_path):
+    from lerobot.scripts.fsdp_train_contrast import _load_cosmos3_resume_policy_config
+
+    saved = deepcopy(config)
+    saved.max_action_dim = 20
+    saved._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True, policy=deepcopy(config), output_dir=tmp_path, use_policy_training_preset=False,
+    )
+    _load_cosmos3_resume_policy_config(cfg, args=[])
+    assert cfg.policy.max_action_dim == 20
+    assert cfg.policy.load_action_modules
+    cfg.policy = deepcopy(config)
+    with pytest.raises(ValueError, match="max_action_dim"):
+        _load_cosmos3_resume_policy_config(cfg, args=["--policy.max_action_dim=64"])
