@@ -210,7 +210,25 @@ def test_dcp_eval_restores_changed_action_width_and_training_processor(config, s
     trained.save_processor(run)
     checkpoint = run / "checkpoint_00000001"
     dcp.save({"model": trained.state_dict()}, checkpoint_id=checkpoint / "model", no_dist=True)
-    restored = load_policy(run, torch.device("cpu"), checkpoint)
+    original_loader = modeling.Cosmos3NanoPolicy.from_pretrained
+    original_to = modeling.Cosmos3NanoPolicy.to
+    transfers = []
+
+    def host_only_loader(*args, **kwargs):
+        if str(kwargs["map_location"]).startswith("cuda"):
+            raise RuntimeError("The direct CUDA safetensors path is unavailable.")
+        return original_loader(*args, **kwargs)
+
+    def transfer(policy, *args, **kwargs):
+        if args and str(args[0]).startswith("cuda"):
+            transfers.append(args[0])
+            return policy
+        return original_to(policy, *args, **kwargs)
+
+    monkeypatch.setattr(modeling.Cosmos3NanoPolicy, "from_pretrained", host_only_loader)
+    monkeypatch.setattr(modeling.Cosmos3NanoPolicy, "to", transfer)
+    restored = load_policy(run, torch.device("cuda"), checkpoint)
+    assert transfers == [torch.device("cuda")]
     torch.testing.assert_close(
         restored.model.network.action2llm.fc.weight, trained.model.network.action2llm.fc.weight,
     )

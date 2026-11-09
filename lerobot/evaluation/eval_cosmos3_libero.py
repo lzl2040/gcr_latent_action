@@ -124,11 +124,13 @@ def load_policy(model_dir, device, dcp_checkpoint=None):
     if dcp_checkpoint:
         # DCP restores every action tensor after bootstrapping the shared backbone.
         config.load_action_modules = False
+    # Avoid the safetensors direct-CUDA path, which can fail during a new worker's startup.
     policy = Cosmos3NanoPolicy.from_pretrained(
         config.pretrained_path if dcp_checkpoint else model_dir,
         config=config,
-        map_location=device,
+        map_location="cpu",
     )
+    policy.to(device)
     if dcp_checkpoint:
         load_dcp_model(policy, dcp_checkpoint / "model")
         policy.config.pretrained_path = str(model_dir)
