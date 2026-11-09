@@ -9,6 +9,8 @@
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
+另有已完成的 **LIBERO-Pro 2,000 条诊断评测**，见下方独立记录，
+不并入上述原版 LIBERO 份数、rollout 数或原版成功率。
 
 官方 Cosmos3/LaWAM 对照、实际微调配置与性能归因限制，见
 [LIBERO 微调审计](../libero_finetuning_audit.md)；该审计不增加正式 rollout 计数。
@@ -379,6 +381,123 @@ Environment manifest: 902b84ecd85094b3b995655bfe9b5ba2b06037826b0731cad084c21ecc
 200-task catalog:     1ff0f9374c8fc0f6df65e5eb70e59aad72311e7559856b073d1428ae6f943d20
 Native CPU report:    7cf99fa7b2fc0945f6f126c1f1e242b5c94e0874e958b85f8686f5d5222059a9
 ```
+
+### baseline 16k：LIBERO-Pro 五类全量诊断结果（每变体十次）
+
+2026-11-09 00:19:24 UTC 启动，13:17:11 UTC 完成，
+GPU 1/2/3 三个互斥任务分片均零退出，全部 **2,000/2,000** 次通过工件验证。
+权重锁定为原版 LIBERO 的三个已测范围等权均值选出的
+`/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step16k/model`，
+原版完整任务清单为 793/800（99.125%）；不使用 Pro 分数重选权重。
+模型依然是无 Stage 1 的 MLP/raw-space、joint-only、latent loss 为零但保留十六个 query，
+不是 wo_latent，也不是官方原生 Cosmos3 baseline。
+
+**最终成功率为 54.50%（1,090/2,000），失败 910 次。**
+每套为十个基础任务 × 五类单因素 × 每个扰动版本十个固定初态＝500 次，
+四套合计 2,000 次；不是每个基础任务跑 500 次。
+二百个任务变体各十个唯一 trial，未重复、未漏项。
+`evaluation_complete=true`、`benchmark_task_coverage_complete=true`、
+`all_artifacts_valid=true`，但 **`official_50_trials_per_task=false`**。
+这是用户指定的十次诊断，不是每任务五十次的官方标准成绩；
+Environment 使用前述本地新生成的固定初态，不冒充官方预打包资源。
+
+| 扰动类别 | 成功次数 | 成功率 |
+| --- | --- | --- |
+| Object / 物体替换 | 341/400 | **85.25%** |
+| Position / 位置交换 | 61/400 | **15.25%** |
+| Semantic / 语言改写 | 393/400 | **98.25%** |
+| Task / 目标变化 | 88/400 | **22.00%** |
+| Environment / 环境替换 | 207/400 | **51.75%** |
+| **全部五类** | **1,090/2,000** | **54.50%** |
+
+| 基础 suite | 成功次数 | 成功率 |
+| --- | --- | --- |
+| Spatial | 337/500 | **67.40%** |
+| Object | 249/500 | **49.80%** |
+| Goal | 255/500 | **51.00%** |
+| LIBERO-10 | 249/500 | **49.80%** |
+
+完整 suite × 扰动矩阵；每格分母 100，各套总计分母 500：
+
+| Suite | Object | Position | Semantic | Task | Environment | 总计 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Spatial | 98/100 | 26/100 | 97/100 | 58/100 | 58/100 | 337/500 |
+| Object | 92/100 | 3/100 | 100/100 | 10/100 | 44/100 | 249/500 |
+| Goal | 83/100 | 25/100 | 97/100 | 10/100 | 40/100 | 255/500 |
+| LIBERO-10 | 68/100 | 7/100 | 99/100 | 10/100 | 65/100 | 249/500 |
+
+任务编号 0–9，每格为该扰动版本成功次数，分母均为 10：
+
+| Suite | 扰动 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Spatial | Object | 10 | 10 | 10 | 10 | 10 | 9 | 10 | 10 | 9 | 10 |
+| Object | Object | 5 | 10 | 10 | 9 | 9 | 10 | 10 | 9 | 10 | 10 |
+| Goal | Object | 10 | 10 | 10 | 3 | 5 | 10 | 6 | 10 | 9 | 10 |
+| LIBERO-10 | Object | 0 | 10 | 10 | 10 | 10 | 7 | 10 | 0 | 10 | 1 |
+| Spatial | Position | 2 | 0 | 10 | 0 | 3 | 1 | 0 | 0 | 10 | 0 |
+| Object | Position | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Goal | Position | 0 | 0 | 0 | 8 | 0 | 0 | 0 | 8 | 0 | 9 |
+| LIBERO-10 | Position | 0 | 2 | 0 | 0 | 0 | 5 | 0 | 0 | 0 | 0 |
+| Spatial | Semantic | 9 | 10 | 10 | 10 | 9 | 10 | 10 | 10 | 9 | 10 |
+| Object | Semantic | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 |
+| Goal | Semantic | 10 | 10 | 10 | 9 | 8 | 10 | 10 | 10 | 10 | 10 |
+| LIBERO-10 | Semantic | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 10 | 9 | 10 |
+| Spatial | Task | 1 | 10 | 0 | 6 | 0 | 10 | 10 | 10 | 1 | 10 |
+| Object | Task | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Goal | Task | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 10 | 0 | 0 |
+| LIBERO-10 | Task | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 10 | 0 |
+| Spatial | Environment | 9 | 0 | 10 | 7 | 1 | 3 | 10 | 7 | 10 | 1 |
+| Object | Environment | 4 | 9 | 0 | 3 | 1 | 5 | 4 | 0 | 8 | 10 |
+| Goal | Environment | 6 | 10 | 0 | 0 | 5 | 0 | 10 | 0 | 9 | 0 |
+| LIBERO-10 | Environment | 10 | 10 | 9 | 0 | 10 | 6 | 10 | 10 | 0 | 0 |
+
+**Environment 无变化项的影响：** 保留上游硬编码 `living_room_table` 后，
+LIBERO-10 的任务 0/1/4/6/7 共五个 BDDL 未发生改变，
+这五个任务合计 **50/50** 成功。完整计划的主分数仍为 1,090/2,000；
+另报实际发生 Environment BDDL 变化的三十五个任务：
+**157/350＝44.86%**，而不是混合后的 207/400＝51.75%。
+若仅从总统计中剔除这五十条无变化 Environment trial，
+得到 **1,040/1,950＝53.33%**；这是解释性附加统计，不是另一个官方协议或重选后的主分数。
+不假定其他类别没有无变化项，也未据此替换原清单或重跑模型。
+
+结果表明，对同义措辞变化的成功率高，但在位置和目标改变后明显下降；
+语言改写不改变原目标，因此 98.25% 不能单独证明模型能根据语言目标重新规划。
+这些汇总与较弱的空间/目标泛化相符，但尚未逐例视频审计，
+不能仅凭成功率断言是在记忆训练轨迹，也不能归因于 Stage 1、latent 开关或某个单一结构。
+原版 99.125% 与 Pro 54.50% 的 **44.625 个百分点**差异只是描述性对照：
+任务变体、初态、trial 数与分片 RNG 均不相同，不是逐 trial 配对的因果实验。
+
+保持上述经典源码、五类单因素、实际 BDDL 指令、各扰动任务对应固定初态，
+BF16 双 `256×256` RGB、20 Hz、完整静置十步、标准 220/280/300/520 上限、
+预测三十二步/执行十步、Flow 二十步、原始训练 mean/std。
+三个分片为 670/670/660 次，成功数 391/326/373，
+完整合并后四套等权均值、五类等权均值和 trial 加权总分均为 54.50%。
+策略、查询开关、模型配置及选定 checkpoint 未改动，不训练、不覆盖已有结果。
+
+队列完成前已逐条核验二千个 action 数组的 shape/有限值和 SHA256、
+910 个失败视频、任务/初态唯一性、三分片真实首轮 rollout、
+严格 DCP/MLP 日志、模型配置/归一化/源码/资源 pins 和三进程零退出。
+完成后再次只读核对运行时版本与 pins、三个 raw hash、二百个十次任务变体、
+精确合并的全部 episode、910 个非空失败视频和原版选权重来源 receipt，
+没有重复评测或重新读取大权重。
+汇总认证时间为 `2026-11-09T13:17:11.832614+00:00`；
+GPU 1/2/3 已释放，GPU 0 的其他工作未受干扰。
+
+持久工件位于 session `files/libero_baseline_pro_10trials_20261108/`。
+最终 `summary.json` SHA256：
+`4b8d6d9d0cddf6dd6a79541d95ab203da8899160f8db789cee4e6afdeda0b804`；
+Pro `plan.json` SHA256：
+`cd0510a61e723ac70954aba7fe0f5e8549e5431f796d001189e3d090ed0b2b70`。
+原版最终 793/800 的汇总 SHA256 为
+`21c5ddeb86f2ee67ac1515a54ea132854a165b13c383f1e27cc7a7f967d784f4`，
+Environment、二百任务 catalog 和 native CPU 报告的 hash 见上一节。
+原始 Pro 结果单独索引，不并入本文原版的 164 份／24,580 次统计：
+
+| 分片 | GPU | 成功次数 | 原始结果文件 | SHA256 |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | 391/670 | `outputs/evaluation/libero_pro/baseline_selected_10trials_20261108_shard0/results.json` | `a24b306cd5fb732a917d2cf458d1ccf06770616bf112a71c2518a28e4d72cb52` |
+| 1 | 2 | 326/670 | `outputs/evaluation/libero_pro/baseline_selected_10trials_20261108_shard1/results.json` | `8339b58c7b46baafb4372e063f2b14f6d920c4204deedab58f17404ab55f1f73` |
+| 2 | 3 | 373/660 | `outputs/evaluation/libero_pro/baseline_selected_10trials_20261108_shard2/results.json` | `796e005b1bff1fe74a4c0d55f81ed25828b5929b35cb3f8c9db5e368899ac590` |
 
 ## 历史评测设置
 
