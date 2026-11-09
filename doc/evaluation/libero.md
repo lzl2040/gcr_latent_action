@@ -11,12 +11,12 @@
 以及下方单独保留的误拷权重评测。
 另有已完成的 **LIBERO-Pro 2,000 条诊断评测**，见下方独立记录，
 不并入上述原版 LIBERO 份数、rollout 数或原版成功率。
-原生 Cosmos3 的独立批量协议已完成两套、400 次，另见下一节，不混入上述历史统计。
+原生 Cosmos3 的独立批量协议已完成三套、600 次，另见下一节，不混入上述历史统计。
 
 官方 Cosmos3/LaWAM 对照、实际微调配置与性能归因限制，见
 [LIBERO 微调审计](../libero_finetuning_audit.md)；该审计不增加正式 rollout 计数。
 
-## 原生 Cosmos3 Nano：官方 LIBERO 权重评测（两套完成，剩余运行中）
+## 原生 Cosmos3 Nano：官方 LIBERO 权重评测（三套完成，LIBERO-10 运行中）
 
 2026-11-09 在当前 `qwen3vl_mot_pretrained_generation` 分支完成官方原生模型移植，
 并启动独立评测。这不是本文的 Qwen3VL-MoT MLP baseline，也不是使用 Cosmos 视频编码器的自定义模型。
@@ -47,7 +47,7 @@ LIBERO-10 使用加载修复 commit `7dba50a493aadeaea860fa3fa595671cdff99a3e`�
 | Suite | 计划次数 | GPU | 状态 | 输出目录 |
 |---|---:|---:|---|---|
 | Spatial | 200 | 1 | 已完成：200/200，100.00% | `20261109_official_spatial_20` |
-| Object | 200 | 2 | 运行中 | `20261109_official_object_20` |
+| Object | 200 | 2 | 已完成：198/200，99.00% | `20261109_official_object_20` |
 | Goal | 200 | 3 | 已完成：197/200，98.50% | `20261109_official_goal_20` |
 | LIBERO-10 | 200 | 1 | 启动加载故障修复后运行中 | `20261109_official_10_20_cpu_load` |
 
@@ -55,10 +55,11 @@ LIBERO-10 使用加载修复 commit `7dba50a493aadeaea860fa3fa595671cdff99a3e`�
 每条轨迹保留实际执行动作、原生预测 chunk，失败时另存观察视频。
 完整初态哈希、权重下载哈希认证、采样及精度设置写入结果，最终成绩只按完整记录计算。
 
-Spatial 于 18:10:31 UTC、Goal 于 18:10:56 UTC 完成。
+Spatial 于 18:10:31 UTC、Goal 于 18:10:56 UTC、Object 于 18:21:30 UTC 完成。
 已核验各十任务 × 二十唯一初态、全部动作/原生 chunk 有限、失败视频存在，
-400 条轨迹重新解码后的控制量与保存的实际控制量最大误差为 0。
-Goal 失败为 task 3 两次、task 4 一次；未完成的 Object/LIBERO-10 不纳入最终均值。
+600 条轨迹重新解码后的控制量与保存的实际控制量最大误差为 0。
+Goal 失败为 task 3 两次、task 4 一次；Object 失败为 task 3、task 7 各一次。
+前三套合计 595/600（99.1667%），不是四套完整成绩；LIBERO-10 尚未完成，不报告最终均值。
 
 LIBERO-10 首次接续在权重加载时遇到 safetensors 直接 CUDA 加载的
 `CUDA error: invalid argument`，尚未产生任何 rollout。
