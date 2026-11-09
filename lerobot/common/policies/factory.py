@@ -26,6 +26,7 @@ from lerobot.common.envs.utils import env_to_policy_features
 from lerobot.common.policies.ace.configuration_robo_clip import RobotCLIPConfig
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.act.configuration_act import ACTConfig
+from lerobot.common.policies.cosmos3.configuration_cosmos3 import Cosmos3EdgeConfig, Cosmos3NanoConfig
 from lerobot.common.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.common.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
@@ -39,7 +40,11 @@ from lerobot.configs.types import FeatureType
 
 def get_policy_class(name: str) -> PreTrainedPolicy:
     """Get the policy's class and config class given a name (matching the policy class' `name` attribute)."""
-    if name == "tdmpc":
+    if name in ("cosmos3_nano", "cosmos3_edge"):
+        from lerobot.common.policies.cosmos3.modeling_cosmos3 import Cosmos3EdgePolicy, Cosmos3NanoPolicy
+
+        return Cosmos3NanoPolicy if name == "cosmos3_nano" else Cosmos3EdgePolicy
+    elif name == "tdmpc":
         from lerobot.common.policies.tdmpc.modeling_tdmpc import TDMPCPolicy
 
         return TDMPCPolicy
@@ -90,7 +95,9 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
 
 
 def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
-    if policy_type == "tdmpc":
+    if policy_type in ("cosmos3_nano", "cosmos3_edge"):
+        return (Cosmos3NanoConfig if policy_type == "cosmos3_nano" else Cosmos3EdgeConfig)(**kwargs)
+    elif policy_type == "tdmpc":
         return TDMPCConfig(**kwargs)
     elif policy_type == "diffusion":
         return DiffusionConfig(**kwargs)
@@ -187,6 +194,22 @@ def make_policy(
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
     cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
     kwargs["config"] = cfg
+    if cfg.type in ("cosmos3_nano", "cosmos3_edge"):
+        if weight_pt_path and weight_pt_path != cfg.pretrained_path:
+            raise ValueError("Cosmos3 uses its native pretrained_path directory, not a legacy .pt weight file.")
+        if ds_meta is not None:
+            cfg._runtime_dataset_meta = ds_meta
+            names = ds_meta.features.get("action", {}).get("names")
+            if isinstance(names, dict):
+                names = names.get("action")
+            if isinstance(names, list) and all(isinstance(name, str) for name in names):
+                cfg.action_feature_names = names
+        if cfg.pretrained_path:
+            return policy_cls.from_pretrained(
+                cfg.pretrained_path, config=cfg, dataset_stats=kwargs.get("dataset_stats"),
+                revision=cfg.pretrained_revision, map_location=device, strict=True,
+            )
+        return policy_cls(**kwargs)
     policy = policy_cls(**kwargs)
     print("training from scratch")
 

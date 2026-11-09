@@ -1,6 +1,8 @@
 from .ace.configuration_robo_clip import RobotCLIPConfig as RobotCLIPConfig
 from .ace.configuration_robo_contrast import RoboContrastConfig as RoboContrastConfig
 from .act.configuration_act import ACTConfig as ACTConfig
+from .cosmos3.configuration_cosmos3 import Cosmos3EdgeConfig as Cosmos3EdgeConfig
+from .cosmos3.configuration_cosmos3 import Cosmos3NanoConfig as Cosmos3NanoConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
 from .latent_action.configuration_latent_action import LatentActionConfig as LatentActionConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config

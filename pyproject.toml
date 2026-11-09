@@ -101,6 +101,14 @@ pi0 = [
     "torchao>=0.15.0,<0.16.0",
     "safetensors>=0.4.0",
 ]
+# Cosmos3 follows the pinned upstream implementation, not the Transformers 4 MoT API.
+# Install in a separate environment; do not combine this extra with contrast or pi0.
+cosmos3 = [
+    "transformers>=5.22.0,<5.23.0",
+    "diffusers>=0.38.0,<0.40.0",
+    "safetensors>=0.4.3",
+    "accelerate>=1.14.0,<2.0.0",
+]
 pusht = ["gym-pusht>=0.1.5 ; python_version < '4.0'"]
 stretch = [
     "hello-robot-stretch-body>=0.7.27 ; python_version < '4.0' and sys_platform == 'linux'",
