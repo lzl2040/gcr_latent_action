@@ -1,11 +1,11 @@
 # LIBERO 评测记录
 
-更新日期：2026-11-08。
+更新日期：2026-11-09。
 
-本文汇总已完成的有效正式评测，共 155 份结果、23,440 次 rollout：
-95 份完整 suite 评测、19,000 次，以及 60 份已完成的任务子集评测、4,440 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 113 份、15,040 次，
-包括 53 份完整 suite 和 60 份任务子集，分开记录。
+本文汇总已完成的有效正式评测，共 164 份结果、24,580 次 rollout：
+98 份完整 suite 评测、19,600 次，以及 66 份已完成的任务子集评测、4,980 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 122 份、16,180 次，
+包括 56 份完整 suite 和 66 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -3449,6 +3449,145 @@ identity SHA256 为
 | Spatial | `85e191d04eb8a5d5b61073bfb9e7cf0a3c75f823c35888434bd9b29a538b8a57` |
 | Goal | `6ed751b7614129ff6c879cd439f8d6e1c22eeb565ae00cb180f03a831345a895` |
 
+### 1107_basline_4nodes_8gpu：16k/18k 对比、选权重及 16k 四套任务补齐
+
+2026-11-08 至 2026-11-09 完成 baseline 的
+`/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step16k/model`
+和 `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step18k/model`。
+每份先测 Object 0–9 × 20、Spatial 4/6/9 × 20、Goal 0/3/4/9 × 20，共 340 次；
+GPU 分配为 Object **1**、Spatial **2**、Goal **3**，每份三套同时运行，
+16k 完整验证后再测 18k，不使用 GPU 0。
+保持上一节 12k 的 MLP/raw-space 模型与严格 DCP 加载、同一原样策略配置、
+`250d71684480abbef7c72735944b5ea347358547` 隔离源码、训练归一化及外部评测协议；
+两份各有 32 个完整分片、1,358 个 BF16 tensor，四个参数探针均区别于 12k 和彼此，
+全部权重文件 SHA256 已归档，不是重复拷贝。
+
+无 Stage 1 迁移、teacher/projection 或 physical Transformer；
+仍为 trainable state/action MLP、raw flow、joint-only，
+`latent_action_prediction_enabled=true`，十六个 query 保留，latent loss 为零。
+没有把它改成 wo_latent，也未合入 MLP 实现到本分支。
+BF16、双 `256×256` RGB、预测 32 步/执行 10 步、Flow 20 步、shift 5、
+静置 10 步、每任务前二十个固定初态、每个 suite 启动一次 seed0 后连续消耗 RNG，
+仅存失败视频，不解码预测视频。
+
+用户明确选择按 **Object、Goal 困难、Spatial 困难三个范围的成功率等权平均**
+选权重，而不是 340 次总成功率；同分先比较困难成功数，再取较早的 checkpoint。
+
+| 选权重范围 | 12k | 16k | 18k |
+| --- | --- | --- | --- |
+| Object 全套 | 99.50%（199/200） | **100.00%（200/200）** | 99.50%（199/200） |
+| Spatial 困难 | 96.67%（58/60） | 96.67%（58/60） | 96.67%（58/60） |
+| Goal 困难 | 100.00%（80/80） | 100.00%（80/80） | 98.75%（79/80） |
+| 困难合计（辅助指标） | 98.57%（138/140） | 98.57%（138/140） | 97.86%（137/140） |
+| 340 次总分（不是选权重指标） | 99.12%（337/340） | 99.41%（338/340） | 98.82%（336/340） |
+| **三个范围等权均值** | 98.722222% | **98.888889%** | 98.305556% |
+
+精确均值分别为 `1777/1800`、`89/90`、`3539/3600`，自动选择 **16k**，
+不使用随后 LIBERO-10 或 Pro 的分数重选。16k 比 12k 的均值仅高
+**0.166667 个百分点**，来自 Object 多一次成功；两者困难合计相同。
+这是当前单种子、小 checkpoint 集的选择结果，不能据此证明统计显著提升或 18k 过拟合。
+
+两份新权重逐任务结果（每项分母均为 20）：
+
+| Suite | Task ID | 16k | 18k |
+| --- | --- | --- | --- |
+| Object | 0 | 20/20 | 20/20 |
+| Object | 1 | 20/20 | 20/20 |
+| Object | 2 | 20/20 | 20/20 |
+| Object | 3 | 20/20 | 20/20 |
+| Object | 4 | 20/20 | 20/20 |
+| Object | 5 | 20/20 | 20/20 |
+| Object | 6 | 20/20 | 20/20 |
+| Object | 7 | 20/20 | 20/20 |
+| Object | 8 | 20/20 | 20/20 |
+| Object | 9 | 20/20 | 19/20 |
+| Spatial | 4 | 19/20 | 19/20 |
+| Spatial | 6 | 20/20 | 20/20 |
+| Spatial | 9 | 19/20 | 19/20 |
+| Goal | 0 | 20/20 | 20/20 |
+| Goal | 3 | 20/20 | 19/20 |
+| Goal | 4 | 20/20 | 20/20 |
+| Goal | 9 | 20/20 | 20/20 |
+
+选定 16k 后，GPU 1 测 LIBERO-10 全套 200 次、GPU 2 测剩余 Spatial
+0/1/2/3/5/7/8 共 140 次、GPU 3 测剩余 Goal 1/2/5/6/7/8 共 120 次。
+三套并行，新增 **455/460（98.913043%）**：
+LIBERO-10 196/200，Spatial 剩余 139/140，Goal 剩余 120/120。
+LIBERO-10 使用其训练集的 mean/std 和 520 步标准上限；其余配置与对应原版 suite 相同。
+2026-11-09 00:18:16 UTC 完成汇总认证，四套十任务清单均完整、每任务二十个唯一固定初态：
+
+| 选定 16k 的完整任务范围 | 成功次数 | 成功率 |
+| --- | --- | --- |
+| Object | 200/200 | **100.00%** |
+| Goal | 200/200 | **100.00%** |
+| Spatial | 197/200 | **98.50%** |
+| LIBERO-10 | 196/200 | **98.00%** |
+| **四套合计／四套等权均值** | **793/800** | **99.125%** |
+
+Goal 和 Spatial 由先测困难任务与后测剩余任务拼接，两个子组分别启动 seed0，
+不是一次按 0–9 顺序连续消耗 RNG 的完整 suite 运行。
+Object 与 LIBERO-10 是各自一次完整运行。
+这些是原 LIBERO 四套任务的 20-trial 结果，不是官方常用 50-trial 协议，
+也不能直接与原生 Cosmos3/LaWAM 官方表格做严格排序。
+
+| 16k 完整清单的 Task ID | Object | Goal | Spatial | LIBERO-10 |
+| --- | --- | --- | --- | --- |
+| 0 | 20/20 | 20/20 | 20/20 | 20/20 |
+| 1 | 20/20 | 20/20 | 20/20 | 20/20 |
+| 2 | 20/20 | 20/20 | 20/20 | 20/20 |
+| 3 | 20/20 | 20/20 | 20/20 | 20/20 |
+| 4 | 20/20 | 20/20 | 19/20 | 20/20 |
+| 5 | 20/20 | 20/20 | 19/20 | 20/20 |
+| 6 | 20/20 | 20/20 | 20/20 | 19/20 |
+| 7 | 20/20 | 20/20 | 20/20 | 20/20 |
+| 8 | 20/20 | 20/20 | 20/20 | 17/20 |
+| 9 | 20/20 | 20/20 | 19/20 | 20/20 |
+
+选定 16k 的七个失败（task/trial 均从 0 开始）为：
+Spatial `(4,1)`、`(9,11)`、`(5,0)`；
+LIBERO-10 `(6,2)`、`(8,1)`、`(8,2)`、`(8,9)`。
+18k 初轮四个失败为 Object `(9,14)`、Spatial `(4,1)`、`(9,1)`、Goal `(3,17)`。
+全部失败视频非空；未逐例回放分析阶段，不能猜测具体失败原因。
+完整工件验证已核验所有 1,140 条新增 action 数组有限值、
+唯一任务/初态、协议、配置/源码/归一化/权重 pins、真实 MLP 与 query 日志及零退出；
+之后再次只读核验九个原始结果的 hash/计数、视频与 793/800 的合并算术。
+不重复计数合并后的 Goal/Spatial，也不将旧 12k 340 次再次加入新增统计。
+原版队列成功退出；后续独立 Pro 队列锁定同一 16k，须先确认原版认证与 GPU 1/2/3
+释放稳定六十秒才启动，此节不计入尚未完成的 Pro 成绩。
+Pro 已于 2026-11-09 00:19:24 UTC 在 GPU 1/2/3 自动接续，
+三份 16k 严格 DCP 恢复、保存配置契约及首个真实有限值 7D rollout 均确认；
+仍为进行中的 2,000 条诊断队列，没有最终 Pro 分数。
+
+全部控制工件在 session `files/libero_baseline_mlp_16k18k_select_20261108/`，
+含 `step16/`、`step18/`、`backfill/`、选权重 receipt 与完整汇总。
+关键 SHA256：
+
+| 工件 | SHA256 |
+| --- | --- |
+| 三卡与补测 plan | `3b2cd336913850c28e86293da590d85b8c59066c790c78dd11296881f361597c` |
+| 16k summary | `4c1792c2053952e0266a9a8c145f6e1fddd7b91630158f19d43823d25dc2dc53` |
+| 18k summary | `417edd13f7f96ad83364d98cb3d2840549633a519fa6b83eddf42002f5038eb5` |
+| selection | `e766b46fdcdb6d83bf163ea92dac1eb79b77a7632c5bec9dc1b0177a6e9114bd` |
+| backfill summary | `78b0764a678cfb8b782409a9d85561d2ec2188b607b81c6525ce3f5f65baef35` |
+| final summary | `21c5ddeb86f2ee67ac1515a54ea132854a165b13c383f1e27cc7a7f967d784f4` |
+| 16k preflight | `af367583e76efbc2695551f909ab8e20b1f4fb2be3823e19a96d7a182bdeca31` |
+| 18k preflight | `4595b79285dafc76206255d891c7dd114ac4edfa19d04def5622cc08b9882cc9` |
+| backfill preflight | `58ef252f6346ef80b7dacf9fec179264c19c7f239f1a03a0de90f223b546c04d` |
+
+九个新增原始结果文件的 SHA256：
+
+| 运行 | Suite | SHA256 |
+| --- | --- | --- |
+| 16k 初轮 | Object | `f398208a65abbd389c7fcfe0da5caa6ebc945310332147b444b64e75f4311b4f` |
+| 16k 初轮 | Spatial | `924ae55e3cd9bcea82bb9db1618407943cd9b920000555b027876648f3b25eaa` |
+| 16k 初轮 | Goal | `29f5e857ca2dffa01c11abe281fb74de906d71e3305cb6a5067865d1da8adda5` |
+| 18k 初轮 | Object | `ac963f0a36948ca5f3c8e5836e5318d390ed783d2bbc5165b3d1170f2e0cd4a2` |
+| 18k 初轮 | Spatial | `6d8e0821abb67610a2c97459e4d5463f5033c410b3d39725b6c50f2d95bb9956` |
+| 18k 初轮 | Goal | `9c990a829423135dba27840aa9129ed675588625b90df8e801505fd6279ca0e7` |
+| 16k 补测 | LIBERO-10 | `5462bd41ec2e682333a29ffb7f823390b66a62ebf49ef55c63bd89a9038b38be` |
+| 16k 补测 | Spatial | `27069c83d6ab6bc3001a9afa09d96de7e17ab1089bf2b19c46026464f707784d` |
+| 16k 补测 | Goal | `4c5976cc3f21305bdfb7d7f692b0cf1627237dae6ecd72ff7fcbbf035f458f1c` |
+
 ### 重复权重核验：目录标作 v5 16k，内容与 v4 shift2 16k 相同（不计入新增正式结果）
 
 2026-11-05 按用户要求，对
@@ -3594,6 +3733,8 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1107v7_4nodes_8gpu_wo_latent`（16k，关闭 latent-action） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107v7_4nodes_8gpu_wo_latent/step16k/model` |
 | `1107v7_4nodes_8gpu_wo_latent`（18k，关闭 latent-action） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107v7_4nodes_8gpu_wo_latent/step18k/model` |
 | `1107_basline_4nodes_8gpu`（12k，MLP/raw-space baseline，保留 queries） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step12k/model` |
+| `1107_basline_4nodes_8gpu`（16k，三范围均值选定，四套原版任务补齐） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step16k/model` |
+| `1107_basline_4nodes_8gpu`（18k，MLP/raw-space baseline，保留 queries） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step18k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。
@@ -3753,6 +3894,15 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1107_basline_4nodes_8gpu` | 12k | Object（MLP baseline，全套，200 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_12k_object_and_weak_tasks_two_gpu_run_seeded_20261108_object_20trials/results.json` |
 | `1107_basline_4nodes_8gpu` | 12k | Spatial（MLP baseline，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_12k_object_and_weak_tasks_two_gpu_run_seeded_20261108_spatial_20trials/results.json` |
 | `1107_basline_4nodes_8gpu` | 12k | Goal（MLP baseline，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_12k_object_and_weak_tasks_two_gpu_run_seeded_20261108_goal_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 16k | Object（MLP baseline，三卡初轮，全套 200 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_16k_object_and_weak_tasks_three_gpu_run_seeded_20261108_object_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 16k | Spatial（MLP baseline，三卡初轮，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_16k_object_and_weak_tasks_three_gpu_run_seeded_20261108_spatial_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 16k | Goal（MLP baseline，三卡初轮，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_16k_object_and_weak_tasks_three_gpu_run_seeded_20261108_goal_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 18k | Object（MLP baseline，三卡初轮，全套 200 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_18k_object_and_weak_tasks_three_gpu_run_seeded_20261108_object_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 18k | Spatial（MLP baseline，三卡初轮，任务 4/6/9，60 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_18k_object_and_weak_tasks_three_gpu_run_seeded_20261108_spatial_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 18k | Goal（MLP baseline，三卡初轮，任务 0/3/4/9，80 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_18k_object_and_weak_tasks_three_gpu_run_seeded_20261108_goal_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 16k | LIBERO-10（选定权重补测，全套 200 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_16k_remaining_goal_spatial_and_10_three_gpu_run_seeded_20261108_10_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 16k | Spatial（选定权重补测，剩余 0/1/2/3/5/7/8，140 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_16k_remaining_goal_spatial_and_10_three_gpu_run_seeded_20261108_spatial_20trials/results.json` |
+| `1107_basline_4nodes_8gpu` | 16k | Goal（选定权重补测，剩余 1/2/5/6/7/8，120 次） | `outputs/evaluation/libero/libero_baseline_1107_no_stage1_mlp_16k_remaining_goal_spatial_and_10_three_gpu_run_seeded_20261108_goal_20trials/results.json` |
 
 ### 误拷权重的原始产物（不计入正式结果）
 
