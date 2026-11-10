@@ -557,6 +557,44 @@ Environment、二百任务 catalog 和 native CPU 报告的 hash 见上一节。
 | 1 | 2 | 326/670 | `outputs/evaluation/libero_pro/baseline_selected_10trials_20261108_shard1/results.json` | `8339b58c7b46baafb4372e063f2b14f6d920c4204deedab58f17404ab55f1f73` |
 | 2 | 3 | 373/660 | `outputs/evaluation/libero_pro/baseline_selected_10trials_20261108_shard2/results.json` | `796e005b1bff1fe74a4c0d55f81ed25828b5929b35cb3f8c9db5e368899ac590` |
 
+### 官方 Cosmos3 Nano：LIBERO-Pro 五类评测启动记录
+
+2026-11-10 03:33:27 UTC 启动，使用官方
+`lerobot/Cosmos3-Nano-Policy-LIBERO@29563132da0815a4e034435ca55aaaf061ecb5ba`
+EMA 权重，不使用本地三步训练权重，也不根据 Pro 成绩重选模型。
+运行代码为当前分支提交 `967a3c70c83e2a10a68f36db1539ba24681f06a3`。
+这次评测**仍在运行，没有最终成功率**；不能将验收的两次成功作为正式成绩。
+
+完整复用上一节 baseline 的二百个任务变体、真实 BDDL 指令、
+固定初态及 Environment 资产；新 catalog 的所有任务字段与旧清单逐项精确一致。
+四套 × 五类 × 十任务 × 十初态＝**2,000 次诊断评测**，
+不是官方每变体五十次的标准成绩。
+五个未发生 BDDL 变化的 Environment 任务保留，并单独汇报。
+Environment 仍使用之前本地生成的固定资源，不冒充官方预打包初态。
+
+| 分片 | GPU | 计划次数 | 输出目录 |
+| --- | --- | --- | --- |
+| 0 | 1 | 670 | `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_shard0` |
+| 1 | 2 | 670 | `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_shard1` |
+| 2 | 3 | 660 | `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_shard2` |
+
+03:34:48 UTC 已验证三个独立进程均完成至少两轮真实 batch10 原生采样，
+动作有限、环境已推进、任务分片互斥且精确覆盖原清单；GPU 0 未占用。
+使用独立 Transformers 5 环境，未修改共享 MoT 环境。
+保留原生 BF16/FP32 时间模块、quantile 统计、16 步执行和 30 步 UniPC；
+每环境 reset 前 seed 0、完整静置十步，首个策略控制步后才判定成功。
+与旧 MLP baseline 相同的是资源、任务和初态，不是逐轨迹配对的采样噪声：
+旧 baseline 每次执行十步且逐环境采样，不能据此作单一结构的因果归因。
+
+启动前十四项 native/Pro 回归测试通过。真实 Semantic 和已变化 Environment
+task-0 验收分别 82/100 步成功，完整静置十步，保存的 native chunk
+重新解码与实际 controls 最大误差为零；这两次不计入正式二千次。
+持久控制器将在三个分片全部零退出且覆盖完整后，自动合并并审计
+固定初态、动作 hash/有限值、原生动作解码和失败视频。
+运行计划、日志、readiness 和最终结果均独立保存在
+`/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_control/`；
+最终应读取其中 `summary.json`，而不是将本启动快照当作最终结果。
+
 ## 历史评测设置
 
 下表及“旧协议结果汇总”使用旧协议：每个 episode 前按
