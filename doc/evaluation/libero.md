@@ -557,13 +557,16 @@ Environment、二百任务 catalog 和 native CPU 报告的 hash 见上一节。
 | 1 | 2 | 326/670 | `outputs/evaluation/libero_pro/baseline_selected_10trials_20261108_shard1/results.json` | `8339b58c7b46baafb4372e063f2b14f6d920c4204deedab58f17404ab55f1f73` |
 | 2 | 3 | 373/660 | `outputs/evaluation/libero_pro/baseline_selected_10trials_20261108_shard2/results.json` | `796e005b1bff1fe74a4c0d55f81ed25828b5929b35cb3f8c9db5e368899ac590` |
 
-### 官方 Cosmos3 Nano：LIBERO-Pro 五类评测启动记录
+### 官方 Cosmos3 Nano：LIBERO-Pro 五类最终结果（每变体十次）
 
-2026-11-10 03:33:27 UTC 启动，使用官方
+2026-11-10 03:33:27 UTC 启动，11:12:01 UTC 完成全部评测与工件审计，使用官方
 `lerobot/Cosmos3-Nano-Policy-LIBERO@29563132da0815a4e034435ca55aaaf061ecb5ba`
 EMA 权重，不使用本地三步训练权重，也不根据 Pro 成绩重选模型。
 运行代码为当前分支提交 `967a3c70c83e2a10a68f36db1539ba24681f06a3`。
-这次评测**仍在运行，没有最终成功率**；不能将验收的两次成功作为正式成绩。
+**最终成功率为 50.35%（1,007/2,000），失败 993 次。**
+相比前述 MLP baseline 的 54.50% 低 **4.15 个百分点**；
+这是相同任务与初态、不同模型训练及原生推理配方的描述性对照，不是单一结构的因果实验。
+验收的两次成功不计入正式成绩。
 
 完整复用上一节 baseline 的二百个任务变体、真实 BDDL 指令、
 固定初态及 Environment 资产；新 catalog 的所有任务字段与旧清单逐项精确一致。
@@ -572,11 +575,44 @@ EMA 权重，不使用本地三步训练权重，也不根据 Pro 成绩重选�
 五个未发生 BDDL 变化的 Environment 任务保留，并单独汇报。
 Environment 仍使用之前本地生成的固定资源，不冒充官方预打包初态。
 
-| 分片 | GPU | 计划次数 | 输出目录 |
+| 扰动类别 | Cosmos3 成功次数 | Cosmos3 成功率 | MLP baseline |
 | --- | --- | --- | --- |
-| 0 | 1 | 670 | `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_shard0` |
-| 1 | 2 | 670 | `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_shard1` |
-| 2 | 3 | 660 | `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_shard2` |
+| Object / 物体替换 | 306/400 | **76.50%** | 85.25% |
+| Position / 位置交换 | 77/400 | **19.25%** | 15.25% |
+| Semantic / 语言改写 | 388/400 | **97.00%** | 98.25% |
+| Task / 目标变化 | 65/400 | **16.25%** | 22.00% |
+| Environment / 环境替换 | 171/400 | **42.75%** | 51.75% |
+| **全部五类** | **1,007/2,000** | **50.35%** | **54.50%** |
+
+| 基础 suite | Cosmos3 成功次数 | Cosmos3 成功率 | MLP baseline |
+| --- | --- | --- | --- |
+| Spatial | 315/500 | **63.00%** | 67.40% |
+| Object | 254/500 | **50.80%** | 49.80% |
+| Goal | 200/500 | **40.00%** | 51.00% |
+| LIBERO-10 | 238/500 | **47.60%** | 49.80% |
+
+完整 suite × 扰动矩阵；每格分母 100，各套总计分母 500：
+
+| Suite | Object | Position | Semantic | Task | Environment | 总计 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Spatial | 98/100 | 37/100 | 97/100 | 20/100 | 63/100 | 315/500 |
+| Object | 86/100 | 18/100 | 100/100 | 10/100 | 40/100 | 254/500 |
+| Goal | 63/100 | 17/100 | 93/100 | 10/100 | 17/100 | 200/500 |
+| LIBERO-10 | 59/100 | 5/100 | 98/100 | 25/100 | 51/100 | 238/500 |
+
+五个未变化 Environment 任务合计 **50/50** 成功；
+仅实际发生 BDDL 变化的三十五个任务为 **121/350＝34.57%**，
+此前 MLP baseline 同一子集为 157/350＝44.86%。
+若从全部统计中剔除这五十条无变化 Environment trial，
+得到 **957/1,950＝49.08%**；这是附加解释统计，不替换主分数或更改协议。
+结果中位置交换有所提升，但其余四类总体较低，尤其 Goal 套件差距较大；
+不能据此将差异归因于某个 latent 开关、编码器或单一训练环节。
+
+| 分片 | GPU | 成功次数 | 输出目录 |
+| --- | --- | --- | --- |
+| 0 | 1 | 343/670 | `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_shard0` |
+| 1 | 2 | 330/670 | `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_shard1` |
+| 2 | 3 | 334/660 | `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_shard2` |
 
 03:34:48 UTC 已验证三个独立进程均完成至少两轮真实 batch10 原生采样，
 动作有限、环境已推进、任务分片互斥且精确覆盖原清单；GPU 0 未占用。
@@ -589,11 +625,28 @@ Environment 仍使用之前本地生成的固定资源，不冒充官方预打�
 启动前十四项 native/Pro 回归测试通过。真实 Semantic 和已变化 Environment
 task-0 验收分别 82/100 步成功，完整静置十步，保存的 native chunk
 重新解码与实际 controls 最大误差为零；这两次不计入正式二千次。
-持久控制器将在三个分片全部零退出且覆盖完整后，自动合并并审计
-固定初态、动作 hash/有限值、原生动作解码和失败视频。
+三个分片全部零退出，控制器已自动合并并完成审计：
+二百个任务变体各十个唯一固定初态 trial，无重复、无漏项；
+所有 action/native-chunk 的 shape、有限值、SHA256 及固定初态来源检查通过，
+993 个失败视频均非空。CPU 原生动作重新解码与实际 controls 最大绝对误差为
+`7.275957614183426e-12`，小于审计容差 `1e-6`。
+`evaluation_complete=true`、`benchmark_task_coverage_complete=true`、
+`all_artifacts_valid=true`，但 `official_50_trials_per_task=false`。
+原始结果 hash、三分片与 baseline catalog 的精确一致性及模型/评测源码指纹再次核验通过；
+Pro checkout 仍 clean，模型权重仍引用之前完整下载校验 receipt，未重新读取大权重。
+GPU 1/2/3 已释放；未停止或修改 GPU 0 的其他工作。
+
 运行计划、日志、readiness 和最终结果均独立保存在
 `/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_control/`；
-最终应读取其中 `summary.json`，而不是将本启动快照当作最终结果。
+最终汇总为其中 `summary.json`，SHA256：
+`cb69522e8f1407e02afbad1230fbef06a9ea19079038a61c2864baad6ae2fbed`。
+完整合并 `results.json` SHA256：
+`4d6bbda0b21e33383e6f6852fa453cc6d1cf3a5da392b990c95154151dfaf4d6`。
+三份原始 `results.json` SHA256 依次为：
+`7c38be2c86e58e29eb018d2454087f0cd91dfa87749264c8b8d10245af79363e`、
+`44a4d3f4c8537e9a1a9f409acb9b91eff85353753d12a722aa18ab0570b41481`、
+`0bafc88a3085247e34cfbde3b0536c85f40969ec16b8383bca832dca4aaa477d`。
+此二千次 Pro 结果不并入原版 LIBERO 的 792/800，也不并入旧协议历史统计。
 
 ## 历史评测设置
 

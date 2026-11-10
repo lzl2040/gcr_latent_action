@@ -165,6 +165,19 @@ On 2026-11-10, all 200 catalog rows matched the previous baseline exactly and
 Environment task-0 smoke trials succeeded in 82/100 steps. These **2/2 acceptance
 trials are excluded from the formal 2,000-episode evaluation**.
 
+The full diagnostic finished on 2026-11-10 at 11:12 UTC: **1,007/2,000
+(50.35%)**, versus the previous MLP baseline's 1,090/2,000 (54.50%).
+Spatial/Object/Goal/LIBERO-10 were 315/500, 254/500, 200/500 and 238/500.
+All fixed-state coverage and action traces passed audit; all 993 failure videos
+were present and nonempty. Native re-decoding differed from executed controls by
+at most `7.28e-12` (audit tolerance `1e-6`). Changed Environment cases were
+121/350 (34.57%); the five unchanged cases contributed 50/50.
+All three workers exited successfully and GPUs 1/2/3 were released.
+Final artifacts are in
+`/Data/lzl/cosmos3_evaluation/libero_pro/20261110_official_control/summary.json`;
+the full category/suite breakdown and hashes are in
+[the evaluation log](evaluation/libero.md).
+
 ## Validation
 
 Real Object data: 454 episodes, 66,984 source frames, 59,720 unpadded windows.
