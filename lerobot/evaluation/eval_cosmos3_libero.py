@@ -37,11 +37,23 @@ def observation_batch(observations, instruction, device):
     return batch
 
 
-def rollout_batch(envs, initial_states, plan, *, max_steps, wait_steps=10, replan_steps=16):
-    """Keep live episodes synchronized at chunk boundaries; never step a finished environment."""
+def rollout_batch(
+    envs,
+    initial_states,
+    plan,
+    *,
+    max_steps,
+    wait_steps=10,
+    replan_steps=16,
+    environment_seed=None,
+    reference_settling=False,
+):
+    """Synchronize chunks; reference mode fully settles before scoring policy-controlled steps."""
     observations, records, frames = [], [], []
     started = time.perf_counter()
     for env, initial in zip(envs, initial_states, strict=True):
+        if environment_seed is not None:
+            env.seed(environment_seed)
         env.reset()
         observation = env.set_init_state(initial)
         done = False
@@ -49,9 +61,10 @@ def rollout_batch(envs, initial_states, plan, *, max_steps, wait_steps=10, repla
         for _ in range(wait_steps):
             observation, _, done, _ = env.step(DUMMY_ACTION)
             settled += 1
-            if done:
+            if done and not reference_settling:
                 break
-        success = bool(env.check_success())
+        success = False if reference_settling else bool(env.check_success())
+        done = False if reference_settling else done
         observations.append(observation)
         records.append(
             {

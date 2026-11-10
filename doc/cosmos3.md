@@ -121,6 +121,50 @@ To evaluate our fine-tuned DCP, point `--model-dir` at the training run root
 (saved config and processors) and add
 `--dcp-checkpoint RUN/checkpoint_XXXXXXXX`.
 
+## Official-weight LIBERO-Pro evaluation
+
+The separate entry point reuses the pinned classic five-factor Pro catalog and
+the previous baseline's **exact BDDL files, instructions and fixed initial states**:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 "$PYTHON_BIN" -m lerobot.evaluation.eval_cosmos3_libero_pro \
+  --environment-assets "$ENVIRONMENT_ASSETS" \
+  --trials-per-task 10 --batch-size 10 \
+  --num-shards 3 --shard-index 0 --render-gpu-device-id 1 \
+  --checkpoint-receipt "$OFFICIAL_DOWNLOAD_RECEIPT" \
+  --output-dir /Data/lzl/cosmos3_evaluation/libero_pro/official_shard0
+```
+
+Use the existing assets at session
+`2b94f90b-5127-41e3-8e7b-61371941deb9/files/libero_baseline_pro_10trials_20261108/environment_assets`,
+not newly generated replacements. Their manifest SHA256 is
+`902b84ecd85094b3b995655bfe9b5ba2b06037826b0731cad084c21eccdcd30e`.
+The Pro checkout is `eafdb809426b13153aa1e4c42d6601844217dfec`.
+Environment cases use the previously generated, task-specific fixed states;
+they are **not official prepackaged Environment initial states**.
+Five Environment tasks have unchanged BDDL; retain them and report changed-only
+and unchanged subsets separately.
+
+Run shard 1 on GPU 2 and shard 2 on GPU 3, using distinct new output directories.
+The three disjoint shards contain 670/670/660 episodes: four suites, five factors,
+ten tasks and ten trials per variant. This is a **2,000-episode diagnostic**, not
+the official 50-trial standard. `--dry-run --render-backend osmesa` validates all
+selected assets without loading weights. `--merge RESULTS0 RESULTS1 RESULTS2`
+requires complete, disjoint results with matching policy, source and protocol
+fingerprints; it does not rerun inference.
+
+Each environment is seeded 0 immediately before reset. Match Pro's full ten
+settling steps and only score after the first policy-controlled step, without
+changing the original LIBERO runner's default behavior. Native inference remains
+16 executed actions, 30 UniPC steps, shift 5 and guidance 1. The MLP baseline used
+ten executed actions and single-environment sampling: assets are matched, but
+sampling noise and inference recipes are not trajectory-paired.
+
+On 2026-11-10, all 200 catalog rows matched the previous baseline exactly and
+14 native/Pro regression tests passed. Real full-horizon Semantic and changed
+Environment task-0 smoke trials succeeded in 82/100 steps. These **2/2 acceptance
+trials are excluded from the formal 2,000-episode evaluation**.
+
 ## Validation
 
 Real Object data: 454 episodes, 66,984 source frames, 59,720 unpadded windows.
