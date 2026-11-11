@@ -1149,6 +1149,13 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
+    "real_house_stack": {
+        "image_obs_keys": {"primary": "kinect_0", "secondary": "realsense_0", "wrist": "realsense_1"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.EEF_R6,
+        "action_encoding": ActionEncoding.EEF_R6,
+    },
     # ftp-1
     "ftp_1_RH20TCfg5Franka": {
         "image_obs_keys": {"primary": "ego", "secondary": "main", "wrist": "right_wrist_camera"},

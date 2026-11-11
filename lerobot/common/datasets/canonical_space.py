@@ -696,6 +696,11 @@ PHYSICAL_SPECS: dict[str, dict] = {
         "action": [_seg("delta_action.ee_ort6d_pos", 0, 20, 0)],
         "state": [_seg("observation.ee_ort6d_pos", 0, 20, 0)],
     },
+    "real_house_stack": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 10, 0)],
+        "state": [_seg("observation.state", 0, 10, 0)],
+    },
 }
 
 # ms_data_xdof_5, ms_data_xdof_2,  ms_data_xdof_3
