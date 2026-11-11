@@ -4892,3 +4892,101 @@ and327.598/15.302 (packing).
 Policy port19192 is closed and evaluation GPU processes exited; unrelated
 jobs remain running. The step16k full sweep stays paused. These15 episodes
 are a selected-task diagnostic, not the complete RoboDojo benchmark.
+
+## No-Stage1 physical-MLP baseline: step21k, two tasks (2026-11-11)
+
+Evaluate the user-supplied experiment
+`/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base`.
+The uploaded checkpoint is **step21k**, not step25k. The selected scope is
+`stack_bowls` and `put_bottles_into_dustbin`, native layouts0/1/2 each:
+six episodes, original horizons800/700, at most4500 controls.
+The interrupted step16k full sweep remains paused.
+
+Use the exact matching branch
+`baseline/qwen3vl-mot-no-stage1-physical-mlp`, verified remote revision
+`8a2fce0e6f32b3edd73cef01f33851de35b57504`, in a clean detached
+worktree under
+`outputs/evaluation/robodojo/runtime_assets/runtime_sources/no_stage1_physical_mlp_8a2fce0e`.
+The main worktree stays on `qwen3vl_mot_pretrained_generation`; neither
+its architecture nor the separate PI05 worktree is replaced.
+This branch's existing loader handles a null Stage1 config correctly.
+Do not fabricate a Stage1 config, discard architecture fields, relax DCP
+key/shape checks or restore these weights with the staged-model loader.
+
+Preflight passed for **35 source files:32 DCP shards, metadata and two
+configs;23,353,964,787 bytes,1357 tensors and30,664 storage references**.
+All source SHA256 hashes were recorded with stable sizes/mtimes, and
+every storage range fits its shard. The12 physical-encoder tensor names
+and shapes match the branch's actual `PhysicalMLP` state dictionary.
+Full-model exact-key/shape verification and strict weight restoration
+remain mandatory at actual policy startup, not inferred from metadata.
+Weights are read in place without a full checkpoint copy.
+
+The full-task delta-action contract and all five previously audited
+dataset metadata/Parquet hashes match the staged experiment, including
+stats SHA256
+`94d978e4177fa8db22a1a48daedcffda28c8d24a325210a488d4c9006c1778e1`.
+Native task sources/configs, all six layouts and39 asset/config files
+match the completed staged25k two-task preflight. Evidence is under
+`runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/`:
+`checkpoint_provenance_step21k.json` and
+`two_tasks_step21k_preflight_20261111.json`.
+
+This is **not a controlled single-variable Stage1 ablation**. In addition
+to step21k versus25k, the baseline uses trainable state/action MLPs,
+raw physical flow rather than embedding flow, no latent-action prediction
+or action/state reconstruction losses, `understanding_lr_scale=1.0`
+rather than0.01, and a32000-step rather than25000-step decay schedule.
+Saved training uses batch16, accumulation1, seed1000, AdamW8bit at1e-4
+and no FP8. No Stage1 teacher is constructed, but Qwen/Cosmos still use
+pretrained assets: this is not training every network from scratch.
+The directory name is not authoritative for the schedule.
+
+Matching-branch regression tests passed: **124 tests**, covering MLP
+initialization/training/sampling/self-contained restore, architecture
+guards, the Stage1-free evaluation loader, strict DCP restoration and
+native RoboDojo evaluation. The session preparation helper passes Ruff.
+Keep the previous evaluation protocol: BF16, seed0, one environment,
+sampling10 (saved20), prediction32/execution10, continuous RNG within a
+task and independent policy initialization for the next task. Save native
+and predicted videos, with passive camera and integration/export audits.
+
+After creating the detached worktree, launch from it, using absolute
+paths for shared cached assets and main-worktree output:
+
+```bash
+MAIN=/home/jianf/lzl_project/gcr_latent_action
+CACHE="$MAIN/outputs/evaluation/robodojo/runtime_assets"
+CODE="$CACHE/runtime_sources/no_stage1_physical_mlp_8a2fce0e"
+cd "$CODE"
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$CODE" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+/home/jianf/miniforge3/envs/wam/bin/python -u -c \
+  'import runpy, signal; signal.signal(signal.SIGINT, signal.default_int_handler); runpy.run_module("lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite", run_name="__main__")' \
+  eval --tasks stack_bowls put_bottles_into_dustbin \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/step21k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --robodojo-root /data2/guoqi/robodojo_pi05_repro \
+  --assets /data2/guoqi/robodojo_pi05_repro/Assets \
+  --sim-python /home/jianf/miniforge3/envs/RoboDojo6/bin/python \
+  --checkpoint-provenance "$CACHE/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/checkpoint_provenance_step21k.json" \
+  --camera-wrapper /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py \
+  --gpu 0 --sim-gpu 1 --port 19193 --seed 0 \
+  --inference-steps 10 --replan-steps 10 \
+  --save-predicted-video --timeout 14400 \
+  --output-dir "$MAIN/outputs/evaluation/robodojo/two_tasks_baseline_mlp_step21k_sampling10_20261111_v1"
+```
+
+No Stage1 text asset is needed by this MLP loader. The coordinator pins
+the isolated model/evaluation sources, including `modeling_physical.py`,
+and repeats full checkpoint/data SHA256 before and after the suite.
+Restore default SIGINT handling before starting detached Python, then
+check the actual owned Python children do not ignore it.
+Other GPU jobs are present; do not stop them or infer causal speed
+comparisons from shared-machine wall time. Live outcomes will be in the
+new root's `progress.json` and `results.csv`; infrastructure errors remain
+separate from genuine policy failures. Actual startup and results are
+pending at this preparation checkpoint.
