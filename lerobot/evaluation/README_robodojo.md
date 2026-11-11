@@ -5082,3 +5082,77 @@ head videos are `episode_000000{0,1,2}_cam_head_{success,fail}.mp4`.
 Predicted futures are in each task's `policy/predictions/` directory.
 Policy port19193 is closed and all four startup Python PIDs have exited;
 only the unrelated GPU jobs remain. The step16k full sweep stays paused.
+
+## Physical-MLP step21k: all42 non-random tasks, three layouts each
+
+The user requested all42 tasks and explicitly selected the already
+validated **serial GPU0-policy/GPU1-simulator** arrangement, not two
+same-GPU policy/simulator workers. Start a fresh126-episode sweep of the
+same baseline step21k using the clean isolated branch revision
+`8a2fce0e6f32b3edd73cef01f33851de35b57504`.
+Do not resume the paused staged16k sweep or reuse the completed baseline
+bowls/bottles outcomes in this new denominator.
+
+Preparation verifies that checkpoint/dataset sizes, mtimes and small
+metadata hashes match the completed baseline run and its full SHA256
+audit. All19 pinned model/evaluation/wrapper files are unchanged from
+the124-test and real six-episode validation. The new suite repeats full
+checkpoint/data SHA256 before the first task and after the last.
+All42 native tasks,126 original layout files and761 referenced object
+mesh/metadata/description, environment-config and dimension-inventory
+files passed preflight. Clutter meshes use the native Clutter path;
+Dynamic, Articulation, Garment and Fluid groups are also checked.
+Evidence:
+`runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/nonrandom42_step21k_preflight_20261111.json`.
+
+Keep seed0, layouts0/1/2, one environment, BF16, sampling10,
+prediction32/execution10, continuous policy RNG within each task,
+actual/predicted videos and passive camera audits. Original native
+horizons range from200 to1900 controls, totaling at most98,400 controls.
+The inventory covers12 Generalization,6 Memory,8 Precision,8 Long-Horizon
+and8 Open tasks. No random variant is selected.
+This three-layout diagnostic is not the official full benchmark protocol.
+The live suite's `mean_score_completed_only` is a simple task average,
+not the official equal-five-dimension aggregate; capability reporting
+requires grouping the task results using the saved dimension inventory.
+
+All42 tasks will be attempted. The previous staged16k run encountered
+unstable scene settling in `fill_egg_holder` and an invalid garment
+rest mesh in `fold_clothes`; do not silently remove these tasks or assume
+they now work. Preserve infrastructure errors separately, continue to
+other tasks without automatic retries, and never label invalid episodes
+as policy0/3. No shared native code/assets or unrelated GPU jobs are changed.
+
+```bash
+MAIN=/home/jianf/lzl_project/gcr_latent_action
+CACHE="$MAIN/outputs/evaluation/robodojo/runtime_assets"
+CODE="$CACHE/runtime_sources/no_stage1_physical_mlp_8a2fce0e"
+cd "$CODE"
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$CODE" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+/home/jianf/miniforge3/envs/wam/bin/python -u -c \
+  'import runpy, signal; signal.signal(signal.SIGINT, signal.default_int_handler); runpy.run_module("lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite", run_name="__main__")' \
+  eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/step21k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --robodojo-root /data2/guoqi/robodojo_pi05_repro \
+  --assets /data2/guoqi/robodojo_pi05_repro/Assets \
+  --sim-python /home/jianf/miniforge3/envs/RoboDojo6/bin/python \
+  --checkpoint-provenance "$CACHE/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/checkpoint_provenance_step21k.json" \
+  --camera-wrapper /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py \
+  --gpu 0 --sim-gpu 1 --port 19194 --seed 0 \
+  --inference-steps 10 --replan-steps 10 \
+  --save-predicted-video --timeout 14400 \
+  --output-dir "$MAIN/outputs/evaluation/robodojo/nonrandom42_baseline_mlp_step21k_sampling10_20261111_v1"
+```
+
+Omitting `--tasks` selects all42 canonical non-random tasks. The output
+must be fresh; subsequent explicit resume requires the identical command,
+sources and settings plus `--resume`.
+Live results are `progress.json` and `results.csv`; each task preserves
+its attempt log, native/predicted videos and `suite_audit.json`.
+Preparation helper lint/format and preflight passed. Actual startup and
+full-sweep outcomes remain pending at this preparation checkpoint.
