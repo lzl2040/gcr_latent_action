@@ -5021,3 +5021,64 @@ Coordinator log is
 Preparation commit: `e666598`. Both tasks' final outcomes and full
 completion audits remain pending; do not report a startup success as a
 successful task episode.
+
+### Completed physical-MLP step21k results
+
+The suite exited0 with **5/6 successes (83.33%), six valid native episodes
+and zero infrastructure errors**. Both tasks ran once, without retries,
+replaced layouts or RNG restarts within a task. Mean native score is
+85.83/100.
+
+| Task | Successes | Scores, layouts0/1/2 | Controls, layouts0/1/2 |
+|---|---:|---|---|
+| `stack_bowls` | 2/3 | 1.00 / 0.15 / 1.00 | 360 / 800 / 379 |
+| `put_bottles_into_dustbin` | 3/3 | 1.00 / 1.00 / 1.00 | 600 / 354 / 466 |
+
+| Variant on these same six layouts | Bowls | Bottles | Total |
+|---|---:|---:|---:|
+| Staged model, step25k | 0/3 | 1/3 | 1/6 |
+| No-Stage1 physical-MLP baseline, step21k | 2/3 | 3/3 | 5/6 |
+
+All six initial measured states, initial head-camera matrices and static
+scene transforms match staged25k exactly. This baseline performs better
+on the selected layouts, but these are only three trials per task.
+The checkpoint step, raw/embedding flow, physical tuning, auxiliary
+losses, understanding LR scale and decay schedule also differ: do not
+attribute the gain solely to removing Stage1, or treat this as the full
+RoboDojo benchmark.
+
+All2959 controls and297 action chunks were retained. Numerical
+integration/export audits passed with maximum component error below
+1.14e-7; inverse normalization error is zero. All64 passive camera
+snapshots passed. Source SHA256 verification passed at suite completion;
+source stats/small metadata, both native results, all39 asset/config
+files and all19 pinned runtime files were rechecked afterward.
+The isolated runtime worktree remains clean at the exact recorded commit.
+
+There are **891 predicted MP4s,9801 prediction/conditioning PNGs and18
+actual camera MP4s**. Native videos decode at640x480/25FPS, with
+361/801/380 frames per bowls layout and601/355/467 frames per bottles
+layout, three camera views each. Maximum sampled left/right target
+tracking discrepancies are2.328/2.801mm for bowls and5.891/6.206mm for
+bottles; these measure command following, not expert prediction error.
+Per-task wall times are2194.24 and2065.18 seconds, respectively, excluding
+suite-level hash checks and completion audits.
+
+Visual review covered18 exact final frames in the two
+`native_final_frames.jpg` sheets, not complete videos or every conditioning
+image. Successful bowls layouts0/2 show a consolidated nested stack with
+the grippers withdrawn; failed layout1 retains tilted, incompletely
+stacked bowls. All three final bottles head views show the table cleared,
+consistent with native success labels. The broader
+`visual_review_pending` audit flag remains unchanged. Scope, results,
+artifact counts and exact cross-run initial-state/scene checks are
+persisted in the suite root's `completion_review.json`.
+
+All artifacts are under
+`outputs/evaluation/robodojo/two_tasks_baseline_mlp_step21k_sampling10_20261111_v1/`.
+Actual videos are in
+`tasks/<task>/attempt_001/simulator/eval_result/RoboDojo/<task>/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/attempt_001/`;
+head videos are `episode_000000{0,1,2}_cam_head_{success,fail}.mp4`.
+Predicted futures are in each task's `policy/predictions/` directory.
+Policy port19193 is closed and all four startup Python PIDs have exited;
+only the unrelated GPU jobs remain. The step16k full sweep stays paused.
