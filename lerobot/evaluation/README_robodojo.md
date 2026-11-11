@@ -4990,3 +4990,34 @@ comparisons from shared-machine wall time. Live outcomes will be in the
 new root's `progress.json` and `results.csv`; infrastructure errors remain
 separate from genuine policy failures. Actual startup and results are
 pending at this preparation checkpoint.
+
+### Verified physical-MLP startup
+
+The new two-task suite is running in
+`two_tasks_baseline_mlp_step21k_sampling10_20261111_v1`.
+Full-source hash preflight passed. The matching branch constructed the
+MLP baseline with **no Stage1 teacher**, completed full-model strict
+key/shape checks and DCP restoration, then reported11.650B parameters,
+BF16 and ten denoising steps. No missing or unexpected weights were
+silently skipped.
+
+The native bowls rollout advanced control0 to10 with finite32x20 delta
+actions and instruction "Stack the three bowls together." Its initial
+measured state matches staged25k layout0 exactly. All19 pinned runtime
+files and native task/layout hashes pass. Saved per-task settings differ
+from staged25k only in checkpoint/output/port and the unused Stage1-text
+argument; this argument is not read by the MLP loader.
+All three first-chunk conditioning PNGs were visually checked: ordinary
+wooden tabletop, three white bowls and expected head/left-wrist/right-wrist
+camera roles. This does not constitute a complete-video review.
+Matched predicted videos and passive camera observations are saved.
+
+Policy port19193 completes a valid WebSocket handshake. The four owned
+Python processes do not ignore SIGINT; other GPU jobs remain running.
+Startup evidence is `startup_validation.json` in the suite root.
+Detached shell is `baseline21k-two-eval`, coordinator PID2023270.
+Coordinator log is
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/baseline21k_two_tasks_suite.log`.
+Preparation commit: `e666598`. Both tasks' final outcomes and full
+completion audits remain pending; do not report a startup success as a
+successful task episode.
