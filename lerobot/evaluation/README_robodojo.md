@@ -5156,3 +5156,35 @@ Live results are `progress.json` and `results.csv`; each task preserves
 its attempt log, native/predicted videos and `suite_audit.json`.
 Preparation helper lint/format and preflight passed. Actual startup and
 full-sweep outcomes remain pending at this preparation checkpoint.
+
+### Verified full42 baseline startup
+
+The new suite is running in
+`nonrandom42_baseline_mlp_step21k_sampling10_20261111_v1`.
+Full checkpoint/data SHA256 preflight passed. The persisted manifest
+selects exactly42 non-random tasks,126 episodes and the original
+200--1900 control horizons. Checkpoint provenance and the19 pinned
+runtime files match the completed baseline run.
+
+The first task `align_blocks` advanced control0 to10 with finite32x20
+delta actions. The native instruction is:
+"Use the set square to push the three blocks into a straight, aligned
+row, then reset the robot arm." Actual per-task settings differ from
+completed baseline bowls only in task, output directory and port.
+The loader completed strict full-model restoration, with no Stage1
+teacher, BF16 and sampling10. Initial camera observations and three
+matched prediction videos are persisted. All three first conditioning
+images were visually checked: wooden table, magenta blocks and white
+alignment tool in the head view, with expected wrist-camera perspectives.
+This is not a full-video review.
+
+Policy port19194 completes a valid WebSocket handshake. The four owned
+Python processes do not ignore SIGINT; actual GPU placement is policy0/
+simulator1 and unrelated GPU jobs remain running. The old staged16k
+sweep still has status `interrupted` and was not resumed.
+Evidence is `startup_validation.json` in the new suite root.
+Detached shell is `nonrandom42-baseline21k-eval`, coordinator PID2212600.
+Coordinator log is
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/nonrandom42_baseline21k_suite.log`.
+Preparation commit: `1bbb552`. Full42-task success and capability scores
+remain pending; follow `progress.json` and `results.csv`.
