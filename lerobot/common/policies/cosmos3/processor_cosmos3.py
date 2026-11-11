@@ -557,6 +557,10 @@ class Cosmos3Processor:
                     if step["registry_name"] not in ("normalizer_processor", "unnormalizer_processor"):
                         continue
                     self.eps = step["config"].get("eps", self.eps)
+                    if "state_file" not in step:
+                        if any(mode != "IDENTITY" for mode in step["config"].get("norm_map", {}).values()):
+                            raise ValueError(f"Missing normalization statistics state_file in {manifest}.")
+                        continue
                     state_file = (root / step["state_file"]).resolve()
                     if not state_file.is_relative_to(root.resolve()):
                         raise ValueError("Processor state must be inside its checkpoint.")

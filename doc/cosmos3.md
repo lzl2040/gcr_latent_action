@@ -6,6 +6,9 @@ Cosmos video encoder. The port stays on `qwen3vl_mot_pretrained_generation`.
 ## Provenance and environment
 
 - Upstream: `huggingface/lerobot@81b8c5bfdd5591ec59e512cfc7ac6db8151c70ee`.
+- Fresh fine-tuning base: `lerobot/Cosmos3-Nano`,
+  revision `104d12ccc544e14984443b812233969f389ee8dc`. This is **not** the
+  LIBERO-fine-tuned checkpoint or the NVIDIA generation-only package.
 - Official EMA checkpoint: `lerobot/Cosmos3-Nano-Policy-LIBERO`,
   revision `29563132da0815a4e034435ca55aaaf061ecb5ba`.
 - `model.safetensors`: 32,944,302,256 bytes,
@@ -39,34 +42,91 @@ the module-based entry points.
 
 ## Fine-tuning with the existing FSDP trainer
 
+The launcher now follows `train_qwen3vl_mot_fsdp.sh`'s cluster path conventions.
+Use a cluster environment with the separate `cosmos3` dependencies installed;
+the workstation's `/Data/...` Python path above is only a local example.
+
 ```bash
-CUDA_VISIBLE_DEVICES=1,2,3 \
-MODEL_DIR=/Data/lzl/huggingface/Cosmos3-Nano-Policy-LIBERO \
-OUTPUT_DIR=/Data/lzl/qwen3vl_mot_weights/cosmos3_libero \
-DATA_MIX=libero BATCH_SIZE=2 GRADIENT_ACCUMULATION_STEPS=4 \
+JOB_NAME=cosmos3_nano_base_libero \
 bash train_cosmos3_fsdp.sh
 ```
 
-`MODEL_DIR` must contain the native config, safetensors, pre/postprocessor
-statistics and tokenizer. The initial weights can instead be a Cosmos3 base
-checkpoint; use `LOAD_ACTION_MODULES=false` when initializing new action modules.
-Each newly saved run turns that flag back to true.
+| Setting | Default |
+|---|---|
+| `WEIGHTS_ROOT` | `/mnt/wangxiaofa/pt_weights` |
+| `MODEL_DIR` | `${WEIGHTS_ROOT}/Cosmos3-Nano` |
+| `PARENT_DIR_V21`, `PARENT_DIR_V30` | `/mnt/wangxiaofa/robot_dataset/lerobot-format-v30-0710/` |
+| `PARENT_DIR_EXTRA` | `/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/` |
+| `OUTPUT_ROOT` | `/mnt/wangxiaofa/qwen3vl_mot_exp` |
+| `JOB_NAME` | `cosmos3_nano_fsdp` |
+| `OUTPUT_DIR` | `${OUTPUT_ROOT}/${JOB_NAME}` |
+| `LOG_DIR` | `/mnt/wangxiaofa/ace_logs` |
+| `CUDA_VISIBLE_DEVICES` | `0,1,2,3,4,5,6,7` |
+| `MODEL_LOCAL_CACHE` | `${TMPDIR:-/tmp}/cosmos3_policy_models` |
+
+`DATA_ROOT_V21/V30/EXTRA` remain supported aliases; explicit `PARENT_DIR_*`
+settings take precedence. `PARENT_DIR_EXTRA=""` disables the extra root.
+An explicit `OUTPUT_DIR` overrides `OUTPUT_ROOT/JOB_NAME`.
+Batch size 2 per rank, accumulation 4, BF16, and the existing learning-rate
+schedule are unchanged.
+
+With `MODEL_AUTO_DOWNLOAD=true` (default), each node checks the native config,
+weights, processors, referenced statistics and local tokenizer **before**
+starting workers. A complete `MODEL_DIR` is reused without network access.
+If missing or incomplete, the launcher downloads the pinned
+`lerobot/Cosmos3-Nano` package into
+`${MODEL_LOCAL_CACHE}/Cosmos3-Nano-LeRobot`; it does not write to the mounted
+weights root. The separate cache name prevents confusion with
+`nvidia/Cosmos3-Nano`, which our MoT policy uses for generation.
+Download locking, Hub/Xet caches and disk-space checks are node-local; Blob,
+network filesystems and RAM-backed caches are rejected.
+The model file alone is approximately 33GB; allow additional space for download
+staging and caches. A failed download never starts training workers.
+`MODEL_AUTO_DOWNLOAD=false` permits only complete local weights or a complete
+existing node cache and otherwise fails without downloading.
+
+Fresh fine-tuning defaults to `LOAD_ACTION_MODULES=false`, as recommended by
+the base model card: action modules are newly initialized, not reused from a
+LIBERO-fine-tuned policy. Base identity normalizers need no statistics files;
+our adapter supplies the selected training mixture's action quantiles instead.
+The local LIBERO data recipe remains 16 actions, two cameras and no state;
+the base package's different DROID-style processor settings do not replace it.
+Each newly saved run turns `load_action_modules` back to true.
+To intentionally warm-start from the old LIBERO checkpoint, specify both
+`MODEL_DIR=/path/to/Cosmos3-Nano-Policy-LIBERO` and `LOAD_ACTION_MODULES=true`.
+
+Inspect the command without downloading, creating a cache or starting workers:
+
+```bash
+DRY_RUN=true CHECK_PATHS=false bash train_cosmos3_fsdp.sh
+```
+
+By default, dataset roots are checked even in dry-run mode; only disable
+`CHECK_PATHS` when inspecting paths not mounted on the current machine.
+For multi-node jobs, run once on each node with matching `NNODES`,
+`MASTER_ADDR`, `MASTER_PORT`, `JOB_NAME` and shared output paths, and distinct
+`NODE_RANK=0..NNODES-1`. The master address must be reachable from every node,
+not localhost. Ports are selected automatically only for single-node jobs.
+`DISTRIBUTED_TIMEOUT_MINUTES` defaults to 60 for rendezvous and process groups.
 
 Resume the same run with the same batch/world/accumulation geometry:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1,2,3 \
-OUTPUT_DIR=/Data/lzl/qwen3vl_mot_weights/cosmos3_libero \
-DATA_MIX=libero BATCH_SIZE=2 GRADIENT_ACCUMULATION_STEPS=4 \
+JOB_NAME=cosmos3_nano_base_libero \
 WEIGHT_RESUME=true STEPS=10000 bash train_cosmos3_fsdp.sh
 ```
 
+Resume defaults to `LOAD_ACTION_MODULES=true`; combining resume with false is
+rejected to avoid resetting trained action heads.
 The saved policy configuration is restored and explicit architectural changes
 are rejected. Complete DCP model shards, rank-local optimizer state, scheduler,
 RNG and sampler position are restored. An action width changed during a fresh
 run can still resume: the shared backbone bootstraps first, then strict DCP
 restoration replaces every action tensor.
 
+**The current native Cosmos3 adapter still supports only LIBERO mixtures.**
+Sharing data-root conventions does not add house/other-robot support; do not
+apply LIBERO-specific rotation conversion to house data.
 The adapter reads 17 real consecutive frames from both cameras and 16 actions,
 excludes padded episode tails, and recomputes native action quantiles over the
 selected mixture. Our old 10D LIBERO actions encode controls as *Euler XYZ with
@@ -179,6 +239,15 @@ the full category/suite breakdown and hashes are in
 [the evaluation log](evaluation/libero.md).
 
 ## Validation
+
+The cluster/base launcher update passed 56 model-cache/launcher tests and
+12 native policy/dataset/evaluation tests. The full emitted cluster command also
+passed the actual FSDP configuration parser, including its final output path.
+The pinned base package's real processor manifests and tokenizer were downloaded
+without weights: offline tokenization, dual-camera preprocessing and runtime
+action-quantile normalization passed. This update did **not** download the 33GB
+base weights, run fresh-base GPU training or submit a multi-node cluster job.
+The real training/evaluation results below used the official LIBERO checkpoint.
 
 Real Object data: 454 episodes, 66,984 source frames, 59,720 unpadded windows.
 The final valid anchors decode 17 camera frames and 16 finite native actions,

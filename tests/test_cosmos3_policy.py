@@ -94,6 +94,29 @@ def test_native_canvas_prompt_normalization_and_roundtrip(config, stats, tmp_pat
         Cosmos3Processor(config, {"action": {"q01": torch.zeros(40), "q99": torch.ones(40)}})
 
 
+def test_base_identity_processors_need_no_state_files_and_use_finetuning_stats(config, stats, tmp_path):
+    Cosmos3Processor(config, stats).save_pretrained(tmp_path)
+    for name in ("policy_preprocessor", "policy_postprocessor"):
+        path = tmp_path / f"{name}.json"
+        pipeline = json.loads(path.read_text())
+        for step in pipeline["steps"]:
+            if step["registry_name"] in ("normalizer_processor", "unnormalizer_processor"):
+                del step["state_file"]
+                step["config"]["features"] = {}
+                step["config"]["norm_map"] = {"VISUAL": "IDENTITY", "STATE": "IDENTITY", "ACTION": "IDENTITY"}
+        path.write_text(json.dumps(pipeline))
+    processor = Cosmos3Processor(config, stats, pretrained_path=tmp_path)
+    batch = raw_batch(17)
+    batch["action"] = torch.zeros(2, 16, 10)
+    torch.testing.assert_close(processor(batch)["action"], torch.full((2, 16, 10), -1 / 3))
+    path = tmp_path / "policy_postprocessor.json"
+    pipeline = json.loads(path.read_text())
+    pipeline["steps"][0]["config"]["norm_map"]["ACTION"] = "QUANTILES"
+    path.write_text(json.dumps(pipeline))
+    with pytest.raises(ValueError, match="Missing normalization statistics"):
+        Cosmos3Processor(config, stats, pretrained_path=tmp_path)
+
+
 def test_libero_native_axis_angle_and_continuous_gripper():
     controls = torch.tensor([[0.2, -0.1, 0.3, 0.2, -0.4, 0.5, 0.25]], dtype=torch.float64)
     matrix = torch.from_numpy(Rotation.from_rotvec(controls[0, 3:6].numpy()).as_matrix())
