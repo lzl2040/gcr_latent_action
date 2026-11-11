@@ -38,6 +38,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     understanding_lora_dropout: float = 0.0
     understanding_text_lora_layers: int = 0
     understanding_vision_lora_layers: int = 4
+    understanding_dual_vision: bool = False
     understanding_lr_scale: float = 0.1
     understanding_gradient_checkpointing: bool = True
     understanding_max_text_tokens: int = 64

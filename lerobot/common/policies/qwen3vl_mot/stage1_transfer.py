@@ -71,15 +71,21 @@ def transfer_matching_module(
 def transfer_stage1_perception(
     stage1_perception: nn.Module,
     qwen_model: nn.Module,
-) -> tuple[TransferReport, TransferReport]:
-    """Transfer Qwen-compatible vision and text tensors from the stage-one perception side."""
+    *,
+    transfer_vision: bool = True,
+) -> tuple[TransferReport | None, TransferReport]:
+    """Merge stage-one adapters, optionally transfer vision, and transfer compatible text."""
     vision_source = merge_peft_module(stage1_perception.vision_backbone)
     stage1_perception.vision_backbone = vision_source
-    vision_report = transfer_matching_module(
-        vision_source,
-        qwen_model.visual,
-        source_prefixes=("vision_model.", "model.visual.", "visual."),
-        ignored_destination_prefixes=("merger.linear_fc", "deepstack_merger_list."),
+    vision_report = (
+        transfer_matching_module(
+            vision_source,
+            qwen_model.visual,
+            source_prefixes=("vision_model.", "model.visual.", "visual."),
+            ignored_destination_prefixes=("merger.linear_fc", "deepstack_merger_list."),
+        )
+        if transfer_vision
+        else None
     )
 
     text_source = merge_peft_module(stage1_perception.text_backbone)

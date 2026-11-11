@@ -17,6 +17,14 @@ if [[ -n "${LATENT_ACTION_PREDICTION_ENABLED:-}" ]]; then
     esac
     LATENT_ACTION_ARGS+=(--policy.latent_action_prediction_enabled="$LATENT_ACTION_PREDICTION_ENABLED")
 fi
+DUAL_VISION_ARGS=()
+if [[ -n "${UNDERSTANDING_DUAL_VISION:-}" ]]; then
+    case "$UNDERSTANDING_DUAL_VISION" in
+        true|false) ;;
+        *) echo "Error: UNDERSTANDING_DUAL_VISION must be true or false" >&2; exit 1 ;;
+    esac
+    DUAL_VISION_ARGS+=(--policy.understanding_dual_vision="$UNDERSTANDING_DUAL_VISION")
+fi
 if [[ "${WEIGHT_RESUME}" != "true" ]]; then
     : "${STAGE1_CHECKPOINT:?Set STAGE1_CHECKPOINT for a fresh stage-two run}"
 fi
@@ -198,6 +206,7 @@ deepspeed --master_port="${MASTER_PORT}" lerobot/scripts/dps_train_contrast.py \
     --policy.qwen3vl_dir="${QWEN3VL_DIR}" \
     --policy.cosmos3_dir="${COSMOS3_DIR}" \
     "${LATENT_ACTION_ARGS[@]}" \
+    "${DUAL_VISION_ARGS[@]}" \
     "${GENERATION_ARGS[@]}" \
     --policy.understanding_tuning_mode="${UNDERSTANDING_TUNING_MODE:-lora}" \
     --policy.understanding_lora_rank="${UNDERSTANDING_LORA_RANK:-16}" \

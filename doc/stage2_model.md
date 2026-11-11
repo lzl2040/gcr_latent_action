@@ -284,6 +284,66 @@ initialize_from_stage1 = false
 
 之后从 Stage 2 checkpoint 恢复时，不再依赖原始 Stage 1 checkpoint 的配置文件。
 
+### 4.6 可选双视觉理解分支
+
+`policy.understanding_dual_vision=true` 启用双视觉变体，默认 `false`，旧模型的
+Stage 1 覆盖式视觉迁移、参数键和初始化 RNG 不变。新变体**不覆盖 Qwen 的预训练视觉权重**：
+
+- 预训练 ViT 仍按原配置训练：默认最后 4 层、rank/alpha 为 16 的 attention LoRA，
+  与 no-stage1 MLP baseline 的视觉训练范围相同；decoder 的 `full/lora` 和学习率设置不被开关更改。
+- Stage 1 ViT 复用 `teacher_perception.vision_backbone`，始终冻结、eval、no-grad，
+  不再复制第三个 ViT。完整模型仍用同一个 teacher 的 primary 起止帧生成 change-query targets。
+- 两路读取相同的当前图像，使用相同的 256px resize 和 `[-1,1]` 归一化。
+  在最终 merger 的逐 patch LayerNorm **之后、2×2 合并之前**融合，不拼接额外视觉 tokens。
+  Stage 1 的 row-major patch 顺序先恢复成 Qwen 的 merge-block 顺序。
+
+对 Qwen3-VL-4B，两路该位置均为每图 `256×1024`，融合为：
+
+```text
+H = LN_pretrained(H_pretrained) + tanh(g) * H_stage1_normalized
+visual_tokens = pretrained_merger_MLP(group_2x2(H))   # 64×2560
+g = 0 at initialization
+```
+
+无需额外维度投影。最终 merger 权重保持预训练值并冻结；原有 DeepStack 只使用预训练视觉
+分支的中间特征，不向缺少 DeepStack 的 Stage 1 分支虚构中间层特征。
+初始化时最终视觉 tokens 与未迁移 Stage 1 的预训练路径完全一致，**不等于整个 MLP baseline**：
+本变体仍保留完整模型的 Physical Transformer、latent queries 和已有损失。
+`tanh(g)` 可正可负，记录为训练指标 `vision_fusion_weight`；门控长期接近零意味着模型可能
+未利用 Stage 1 特征，不能只凭增加分支就断言性能提升。
+
+完整模型已有 frozen perception teacher，因此仅增加 **1 个可训练标量**，归入 main optimizer
+组、使用主学习率。每次有图像的理解前向增加一次冻结 Stage 1 ViT 计算；多视角只编码有效
+相机，全缺失 rank 仍执行 dummy forward，masked 视角不影响理解结果。尚无吞吐或成功率结论。
+关闭 latent prediction 时也支持双视觉，此时仍保留 frozen perception 供视觉路径使用，
+但不运行 change-query teacher，不需要未来帧；相对无 teacher 的单视觉消融会增加冻结参数。
+
+在原完整模型训练命令上增加：
+
+```bash
+UNDERSTANDING_DUAL_VISION=true \
+OUTPUT_DIR=/Data/lzl/qwen3vl_mot_weights/dual_vision \
+STAGE1_CHECKPOINT=/path/to/stage1_checkpoint \
+bash train_qwen3vl_mot_fsdp.sh
+```
+
+`train_qwen3vl_mot_local.sh` 同样支持该环境变量。其余 task、flow、noise、视角和 loss 参数沿用
+原实验配置，不应为此变体切换为 MLP/raw flow。需要连 understanding decoder 和学习率也显式
+匹配已评测 MLP baseline 时，可设置 `UNDERSTANDING_TUNING_MODE=full`、
+`UNDERSTANDING_VISION_LORA_LAYERS=4`、`UNDERSTANDING_LR_SCALE=1.0`；这不是开关的隐式副作用。
+必须使用新输出目录，不能把单视觉 checkpoint 原地当作双视觉续训。
+
+保存后配置和冻结 Stage 1 权重自包含；恢复不依赖原 Stage 1 checkpoint。
+不显式传开关时继承保存值，显式切换时拒绝恢复；双视觉权重缺失（包括 gate）会严格报错。
+
+验证包括 tiny 真实 Qwen 的融合公式/空间顺序、零门控预训练等价、LoRA/gate 梯度、
+冻结检查、缺失视角/text-only/checkpoint 重算，以及完整 MoT 的任务路由、无 Stage 1 原路径
+保存恢复和缺失 gate 拒绝加载。另在 RTX A6000 上使用真实预训练 Qwen3-VL-4B，
+按 Stage 1 patch 架构构建冻结视觉路径，以 BF16、AdamW8bit、单 rank FSDP 完成两步更新，
+gate 有非零梯度且从 0 更新；理解分支峰值约 8.95 GiB。
+该 smoke 的冻结路径使用预训练权重，**不是已训练 Stage 1 权重**，也不是完整 MoT
+训练/吞吐测试；单 rank 自动使用 NO_SHARD，尚未验证此变体的多 rank 实际训练和下游成功率。
+
 ---
 
 ## 5. Qwen3-VL Understanding Expert

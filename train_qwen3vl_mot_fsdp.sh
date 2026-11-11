@@ -258,6 +258,12 @@ if [[ -n "${LATENT_ACTION_PREDICTION_ENABLED:-}" ]]; then
         || die "LATENT_ACTION_PREDICTION_ENABLED must be true or false"
     LATENT_ACTION_ARGS+=(--policy.latent_action_prediction_enabled="$LATENT_ACTION_PREDICTION_ENABLED")
 fi
+DUAL_VISION_ARGS=()
+if [[ -n "${UNDERSTANDING_DUAL_VISION:-}" ]]; then
+    [[ "$UNDERSTANDING_DUAL_VISION" == "true" || "$UNDERSTANDING_DUAL_VISION" == "false" ]] \
+        || die "UNDERSTANDING_DUAL_VISION must be true or false"
+    DUAL_VISION_ARGS+=(--policy.understanding_dual_vision="$UNDERSTANDING_DUAL_VISION")
+fi
 if [[ "$WEIGHT_RESUME" != "true" && -z "$STAGE1_CHECKPOINT" ]]; then
     die "STAGE1_CHECKPOINT is required for a fresh stage-two run"
 fi
@@ -472,6 +478,7 @@ CMD=(
     --policy.qwen3vl_dir="${QWEN3VL_DIR}"
     --policy.cosmos3_dir="${COSMOS3_DIR}"
     "${LATENT_ACTION_ARGS[@]}"
+    "${DUAL_VISION_ARGS[@]}"
     "${GENERATION_ARGS[@]}"
     --policy.understanding_tuning_mode="${UNDERSTANDING_TUNING_MODE:-full}"
     --policy.understanding_lora_rank="${UNDERSTANDING_LORA_RANK:-16}"

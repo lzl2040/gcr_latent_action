@@ -303,6 +303,13 @@ def _load_stage2_resume_policy_config(
             "Cannot change `policy.latent_action_prediction_enabled` while resuming; "
             "start a fresh output directory."
         )
+    if (
+        parser.parse_arg("policy.understanding_dual_vision", args) is not None
+        and runtime_policy.understanding_dual_vision != saved_policy.understanding_dual_vision
+    ):
+        raise ValueError(
+            "Cannot change `policy.understanding_dual_vision` while resuming; start a fresh output directory."
+        )
     for field_name in ("qwen3vl_dir", "cosmos3_dir"):
         runtime_path = getattr(runtime_policy, field_name)
         if runtime_path:

@@ -199,6 +199,11 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 "Cannot change `policy.latent_action_prediction_enabled` when loading a checkpoint; "
                 "start a fresh output directory."
             )
+        if config.understanding_dual_vision != saved_config.get("understanding_dual_vision", False):
+            raise ValueError(
+                "Cannot change `policy.understanding_dual_vision` when loading a checkpoint; "
+                "start a fresh output directory."
+            )
         return super().from_pretrained(pretrained_name_or_path, config=config, **kwargs)
 
     def __init__(self, config: Qwen3VLMoTConfig, dataset_stats=None):
@@ -268,9 +273,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
         self._validate_stage1_contract(teacher.config)
 
-        # Load the stock Qwen checkpoint first, overwrite every compatible stage-one tensor,
-        # and only then attach new LoRA adapters. This preserves the actual stage-one weights
-        # instead of loading them into PEFT base-layer names by accident.
+        # Transfer before attaching new LoRA; dual vision keeps the stock visual weights.
         requested_tuning = config.understanding_tuning_mode
         self.understanding = Qwen3VLUnderstandingExpert(
             config.qwen3vl_dir,
@@ -285,6 +288,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             vision_lora_layers=config.understanding_vision_lora_layers,
             gradient_checkpointing=config.understanding_gradient_checkpointing,
             use_latent_queries=config.latent_action_prediction_enabled,
+            dual_vision=config.understanding_dual_vision,
         )
         qwen_text_config = _base_qwen(self.understanding.model).config.text_config
         qwen_kv_heads = int(qwen_text_config.num_key_value_heads)
@@ -303,19 +307,21 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             vision_report, text_report = transfer_stage1_perception(
                 teacher.perception_encoder,
                 _base_qwen(self.understanding.model),
+                transfer_vision=not config.understanding_dual_vision,
             )
-            logger.info(
-                "Stage-one -> Qwen transfer: vision %.1f%% (%d tensors), text %.1f%% (%d tensors).",
-                100.0 * vision_report.coverage,
-                vision_report.copied_tensors,
-                100.0 * text_report.coverage,
-                text_report.copied_tensors,
-            )
-            if config.require_stage1_vision_transfer and vision_report.coverage < 0.90:
-                raise RuntimeError(
-                    "The stage-one vision tower is not Qwen3-VL-compatible: only "
-                    f"{vision_report.coverage:.1%} of the reusable Qwen vision parameters matched."
+            if vision_report is not None:
+                logger.info(
+                    "Stage-one -> Qwen transfer: vision %.1f%% (%d tensors), text %.1f%% (%d tensors).",
+                    100.0 * vision_report.coverage,
+                    vision_report.copied_tensors,
+                    100.0 * text_report.coverage,
+                    text_report.copied_tensors,
                 )
+                if config.require_stage1_vision_transfer and vision_report.coverage < 0.90:
+                    raise RuntimeError(
+                        "The stage-one vision tower is not Qwen3-VL-compatible: only "
+                        f"{vision_report.coverage:.1%} of the reusable Qwen vision parameters matched."
+                    )
             if config.require_stage1_text_transfer and text_report.coverage < 0.90:
                 raise RuntimeError(
                     "The stage-one text tower is not Qwen3-VL-compatible: only "
@@ -350,7 +356,11 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         if self.physical_embedding_flow:
             self.physical_encoder.eval()
 
-        self.teacher_perception = teacher.perception_encoder if config.latent_action_prediction_enabled else None
+        self.teacher_perception = (
+            teacher.perception_encoder
+            if config.latent_action_prediction_enabled or config.understanding_dual_vision
+            else None
+        )
         if self.teacher_perception is not None:
             self.teacher_perception.predictor = None
             self.teacher_perception.vae = None
@@ -358,6 +368,11 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 parameter.requires_grad_(False)
             self.teacher_perception.eval()
         del teacher
+        if config.understanding_dual_vision:
+            logger.info(
+                "Dual vision: retain pretrained Qwen vision with configured LoRA, reuse the frozen "
+                "stage-one teacher ViT, and fuse normalized patches with a zero-initialized tanh gate."
+            )
 
         from lerobot.common.policies.ace.cosmos3_encoders import build_cosmos3_vae
 
@@ -395,7 +410,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             # Preserve the initialization RNG of the unchanged Generation/decoder modules.
             self.latent_action_projection = None
             logger.info(
-                "Latent-action prediction disabled: no queries, teacher, projection or distillation; "
+                "Latent-action prediction disabled: no queries, projection or distillation; "
                 "Generation retains image/language K/V and the unchanged physical streams."
             )
         if config.tactile_generation_target == "spatial_patches":
@@ -492,10 +507,14 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
     @classmethod
     def _load_as_safetensor(cls, model, model_file, map_location, strict):
         return super()._load_as_safetensor(
-            model, model_file, map_location,
+            model,
+            model_file,
+            map_location,
             strict=(
-                strict or model.config.generation_backbone != "random"
+                strict
+                or model.config.generation_backbone != "random"
                 or not model.config.latent_action_prediction_enabled
+                or model.config.understanding_dual_vision
             ),
         )
 
@@ -685,13 +704,19 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             texts = [texts] * self._current_image(batch).shape[0]
         if not with_image:
             return self.understanding(None, texts)
+        vision_args = (
+            {"stage1_vision": self.teacher_perception.vision_backbone}
+            if self.config.understanding_dual_vision
+            else {}
+        )
         if len(self.rgb_views) == 1:
-            return self.understanding(self._current_image(batch), texts)
+            return self.understanding(self._current_image(batch), texts, **vision_args)
         return self.understanding(
             batch["images_t0"],
             texts,
             image_mask=batch["image_view_mask"],
             view_names=self.rgb_views,
+            **vision_args,
         )
 
     def _sample_canonical_action(
@@ -2041,7 +2066,11 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
         latent_target, latent_rows = self._latent_action_target(
             batch,
-            enabled=task.understanding_image and self.teacher_perception is not None,
+            enabled=(
+                task.understanding_image
+                and self.teacher_perception is not None
+                and self.config.latent_action_prediction_enabled
+            ),
         )
 
         streams: list[GenerationStream] = []
@@ -2149,4 +2178,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             loss_dict["latent_action_loss"] = 0.0
             loss_dict["latent_action_elements"] = 0.0
         loss_dict["valid_rows"] = _all_reduce_detached(valid_rows.sum().float()).item()
+        if self.config.understanding_dual_vision:
+            loss_dict["vision_fusion_weight"] = (
+                self.understanding.vision_fusion_gate.detach().float().tanh().item()
+            )
         return loss, loss_dict

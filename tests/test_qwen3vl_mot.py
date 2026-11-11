@@ -408,18 +408,13 @@ def test_native_kv_checkpointing_matches_non_checkpointed_gradients():
             torch.testing.assert_close(checkpointed_parameter.grad, plain_parameter.grad)
 
 
-@pytest.mark.parametrize("multiview", [False, True])
-def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients(multiview, monkeypatch):
+@pytest.fixture
+def tiny_qwen_understanding_options(monkeypatch):
     from transformers import AutoTokenizer
     from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
     from transformers.models.qwen3_vl.modeling_qwen3_vl import (
         Qwen3VLForConditionalGeneration,
         Qwen3VLModel,
-    )
-
-    from lerobot.common.policies.qwen3vl_mot.modeling_understanding import (
-        Qwen3VLUnderstandingExpert,
-        _base_qwen,
     )
 
     config = Qwen3VLConfig(
@@ -476,6 +471,21 @@ def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients(multiview, 
         "lora_rank": 2, "lora_alpha": 2, "lora_dropout": 0, "text_lora_layers": 0,
         "vision_lora_layers": 0, "gradient_checkpointing": True,
     }
+    return config, options
+
+
+@pytest.mark.parametrize("multiview", [False, True])
+def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients(
+    multiview, tiny_qwen_understanding_options
+):
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
+
+    from lerobot.common.policies.qwen3vl_mot.modeling_understanding import (
+        Qwen3VLUnderstandingExpert,
+        _base_qwen,
+    )
+
+    config, options = tiny_qwen_understanding_options
     initial_rng = torch.get_rng_state()
     expert = Qwen3VLUnderstandingExpert("unused", **options)
     expected_rng = torch.get_rng_state()
@@ -597,6 +607,131 @@ def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients(multiview, 
         "visual.blocks" in name and "base_layer" in name
         for name in full_trainable_names
     )
+
+
+@pytest.mark.parametrize("checkpointed", [False, True])
+@pytest.mark.parametrize("tuning_mode", ["frozen", "full"])
+def test_dual_vision_fuses_aligned_patches_and_keeps_stage1_frozen(
+    tiny_qwen_understanding_options, checkpointed, tuning_mode
+):
+    from lerobot.common.policies.ace.qwen3vl_encoder import Qwen3VLPatchTrunk, _NormOnlyMerger
+    from lerobot.common.policies.qwen3vl_mot.modeling_understanding import (
+        Qwen3VLUnderstandingExpert,
+        _base_qwen,
+    )
+
+    _, options = tiny_qwen_understanding_options
+    options = {
+        **options,
+        "tuning_mode": tuning_mode,
+        "vision_lora_layers": 1,
+        "gradient_checkpointing": checkpointed,
+    }
+    rng = torch.get_rng_state()
+    baseline = Qwen3VLUnderstandingExpert("unused", **options).eval()
+    expected_rng = torch.get_rng_state()
+    torch.set_rng_state(rng)
+    expert = Qwen3VLUnderstandingExpert("unused", **options, dual_vision=True).eval()
+    assert torch.equal(torch.get_rng_state(), expected_rng)
+    visual = _base_qwen(expert.model).visual
+    teacher_visual = copy.deepcopy(visual)
+    teacher_visual.merger = _NormOnlyMerger(teacher_visual.merger.norm)
+    teacher_visual.deepstack_merger_list = nn.ModuleList()
+    teacher_visual.deepstack_visual_indexes = []
+    with torch.no_grad():
+        teacher_visual.pos_embed.weight.add_(torch.randn_like(teacher_visual.pos_embed.weight) * 0.1)
+    teacher = Qwen3VLPatchTrunk(teacher_visual, teacher_visual.config).requires_grad_(False).eval()
+    images = torch.randint(0, 256, (2, 3, 256, 256), dtype=torch.uint8)
+    with pytest.raises(ValueError, match="requires the frozen"):
+        expert._pack_images(images)
+    teacher.train()
+    with pytest.raises(ValueError, match="eval mode"):
+        expert._pack_images(images, stage1_vision=teacher)
+    teacher.eval()
+    original, original_deepstack, _ = baseline._pack_images(images)
+    fused, deepstack, _ = expert._pack_images(images, stage1_vision=teacher)
+    torch.testing.assert_close(fused, original, rtol=0, atol=0)
+    assert set(expert.state_dict()) - set(baseline.state_dict()) == {"vision_fusion_gate"}
+    for actual, expected in zip(deepstack, original_deepstack, strict=True):
+        torch.testing.assert_close(actual, expected)
+    normalized = []
+    handle = visual.merger.norm.register_forward_hook(
+        lambda _module, _inputs, output: normalized.append(output)
+    )
+    with torch.no_grad():
+        expert.vision_fusion_gate.fill_(0.4)
+    fused, deepstack, _ = expert._pack_images(images, stage1_vision=teacher)
+    handle.remove()
+    with torch.no_grad():
+        patches = teacher(pixel_values=images.float() / 127.5 - 1).last_hidden_state
+        patches = patches.reshape(2, 8, 2, 8, 2, 32).permute(0, 1, 3, 2, 4, 5).reshape(-1, 32)
+        expected = normalized[0] + expert.vision_fusion_gate.tanh() * patches
+        expected = visual.merger.linear_fc2(
+            visual.merger.act_fn(visual.merger.linear_fc1(expected.reshape(-1, 128)))
+        )
+    torch.testing.assert_close(fused, expected.reshape(2, 64, 32))
+    assert not torch.allclose(fused, original)
+    for actual, expected in zip(deepstack, original_deepstack, strict=True):
+        torch.testing.assert_close(actual, expected)
+    assert not visual.merger.norm._forward_hooks
+
+    expert.train()
+    multiview = images[:, None].expand(-1, 2, -1, -1, -1).clone()
+    mask = torch.tensor([[1, 0], [1, 1]], dtype=torch.bool)
+    kwargs = {"image_mask": mask, "view_names": ("primary", "wrist"), "stage1_vision": teacher}
+    output = expert(multiview, ["move", "move"], **kwargs)
+    modified = multiview.clone()
+    modified[~mask] = 255 - modified[~mask]
+    torch.testing.assert_close(
+        expert(modified, ["move", "move"], **kwargs).latent_queries, output.latent_queries
+    )
+    loss = sum(value.square().mean() for _, value in output.key_values)
+    loss.backward()
+    assert expert.vision_fusion_gate.grad is not None
+    assert torch.isfinite(expert.vision_fusion_gate.grad) and expert.vision_fusion_gate.grad.abs() > 0
+    assert all(parameter.grad is None for parameter in teacher.parameters())
+    if tuning_mode == "full":
+        assert any(
+            "lora_B" in name and parameter.grad is not None and parameter.grad.abs().sum() > 0
+            for name, parameter in visual.named_parameters()
+        )
+        assert all(
+            not parameter.requires_grad
+            for name, parameter in visual.named_parameters()
+            if "lora_" not in name
+        )
+    else:
+        assert not any(parameter.requires_grad for parameter in visual.parameters())
+    assert not visual.merger.norm._forward_hooks
+    expert.zero_grad(set_to_none=True)
+    empty = expert(multiview, ["move", "move"], **{**kwargs, "image_mask": torch.zeros_like(mask)})
+    empty.latent_queries.square().mean().backward()
+    assert expert.vision_fusion_gate.grad is not None
+    assert expert.vision_fusion_gate.grad == 0
+    text_only = expert(None, ["move", "move"])
+    assert torch.isfinite(text_only.latent_queries).all()
+
+
+def test_dual_vision_stage1_transfer_preserves_pretrained_vision():
+    from peft import LoraConfig, get_peft_model
+
+    from lerobot.common.policies.qwen3vl_mot.stage1_transfer import transfer_stage1_perception
+
+    stage1_vision = get_peft_model(nn.Sequential(nn.Linear(3, 5)), LoraConfig(r=2, target_modules=["0"]))
+    with torch.no_grad():
+        stage1_vision.base_model.model[0].lora_B["default"].weight.fill_(0.25)
+    sample = torch.randn(2, 3)
+    before_merge = stage1_vision(sample).detach()
+    source = SimpleNamespace(vision_backbone=stage1_vision, text_backbone=nn.Linear(4, 6))
+    destination = SimpleNamespace(visual=nn.Linear(3, 5), language_model=nn.Linear(4, 6))
+    original = copy.deepcopy(destination.visual.state_dict())
+    vision_report, text_report = transfer_stage1_perception(source, destination, transfer_vision=False)
+    assert vision_report is None and text_report.coverage == 1
+    assert not hasattr(source.vision_backbone, "merge_and_unload")
+    torch.testing.assert_close(source.vision_backbone(sample), before_merge)
+    for name, value in destination.visual.state_dict().items():
+        torch.testing.assert_close(value, original[name])
+    torch.testing.assert_close(destination.language_model.weight, source.text_backbone.weight)
 
 
 def test_stage1_transfer_strips_wrapper_prefixes():
@@ -798,7 +933,7 @@ class _FakePhysical(nn.Module):
 
 
 class _FakeUnderstanding(nn.Module):
-    def __init__(self, _model_dir, *, num_queries, use_latent_queries=True, **kwargs):
+    def __init__(self, _model_dir, *, num_queries, use_latent_queries=True, dual_vision=False, **kwargs):
         super().__init__()
         del kwargs
         from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig
@@ -823,6 +958,7 @@ class _FakeUnderstanding(nn.Module):
         if not use_latent_queries:
             self.query_tokens = None
         self.tuning_mode = "frozen"
+        self.vision_fusion_gate = nn.Parameter(torch.zeros(1)) if dual_vision else None
 
     @property
     def hidden_dim(self):
@@ -875,6 +1011,7 @@ def test_spatial_tactile_target_and_generation_are_decodable():
     nn.Module.__init__(policy)
     policy.config = SimpleNamespace(
         tactile_generation_target="spatial_patches",
+        understanding_dual_vision=False,
         chunk_size=4,
         group_size=2,
         num_groups=2,
@@ -982,21 +1119,22 @@ def test_spatial_tactile_target_and_generation_are_decodable():
 
 
 @pytest.mark.parametrize("saved_enabled", [False, True])
-def test_checkpoint_loading_cannot_toggle_latent_prediction(tmp_path, monkeypatch, saved_enabled):
+@pytest.mark.parametrize("field", ["latent_action_prediction_enabled", "understanding_dual_vision"])
+def test_checkpoint_loading_cannot_toggle_architecture(tmp_path, monkeypatch, saved_enabled, field):
     import json
 
-    Qwen3VLMoTConfig(latent_action_prediction_enabled=saved_enabled)._save_pretrained(tmp_path)
-    if saved_enabled:
+    Qwen3VLMoTConfig(**{field: saved_enabled})._save_pretrained(tmp_path)
+    if saved_enabled == (field == "latent_action_prediction_enabled"):
         path = tmp_path / "config.json"
         payload = json.loads(path.read_text())
-        del payload["latent_action_prediction_enabled"]
+        del payload[field]
         path.write_text(json.dumps(payload))
-    runtime = Qwen3VLMoTConfig(latent_action_prediction_enabled=not saved_enabled)
+    runtime = Qwen3VLMoTConfig(**{field: not saved_enabled})
     monkeypatch.setattr(
         Qwen3VLMoTPolicy, "__init__",
         lambda *args, **kwargs: pytest.fail("A query architecture mismatch must fail before construction."),
     )
-    with pytest.raises(ValueError, match="latent_action_prediction_enabled"):
+    with pytest.raises(ValueError, match=field):
         Qwen3VLMoTPolicy.from_pretrained(tmp_path, config=runtime)
 
 
@@ -1033,9 +1171,30 @@ def test_policy_without_latent_prediction_keeps_physical_flow_and_roundtrips(
         torch.testing.assert_close(initial_states[0][name], initial_states[1][name])
 
 
+@pytest.mark.parametrize("latent_enabled", [True, False])
+def test_dual_vision_policy_keeps_frozen_teacher_and_roundtrips(tmp_path, monkeypatch, latent_enabled):
+    _check_policy_routes_and_roundtrip(
+        tmp_path,
+        monkeypatch,
+        True,
+        "embedding",
+        "edge",
+        "shifted_uniform",
+        latent_action_prediction_enabled=latent_enabled,
+        dual_vision=True,
+    )
+
+
 def _check_policy_routes_and_roundtrip(
-    tmp_path, monkeypatch, multiview, flow_space, generation_variant, time_distribution,
-    *, latent_action_prediction_enabled=True,
+    tmp_path,
+    monkeypatch,
+    multiview,
+    flow_space,
+    generation_variant,
+    time_distribution,
+    *,
+    latent_action_prediction_enabled=True,
+    dual_vision=False,
 ):
     import lerobot.common.policies.ace.cosmos3_encoders as cosmos3_encoders
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
@@ -1147,6 +1306,7 @@ def _check_policy_routes_and_roundtrip(
         num_latent_queries=2,
         latent_action_dim=8,
         latent_action_prediction_enabled=latent_action_prediction_enabled,
+        understanding_dual_vision=dual_vision,
         generation_hidden_dim=16,
         generation_depth=1,
         generation_num_heads=4,
@@ -1186,12 +1346,28 @@ def _check_policy_routes_and_roundtrip(
         if name.startswith(("generation.", "physical_encoder.", "physical_decoders."))
     }
     if not latent_action_prediction_enabled:
-        assert policy.teacher_perception is None and policy.latent_action_projection is None
+        assert policy.latent_action_projection is None
+        assert (policy.teacher_perception is not None) == dual_vision
         assert policy.understanding.query_tokens is None
         assert policy.config.latent_action_loss_weight == 0
-        assert not any(name.startswith((
-            "teacher_perception.", "latent_action_projection.", "understanding.query_tokens"
-        )) for name in policy.state_dict())
+        assert not any(
+            name.startswith(
+                (
+                    *(("teacher_perception.",) if not dual_vision else ()),
+                    "latent_action_projection.",
+                    "understanding.query_tokens",
+                )
+            )
+            for name in policy.state_dict()
+        )
+    if dual_vision:
+        policy.train()
+        assert not policy.teacher_perception.training
+        assert not any(p.requires_grad for p in policy.teacher_perception.parameters())
+        with torch.no_grad():
+            policy.understanding.vision_fusion_gate.fill_(0.35)
+        groups = policy.get_optim_params()
+        assert any(p is policy.understanding.vision_fusion_gate for group in groups for p in group["params"])
     if generation_kind != "random":
         assert policy.generation_load_report.copied_tensors > 0
         assert policy.generation.output_heads["video"].weight.count_nonzero() > 0
@@ -1273,6 +1449,15 @@ def _check_policy_routes_and_roundtrip(
         if multiview and task_name != "t2v":
             assert policy.understanding.last_view_arguments["image_mask"] is batch["image_view_mask"]
             assert policy.understanding.last_view_arguments["view_names"] == config.rgb_views
+        if dual_vision:
+            assert metrics["vision_fusion_weight"] == pytest.approx(torch.tensor(0.35).tanh().item())
+            if task_name != "t2v":
+                assert (
+                    policy.understanding.last_view_arguments["stage1_vision"]
+                    is policy.teacher_perception.vision_backbone
+                )
+            else:
+                assert "stage1_vision" not in policy.understanding.last_view_arguments
         if task_name == "t2v":
             assert metrics["video_target_elements"] == (144 if multiview else 96)
         elif task_name in ("i2v", "joint_prediction", "va_prediction", "forward_dynamics"):
@@ -1529,6 +1714,12 @@ def _check_policy_routes_and_roundtrip(
     assert restored.config.physical_flow_space == flow_space
     assert restored.config.generation_backbone == generation_kind
     assert restored.config.latent_action_prediction_enabled == latent_action_prediction_enabled
+    assert restored.config.understanding_dual_vision == dual_vision
+    if dual_vision:
+        torch.testing.assert_close(
+            restored.understanding.vision_fusion_gate, policy.understanding.vision_fusion_gate
+        )
+        assert not any(p.requires_grad for p in restored.teacher_perception.vision_backbone.parameters())
     if generation_kind != "random":
         assert not hasattr(restored, "generation_load_report")
         for name, parameter in policy.generation.named_parameters():
@@ -1542,6 +1733,15 @@ def _check_policy_routes_and_roundtrip(
         torch.testing.assert_close(restored.sample_canonical_action(batch), expected_action)
     else:
         assert not hasattr(restored, "physical_decoders")
+    if dual_vision:
+        from safetensors.torch import load_file
+
+        weights_path = stage2_dir / "model.safetensors"
+        weights = load_file(weights_path)
+        del weights["understanding.vision_fusion_gate"]
+        save_file(weights, weights_path)
+        with pytest.raises(RuntimeError, match="understanding.vision_fusion_gate"):
+            stage2.Qwen3VLMoTPolicy.from_pretrained(stage2_dir)
     return initial_state
 
 

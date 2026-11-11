@@ -434,7 +434,10 @@ def test_fsdp_launcher_resolves_complete_checkpoint(tmp_path, fsdp_checkpoint_fa
 
 @pytest.mark.parametrize("launcher", ["fsdp", "local"])
 @pytest.mark.parametrize("latent_enabled", [None, "false"])
-def test_stage2_launchers_forward_optional_latent_prediction_switch(tmp_path, launcher, latent_enabled):
+@pytest.mark.parametrize("dual_vision", [None, "true", "false"])
+def test_stage2_launchers_forward_optional_vision_and_latent_switches(
+    tmp_path, launcher, latent_enabled, dual_vision
+):
     root = Path(__file__).resolve().parents[1]
     weights = tmp_path / "weights"
     qwen = weights / "Qwen3-VL-4B-Instruct"
@@ -504,10 +507,13 @@ def test_stage2_launchers_forward_optional_latent_prediction_switch(tmp_path, la
         "ACTION_PRED_RECON_WEIGHT",
         "STATE_PRED_RECON_WEIGHT",
         "LATENT_ACTION_PREDICTION_ENABLED",
+        "UNDERSTANDING_DUAL_VISION",
     ):
         env.pop(key, None)
     if latent_enabled is not None:
         env["LATENT_ACTION_PREDICTION_ENABLED"] = latent_enabled
+    if dual_vision is not None:
+        env["UNDERSTANDING_DUAL_VISION"] = dual_vision
     result = subprocess.run(
         ["bash", str(root / f"train_qwen3vl_mot_{launcher}.sh")],
         cwd=root,
@@ -530,6 +536,10 @@ def test_stage2_launchers_forward_optional_latent_prediction_switch(tmp_path, la
         assert "--policy.latent_action_prediction_enabled=" not in result.stdout
     else:
         assert f"--policy.latent_action_prediction_enabled={latent_enabled}" in result.stdout
+    if dual_vision is None:
+        assert "--policy.understanding_dual_vision=" not in result.stdout
+    else:
+        assert f"--policy.understanding_dual_vision={dual_vision}" in result.stdout
 
 
 def test_restore_replicated_frozen_parameters_uses_canonical_fsdp_names() -> None:

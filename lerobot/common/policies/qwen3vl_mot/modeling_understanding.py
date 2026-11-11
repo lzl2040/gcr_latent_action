@@ -99,6 +99,7 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         vision_lora_layers: int,
         gradient_checkpointing: bool,
         use_latent_queries: bool = True,
+        dual_vision: bool = False,
     ):
         super().__init__()
         from transformers import AutoTokenizer
@@ -129,6 +130,7 @@ class Qwen3VLUnderstandingExpert(nn.Module):
             kv_layers,
         )
         self.gradient_checkpointing = gradient_checkpointing
+        self.vision_fusion_gate = nn.Parameter(torch.zeros(1)) if dual_vision else None
         self.tuning_mode = tuning_mode
         self._configure_tuning(
             tuning_mode=tuning_mode,
@@ -224,6 +226,7 @@ class Qwen3VLUnderstandingExpert(nn.Module):
     def _pack_images(
         self,
         images: torch.Tensor,
+        stage1_vision: nn.Module | None = None,
     ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
         base = _base_qwen(self.model)
         visual = base.visual
@@ -282,25 +285,62 @@ class Qwen3VLUnderstandingExpert(nn.Module):
             dtype=torch.long,
         )
 
-        visual_context = (
-            torch.enable_grad()
-            if any(parameter.requires_grad for parameter in visual.parameters())
-            else torch.no_grad()
-        )
+        stage1_features = None
+        if self.vision_fusion_gate is not None:
+            if stage1_vision is None:
+                raise ValueError("Dual vision requires the frozen stage-one patch encoder.")
+            if stage1_vision.training or any(p.requires_grad for p in stage1_vision.parameters()):
+                raise ValueError("The stage-one vision encoder must remain frozen and in eval mode.")
+            with torch.no_grad():
+                stage1_dtype = next(stage1_vision.parameters()).dtype
+                stage1_features = stage1_vision(pixel_values=images.to(dtype=stage1_dtype)).last_hidden_state
+            expected = (batch, grid_h * grid_w, int(config.hidden_size))
+            if stage1_features.shape != expected:
+                raise ValueError(
+                    f"Stage-one patch features must match the pretrained ViT grid/width "
+                    f"{expected}, got {tuple(stage1_features.shape)}."
+                )
+            # Stage one exposes row-major patches; Qwen's merger expects 2x2-block order.
+            stage1_features = (
+                stage1_features.reshape(batch, block_h, merge, block_w, merge, -1)
+                .permute(0, 1, 3, 2, 4, 5)
+                .reshape(batch * grid_h * grid_w, -1)
+                .to(dtype=visual_dtype)
+            )
+            if visual.merger.use_postshuffle_norm:
+                raise ValueError("Dual vision requires Qwen's per-patch final merger normalization.")
+
+        def encode_visual(pixels):
+            if stage1_features is None:
+                return visual(pixels, grid_thw=grid_thw)
+
+            def fuse_normalized_patches(_module, _inputs, output):
+                return output + self.vision_fusion_gate.float().tanh().to(output.dtype) * stage1_features
+
+            # Install inside the checkpointed call so backward recomputation uses fusion too.
+            handle = visual.merger.norm.register_forward_hook(fuse_normalized_patches)
+            try:
+                return visual(pixels, grid_thw=grid_thw)
+            finally:
+                handle.remove()
+
+        visual_trainable = any(parameter.requires_grad for parameter in visual.parameters())
+        fusion_trainable = self.vision_fusion_gate is not None and self.vision_fusion_gate.requires_grad
+        visual_context = torch.enable_grad() if visual_trainable or fusion_trainable else torch.no_grad()
         with visual_context:
             if (
                 self.gradient_checkpointing
                 and self.training
                 and torch.is_grad_enabled()
-                and any(parameter.requires_grad for parameter in visual.parameters())
+                and (visual_trainable or fusion_trainable)
             ):
                 image_features, deepstack_features = checkpoint(
-                    lambda pixels: visual(pixels, grid_thw=grid_thw),
+                    encode_visual,
                     packed,
                     use_reentrant=False,
                 )
             else:
-                image_features, deepstack_features = visual(packed, grid_thw=grid_thw)
+                image_features, deepstack_features = encode_visual(packed)
         merged_tokens = grid_h * grid_w // (merge * merge)
         image_features = image_features.view(batch, merged_tokens, -1)
         deepstack_features = [
@@ -324,6 +364,7 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         images: torch.Tensor,
         image_mask: torch.Tensor,
         view_names: tuple[str, ...],
+        stage1_vision: nn.Module | None = None,
     ):
         base = _base_qwen(self.model)
         embedding = base.language_model.embed_tokens
@@ -336,7 +377,8 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         # Every rank executes the visual tower, including ranks with no valid images.
         encoded_indices = selected if selected.numel() else selected.new_zeros(1)
         features, deepstack, grids = self._pack_images(
-            images.to(device).flatten(0, 1)[encoded_indices]
+            images.to(device).flatten(0, 1)[encoded_indices],
+            stage1_vision=stage1_vision,
         )
         tokens, width = features.shape[1:]
 
@@ -407,6 +449,7 @@ class Qwen3VLUnderstandingExpert(nn.Module):
         *,
         image_mask: torch.Tensor | None = None,
         view_names: tuple[str, ...] = ("primary",),
+        stage1_vision: nn.Module | None = None,
     ) -> UnderstandingOutput:
         from transformers.masking_utils import create_causal_mask
 
@@ -438,14 +481,16 @@ class Qwen3VLUnderstandingExpert(nn.Module):
             if image_mask is None:
                 raise ValueError("Multi-view understanding requires an image_mask.")
             prefix_ids, prefix_embeddings, prefix_keep, image_grid_thw, deepstack_features = (
-                self._multiview_prefix(images, image_mask, view_names)
+                self._multiview_prefix(images, image_mask, view_names, stage1_vision=stage1_vision)
             )
             image_slice = slice(0, prefix_ids.shape[1])
             input_ids = torch.cat([prefix_ids, input_ids, query_ids], dim=1)
             attention_keep = torch.cat([prefix_keep, text_keep, query_keep], dim=1)
             hidden_states = torch.cat([prefix_embeddings, text_embeddings, query_embeddings], dim=1)
         elif images is not None:
-            image_features, deepstack_features, image_grid_thw = self._pack_images(images.to(device))
+            image_features, deepstack_features, image_grid_thw = self._pack_images(
+                images.to(device), stage1_vision=stage1_vision
+            )
             image_features = image_features.to(dtype)
             num_image_tokens = image_features.shape[1]
             vision_start = torch.full(
