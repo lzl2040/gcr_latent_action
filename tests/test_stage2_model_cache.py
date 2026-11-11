@@ -465,6 +465,10 @@ def _cosmos3_launcher_env(tmp_path, **overrides):
         "JOB_NAME",
         "LOAD_ACTION_MODULES",
         "FFMPEG_LIB_DIR",
+        "TRAINING_ACTION_LAYOUT",
+        "FPS",
+        "RGB_VIEWS",
+        "USE_STATE",
     ):
         env.pop(name, None)
     env.update(
@@ -528,7 +532,26 @@ def test_cosmos3_cluster_defaults_use_base_weights_and_resume_action_modules(tmp
     ):
         assert argument in result.stdout
     assert "Policy-LIBERO" not in result.stdout
+    assert "--policy.fps=" not in result.stdout
+    if resume == "false":
+        assert "--policy.training_action_layout=auto" in result.stdout
+    else:
+        assert "--policy.training_action_layout=" not in result.stdout
     assert not (tmp_path / "cache").exists()
+
+
+def test_cosmos3_launcher_exposes_generic_house_state_camera_and_fps_options(tmp_path):
+    import shlex
+
+    result = _cosmos3_launcher(_cosmos3_launcher_env(
+        tmp_path, DATA_MIX="real_house_stack", USE_STATE="true", RGB_VIEWS='["primary"]', FPS="10",
+    ))
+    assert result.returncode == 0, result.stderr
+    args = shlex.split(result.stdout.split("command:", 1)[1])
+    assert "--data_mix=real_house_stack" in args
+    assert "--policy.use_state=true" in args
+    assert '--policy.training_rgb_views=["primary"]' in args
+    assert "--policy.fps=10" in args
 
 
 def test_cosmos3_launcher_respects_dataset_aliases_extra_disable_and_output_overrides(tmp_path):

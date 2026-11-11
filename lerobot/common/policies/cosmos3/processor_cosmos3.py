@@ -64,6 +64,13 @@ CONCAT_VIEW_TEMPLATE = "This video contains concatenated views from multiple cam
 START_OF_GENERATION = "<|vision_start|>"
 
 
+def _batch_fps(data, default, batch_size, device):
+    fps = torch.as_tensor(data.get("sample_fps", default), device=device, dtype=torch.float32)
+    if fps.numel() not in (1, batch_size) or not torch.isfinite(fps).all() or (fps <= 0).any():
+        raise ValueError("sample_fps must contain one positive finite frame rate per sample.")
+    return fps.reshape(-1).expand(batch_size)
+
+
 def axis_angle_to_matrix(axis_angle: Tensor) -> Tensor:
     """Rotation matrices `[..., 3, 3]` of axis-angle vectors `[..., 3]` (Rodrigues' formula, in float64)."""
     rotvec = axis_angle.double()
@@ -177,7 +184,14 @@ class Cosmos3IdleFrameProcessorStep(FlatBatchStep):
         action = self.transition.get(TransitionKey.ACTION)
         if action is not None and any(self.channel_mask(*CHANNEL_TYPES)):
             observation = self.transition.get(TransitionKey.OBSERVATION) or {}
-            complementary_data["idle_frames"] = self.count(action, observation.get(OBS_STATE), self.fps)
+            fps = _batch_fps(complementary_data, self.fps, action.shape[0], action.device)
+            complementary_data["idle_frames"] = self.count(
+                action,
+                observation.get(OBS_STATE),
+                fps,
+                complementary_data.get("action_mask"),
+                complementary_data.get("state_mask"),
+            )
         return complementary_data
 
     def channel_mask(self, *types: str) -> list[bool]:
@@ -185,23 +199,45 @@ class Cosmos3IdleFrameProcessorStep(FlatBatchStep):
         pattern = rf"(?:.+_)?(?:{'|'.join(types)})_\d+"
         return [re.fullmatch(pattern, name) is not None for name in self.action_feature_names or []]
 
-    def count(self, action: Tensor, state: Tensor | None, fps: float) -> Tensor:
+    def count(
+        self,
+        action: Tensor,
+        state: Tensor | None,
+        fps: float | Tensor,
+        action_mask: Tensor | None = None,
+        state_mask: Tensor | None = None,
+    ) -> Tensor:
         """
         Idle frames `[B]` of dataset action chunks `[B, T, action_dim]` with the states `[B, action_dim]` at the
         frame rate `fps`.
         """
         rows = action
+        valid = torch.ones_like(action, dtype=torch.bool)
+        if action_mask is not None:
+            valid &= action_mask.bool()[:, None, :]
         if self.idle_state and self.use_state and state is not None:  # the native DROID recipe
             rows = torch.cat([state[:, None], action], dim=1)
+            state_valid = (
+                torch.ones_like(state, dtype=torch.bool) if state_mask is None else state_mask.bool()
+            )
+            valid = torch.cat([state_valid[:, None], valid], dim=1)
+        fps = torch.as_tensor(fps, device=action.device, dtype=action.dtype).reshape(-1, 1)
         still = torch.ones(rows.shape[:2], dtype=torch.bool, device=rows.device)
-        positions = rows[..., self.channel_mask("pos")]  # the norm of all translation channels together
+        positions = rows[..., self.channel_mask("pos")].where(valid[..., self.channel_mask("pos")], 0)
         still &= positions.norm(dim=-1) < self.translation_threshold / fps
         for rotation_format, width in ROTATION_WIDTHS.items():  # every rotation of every arm
             rotations = rows[..., self.channel_mask(rotation_format)].unflatten(-1, (-1, width))
-            still &= (rotation_angle(rotations, rotation_format) < self.rotation_threshold / fps).all(dim=-1)
+            available = valid[..., self.channel_mask(rotation_format)].unflatten(-1, (-1, width)).all(-1)
+            angles = rotation_angle(rotations, rotation_format)
+            still &= ((angles < (self.rotation_threshold / fps)[..., None]) | ~available).all(dim=-1)
         for kind, threshold in (("gripper", self.gripper_threshold), ("joint", self.joint_threshold / fps)):
             values = rows[..., self.channel_mask(kind)]  # the change of every channel from the previous frame
-            still &= (torch.diff(values, dim=1, prepend=values[:, :1]).abs() < threshold).all(dim=-1)
+            available = valid[..., self.channel_mask(kind)]
+            comparable = available & torch.cat([available[:, :1], available[:, :-1]], dim=1)
+            limit = threshold[..., None] if isinstance(threshold, Tensor) else threshold
+            still &= ((torch.diff(values, dim=1, prepend=values[:, :1]).abs() < limit) | ~comparable).all(
+                dim=-1
+            )
         # A frame counts when a run of min_streak still frames covers it.
         k = self.min_streak
         runs = F.pad(still.float(), (0, k - 1)).unfold(-1, k, 1).amin(dim=-1)  # the k frames from t are still
@@ -276,12 +312,10 @@ class Cosmos3VideoCanvasProcessorStep(FlatBatchStep):
             content_h // self.spatial_compression,
             content_w // self.spatial_compression,
         ]
-        seconds_per_latent_frame = self.temporal_compression / self.fps
         complementary_data["pixel_values_videos_gen"] = canvas.permute(0, 2, 1, 3, 4).float() / 127.5 - 1.0
         complementary_data["video_grid_thw_gen"] = torch.tensor(grid, device=device).expand(batch_size, 3)
-        complementary_data["second_per_grid_ts_gen"] = torch.full(
-            (batch_size,), seconds_per_latent_frame, device=device
-        )
+        fps = _batch_fps(complementary_data, self.fps, batch_size, device)
+        complementary_data["second_per_grid_ts_gen"] = self.temporal_compression / fps
         complementary_data["video_canvas_size"] = [canvas.shape[-2], canvas.shape[-1]]
         return complementary_data
 
@@ -396,9 +430,10 @@ class Cosmos3PromptProcessorStep(FlatBatchStep):
         canvas_h, canvas_w = complementary_data.pop("video_canvas_size")
         idle_frames = complementary_data.pop("idle_frames", None)
         counts = [0] * len(tasks) if idle_frames is None else idle_frames.tolist()
+        frame_rates = _batch_fps(complementary_data, self.fps, len(tasks), "cpu").tolist()
         prompts = []
-        for task, idle in zip(tasks, counts, strict=True):
-            prompts.append(self.caption(task, canvas_h, canvas_w, idle, self.fps))
+        for task, idle, fps in zip(tasks, counts, frame_rates, strict=True):
+            prompts.append(self.caption(task, canvas_h, canvas_w, idle, fps))
         complementary_data["prompt"] = prompts
         return complementary_data
 
@@ -427,7 +462,7 @@ class Cosmos3PromptProcessorStep(FlatBatchStep):
                 }
             ],
             "duration": f"{int(duration)}s",
-            "fps": float(int(fps)),
+            "fps": float(fps),
             "resolution": {"H": canvas_h, "W": canvas_w},
             "aspect_ratio": aspect_ratio,
         }
@@ -673,6 +708,12 @@ class Cosmos3Processor:
         for key in (*self.config.input_features, *self.config.output_features):
             if key in batch:
                 batch[key] = self.transform(batch[key], key)
+                mask_key = {ACTION: "action_mask", OBS_STATE: "state_mask"}.get(key)
+                mask = batch.get(mask_key)
+                if mask is not None:
+                    while mask.ndim < batch[key].ndim:
+                        mask = mask.unsqueeze(-2)
+                    batch[key] = batch[key].where(mask.bool(), 0)
         batch = self.tokenizer(self.prompt(self.canvas(batch)))
         return {key: value.to(device) if isinstance(value, Tensor) else value for key, value in batch.items()}
 

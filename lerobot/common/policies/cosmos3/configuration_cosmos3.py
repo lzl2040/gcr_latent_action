@@ -372,7 +372,9 @@ class Cosmos3Config(PreTrainedConfig):
     tags: list[str] | None = None
     license: str | None = None
     pretrained_revision: str | None = None
-    training_action_layout: str = "libero_euler_interleaved"
+    training_action_layout: str = "auto"
+    training_rgb_views: tuple[str, ...] = ("primary", "wrist")
+    training_canonical_slots: list[int] | None = None
     # Observation steps, the current one and the past states as history actions. Only 1 is supported.
     n_obs_steps: int = 1
     chunk_size: int = 16  # Number of action steps predicted per denoising call
@@ -502,8 +504,14 @@ class Cosmos3Config(PreTrainedConfig):
     def __post_init__(self):
         super().__post_init__()
 
-        if self.training_action_layout not in ("libero_euler_interleaved", "cosmos3_native"):
+        if self.training_action_layout not in ("auto", "libero_euler_interleaved", "cosmos3_native"):
             raise ValueError(f"Unsupported training_action_layout={self.training_action_layout!r}.")
+        if (
+            not 1 <= len(self.training_rgb_views) <= 3
+            or len(set(self.training_rgb_views)) != len(self.training_rgb_views)
+            or any(role not in ("primary", "secondary", "wrist") for role in self.training_rgb_views)
+        ):
+            raise ValueError("training_rgb_views must contain one to three distinct RGB roles.")
         for value in (self.video_time_distribution, self.action_time_distribution):
             if value not in ("uniform", "logitnormal", "waver"):
                 raise ValueError(f"Unknown Cosmos3 time distribution: {value!r}.")
@@ -555,7 +563,7 @@ class Cosmos3Config(PreTrainedConfig):
 
     @property
     def rgb_views(self):
-        return ("primary", "wrist")
+        return self.training_rgb_views
 
     @property
     def world_video_frames(self):

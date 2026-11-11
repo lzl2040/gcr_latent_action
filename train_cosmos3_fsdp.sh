@@ -102,9 +102,7 @@ CMD=(
     --policy.dtype=bfloat16
     --policy.load_action_modules="$LOAD_ACTION_MODULES"
     --policy.gradient_checkpointing=true
-    --policy.fps=20
     --policy.view_size='[256,256]'
-    --policy.training_action_layout="${TRAINING_ACTION_LAYOUT:-libero_euler_interleaved}"
     --policy.optimizer_lr="${LEARNING_RATE:-5e-5}"
     --policy.scheduler_warmup_steps="${WARMUP_STEPS:-500}"
     --policy.scheduler_decay_steps="${DECAY_STEPS:-16000}"
@@ -136,6 +134,18 @@ CMD=(
     --wandb.enable="${WANDB_ENABLE:-false}"
     --wandb.project="${WANDB_PROJECT:-lerobot-stage2}"
 )
+if [[ "$WEIGHT_RESUME" != true || -n "${TRAINING_ACTION_LAYOUT:-}" ]]; then
+    CMD+=(--policy.training_action_layout="${TRAINING_ACTION_LAYOUT:-auto}")
+fi
+if [[ -n "${FPS:-}" ]]; then
+    CMD+=(--policy.fps="$FPS")
+fi
+if [[ -n "${RGB_VIEWS:-}" ]]; then
+    CMD+=(--policy.training_rgb_views="$RGB_VIEWS")
+fi
+if [[ -n "${USE_STATE:-}" ]]; then
+    CMD+=(--policy.use_state="$USE_STATE")
+fi
 CMD+=("$@")
 if [[ "$DRY_RUN" == true ]]; then
     printf 'command:'

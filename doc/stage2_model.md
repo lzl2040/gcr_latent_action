@@ -21,7 +21,12 @@ LIBERO 实际微调配置、与官方 Cosmos3/LaWAM 的差异和待验证风险�
 `train_cosmos3_fsdp.sh` 采用相同的数据/输出目录约定，但默认使用未经过 LIBERO 微调的
 `lerobot/Cosmos3-Nano`：本地缺失时在启动 workers 前缓存至节点本地盘，首次微调重置动作头，
 续训保留动作头；基座的 identity normalizer 无需统计文件，训练统计由数据适配器提供。
-该适配器目前仍仅支持 LIBERO。具体路径、下载与续训约定见
+Cosmos3 与 MoT 使用同一个 `MultiModalContrastiveDataset` 读取和采样：新增的
+`normalize_physical=False`、`require_full_window=True` 和 `sample_transform` 接口，
+允许模型侧 `Cosmos3DataAdapter` 消费未归一化的 canonical action/state，而不另建 dataset。
+LIBERO 与 house 等已注册数据均可接入；旋转转换、有效维度 loss mask 和每样本真实帧率
+由原生 Cosmos3 适配层处理。MoT 默认仍使用原有 mean/std 归一化和 episode 尾部 padding，
+不因新增接口改变行为。具体路径、下载与续训约定见
 [原生 Cosmos3 说明](cosmos3.md)，不改变本文的 MoT 配置或权重来源。
 
 ---

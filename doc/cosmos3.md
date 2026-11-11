@@ -124,16 +124,75 @@ RNG and sampler position are restored. An action width changed during a fresh
 run can still resume: the shared backbone bootstraps first, then strict DCP
 restoration replaces every action tensor.
 
-**The current native Cosmos3 adapter still supports only LIBERO mixtures.**
-Sharing data-root conventions does not add house/other-robot support; do not
-apply LIBERO-specific rotation conversion to house data.
-The adapter reads 17 real consecutive frames from both cameras and 16 actions,
-excludes padded episode tails, and recomputes native action quantiles over the
-selected mixture. Our old 10D LIBERO actions encode controls as *Euler XYZ with
-interleaved rotation columns*. The adapter reverses that encoding and produces
-the official *axis-angle with concatenated rotation columns* representation.
-Both are 10D but **are not interchangeable**. Gripper stays continuous.
-`TRAINING_ACTION_LAYOUT=cosmos3_native` is only for already-native source data.
+### Shared fine-tuning dataset
+
+Cosmos3 now uses the same `MultiModalContrastiveDataset` as MoT for local v2/v3
+reading, mixtures, episode indexing and sampling. The LIBERO-only dataset class
+has been removed. The shared constructor adds opt-in interfaces:
+
+- `normalize_physical=False`: return raw canonical action/state values and masks,
+  before the existing per-dataset mean/std transform.
+- `require_full_window=True`: keep only starts with a complete future clip/action
+  chunk; reject padded or incomplete reads. Source-frame totals remain distinct
+  from valid-window counts.
+- `sample_transform`: run a model-specific conversion after shared RGB
+  augmentation and read-fallback receipt creation.
+- `get_raw_physical_values(dataset_idx, "action" | "state")`: project parquet
+  columns into canonical slots for statistics, without decoding videos.
+
+The defaults preserve MoT's existing normalized physical inputs and padded
+episode tails. Only native Cosmos3 enables the raw/full-window interfaces.
+`lerobot/common/policies/cosmos3/dataset_adapter.py` owns model-side conversion,
+not dataset loading or sampling.
+
+`TRAINING_ACTION_LAYOUT=auto` is the new fresh-run default. The shared specs
+first map actions into the canonical 40-slot space. The adapter compacts the
+mixture's active action slots (and state slots with `USE_STATE=true`), saves
+`training_canonical_slots` in the policy config, and creates native feature names.
+Single-arm EEF data remains 10D; joint-only, bimanual and mixed layouts keep
+their distinct slots. Missing dimensions are masked after normalization and
+excluded from action flow loss, not trained as zero measurements. Supplying
+`action_mask` during inference also zeros the unavailable output channels.
+Quantiles and other statistics use only sources with that channel. Changing the saved slot
+mapping is rejected on resume.
+
+Ordinary canonical rot6d stores interleaved first/second rotation columns.
+`auto` only reorders those columns for house and other ordinary datasets; it
+does **not** reinterpret their rotations as Euler controls. Our old LIBERO
+actions additionally encode the original Euler control vector as a rotation:
+only `libero_*` actions receive that legacy Euler-to-axis-angle correction.
+State rotations describe actual poses and never receive the LIBERO action
+reinterpretation. Gripper units/continuous values are preserved.
+Explicit `TRAINING_ACTION_LAYOUT=libero_euler_interleaved` rejects non-LIBERO
+sources. `cosmos3_native` skips rotation conversion and is only for source values
+already using native column rot6d. Resume does not implicitly override a saved
+layout with `auto`.
+
+The default window remains 17 real frames and 16 actions. `sample_fps` carries
+each source's true frame rate to the idle-frame prompt and video M-RoPE timing,
+so 10Hz house data is not labeled as 20Hz, and mixtures can contain different
+capture rates without action resampling. `FPS` optionally sets the fallback
+rate for inference; source training rates remain authoritative.
+`RGB_VIEWS='["primary","wrist"]'` selects one to three distinct shared camera
+roles. Every selected view must exist in each source; choose a common subset
+such as `RGB_VIEWS='["primary"]'` for mixtures without wrist cameras rather than
+inventing camera targets. Set a matching `--policy.view_description` for a
+non-default camera layout.
+
+For the registered house dataset, ensure `dataset-house` exists under one of the
+configured data roots, then run in the Cosmos3 environment:
+
+```bash
+DATA_MIX=real_house_stack USE_STATE=true \
+JOB_NAME=cosmos3_nano_base_house \
+bash train_cosmos3_fsdp.sh
+```
+
+`USE_STATE=true` passes the current raw state as a clean conditioning row in the
+same compact layout, with its own validity mask. It is optional and still false
+by default to preserve the LIBERO recipe. Sources must provide usable actions
+and, when enabled, state; perception-only data is rejected. This interface
+does not add tactile tokens or MoT-specific task families to the native model.
 
 This is compatibility with our trainer, **not an exact upstream training recipe
 reproduction**: FULL_SHARD/FSDP1, BF16 parameters and 8-bit AdamW; native timestep
@@ -249,6 +308,17 @@ action-quantile normalization passed. This update did **not** download the 33GB
 base weights, run fresh-base GPU training or submit a multi-node cluster job.
 The real training/evaluation results below used the official LIBERO checkpoint.
 
+The shared-interface update also exercised real `real_house_stack` parquet and
+dual-camera videos through `MultiModalContrastiveDataset`, with state enabled,
+the real offline base tokenizer, native preprocessing and a two-step CPU
+TinyModel backward/optimizer smoke. Raw actions were `[2,16,10]`, current state
+`[2,10]`, video canvas `[2,3,17,192,320]`, and both samples used the actual 10Hz
+capture rate with no read fallback. The source contains 91,296 frames and
+84,322 valid windows. Rotation reordering matched the raw parquet actions;
+processor save/reload preserved the prepared actions. The tiny smoke validates
+the data/model interface, **not** full
+16.5B Cosmos3 training, convergence or house task success.
+
 Real Object data: 454 episodes, 66,984 source frames, 59,720 unpadded windows.
 The final valid anchors decode 17 camera frames and 16 finite native actions,
 without read fallback. A real 3-A6000 smoke run completed two optimizer steps
@@ -272,11 +342,16 @@ recovery history are recorded in [the evaluation log](evaluation/libero.md).
 ```bash
 /Data/lzl/venvs/lerobot_cosmos3/bin/python -m pytest -q \
   tests/test_cosmos3_policy.py tests/test_cosmos3_dataset.py \
-  tests/test_cosmos3_libero_eval.py tests/test_fsdp_training.py
+  tests/test_cosmos3_libero_eval.py tests/test_cosmos3_libero_pro.py \
+  tests/test_fsdp_training.py
 ```
 
 Synthetic-image inference is only a loader/finite-output check, not a real
 rollout or success-rate measurement. Benchmark results must come from complete
 `results.json` episode records; no upstream reported score is a local result.
-Native/FSDP tests: 107 passed, two optional FP8-dependency skips. Existing
-Transformers-4 training-schedule/MoT regression tests: 225 passed in `lerobot_v2`.
+Current native/FSDP tests: 131 passed, two optional FP8-dependency skips.
+Shared dataset/indexing/sampling/cache/launcher and default-padding regressions:
+182 passed in `lerobot_v2`; 30 existing `repeat_last` cases were excluded because
+they reference the inactive `robodojo.action_padding` specification. That
+unrelated specification was not changed. Earlier Transformers-4
+training-schedule/MoT validation passed 225 tests.
