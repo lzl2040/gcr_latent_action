@@ -5198,3 +5198,41 @@ completed-task denominator. All partial attempts and videos are retained.
 The verified coordinator received SIGINT; all live owned descendants
 exited without escalation, port19194 is closed and evaluation GPU
 processes are gone. No automatic resume is scheduled.
+
+### Reset-only investigation of the two failed tasks (2026-11-12)
+
+The stopped sweep remains stopped. Model-free diagnostics in
+`outputs/evaluation/robodojo/env_reset_diagnostics_20261112_v1/` use
+the original seed0/layouts0--2, real cameras and native scene checks.
+They do not load a policy or execute policy actions, alter rewards,
+skip layouts or edit shared native sources/assets. The probe must call
+`env.close()` between layouts, as the native evaluation loop does;
+earlier probes without this lifecycle produced additional, diagnostic-only
+reload errors and are not valid evidence about normal evaluation.
+
+* `egg_cpu_lifecycle_probe.json`: layouts0/2 reset successfully; layout1
+  reproduces `UnStableError`. An egg is still rolling during the native
+  stability window. The10-degree rotational gate is unchanged. This is
+  not a model failure and is not repaired by declaring the layout valid.
+* `cloth_shape_probe.json`: CPU dynamics registers the garment but reports
+  zero simulation nodes against9625 cooked rest points; the CPU tensor
+  backend also reports its rest-nodal getter is unimplemented.
+* `cloth_gpu_lifecycle_probe.json`: explicitly selecting native
+  `--physics_device cuda:0` fixes initialization for all three layouts.
+  Their live nodal states are finite, with9625/9455/10410 simulation nodes
+  and original-to-cooked landmark errors below6.4e-8m. No rest-shape
+  validation was bypassed. Reset camera PNGs and material/backend metadata
+  are preserved; they have not undergone full visual/contact validation.
+
+This last result only restores the existing **experimental Sim6 surface
+FEM** path: it is not equivalent to official Sim5.1 particle cloth, and
+does not establish that gripper contact or folding works. In particular,
+the native FEM configuration retains particle-count-derived mass
+(96.65/94.87/104.1kg), which is recorded, not silently retuned here.
+The installed Sim5.1 environment was also tried without Sim6 extension
+paths, but segfaulted during `SimulationApp._prepare_ui`, before a task
+could initialize (`cloth_sim51_clean_probe.log`). Official-runtime
+validation therefore remains blocked on that separate runtime failure.
+Selecting GPU physics for the articulated egg task additionally exposes
+a legacy GPU-tensor-to-NumPy error in `SingleArticulation.dof_properties`;
+it is not a verified workaround (`egg_gpu_lifecycle_probe.json`).
