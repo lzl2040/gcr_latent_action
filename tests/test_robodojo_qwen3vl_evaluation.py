@@ -996,6 +996,72 @@ def test_suite_discovers_nonrandom_tasks_and_preserves_long_native_horizons(tmp_
         task_specs(tmp_path, 0)
 
 
+@pytest.mark.parametrize("physics_device", [None, "cpu", "cuda:0"])
+def test_simulator_physics_override_is_explicit_and_does_not_change_policy_device(
+    tmp_path, monkeypatch, physics_device
+):
+    from lerobot.evaluation import eval_qwen3vl_mot_robodojo as evaluator
+
+    cli = ["eval", "--sim-gpu", "1"]
+    if physics_device is not None:
+        cli.extend(("--physics-device", physics_device))
+    args = build_parser().parse_args(cli)
+    args.robodojo_root = tmp_path / "source"
+    configs = args.robodojo_root / "task/RoboDojo/config"
+    configs.mkdir(parents=True)
+    (configs / "stack_bowls.yml").write_text("{}")
+    (configs / "_task.yml").write_text("common:\n  eval_nums: 50\ntasks: {}\n")
+    args.sim_python = tmp_path / "python"
+    args.sim_python.touch()
+    args.output_dir = tmp_path / "output"
+    args.output_dir.mkdir()
+    args.port = 0
+    monkeypatch.setenv("OMNI_KIT_ACCEPT_EULA", "YES")
+    monkeypatch.setattr(evaluator, "create_workspace", lambda *args: None)
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: "/sim/extsDeprecated")
+    monkeypatch.setattr(evaluator, "wait_for_server", lambda *args: None)
+    launched = []
+
+    class SimulatorReachedError(Exception):
+        pass
+
+    def launch(command, **kwargs):
+        launched.append((command, kwargs))
+        if len(launched) == 1:
+            return SimpleNamespace(poll=lambda: 0)
+        raise SimulatorReachedError
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    with pytest.raises(SimulatorReachedError):
+        evaluate(args)
+    policy, simulator = launched
+    assert "--physics-device" not in policy[0] and "--physics_device" not in policy[0]
+    assert policy[1]["env"]["CUDA_VISIBLE_DEVICES"] == "0"
+    assert simulator[1]["env"]["CUDA_VISIBLE_DEVICES"] == "1"
+    if physics_device is None:
+        assert "--physics_device" not in simulator[0]
+    else:
+        assert simulator[0][-2:] == ["--physics_device", physics_device]
+    assert "--fail_fast" in simulator[0] and "--skip_unstable" not in simulator[0]
+    summary = json.loads((args.output_dir / "summary.json").read_text())
+    assert summary["physics_device_override"] == physics_device
+    assert summary["simulator_command"] == simulator[0]
+
+
+@pytest.mark.parametrize("physics_device", [None, "cuda:0"])
+def test_suite_forwards_physics_override_to_child_evaluation(tmp_path, physics_device):
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite import task_command
+
+    args = build_parser().parse_args(["eval"])
+    args.camera_wrapper = None
+    args.physics_device = physics_device
+    command = task_command(args, {"task": "fold_clothes"}, tmp_path / "output")
+    child_args = build_parser().parse_args(command[4:])
+    assert child_args.physics_device == physics_device
+    assert child_args.task == "fold_clothes"
+    assert child_args.eval_num == "3"
+
+
 def test_suite_validates_native_caps_without_truncating_long_tasks():
     from lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite import validate_episode_profile
 

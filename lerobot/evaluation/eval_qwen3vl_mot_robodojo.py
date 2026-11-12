@@ -48,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--gpu", type=int, default=0, help="Physical policy GPU for eval mode.")
     parser.add_argument("--sim-gpu", type=int, default=0, help="Physical simulator GPU for eval mode.")
+    parser.add_argument(
+        "--physics-device",
+        choices=("cpu", "cuda:0"),
+        help="Override native PhysX dynamics; cuda:0 uses --sim-gpu. Omit to preserve native settings.",
+    )
     parser.add_argument("--inference-steps", type=int)
     parser.add_argument("--replan-steps", type=int, default=10)
     parser.add_argument(
@@ -459,6 +464,8 @@ def evaluate(args) -> None:
         "--kit_args",
         kit_args,
     ]
+    if args.physics_device is not None:
+        sim_command.extend(("--physics_device", args.physics_device))
     metadata = {
         "status": "running",
         "evaluation_complete": False,
@@ -467,6 +474,7 @@ def evaluate(args) -> None:
         "seed": args.seed,
         "policy_gpu": args.gpu,
         "simulator_gpu": args.sim_gpu,
+        "physics_device_override": args.physics_device,
         "replan_steps": args.replan_steps,
         "save_predicted_video": args.save_predicted_video,
         "checkpoint": str(args.checkpoint.resolve()),

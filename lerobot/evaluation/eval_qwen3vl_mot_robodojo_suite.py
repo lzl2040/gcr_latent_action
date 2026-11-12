@@ -388,7 +388,7 @@ def task_command(args, spec: dict, output: Path) -> list[str]:
         "timeout": args.timeout,
         "startup-timeout": args.startup_timeout,
     }
-    for key in ("policy_config", "training_config"):
+    for key in ("policy_config", "training_config", "physics_device"):
         if getattr(args, key):
             values[key.replace("_", "-")] = getattr(args, key)
     for name, value in values.items():

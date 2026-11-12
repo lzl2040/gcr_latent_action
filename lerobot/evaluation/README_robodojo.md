@@ -5236,3 +5236,35 @@ validation therefore remains blocked on that separate runtime failure.
 Selecting GPU physics for the articulated egg task additionally exposes
 a legacy GPU-tensor-to-NumPy error in `SingleArticulation.dof_properties`;
 it is not a verified workaround (`egg_gpu_lifecycle_probe.json`).
+
+### Opt-in garment initialization repair
+
+The evaluator now forwards `--physics-device cuda:0` to native
+`--physics_device cuda:0`. Logical0 refers to the physical GPU selected
+by `--sim-gpu`, not necessarily physical GPU0. Omit the option to preserve
+all existing native device selection; `--physics-device cpu` is also
+supported. Both settings and `summary.json` record the explicit override,
+and the suite forwards it and includes it in resume identity.
+
+For a **fresh, cloth-only** run, append `--physics-device cuda:0` to the
+single-task command with `--task fold_clothes`, or to the suite with
+`--tasks fold_clothes`. Do not apply it to all42 tasks: GPU compatibility
+of other tasks is not established, and the articulated egg task has the
+separate failure above. Do not mix this changed backend with the stopped
+sweep or silently update its pinned baseline worktree, which remains
+clean at8a2fce0e and does not contain this new CLI option.
+
+`cloth_gpu1_final_probe.json` confirms another3/3 real resets using the
+evaluator-equivalent `CUDA_VISIBLE_DEVICES=1`, rendererGPU1 and logical
+physicsGPU0. All three report GPU dynamics/broadphase and CUDA tensor
+views, finite rest tensors and valid landmark maps. The three reset head
+images were checked: each garment is visible on the table with no obvious
+explosion. This is only reset-state validation, not full-video,
+gripper-contact or successful-folding validation. No policy was loaded,
+no task evaluation resumed, and the probes released their GPU resources.
+
+Validation: all61 focused RoboDojo tests pass, including default-device
+preservation, simulator-only overrides, metadata, unchanged fail-fast
+gates and suite forwarding. Ruff lint/format and `git diff --check` pass.
+The experimental FEM/official-particle-cloth distinction still applies;
+`fill_egg_holder` layout1 remains unresolved under the original protocol.
