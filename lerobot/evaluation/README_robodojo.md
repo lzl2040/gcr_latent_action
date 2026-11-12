@@ -5440,5 +5440,16 @@ The running28k sweep continues using the unchanged original25FPS source.
 Tests:29 dataset/downsampling cases pass, including real video frame
 identity/phase, cross-file episodes, short/single-frame episodes,
 noncommuting rotation composition, terminal identities, statistics and
-source preservation. Ruff lint/format pass. Full source conversion is
-pending at this implementation checkpoint.
+source preservation. Ruff lint/format pass.
+
+Real-source smoke validation completed at
+`RoboDojo_ee_lerobot_v30_video_fps12p5_smoke3`:3 episodes,894 rows and
+894 frames per camera at12.5FPS. Episode1's left-camera short tail was
+trimmed consistently. Selected absolute state/action columns match
+source exactly. Reintegrating new deltas reaches the next retained
+measured state (maximum rotation error1.28e-8rad); all three terminal
+deltas are identities. The actual v3.0 training loader/CPU TorchCodec
+decoded all cameras and a32-action window at the first/last rows of
+each episode, including future-image offsets0/.64/2.48s and padding.
+Source snapshots were unchanged. Full source conversion is pending
+at this smoke-validation checkpoint.
