@@ -5453,22 +5453,28 @@ decoded all cameras and a32-action window at the first/last rows of
 each episode, including future-image offsets0/.64/2.48s and padding.
 Source snapshots were unchanged.
 
-Full conversion was launched2026-11-12 22:38 with4 CPU workers x2
-FFmpeg threads, PID3991650; no GPU or original files were changed.
-The verified build plans3500 episodes,928940 output rows and319 MP4s.
+Full conversion ran2026-11-12 22:38 through2026-11-13 00:42:55 with
+4 CPU workers x2 FFmpeg threads, exit0; no GPU or original files were
+changed. The final dataset has3500 episodes,928940 rows at12.5FPS
+and319 MP4s across three cameras. Every MP4 was probed and completely
+decoded during conversion; source size/mtime snapshots were unchanged.
 There are26 short camera intervals across25 episodes;25 source tail
 rows are trimmed synchronously, removing10 otherwise-retained samples.
-Startup verification observed progress0->2 validated/completely decoded
-MP4s. The full dataset is **still building**, not yet ready for training.
-Its final destination is the command's `_fps12p5` directory above;
-current staging is sibling
-`.RoboDojo_ee_lerobot_v30_video_fps12p5.building-vz3if6eu`.
-Progress is in that staging directory's `meta/downsample_manifest.json`;
-log:
+The final dataset was atomically published to the command's `_fps12p5`
+directory above. Its `meta/downsample_manifest.json` has `complete=true`
+and `completed_video_files=319`; staging was renamed, not left as a
+second dataset. Conversion log:
 `/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/robodojo_v30_fps12p5_full.log`.
-Success logs `Complete: 3500 episodes, 928940 frames` and atomically
-publishes the final directory with manifest `complete=true`; a failure
-leaves staging and logs the exception instead.
+
+Post-publication audit checked all928940 rows: selected absolute
+state/action columns match source exactly; both arms' delta endpoint
+translation/gripper and rotation reconstruction pass, with maximum
+rotation error3.09e-8rad. All3500 episode terminal deltas are identities.
+The actual v3.0 training loader/CPU TorchCodec read three-camera future
+frames and32-action windows at the dataset beginning/end and both
+physical Parquet boundaries (400395/400396 and821879/821880), with
+correct episode-local timestamps and padding. Full audit artifact:
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/audit_downsample_full.json`.
 
 Use the12.5FPS dataset for **new training**, with80ms action intervals.
 A32-row chunk now represents2.56s (last future frame at2.48s).
