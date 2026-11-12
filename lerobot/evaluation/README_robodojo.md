@@ -5380,3 +5380,65 @@ Coordinator log:
 `/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/nonrandom42_baseline28k_suite.log`.
 Preparation commit: `5c69e1a`. Full-task success rates remain pending;
 live results are `progress.json` and `results.csv`.
+
+## Downsample v3.0 data and videos together
+
+`scripts/downsample_lerobot_v30.py` creates a separate v3.0 dataset.
+It supports integer decimation ratios, e.g.25->12.5FPS (stride2);
+25->10 is deliberately rejected rather than silently making an irregular
+time grid look regular. Sampling restarts at frame0 of every episode,
+including episodes crossing Parquet boundaries or starting at odd frame
+offsets inside concatenated MP4s.
+
+All data columns are sampled together. Absolute action targets are
+preserved at retained timestamps. For the declared RoboDojo
+`next_measured_state` delta contract, both delta columns are recomputed
+from consecutive **retained measured states**: world translation and
+gripper differences, `R_next @ R_current.T`, canonical WXYZ quaternion,
+and interleaved first-two-column6D rotation. The final row of each
+episode has zero translation/gripper delta and identity rotation.
+Unknown delta conventions are rejected; quaternion/6D components are
+never subtracted, averaged or independently subsampled.
+
+Videos are genuinely re-encoded to H.264/yuv420p (defaultCRF18), retaining
+resolution, with exactly the same per-episode frame selection as data.
+This changes codec and may introduce compression differences; use
+`--crf 0` for lossless H.264 encoding of the decoded YUV frames.
+Each output is probed and fully decoded to verify frame count and FPS.
+Image stats are recomputed from **every decoded output frame**, using a
+32x24 area-resized spatial sample and exact RGB histograms/quantiles,
+not copied from25FPS. Scalar/vector stats and episode-level stats are
+recomputed exactly. Episode lengths/global indices/local frame indices/
+timestamps/video offsets, feature FPS/codec and metadata are updated.
+
+The supplied source has26 episode-camera intervals one frame shorter
+than data. By explicit user choice, `--short-video-policy trim` restricts
+**all** modalities to each episode's common valid prefix before decimating.
+No frame is borrowed from the next episode or duplicated. All source
+interval warnings, tail trims and source-to-output frame mappings are
+recorded in `meta/downsample_manifest.json`. Default policy is to error.
+
+```bash
+conda activate wam
+python scripts/downsample_lerobot_v30.py \
+  --source /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --output /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video_fps12p5 \
+  --fps 12.5 --short-video-policy trim --workers 4 --threads 2
+```
+
+For a smoke test, add `--max-episodes 3` and choose a different output.
+The output must not exist; source and destination cannot contain each
+other. Sources are only read and checked for size/mtime changes.
+The final dataset is published by atomic rename only after validation;
+intermediate data/progress remain in a sibling
+`.OUTPUT_NAME.building-*` directory if conversion fails. This is not a
+resume interface: inspect a failed build and use a new output name.
+FFmpeg/FFprobe are discovered beside the current Python if absent from
+PATH; `--ffmpeg` can select an existing installation. No GPU is used.
+The running28k sweep continues using the unchanged original25FPS source.
+
+Tests:29 dataset/downsampling cases pass, including real video frame
+identity/phase, cross-file episodes, short/single-frame episodes,
+noncommuting rotation composition, terminal identities, statistics and
+source preservation. Ruff lint/format pass. Full source conversion is
+pending at this implementation checkpoint.
