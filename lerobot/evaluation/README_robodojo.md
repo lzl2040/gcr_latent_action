@@ -5280,3 +5280,73 @@ it applies the verified `cuda:0` override **only** to `fold_clothes`, leaving
 egg stability checks and all other native physics selections unchanged.
 The flag is part of the suite manifest/resume identity. This does not make
 cloth results equivalent to the official particle-cloth benchmark.
+
+## Physical MLP baseline step28k: fresh full42 sweep (2026-11-12)
+
+The user requested all42 non-random tasks, three original layouts each,
+using the new
+`robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/step28k`.
+This is a fresh126-episode run, not a resume of the stopped21k sweep.
+PolicyGPU0/simulatorGPU1 remain serial. Seed0, layouts0--2, BF16,
+sampling10, prediction32, execution10 and all native horizons are
+preserved (maximum98,400 controls), with actual and predicted videos.
+Only `fold_clothes` enables the documented experimental GPU FEM repair;
+egg stability checks remain unchanged. Preserve infrastructure errors,
+do not replace layouts, and do not count invalid tasks as policy0/3.
+
+Preflight verified35 source files (32 DCP shards, metadata and two
+configs),23,353,964,787 bytes,1357 tensors and30,664 valid storage ranges.
+All model keys/shapes/dtypes match21k; root training/model configs and
+the five dataset fingerprints are unchanged. All42 task definitions,
+126 layouts and761 native asset/config files match the prior preflight.
+Evidence:
+`runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/checkpoint_provenance_step28k.json`
+and `nonrandom42_step28k_preflight_20261112.json`.
+
+The new isolated runtime is
+`runtime_assets/runtime_sources/no_stage1_physical_mlp_8a2fce0e_cloth_gpu`,
+clean at `fb38d2369d8f082ce00fe27f4b706f57d140d972`.
+Its parent is the exact requested baseline model revision
+`8a2fce0e6f32b3edd73cef01f33851de35b57504`; only the two evaluator
+entrypoints and focused tests differ, to support explicit cloth-only
+GPU physics. All model and loader sources are unchanged. The original
+pinned worktree is untouched. Isolated-runtime MLP/architecture-guard/
+evaluation-loader tests:132 passed. The main branch is not switched.
+Strict full-model restoration and real rollout startup are still pending
+at this preparation checkpoint.
+
+Reproduction command (fresh output only):
+
+```bash
+MAIN=/home/jianf/lzl_project/gcr_latent_action
+CACHE="$MAIN/outputs/evaluation/robodojo/runtime_assets"
+CODE="$CACHE/runtime_sources/no_stage1_physical_mlp_8a2fce0e_cloth_gpu"
+cd "$CODE"
+unset ROBODOJO_STOP_AFTER_FIRST_FAILURE
+export PYTHONPATH="$CODE" OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+export OMNI_KIT_ACCEPT_EULA=YES HF_HUB_OFFLINE=1
+/home/jianf/miniforge3/envs/wam/bin/python -u -c \
+  'import runpy, signal; signal.signal(signal.SIGINT, signal.default_int_handler); runpy.run_module("lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite", run_name="__main__")' \
+  eval \
+  --checkpoint /data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/step28k \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video \
+  --qwen3vl-dir "$CACHE/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$CACHE/pretrained/Cosmos3-Edge" \
+  --robodojo-root /data2/guoqi/robodojo_pi05_repro \
+  --assets /data2/guoqi/robodojo_pi05_repro/Assets \
+  --sim-python /home/jianf/miniforge3/envs/RoboDojo6/bin/python \
+  --checkpoint-provenance "$CACHE/robodojo_2nodes_8gpu_high_noise_shift_5_decay_25k_base/checkpoint_provenance_step28k.json" \
+  --camera-wrapper /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py \
+  --cloth-gpu-physics \
+  --gpu 0 --sim-gpu 1 --port 19195 --seed 0 \
+  --inference-steps 10 --replan-steps 10 \
+  --save-predicted-video --timeout 14400 \
+  --output-dir "$MAIN/outputs/evaluation/robodojo/nonrandom42_baseline_mlp_step28k_sampling10_20261112_v1"
+```
+
+Omitting `--tasks` selects all42 canonical non-random tasks.
+Settings/source fingerprints prevent mixing this protocol with the old
+sweep. Live artifacts are `progress.json`, `results.csv`, per-task logs,
+native/predicted videos and `suite_audit.json`. The simple completed-task
+mean in progress is not the official equally weighted five-dimension
+score; three standard layouts are not the full official protocol.
