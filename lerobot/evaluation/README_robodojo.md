@@ -5350,3 +5350,33 @@ sweep. Live artifacts are `progress.json`, `results.csv`, per-task logs,
 native/predicted videos and `suite_audit.json`. The simple completed-task
 mean in progress is not the official equally weighted five-dimension
 score; three standard layouts are not the full official protocol.
+
+### Verified step28k full42 startup
+
+The new run is active in
+`nonrandom42_baseline_mlp_step28k_sampling10_20261112_v1`.
+Strict full-model checkpoint restoration succeeded with no Stage1
+teacher, BF16 and sampling10. The first task, `align_blocks`, advanced
+control0 to10 with finite32x20 delta actions and all three prediction
+videos saved. Its initial measured robot state, static scene transforms
+and camera matrices exactly match the same task/layout in the old21k
+run (maximum absolute differences0). The initial head and both wrist
+images were checked: magenta blocks and white alignment tool on the
+wooden table, with the expected wrist perspectives. This is not a
+full-video or completed-episode review.
+
+The126-episode manifest and native/runtime hashes passed verification.
+The first task retains native physics selection; only the later cloth
+task receives the explicit GPU dynamics override. A valid WebSocket
+handshake succeeds on port19195. All four owned Python processes have
+SIGINT enabled. Actual physical GPU placement was verified:
+policyPID3501959 onGPU0 and simulatorPID3502305 onGPU1.
+CoordinatorPID3501474 and detached shell
+`nonrandom42-baseline28k-eval` remain running; the stopped21k sweep is
+still `interrupted`. No earlier outcomes were reused.
+
+Evidence: `startup_validation.json` in the new output root.
+Coordinator log:
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/nonrandom42_baseline28k_suite.log`.
+Preparation commit: `5c69e1a`. Full-task success rates remain pending;
+live results are `progress.json` and `results.csv`.
