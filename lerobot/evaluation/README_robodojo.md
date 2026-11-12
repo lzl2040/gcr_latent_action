@@ -5188,3 +5188,13 @@ Coordinator log is
 `/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/nonrandom42_baseline21k_suite.log`.
 Preparation commit: `1bbb552`. Full42-task success and capability scores
 remain pending; follow `progress.json` and `results.csv`.
+
+The user stopped this sweep on2026-11-12. The coordinator exited130,
+with21 completed tasks /63 valid episodes,1 success (1.59%) and a simple
+completed-task mean score8.968/100. `fill_egg_holder` and `fold_clothes`
+remain infrastructure errors, not policy0/3. `play_stacking_toy` was
+interrupted during its second episode and is not included in the audited
+completed-task denominator. All partial attempts and videos are retained.
+The verified coordinator received SIGINT; all live owned descendants
+exited without escalation, port19194 is closed and evaluation GPU
+processes are gone. No automatic resume is scheduled.
