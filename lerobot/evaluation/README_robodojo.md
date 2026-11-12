@@ -5451,5 +5451,26 @@ measured state (maximum rotation error1.28e-8rad); all three terminal
 deltas are identities. The actual v3.0 training loader/CPU TorchCodec
 decoded all cameras and a32-action window at the first/last rows of
 each episode, including future-image offsets0/.64/2.48s and padding.
-Source snapshots were unchanged. Full source conversion is pending
-at this smoke-validation checkpoint.
+Source snapshots were unchanged.
+
+Full conversion was launched2026-11-12 22:38 with4 CPU workers x2
+FFmpeg threads, PID3991650; no GPU or original files were changed.
+The verified build plans3500 episodes,928940 output rows and319 MP4s.
+There are26 short camera intervals across25 episodes;25 source tail
+rows are trimmed synchronously, removing10 otherwise-retained samples.
+Startup verification observed progress0->2 validated/completely decoded
+MP4s. The full dataset is **still building**, not yet ready for training.
+Its final destination is the command's `_fps12p5` directory above;
+current staging is sibling
+`.RoboDojo_ee_lerobot_v30_video_fps12p5.building-vz3if6eu`.
+Progress is in that staging directory's `meta/downsample_manifest.json`;
+log:
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/robodojo_v30_fps12p5_full.log`.
+Success logs `Complete: 3500 episodes, 928940 frames` and atomically
+publishes the final directory with manifest `complete=true`; a failure
+leaves staging and logs the exception instead.
+
+Use the12.5FPS dataset for **new training**, with80ms action intervals.
+A32-row chunk now represents2.56s (last future frame at2.48s).
+Deployment must match that action time base, not simply relabel the FPS
+of an existing25FPS checkpoint or apply one80ms delta twice at25Hz.
