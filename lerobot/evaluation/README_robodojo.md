@@ -5268,3 +5268,9 @@ preservation, simulator-only overrides, metadata, unchanged fail-fast
 gates and suite forwarding. Ruff lint/format and `git diff --check` pass.
 The experimental FEM/official-particle-cloth distinction still applies;
 `fill_egg_holder` layout1 remains unresolved under the original protocol.
+
+The user chose to preserve the original protocol after reviewing the
+extra-settling alternative. Keep egg layout1 as an environment error:
+do not add settling steps, relax stability thresholds or replace the
+layout. This investigation is complete with that limitation; the stopped
+task sweep remains stopped.
