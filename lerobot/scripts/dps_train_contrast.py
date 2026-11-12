@@ -310,6 +310,13 @@ def _load_stage2_resume_policy_config(
         raise ValueError(
             "Cannot change `policy.understanding_dual_vision` while resuming; start a fresh output directory."
         )
+    if (
+        parser.parse_arg("policy.stage1_physical_only", args) is not None
+        and runtime_policy.stage1_physical_only != saved_policy.stage1_physical_only
+    ):
+        raise ValueError(
+            "Cannot change `policy.stage1_physical_only` while resuming; start a fresh output directory."
+        )
     for field_name in ("qwen3vl_dir", "cosmos3_dir"):
         runtime_path = getattr(runtime_policy, field_name)
         if runtime_path:

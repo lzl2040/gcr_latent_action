@@ -542,6 +542,74 @@ def test_stage2_launchers_forward_optional_vision_and_latent_switches(
         assert f"--policy.understanding_dual_vision={dual_vision}" in result.stdout
 
 
+@pytest.mark.parametrize("scenario", ["fresh", "resume", "old_resume", "overwrite"])
+def test_baseline_physical_launcher_recipe_and_output_isolation(tmp_path, fsdp_checkpoint_factory, scenario):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "output"
+    resume = scenario in ("resume", "old_resume")
+    if scenario != "fresh":
+        fsdp_checkpoint_factory(output)
+        (output / "config.json").write_text(
+            json.dumps(
+                {
+                    "type": "qwen3vl_mot",
+                    "stage1_physical_only": scenario == "resume",
+                }
+            )
+        )
+    result = subprocess.run(
+        ["bash", str(root / "train_qwen3vl_mot_baseline_physical_fsdp.sh")],
+        cwd=root,
+        env={
+            **os.environ,
+            "OUTPUT_DIR": str(output),
+            "WEIGHT_RESUME": str(resume).lower(),
+            "DRY_RUN": "true",
+            "CHECK_PATHS": "false",
+            "PYTHON_BIN": sys.executable,
+            "MASTER_PORT": "29599",
+            "NNODES": "1",
+            "NODE_RANK": "0",
+            "NPROC_PER_NODE": "1",
+        },
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+    if scenario in ("old_resume", "overwrite"):
+        assert result.returncode != 0
+        assert "Refusing to" in result.stderr
+        assert not json.loads((output / "config.json").read_text())["stage1_physical_only"]
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    for flag in (
+        "--policy.stage1_physical_only=true",
+        "--policy.require_stage1_vision_transfer=false",
+        "--policy.latent_action_prediction_enabled=true",
+        "--policy.latent_action_loss_weight=0",
+        "--policy.understanding_dual_vision=false",
+        "--policy.physical_flow_space=raw",
+        "--policy.physical_tuning_mode=full",
+        "--policy.understanding_lr_scale=1.0",
+        "--policy.scheduler_warmup_steps=1000",
+        "--policy.scheduler_plateau_steps=100",
+        "--policy.scheduler_decay_steps=20000",
+        "--policy.time_sampling_distribution=shifted_uniform",
+        "--policy.time_sampling_shift=5.0",
+        "--policy.action_prediction_reconstruction_loss_weight=0",
+        "--policy.state_prediction_reconstruction_loss_weight=0",
+        "--policy.use_tactile_conditioning=false",
+        "--dataset.image_transforms.enable=true",
+        "--fsdp.fp8=false",
+        f"--weight_resume={str(resume).lower()}",
+    ):
+        assert flag in result.stdout
+    if scenario == "fresh":
+        assert "--policy.generation_backbone=nano" in result.stdout
+        assert '--policy.task_names=\\[\\"joint_prediction\\"\\]' in result.stdout
+    assert not output.exists() if scenario == "fresh" else output.exists()
+
+
 def test_restore_replicated_frozen_parameters_uses_canonical_fsdp_names() -> None:
     inner = nn.Module()
     inner.weight = nn.Parameter(torch.zeros(2, 3), requires_grad=False)

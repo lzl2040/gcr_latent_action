@@ -1119,17 +1119,20 @@ def test_spatial_tactile_target_and_generation_are_decodable():
 
 
 @pytest.mark.parametrize("saved_enabled", [False, True])
-@pytest.mark.parametrize("field", ["latent_action_prediction_enabled", "understanding_dual_vision"])
+@pytest.mark.parametrize(
+    "field", ["latent_action_prediction_enabled", "understanding_dual_vision", "stage1_physical_only"]
+)
 def test_checkpoint_loading_cannot_toggle_architecture(tmp_path, monkeypatch, saved_enabled, field):
     import json
 
-    Qwen3VLMoTConfig(**{field: saved_enabled})._save_pretrained(tmp_path)
+    options = {"require_stage1_vision_transfer": False, "latent_action_loss_weight": 0}
+    Qwen3VLMoTConfig(**options, **{field: saved_enabled})._save_pretrained(tmp_path)
     if saved_enabled == (field == "latent_action_prediction_enabled"):
         path = tmp_path / "config.json"
         payload = json.loads(path.read_text())
         del payload[field]
         path.write_text(json.dumps(payload))
-    runtime = Qwen3VLMoTConfig(**{field: not saved_enabled})
+    runtime = Qwen3VLMoTConfig(**options, **{field: not saved_enabled})
     monkeypatch.setattr(
         Qwen3VLMoTPolicy, "__init__",
         lambda *args, **kwargs: pytest.fail("A query architecture mismatch must fail before construction."),
@@ -2296,6 +2299,196 @@ def test_embedding_physical_path_with_real_stage1_transformer(dtype):
     assert velocity.grad.abs().sum() > 0
     assert policy.physical_decoders["state"][-1].weight.grad is not None
     assert all(parameter.grad is None for parameter in policy.physical_encoder.parameters())
+
+
+@pytest.fixture
+def physical_only_stage1(tmp_path):
+    from lerobot.common.policies.ace.modeling_robo_contrast import PhysicalEncoder
+
+    config = RoboContrastConfig(
+        chunk_size=4,
+        group_size=2,
+        n_action_steps=4,
+        hidden_dim=8,
+        projection_dim=8,
+        num_attention_heads=2,
+        num_physical_layers=1,
+        max_action_dim=4,
+        max_state_dim=4,
+        max_tactile_signal_dim=3,
+        max_tactile_views=1,
+        tactile_tokens_per_pad=1,
+        tactile_frames=2,
+        tactile_img_size=32,
+        tactile_feat_dim=8,
+        tactile_pretrained=False,
+        num_change_queries=7,
+        dropout=0,
+    )
+    path = tmp_path / "stage1"
+    path.mkdir()
+    config._save_pretrained(path)
+    physical = PhysicalEncoder(config)
+    weights = {f"module.physical_encoder.{k}": v for k, v in physical.state_dict().items()}
+    weights["module.perception_encoder.unused"] = torch.ones(1)
+    return config, physical, path, weights
+
+
+@pytest.mark.parametrize("format", ["safetensors", "deepspeed", "incomplete"])
+def test_physical_only_loads_complete_physical_weights_without_perception(physical_only_stage1, format):
+    from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import _load_stage1_physical_encoder
+
+    _, physical, path, weights = physical_only_stage1
+    if format == "incomplete":
+        weights.pop("module.physical_encoder.action_proj.weight")
+    if format == "deepspeed":
+        (path / "global_step1").mkdir()
+        (path / "latest").write_text("global_step1")
+        torch.save({"module": weights}, path / "global_step1/mp_rank_00_model_states.pt")
+    else:
+        save_file(weights, path / "model.safetensors")
+    if format == "incomplete":
+        with pytest.raises(RuntimeError, match="action_proj.weight"):
+            _load_stage1_physical_encoder(path, "", Qwen3VLMoTConfig())
+        return
+    restored, _ = _load_stage1_physical_encoder(path, "", Qwen3VLMoTConfig())
+    for key, value in physical.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[key], value)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_baseline_physical_only_trains_raw_flow_and_queries_and_roundtrips(
+    tmp_path, monkeypatch, physical_only_stage1, tiny_qwen_understanding_options, dtype
+):
+    import lerobot.common.policies.ace.cosmos3_encoders as cosmos3_encoders
+    import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
+
+    _, _, stage1_path, weights = physical_only_stage1
+    save_file(weights, stage1_path / "model.safetensors")
+    monkeypatch.setattr(stage2, "RoboContrast", lambda *a, **k: pytest.fail("No Stage 1 perception"))
+    monkeypatch.setattr(
+        stage2, "transfer_stage1_perception", lambda *a, **k: pytest.fail("No perception transfer")
+    )
+    monkeypatch.setattr(
+        cosmos3_encoders,
+        "build_cosmos3_vae",
+        lambda *a, **k: (_FakeVAE(4), 4, 4, torch.zeros(4), torch.ones(4)),
+    )
+    config = Qwen3VLMoTConfig(
+        stage1_physical_only=True,
+        require_stage1_vision_transfer=False,
+        latent_action_loss_weight=0,
+        stage1_checkpoint=str(stage1_path),
+        physical_tuning_mode="full",
+        physical_flow_space="raw",
+        understanding_tuning_mode="frozen",
+        understanding_max_text_tokens=4,
+        understanding_kv_layers=2,
+        understanding_text_lora_layers=0,
+        understanding_vision_lora_layers=0,
+        num_latent_queries=2,
+        latent_action_dim=8,
+        generation_backbone="random",
+        generation_hidden_dim=32,
+        generation_depth=1,
+        generation_num_heads=4,
+        generation_num_kv_heads=2,
+        generation_intermediate_dim=64,
+        generation_gradient_checkpointing=False,
+        video_latent_dim=4,
+        video_image_size=16,
+        chunk_size=4,
+        group_size=2,
+        n_action_steps=2,
+        physical_hidden_dim=8,
+        max_action_dim=4,
+        max_state_dim=4,
+        max_tactile_signal_dim=3,
+        max_tactile_views=1,
+        tactile_tokens_per_pad=1,
+        tactile_frames=2,
+        tactile_img_size=32,
+        inference_steps=2,
+        task_names=("joint_prediction",),
+        task_weights=(1.0,),
+    )
+    policy = stage2.Qwen3VLMoTPolicy(config).to(dtype).train()
+    assert policy.teacher_perception is policy.latent_action_projection is None
+    assert policy.understanding.query_tokens is not None
+    assert not hasattr(policy, "physical_decoders")
+    assert not any(
+        key.startswith(("teacher_perception.", "latent_action_projection.")) for key in policy.state_dict()
+    )
+    batch = {
+        "image_t0": torch.zeros(2, 3, 32, 32, dtype=torch.uint8),
+        "video": torch.zeros(2, 9, 3, 16, 16, dtype=torch.uint8),
+        "observation.state": torch.randn(2, 4, 4),
+        "state_mask": torch.ones(2, 4),
+        "action": torch.randn(2, 4, 4),
+        "action_mask": torch.ones(2, 4),
+        "pair_is_valid": torch.ones(2, dtype=torch.bool),
+        "task": ["move"] * 2,
+        "tactile_signal": torch.zeros(2, 4, 3),
+        "tactile_signal_mask": torch.zeros(2),
+        "tactile_image": torch.zeros(2, 1, 2, 3, 32, 32, dtype=torch.uint8),
+        "tactile_image_mask": torch.zeros(2, 1),
+        "sample_rate": torch.full((2,), 10),
+    }
+    optimizer = torch.optim.AdamW(policy.get_optim_params())
+    # Zero-initialized flow heads need one update before gradients reach the encoders.
+    initial_loss, _ = policy(batch, task_type="joint_prediction")
+    initial_loss.backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    loss, metrics = policy(batch, task_type="joint_prediction")
+    assert torch.isfinite(loss)
+    assert metrics["latent_action_loss"] == metrics["latent_action_elements"] == 0
+    loss.backward()
+    for parameter in (
+        policy.physical_encoder.state_proj.weight,
+        policy.physical_encoder.action_proj.weight,
+        next(policy.physical_encoder.blocks[0].parameters()),
+        policy.understanding.query_tokens,
+    ):
+        assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        assert parameter.grad.abs().sum() > 0
+    before = policy.physical_encoder.action_proj.weight.detach().clone()
+    optimizer.step()
+    assert not torch.equal(before, policy.physical_encoder.action_proj.weight)
+    policy.eval()
+    expected = policy.generate_validation(batch, seed=37)["action_normalized"]
+    changed = copy.deepcopy(batch)
+    changed["observation.state"][:, 1:] = 999
+    changed["action"].fill_(-999)
+    changed["video"][:, 1:] = 255
+    torch.testing.assert_close(policy.generate_validation(changed, seed=37)["action_normalized"], expected)
+    exported = tmp_path / "stage2"
+    policy.save_pretrained(exported)
+    (stage1_path / "model.safetensors").unlink()
+    (stage1_path / "config.json").unlink()
+    restored = stage2.Qwen3VLMoTPolicy.from_pretrained(exported).to(dtype).eval()
+    torch.testing.assert_close(restored.generate_validation(batch, seed=37)["action_normalized"], expected)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"understanding_dual_vision": True},
+        {"latent_action_prediction_enabled": False},
+        {"latent_action_loss_weight": 1},
+        {"physical_flow_space": "embedding"},
+        {"require_stage1_vision_transfer": True},
+        {"require_stage1_text_transfer": True},
+    ],
+)
+def test_physical_only_rejects_non_baseline_perception_or_embedding_flow(change):
+    options = {
+        "stage1_physical_only": True,
+        "require_stage1_vision_transfer": False,
+        "latent_action_loss_weight": 0,
+    }
+    with pytest.raises(ValueError, match="stage1_physical_only"):
+        Qwen3VLMoTConfig(**(options | change))
 
 
 @pytest.mark.parametrize("kwargs", [
