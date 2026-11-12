@@ -391,6 +391,8 @@ def task_command(args, spec: dict, output: Path) -> list[str]:
     for key in ("policy_config", "training_config", "physics_device"):
         if getattr(args, key):
             values[key.replace("_", "-")] = getattr(args, key)
+    if getattr(args, "cloth_gpu_physics", False) and spec["task"] == "fold_clothes":
+        values["physics-device"] = "cuda:0"
     for name, value in values.items():
         command.extend((f"--{name}", str(value.resolve() if isinstance(value, Path) else value)))
     if args.save_predicted_video:
@@ -533,6 +535,11 @@ def main() -> None:
     parser.add_argument("--tasks", nargs="+", help="Defaults to all native task definitions except random.")
     parser.add_argument("--checkpoint-provenance", type=Path, required=True)
     parser.add_argument("--camera-wrapper", type=Path, help="Optional passive native camera instrumentation.")
+    parser.add_argument(
+        "--cloth-gpu-physics",
+        action="store_true",
+        help="Use GPU physics for fold_clothes only (experimental FEM, not official particle cloth).",
+    )
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

@@ -5274,3 +5274,9 @@ extra-settling alternative. Keep egg layout1 as an environment error:
 do not add settling steps, relax stability thresholds or replace the
 layout. This investigation is complete with that limitation; the stopped
 task sweep remains stopped.
+
+The suite also accepts `--cloth-gpu-physics` for a fresh mixed-task run:
+it applies the verified `cuda:0` override **only** to `fold_clothes`, leaving
+egg stability checks and all other native physics selections unchanged.
+The flag is part of the suite manifest/resume identity. This does not make
+cloth results equivalent to the official particle-cloth benchmark.

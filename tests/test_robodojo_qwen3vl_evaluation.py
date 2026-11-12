@@ -1062,6 +1062,18 @@ def test_suite_forwards_physics_override_to_child_evaluation(tmp_path, physics_d
     assert child_args.eval_num == "3"
 
 
+@pytest.mark.parametrize("task", ["fold_clothes", "fill_egg_holder", "stack_bowls"])
+def test_suite_cloth_gpu_fix_does_not_change_other_tasks(tmp_path, task):
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite import task_command
+
+    args = build_parser().parse_args(["eval"])
+    args.camera_wrapper = None
+    args.cloth_gpu_physics = True
+    command = task_command(args, {"task": task}, tmp_path / "output")
+    child_args = build_parser().parse_args(command[4:])
+    assert child_args.physics_device == ("cuda:0" if task == "fold_clothes" else None)
+
+
 def test_suite_validates_native_caps_without_truncating_long_tasks():
     from lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite import validate_episode_profile
 
