@@ -5521,5 +5521,22 @@ The dataset index/progress is sibling
 `RoboDojo_ee_lerobot_v30_video_fps12p5_tasks.json`, listing original
 task IDs, instructions, output paths and validation results.
 Preflight found adequate space; all3 existing subset regressions pass.
-Full export and per-task training-reader validation are pending at this
-preparation checkpoint.
+Full export completed2026-11-13 12:49:09, exit0:35 independent task
+directories,100 episodes each,3500 episodes and928940 frames in total,
+all at12.5FPS. The index JSON has `complete=true` and
+`source_snapshots_unchanged=true`; every source episode appears exactly
+once across the subsets.
+
+All subset rows and episode/video mappings were validated. Every
+tabular column except the intentionally reindexed global/episode/task
+IDs matches source exactly, including both delta columns and terminal
+identities. Video copies are regular files with matching source sizes.
+The actual v3.0 training loader/CPU TorchCodec checked each of the35
+subsets at its first row, final episode's first row and final row,
+decoding all three cameras at0/2.48s offsets and32-action windows.
+Each subset has task0 and correct local timestamps/padding. Source file
+size/mtime snapshots were unchanged. Example counts: `stack_bowls`
+100 episodes/22414 frames; `put_bottles_into_dustbin`
+100 episodes/20935 frames; `task_005`100 episodes/32779 frames.
+Run log:
+`/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/split_fps12p5_tasks.log`.
