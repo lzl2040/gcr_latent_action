@@ -5480,3 +5480,46 @@ Use the12.5FPS dataset for **new training**, with80ms action intervals.
 A32-row chunk now represents2.56s (last future frame at2.48s).
 Deployment must match that action time base, not simply relabel the FPS
 of an existing25FPS checkpoint or apply one80ms delta twice at25Hz.
+
+## Per-task v3.0 subsets of the12.5FPS training set
+
+The source has35 training tasks, not all42 native evaluation tasks.
+Use the existing `lerobot.evaluation.scripts.subset_robodojo_tasks`
+exporter to split complete episodes without another downsampling pass.
+For example, export source task30 (`stack_bowls`) into a new destination:
+
+```bash
+conda activate wam
+python -m lerobot.evaluation.scripts.subset_robodojo_tasks \
+  --source /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video_fps12p5 \
+  --output /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video_fps12p5_stack_bowls \
+  --task 30 --video-mode copy
+```
+
+Existing destinations are rejected. Each subset has its own
+`meta/info.json`, `stats.json`, `tasks.parquet`, episode metadata,
+`subset_manifest.json`, Parquet data and copied videos. Each task
+becomes task0; episode/global frame indices restart at0, while local
+timestamps, measured states, absolute actions and both already-correct
+delta columns remain unchanged. Numeric statistics are recomputed;
+image statistics are aggregated from selected episode statistics.
+
+Videos are real copies, not links, and are not re-encoded. Original
+encoded file paths and episode offsets are retained, so some copied
+MP4s can contain unused frames belonging to neighboring source episodes;
+only the selected episodes are accessible through subset metadata.
+This avoids further compression changes and keeps each subset usable
+without its source directory.
+
+The2026-11-13 all-task export uses sibling directories
+`RoboDojo_ee_lerobot_v30_video_fps12p5_<task_name>` under the requested
+RoboDojo data parent. Names use nonrandom native aliases when available.
+Task5 has no matching literal alias in the installed native task files
+and is named `task_005`; its instruction is
+`Arrange the letters to spell "RoboDojo" in a row.`
+The dataset index/progress is sibling
+`RoboDojo_ee_lerobot_v30_video_fps12p5_tasks.json`, listing original
+task IDs, instructions, output paths and validation results.
+Preflight found adequate space; all3 existing subset regressions pass.
+Full export and per-task training-reader validation are pending at this
+preparation checkpoint.
