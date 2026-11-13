@@ -116,6 +116,46 @@ def test_normalization_masks_and_three_native_camera_roles(adapter):
     assert batch["task"] == [observation()["instruction"]]
 
 
+def test_fractional_training_fps_preserves_dataset_physical_rate_bucket(adapter, tmp_path):
+    (tmp_path / "dataset/meta/info.json").write_text(json.dumps({"fps": 12.5}))
+    fractional = RoboDojoAdapter.from_dataset(tmp_path / "dataset")
+    assert fractional.fps == 12.5
+    batch = fractional.observation_batch(observation(), config(), torch.device("cpu"))
+    assert batch["sample_rate"].item() == 12
+
+
+def test_fractional_profile_absolute_evaluation_contract(adapter, tmp_path):
+    from lerobot.evaluation.eval_qwen3vl_mot_robodojo import validate_training_action_mode
+
+    checkpoint = tmp_path / "step4k/model"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / ".metadata").touch()
+    policy = {"type": "qwen3vl_mot"}
+    (tmp_path / "config.json").write_text(json.dumps(policy))
+    (tmp_path / "train_config.json").write_text(json.dumps({
+        "policy": policy, "data_mix": "robodojo_fps12", "stage": "finetune",
+    }))
+    args = build_parser().parse_args([
+        "eval", "--checkpoint", str(checkpoint.parent), "--dataset-root", str(tmp_path / "dataset"),
+    ])
+    assert validate_training_action_mode(args)["data_mix"] == "robodojo_fps12"
+    args.action_mode = "delta"
+    with pytest.raises(ValueError, match="requires finetuning"):
+        validate_training_action_mode(args)
+
+
+@pytest.mark.parametrize("frame,repeat", [(64, 1), (0, 2)])
+def test_offline_history_does_not_treat_arbitrary_frame_as_episode_start(monkeypatch, frame, repeat):
+    from lerobot.evaluation import eval_qwen3vl_mot_robodojo as evaluator
+
+    args = build_parser().parse_args(["offline", "--frame", str(frame), "--repeat", str(repeat)])
+    monkeypatch.setattr(evaluator, "recorded_observation", lambda *args: observation())
+    model = SimpleNamespace(policy=SimpleNamespace(config=SimpleNamespace(visual_history_enabled=True)))
+    monkeypatch.setattr(evaluator, "load_model", lambda args: model)
+    with pytest.raises(ValueError, match="sequential episode"):
+        evaluator.offline(args)
+
+
 def test_no_rgb_flip_or_channel_swap():
     obs = observation()
     image = np.arange(4 * 6 * 3, dtype=np.uint8).reshape(4, 6, 3)
@@ -227,6 +267,87 @@ def test_model_preserves_requested_env_order_and_resets(adapter, tmp_path):
         model.get_action()
     with pytest.raises(KeyError):
         model.get_action_batch([3])
+
+
+def test_history_model_tracks_each_environment_and_rejects_missing_intermediate_frames(adapter, tmp_path):
+    class Policy:
+        config = config()
+        config.visual_history_enabled = True
+        config.visual_history_offsets = (-4, -2)
+        config.visual_history_include_first = True
+
+        def reset(self):
+            pass
+
+        def sample_canonical_action(self, batch):
+            self.context = batch["context_images"]
+            values = torch.zeros(1, 32, 40)
+            raw = torch.from_numpy(state_to_canonical(observation()))
+            values[:, :, :20] = (raw - adapter.action_mean) / adapter.action_std
+            return values
+
+    policy = Policy()
+    model = RoboDojoModel(policy, adapter, device="cpu", replan_steps=6, output_dir=tmp_path)
+    assert model.reset() is True
+    for step in range(7):
+        obs = observation(3)
+        obs["vision"]["cam_head"]["color"].fill(step)
+        model.update_obs(obs)
+        if step in (0, 6):
+            assert len(model.get_action()) == 6
+    assert policy.context[0, :, 0, 0, 0, 0].tolist() == [0, 2, 4, 6]
+    model.update_obs(observation(7))
+    assert model.visual_histories[7].step == 0
+    assert model.visual_histories[3].step == 6
+    model.update_obs(observation(3))
+    with pytest.raises(ValueError, match="inside action chunks"):
+        model.get_action()
+    model.reset()
+    assert model.visual_histories == {}
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_history_deploy_forwards_observations_inside_action_chunks(batched):
+    class Env:
+        steps = 0
+
+        def is_episode_end(self):
+            return self.steps == 6
+
+        def get_obs(self):
+            return {"env_idx": 0, "frame": self.steps}
+
+        def get_obs_batch(self, indices):
+            return [self.get_obs()]
+
+        def get_running_env_idx_list(self):
+            return [0]
+
+        def take_action(self, action):
+            self.steps += 1
+
+        def take_action_batch(self, actions, indices):
+            self.steps += 1
+
+    class Client:
+        def __init__(self):
+            self.frames = []
+
+        def call(self, func_name, obs=None):
+            if func_name == "reset":
+                return True
+            if func_name in ("update_obs", "update_obs_batch"):
+                self.frames.extend(value["frame"] for value in (obs if batched else [obs]))
+            if func_name == "get_action":
+                return [{}, {}]
+            if func_name == "get_action_batch":
+                return [[{}, {}]]
+            return None
+
+    client = Client()
+    runner = eval_one_episode_batch if batched else eval_one_episode
+    runner(TASK_ENV=Env(), model_client=client)
+    assert client.frames == list(range(6))
 
 
 @pytest.mark.parametrize("joint_task", ["joint_prediction", "va_prediction"])

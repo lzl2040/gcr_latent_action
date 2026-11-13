@@ -140,7 +140,7 @@ def validate_training_action_mode(args) -> dict:
     training_path = matching_training_config(args)
     saved = json.loads(training_path.read_text())
     expected = {
-        "absolute": ("robodojo",),
+        "absolute": ("robodojo", "robodojo_fps12"),
         "delta": ("delta_robodojo_stack_bowl", "robodojo"),
     }[args.action_mode]
     if saved["data_mix"] not in expected or saved["stage"] != "finetune":
@@ -239,6 +239,13 @@ def offline(args) -> None:
     )
     observation = recorded_observation(args.robodojo_root, episode, args.frame)
     model = load_model(args)
+    if getattr(model.policy.config, "visual_history_enabled", False) and (
+        args.frame != 0 or args.repeat != 1
+    ):
+        raise ValueError(
+            "History-enabled offline inference supports only frame=0, repeat=1. "
+            "Other frames require a sequential episode observation stream, not a single recorded frame."
+        )
     model.update_obs(observation)
     started = time.perf_counter()
     for _ in range(args.repeat):

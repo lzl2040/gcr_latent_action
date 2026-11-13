@@ -273,7 +273,7 @@ def merge_results(paths: list[Path], catalog: list[dict], identity: dict) -> dic
     return summarize(settings, episodes, catalog)
 
 
-def rollout_episode(env, initial_state, plan, *, max_steps: int, replan_steps: int, save_video: bool):
+def rollout_episode(env, initial_state, plan, *, max_steps: int, replan_steps: int, save_video: bool, observe=None):
     env.reset()
     observation = env.set_init_state(initial_state)
     # Match the reference: always settle for 10 steps, then score policy-controlled steps.
@@ -283,6 +283,8 @@ def rollout_episode(env, initial_state, plan, *, max_steps: int, replan_steps: i
     success, done, calls, inference_seconds = False, False, 0, 0.0
     started = time.perf_counter()
     while len(actions) < max_steps and not done and not success:
+        if observe is not None:
+            observe(observation)
         if save_video:
             frames.append(np.ascontiguousarray(observation["agentview_image"][::-1, ::-1]))
         if not queue:
@@ -331,9 +333,21 @@ def evaluate_task(record: dict, suite, policy, adapter, args, output: Path, devi
         # The reference evaluator seeds each environment with 0 even with fixed init states.
         env.seed(0)
         policy.reset()
+        history = (
+            original.VisualHistoryBuffer(
+                policy.config.visual_history_offsets, policy.config.visual_history_include_first
+            ) if getattr(policy.config, "visual_history_enabled", False) else None
+        )
+
+        def observe(observation):
+            history.update(adapter.observation_batch(
+                observation, record["instruction"], policy.config, torch.device("cpu")
+            ))
 
         def plan(observation, *, control_step, replan_index):
             batch = adapter.observation_batch(observation, record["instruction"], policy.config, device)
+            if history is not None:
+                batch = history.attach(batch)
             with (
                 original.policy_inference_context(args.precision),
                 torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"),
@@ -348,6 +362,7 @@ def evaluate_task(record: dict, suite, policy, adapter, args, output: Path, devi
             max_steps=original.MAX_STEPS[record["suite"]],
             replan_steps=args.replan_steps,
             save_video=not args.no_save_video,
+            observe=observe if history is not None else None,
         )
         stem = f"{record['suite']}_task_{record['task_id']:04d}_trial_000"
         actions_path = output / f"{stem}_actions.npy"

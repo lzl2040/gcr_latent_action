@@ -55,7 +55,9 @@ from lerobot.configs.train import TrainPipelineConfig
 
 # Images stay uint8 all the way to the GPU (4x less PCIe traffic than bf16) and are
 # normalised inside the model; index-like tensors must stay integral.
-_KEEP_DTYPE_KEYS = ("image_t0", "image_t1", "images_t0", "video", "video_views", "tactile_image")
+_KEEP_DTYPE_KEYS = (
+    "image_t0", "image_t1", "images_t0", "context_images", "context_fps", "video", "video_views", "tactile_image"
+)
 _EXTRA_TRAINING_EPOCHS = 100
 
 
@@ -314,6 +316,12 @@ def _load_stage2_resume_policy_config(
             "Cannot change `policy.latent_action_prediction_enabled` while resuming; "
             "start a fresh output directory."
         )
+    for field_name in ("visual_history_offsets", "visual_history_include_first"):
+        if (
+            parser.parse_arg(f"policy.{field_name}", args) is not None
+            and getattr(runtime_policy, field_name) != getattr(saved_policy, field_name)
+        ):
+            raise ValueError(f"Cannot change `policy.{field_name}` while resuming; start a fresh output directory.")
     for field_name in ("qwen3vl_dir", "cosmos3_dir"):
         runtime_path = getattr(runtime_policy, field_name)
         if runtime_path:

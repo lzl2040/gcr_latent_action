@@ -202,6 +202,12 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 "Cannot change `policy.latent_action_prediction_enabled` when loading a checkpoint; "
                 "start a fresh output directory."
             )
+        for field, default in (("visual_history_offsets", ()), ("visual_history_include_first", False)):
+            saved = saved_config.get(field, default)
+            if field == "visual_history_offsets":
+                saved = tuple(saved)
+            if getattr(config, field) != saved:
+                raise ValueError(f"Cannot change `policy.{field}` when loading a checkpoint.")
         return super().from_pretrained(pretrained_name_or_path, config=config, **kwargs)
 
     def __init__(self, config: Qwen3VLMoTConfig, dataset_stats=None):
@@ -705,6 +711,35 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             texts = [texts] * self._current_image(batch).shape[0]
         if not with_image:
             return self.understanding(None, texts)
+        if getattr(self.config, "visual_history_enabled", False):
+            if any(
+                key not in batch for key in ("context_images", "context_image_mask", "context_frame_offsets")
+            ):
+                raise ValueError(
+                    "History-enabled policies require causal context_images, mask and frame offsets."
+                )
+            images, mask = batch["context_images"], batch["context_image_mask"]
+            times = (
+                (["start"] if self.config.visual_history_include_first else [])
+                + [f"past{-offset}" for offset in self.config.visual_history_offsets]
+                + ["current"]
+            )
+            offsets = batch["context_frame_offsets"]
+            if (
+                images.ndim != 6
+                or images.shape[1:3] != (len(times), len(self.rgb_views))
+                or mask.shape != images.shape[:3]
+                or offsets.shape != images.shape[:2]
+                or (offsets > 0).any()
+                or (offsets[:, -1] != 0).any()
+            ):
+                raise ValueError(
+                    "Visual context must contain configured past/current frames, never future frames."
+                )
+            names = tuple(f"{time} {view}" for time in times for view in self.rgb_views)
+            return self.understanding(
+                images.flatten(1, 2), texts, image_mask=mask.flatten(1, 2), view_names=names
+            )
         if len(self.rgb_views) == 1:
             return self.understanding(self._current_image(batch), texts)
         return self.understanding(

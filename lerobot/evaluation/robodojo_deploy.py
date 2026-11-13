@@ -3,7 +3,7 @@
 
 def eval_one_episode(TASK_ENV, model_client):  # noqa: N803
     task_env = TASK_ENV
-    model_client.call(func_name="reset")
+    use_history = model_client.call(func_name="reset") is True
     while not task_env.is_episode_end():
         model_client.call(func_name="update_obs", obs=task_env.get_obs())
         actions = model_client.call(func_name="get_action")
@@ -15,12 +15,14 @@ def eval_one_episode(TASK_ENV, model_client):  # noqa: N803
                 break
             # Preserve benchmark video sampling at every control step, including inside chunks.
             if step + 1 < len(actions):
-                task_env.get_obs()
+                observation = task_env.get_obs()
+                if use_history:
+                    model_client.call(func_name="update_obs", obs=observation)
 
 
 def eval_one_episode_batch(TASK_ENV, model_client):  # noqa: N803
     task_env = TASK_ENV
-    model_client.call(func_name="reset")
+    use_history = model_client.call(func_name="reset") is True
     while not task_env.is_episode_end():
         indices = task_env.get_running_env_idx_list()
         model_client.call(func_name="update_obs_batch", obs=task_env.get_obs_batch(indices))
@@ -39,4 +41,6 @@ def eval_one_episode_batch(TASK_ENV, model_client):  # noqa: N803
             actions = [actions[index] for index in active]
             indices = [indices[index] for index in active]
             if step + 1 < horizon:
-                task_env.get_obs_batch(indices)
+                observations = task_env.get_obs_batch(indices)
+                if use_history and indices:
+                    model_client.call(func_name="update_obs_batch", obs=observations)

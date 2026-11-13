@@ -71,6 +71,7 @@ from lerobot.common.datasets.mixtures import (
 )
 from lerobot.common.datasets.oxe_configs import OXE_DATASET_CONFIGS
 from lerobot.common.datasets.transforms import make_temporal_rgb_transform
+from lerobot.common.datasets.visual_history import visual_context_indices
 from lerobot.common.datasets_v30.dataset_metadata import (
     LeRobotDatasetMetadata as LeRobotDatasetMetadataV30,
 )
@@ -162,6 +163,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         self.image_transforms = image_transforms
 
         policy_cfg = cfg.policy
+        self.visual_history_enabled = getattr(policy_cfg, "visual_history_enabled", False)
         self.rgb_augmentation = None
         if (
             getattr(policy_cfg, "type", None) == "qwen3vl_mot"
@@ -1344,13 +1346,113 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             read_fallback = True
 
         result = self._to_canonical(item, ds_idx, frame_idx)
+        if getattr(self, "visual_history_enabled", False):
+            result.update(self._visual_context(item, result, ds_idx, frame_idx))
         if augment_rgb and getattr(self, "rgb_augmentation", None) is not None:
             result = self._augment_rgb_window(result)
         result["data_read_fallback"] = torch.tensor(float(read_fallback), dtype=torch.float32)
         result["requested_frame_index"] = torch.tensor(requested_frame_idx, dtype=torch.long)
         return result
 
+    def _visual_context(self, item, result, ds_idx, frame_idx):
+        from collections import OrderedDict
+
+        dataset = self.datasets[ds_idx]
+        ranges = self.all_episode_ranges[ds_idx]
+        episode = int(np.searchsorted(ranges[:, 0], frame_idx, side="right") - 1)
+        if episode < 0 or frame_idx >= ranges[episode, 1]:
+            raise ValueError("Visual history frame is outside its episode.")
+        start = int(ranges[episode, 0])
+        step = frame_idx - start
+        indices, valid = visual_context_indices(
+            step, self.cfg.policy.visual_history_offsets, self.cfg.policy.visual_history_include_first
+        )
+        current = result.get("images_t0", result["image_t0"].unsqueeze(0))
+        current_mask = result.get(
+            "image_view_mask", torch.tensor([bool(result["pair_is_valid"])], dtype=torch.bool)
+        )
+        episode_id = int(_to_tensor(item["episode_index"]).item())
+        cache = getattr(self, "_visual_first_cache", None)
+        if cache is None:
+            cache = self._visual_first_cache = OrderedDict()
+        cache_key = (ds_idx, episode_id)
+        frames = {step: (current, current_mask)}
+        if cache_key in cache:
+            frames[0] = cache[cache_key]
+            cache.move_to_end(cache_key)
+        missing = sorted(set(indices) - frames.keys())
+        if missing:
+            keys, seen = [], set()
+            for role in self.rgb_views:
+                key = self.image_key_maps[ds_idx].get(role)
+                keys.append(key if key not in seen else None)
+                if key is not None:
+                    seen.add(key)
+            video_keys = set(dataset.meta.video_keys)
+            columns = ["episode_index", "timestamp"] + [
+                key for key in keys if key is not None and key not in video_keys
+            ]
+            table = dataset.hf_dataset.select_columns(columns)
+            rows = [table[start + index] for index in missing]
+            if any(int(_to_tensor(row["episode_index"]).item()) != episode_id for row in rows):
+                raise ValueError("Visual history attempted to cross episode boundaries.")
+            queries = {
+                key: [float(_to_tensor(row["timestamp"]).item()) for row in rows]
+                for key in keys
+                if key in video_keys
+            }
+            decoded = dataset._query_videos(queries, episode_id) if queries else {}
+            for row_number, index in enumerate(missing):
+                views, masks = [], []
+                for key in keys:
+                    value = None
+                    if key in decoded:
+                        clip = decoded[key]
+                        value = clip if clip.ndim == 3 else clip[row_number]
+                    elif key is not None:
+                        value = rows[row_number].get(key)
+                    views.append(
+                        self._resize_rgb(value) if value is not None else torch.zeros_like(current[0])
+                    )
+                    masks.append(value is not None)
+                frames[index] = (torch.stack(views), torch.tensor(masks, dtype=torch.bool))
+        if 0 in frames and cache_key not in cache:
+            cache[cache_key] = tuple(value.clone() for value in frames[0])
+            if len(cache) > 16:
+                cache.popitem(last=False)
+        selected = [frames[index] for index in indices]
+        return {
+            "context_images": torch.stack([value[0] for value in selected]),
+            "context_image_mask": torch.stack(
+                [value[1] & keep for value, keep in zip(selected, valid, strict=True)]
+            ),
+            "context_frame_offsets": torch.tensor(indices, dtype=torch.long) - step,
+            "context_fps": torch.tensor(self.true_fps[ds_idx], dtype=torch.float32),
+        }
+
     def _augment_rgb_window(self, result: dict) -> dict:
+        if "context_images" in result:
+            context = result["context_images"].clone()
+            videos = result.get("video_views", result["video"].unsqueeze(0)).clone()
+            for view in range(videos.shape[0]):
+                frames = self.rgb_augmentation(
+                    torch.cat(
+                        [
+                            context[:, view],
+                            result["image_t1"][None] if view == 0 else context[:0, view],
+                            videos[view],
+                        ]
+                    )
+                )
+                context[:, view] = frames[: context.shape[0]]
+                if view == 0:
+                    result["image_t1"] = frames[context.shape[0]]
+                videos[view] = frames[context.shape[0] + (view == 0) :]
+            result["context_images"] = context
+            result["image_t0"], result["video"] = context[-1, 0], videos[0]
+            if "video_views" in result:
+                result["images_t0"], result["video_views"] = context[-1], videos
+            return result
         if "video_views" not in result:
             frames = self.rgb_augmentation(torch.cat([
                 torch.stack([result["image_t0"], result["image_t1"]]), result["video"],

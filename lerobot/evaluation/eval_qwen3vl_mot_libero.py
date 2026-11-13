@@ -22,6 +22,8 @@ import torch
 from scipy.spatial.transform import Rotation
 from torch.nn import functional
 
+from lerobot.common.datasets.visual_history import VisualHistoryBuffer
+
 logger = logging.getLogger(__name__)
 
 SUITE_DATASETS = {
@@ -484,6 +486,7 @@ def rollout_episode(
     wait_steps: int,
     replan_steps: int,
     save_video: bool,
+    observe=None,
 ) -> tuple[dict, list]:
     env.reset()
     observation = env.set_init_state(initial_state)
@@ -499,6 +502,8 @@ def rollout_episode(
     inference_seconds = 0.0
     started = time.perf_counter()
     while steps < max_steps and not done and not success:
+        if observe is not None:
+            observe(observation)
         if save_video:
             frames.append(np.ascontiguousarray(observation["agentview_image"][::-1, ::-1]))
         if not queue:
@@ -751,6 +756,16 @@ def main(argv: list[str] | None = None) -> None:
         try:
             for trial in range(args.trials_per_task):
                 policy.reset()
+                history = (
+                    VisualHistoryBuffer(
+                        policy.config.visual_history_offsets, policy.config.visual_history_include_first
+                    ) if getattr(policy.config, "visual_history_enabled", False) else None
+                )
+
+                def observe(observation, history=history, instruction=task.language):
+                    history.update(adapter.observation_batch(
+                        observation, instruction, policy.config, torch.device("cpu")
+                    ))
                 stem = f"task_{task_id:02d}_trial_{trial:03d}"
                 prediction_root = output_dir / "predictions" / stem
                 prediction_records = []
@@ -762,6 +777,7 @@ def main(argv: list[str] | None = None) -> None:
                     control_step,
                     replan_index,
                     instruction=task.language,
+                    history=history,
                     seed=args.seed,
                     root=prediction_root,
                     records=prediction_records,
@@ -770,6 +786,8 @@ def main(argv: list[str] | None = None) -> None:
                 ):
                     started_inference = time.perf_counter()
                     batch = adapter.observation_batch(observation, instruction, policy.config, device)
+                    if history is not None:
+                        batch = history.attach(batch)
                     fingerprint = (
                         sampling_fingerprint(batch, device)
                         if args.capture_first_plan and replan_index == 0
@@ -837,6 +855,7 @@ def main(argv: list[str] | None = None) -> None:
                     wait_steps=args.wait_steps,
                     replan_steps=args.replan_steps,
                     save_video=not args.no_save_video,
+                    observe=observe if history is not None else None,
                 )
                 episode["planning_seconds"] = episode["inference_seconds"]
                 episode["inference_seconds"] = sum(timing[0] for timing in plan_timings)

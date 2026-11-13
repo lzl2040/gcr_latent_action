@@ -18,6 +18,64 @@
 LIBERO 实际微调配置、与官方 Cosmos3/LaWAM 的差异和待验证风险，见
 [LIBERO 微调审计](libero_finetuning_audit.md)。
 
+## 可选的 baseline 视觉历史输入
+
+`visual_history_offsets=()`、`visual_history_include_first=false` 为默认值，旧训练、
+旧 checkpoint 和原启动脚本保持单时刻视觉输入。独立入口
+`train_qwen3vl_mot_baseline_history_fsdp.sh` 使用 MLP physical baseline、Nano Generation，
+开启 `visual_history_offsets=(-4,-2)` 和 `visual_history_include_first=true`：
+
+```text
+条件：episode 第 0 帧 + t-4 + t-2 + 当前帧 t（每个已有相机）
+监督：原有当前 + 未来 video，以及原有 action/state flow
+```
+
+12.5 FPS 时两张历史帧分别约为 0.32 秒、0.16 秒前；偏移按源数据帧计数，
+不是按 replan 次数、物理 token 或未来 video 的稀疏采样间隔计数。episode 开头不足的历史
+补首帧但 mask 为无效，首帧自身和当前帧有效；绝不跨 episode 读取。
+`context_images` 的单样本布局为 `(时间, 相机, 3, H, W)`，顺序为首帧、历史、当前；
+`context_image_mask` 同时表示历史和相机有效性，`context_frame_offsets` 记录实际相对位置，
+`context_fps` 保留浮点真实帧率，不使用取整后的 physical `sample_rate` 推算时间。
+
+所有条件共用原 Qwen 视觉塔，展平为带 `start / past4 / past2 / current` 和相机标签的
+多图像 prefix，经 native K/V 被 Generation 读取；没有引入第二个视觉塔或新的可训练参数。
+历史不进入 Wan VAE 的当前/未来 clip，不改变 `world_video_frames=1+4*k` 的含义，
+未来干净图像也不进入 Understanding 条件。训练 RGB 增强在同相机的全部条件和未来监督
+上共享一次参数，避免独立裁剪制造伪运动。
+
+数据侧只额外查询历史 RGB，不重复读取历史样本的 action/state/tactile 或完整未来 clip；
+episode 首帧使用每 worker 最多 16 个 episode 的有界缓存。随机读取失败回退时，首帧与历史
+跟随实际返回样本的 episode，而非原请求。视觉条件数量变为原来的 4 倍，因此视觉编码、
+prefix K/V、attention 和显存开销增加，**不保证原 micro-batch 仍能容纳，也未实测全尺寸吞吐**；
+可减小 `BATCH_SIZE` 并增加 `GRADIENT_ACCUMULATION_STEPS` 保持 global batch。
+
+沿用现有权重、数据路径和分布式环境变量，另开输出目录训练：
+
+```bash
+conda activate lerobot_v2
+DATA_MIX=robodojo_fps12 \
+RGB_VIEWS=primary,secondary,wrist \
+JOB_NAME=robodojo_fps12_baseline_history \
+WEIGHT_RESUME=false \
+bash train_qwen3vl_mot_baseline_history_fsdp.sh
+```
+
+新实验 resume 使用相同历史配置；旧 checkpoint 不能通过 resume/from_pretrained 静默改变
+历史契约，必须另开训练，不能声称旧模型自动获得历史能力。
+单独在原完整模型入口追加同名 `--policy.visual_history_*` 参数也可启用历史输入；
+不追加则原模型完全不变，`n_obs_steps` 不是此功能的开关。
+
+LIBERO 与 LIBERO-Plus 在 settling 后、每个 policy-controlled 环境步记录 CPU uint8 历史，
+不只在 chunk 重规划时记录。RoboDojo 通过 reset 返回的历史能力开关，仅对新模型在 chunk
+内部转发原本已经采集的观测；缓存按 env 独立且 reset 清空。模型检查观测计数与控制帧数一致，
+旧 deploy 若漏掉中间帧会报错，不会悄悄把 chunk 间隔当帧间隔；也可使用 `replan_steps=1`。
+外部部署需每个观测时刻调用 `VisualHistoryBuffer.update(batch)`，规划时 `attach(batch)`，
+缺失或过时的当前观测会被拒绝。**真实观测/动作频率须与训练数据匹配**：
+元数据写成 12.5 FPS 不会自动将 25 Hz 模拟器控制器降频，此处不改变 benchmark 的控制协议。
+RoboDojo 绝对动作评测允许 `robodojo_fps12` 配置，但必须传入对应的 `--dataset-root`。
+单帧 `offline` 历史模型检查仅支持 `frame=0, repeat=1`；其他时刻必须提供顺序观测，
+不能把任意录制帧冒充 episode 首帧。
+
 ---
 
 ## 1. 设计目标

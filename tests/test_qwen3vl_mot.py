@@ -550,6 +550,51 @@ def test_tiny_qwen_understanding_emits_native_kv_and_query_gradients(multiview, 
         assert vision_parameter.grad is not None
         assert torch.count_nonzero(vision_parameter.grad) == 0
 
+    if multiview:
+        from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import Qwen3VLMoTPolicy
+
+        policy = object.__new__(Qwen3VLMoTPolicy)
+        nn.Module.__init__(policy)
+        policy.config = Qwen3VLMoTConfig(
+            rgb_views=("primary", "wrist"), visual_history_offsets=(-4, -2),
+            visual_history_include_first=True,
+        )
+        policy.understanding = expert
+        expert.eval()
+        context = torch.rand(1, 4, 2, 3, 32, 32, requires_grad=True)
+        context_mask = torch.tensor([[[1, 0], [0, 0], [1, 0], [1, 0]]], dtype=torch.bool)
+        batch = {
+            "image_t0": context[:, -1, 0], "context_images": context,
+            "context_image_mask": context_mask,
+            "context_frame_offsets": torch.tensor([[-6, -4, -2, 0]]), "task": ["move"],
+        }
+        expert.zero_grad(set_to_none=True)
+        conditioned = policy._understand_batch(batch)
+        conditioned.latent_queries.square().mean().backward()
+        assert context.grad[:, 2, 0].abs().sum() > 0
+        assert context.grad[~context_mask].count_nonzero() == 0
+        changed = context.detach().clone()
+        changed[~context_mask] = 100
+        torch.testing.assert_close(
+            policy._understand_batch({**batch, "context_images": changed}).latent_queries,
+            conditioned.latent_queries,
+        )
+        changed[:, 2, 0] = 1 - changed[:, 2, 0]
+        assert not torch.equal(
+            policy._understand_batch({**batch, "context_images": changed}).latent_queries,
+            conditioned.latent_queries,
+        )
+        for future_value in (0, 255):
+            output = policy._understand_batch({
+                **batch, "image_t1": torch.full_like(batch["image_t0"], future_value),
+                "video": torch.full((1, 9, 3, 32, 32), future_value),
+            })
+            torch.testing.assert_close(output.latent_queries, conditioned.latent_queries)
+        with pytest.raises(ValueError, match="never future"):
+            policy._understand_batch({**batch, "context_frame_offsets": torch.tensor([[-6, 1, -2, 0]])})
+        with pytest.raises(ValueError, match="require causal"):
+            policy._understand_batch({"image_t0": batch["image_t0"]})
+
     vision_lora_expert = object.__new__(Qwen3VLUnderstandingExpert)
     nn.Module.__init__(vision_lora_expert)
     vision_lora_expert.model = Qwen3VLModel(config)
@@ -1017,8 +1062,9 @@ def _mlp_baseline_config(**overrides):
 
 
 @pytest.mark.parametrize("generation_kind", ["random", "nano"])
+@pytest.mark.parametrize("history", [False, True])
 def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_restore(
-    tmp_path, monkeypatch, generation_kind
+    tmp_path, monkeypatch, generation_kind, history
 ):
     import lerobot.common.policies.ace.cosmos3_encoders as vae_module
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
@@ -1101,6 +1147,8 @@ def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_resto
         task_weights=(0.2,) * len(names),
         tactile_generation_target="spatial_patches",
         rgb_views=("primary", "wrist"),
+        visual_history_offsets=(-4, -2) if history else (),
+        visual_history_include_first=history,
     )
     policy = stage2.Qwen3VLMoTPolicy(config).train()
     assert policy.teacher_perception is None and policy.latent_action_projection is None
@@ -1129,6 +1177,12 @@ def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_resto
         "video_views": torch.zeros(2, 2, 9, 3, 8, 8, dtype=torch.uint8),
         "video_view_mask": torch.ones(2, 2, dtype=torch.bool),
     }
+    if history:
+        batch.update(
+            context_images=torch.zeros(2, 4, 2, 3, 8, 8, dtype=torch.uint8),
+            context_image_mask=torch.ones(2, 4, 2, dtype=torch.bool),
+            context_frame_offsets=torch.tensor([[-6, -4, -2, 0]]).expand(2, -1),
+        )
     optimizer = torch.optim.AdamW(policy.get_optim_params(), lr=1e-3)
     before = policy.physical_encoder.action_mlp[0].weight.detach().clone()
     for task in names:

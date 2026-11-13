@@ -13,6 +13,7 @@ import torch
 from scipy.spatial.transform import Rotation
 from torch.nn import functional
 
+from lerobot.common.datasets.visual_history import VisualHistoryBuffer
 from lerobot.evaluation.eval_qwen3vl_mot_libero import (
     PredictionVideoWriter,
     _finite_array,
@@ -54,7 +55,7 @@ class RoboDojoAdapter:
     state_std: torch.Tensor
     action_mean: torch.Tensor
     action_std: torch.Tensor
-    fps: int
+    fps: float
     action_mode: str = "absolute"
 
     @property
@@ -90,8 +91,8 @@ class RoboDojoAdapter:
                 (torch.tensor(mean, dtype=torch.float32), torch.tensor(std.clip(1e-3), dtype=torch.float32))
             )
         fps = info["fps"]
-        if not isinstance(fps, int) or isinstance(fps, bool) or fps <= 0:
-            raise ValueError("Training metadata must declare a positive integer source fps.")
+        if not isinstance(fps, (int, float)) or isinstance(fps, bool) or not np.isfinite(fps) or fps <= 0:
+            raise ValueError("Training metadata must declare a positive finite source fps.")
         return cls(*values, fps=fps, action_mode=action_mode)
 
     def observation_batch(self, observation: dict, config, device: torch.device) -> dict:
@@ -117,7 +118,7 @@ class RoboDojoAdapter:
             "observation.state": state,
             "state_mask": mask,
             "action_mask": mask.clone(),
-            "sample_rate": torch.tensor([self.fps]),
+            "sample_rate": torch.tensor([int(round(self.fps))]),
             "tactile_image_mask": torch.zeros(1, config.max_tactile_views),
             "task": [instruction],
         }
@@ -220,18 +221,28 @@ class RoboDojoModel:
         self.calls = 0
         self.reset_index = -1
         self.control_steps: dict[int, int] = {}
+        self.visual_histories: dict[int, VisualHistoryBuffer] = {}
 
     def reset(self):
         self.observations.clear()
         self.single_env_idx = None
         self.control_steps.clear()
+        self.visual_histories.clear()
         self.policy.reset()
         self.reset_index += 1
+        return bool(getattr(self.policy.config, "visual_history_enabled", False))
 
     def update_obs(self, obs):
         index = int(obs["env_idx"])
         self.observations[index] = obs
         self.single_env_idx = index
+        if getattr(self.policy.config, "visual_history_enabled", False):
+            if index not in self.visual_histories:
+                self.visual_histories[index] = VisualHistoryBuffer(
+                    self.policy.config.visual_history_offsets, self.policy.config.visual_history_include_first
+                )
+            batch = self.adapter.observation_batch(obs, self.policy.config, torch.device("cpu"))
+            self.visual_histories[index].update(batch)
 
     def update_obs_batch(self, obs_list):
         indices = [int(obs["env_idx"]) for obs in obs_list]
@@ -244,6 +255,14 @@ class RoboDojoModel:
     def _predict(self, index: int) -> list[dict]:
         observation = self.observations[index]
         batch = self.adapter.observation_batch(observation, self.policy.config, self.device)
+        if getattr(self.policy.config, "visual_history_enabled", False):
+            history = self.visual_histories[index]
+            if history.step != self.control_steps.get(index, 0):
+                raise ValueError(
+                    "History requires update_obs at every control frame, including inside action chunks. "
+                    "Use the updated deploy module or replan_steps=1."
+                )
+            batch = history.attach(batch)
         started = time.perf_counter()
         prediction = None
         with torch.autocast(self.device.type, dtype=torch.bfloat16):
