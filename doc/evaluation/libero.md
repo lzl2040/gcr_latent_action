@@ -1,11 +1,11 @@
 # LIBERO 评测记录
 
-更新日期：2026-11-09。
+更新日期：2026-11-12。
 
-本文历史自定义模型的已完成有效正式评测，共 164 份结果、24,580 次 rollout：
-98 份完整 suite 评测、19,600 次，以及 66 份已完成的任务子集评测、4,980 次。
-其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 122 份、16,180 次，
-包括 56 份完整 suite 和 66 份任务子集，分开记录。
+本文历史自定义模型的已完成有效正式评测，共 166 份结果、24,720 次 rollout：
+98 份完整 suite 评测、19,600 次，以及 68 份已完成的任务子集评测、5,120 次。
+其中旧协议 42 份、8,400 次；单次初始化 RNG 的新协议 124 份、16,320 次，
+包括 56 份完整 suite 和 68 份任务子集，分开记录。
 数据来自对应的
 `results.json`，不包含 smoke test、首次成功即停止的检查、尚未完成的评测，
 以及下方单独保留的误拷权重评测。
@@ -3856,6 +3856,75 @@ Pro 已于 2026-11-09 00:19:24 UTC 在 GPU 1/2/3 自动接续，
 | 16k 补测 | Spatial | `27069c83d6ab6bc3001a9afa09d96de7e17ab1089bf2b19c46026464f707784d` |
 | 16k 补测 | Goal | `4c5976cc3f21305bdfb7d7f692b0cf1627237dae6ecd72ff7fcbbf035f458f1c` |
 
+### 1112_dual_vision_4nodes_8gpu：12k，七个困难任务（2026-11-12）
+
+权重为
+`/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1112_dual_vision_4nodes_8gpu/step12k/model`。
+只测 Goal `[0, 3, 4, 9]` 和 Spatial `[4, 6, 9]`，每任务二十个固定初态，
+共 **140 次 rollout、两份任务子集结果**；没有测 Object，不是完整 suite 成绩。
+
+保存配置为 `understanding_dual_vision=true`、`latent_action_prediction_enabled=false`，
+仅训练 `joint_prediction`；Stage 1 physical Transformer 和 embedding-space flow 保留。
+32 个 DCP 分片完整，共 2,554 个 BF16 tensor、12,582,445,414 个存储元素；
+严格加载后的实际模型参数量为 12,582,426,214。
+保存的 fusion gate 为 `0.0181884765625`，实际 `tanh` 权重为 `0.018186470493674278`。
+两进程均严格恢复全部模型 tensor，真实首个 plan 的 hooks 确认
+**冻结且 eval 的 Stage 1 视觉塔和预训练 Qwen 视觉塔均执行**，
+没有把 dual vision 静默退化成单视觉。小 gate 本身不能证明该分支无作用。
+12k 仍为目录标签，没有独立 trainer metadata 核实实际训练 step 或 world size。
+
+使用提交 `dd216462d75ff60b3646f1e28191686c2b92ba4b` 的隔离源码，
+BF16、primary/wrist 双 256 RGB、预测 32 步/执行 10 步、Flow 20 步、shift 5、
+静置 10 步，Goal/Spatial 控制上限 300/220。
+每套仅在启动时初始化一次 `seed=0`，后续连续消耗 RNG；
+数据归一化 hash 与历史困难任务协议一致，不逐 trial 重置扩散噪声。
+GPU 1 跑 Goal、GPU 3 跑 Spatial，于 `05:12:27 UTC` 启动，
+Spatial 于 `06:06:29 UTC`、Goal 于 `06:30:07 UTC` 完成。
+最终认证于 `06:30:39 UTC` 完成，两进程和控制器均零退出，GPU 1/3 已释放。
+
+| 范围 | 成功次数 | 成功率 |
+| --- | --- | --- |
+| Goal 困难任务 | 60/80 | 75.00% |
+| Spatial 困难任务 | 35/60 | 58.33% |
+| **七个困难任务合计** | **95/140** | **67.86%** |
+
+| Suite | Task ID | 任务 | 成功次数 |
+| --- | --- | --- | --- |
+| Goal | 0 | 打开中层抽屉 | 16/20 |
+| Goal | 3 | 打开上层抽屉并放碗 | 11/20 |
+| Goal | 4 | 碗放到柜顶 | 19/20 |
+| Goal | 9 | 酒瓶放酒架 | 14/20 |
+| Spatial | 4 | 上层抽屉取碗 | 4/20 |
+| Spatial | 6 | cookie box 旁取碗 | 18/20 |
+| Spatial | 9 | 木柜上取碗 | 13/20 |
+
+Spatial 任务 4 贡献该套 25 次失败中的 16 次，是本轮最明显短板。
+同七任务历史参考为 v7 wo_latent 16k `111/140`（79.29%）、
+v4 shift5 12k `119/140`（85.00%）、
+MLP/raw-space baseline 16k `138/140`（98.57%）。
+本轮分别低 11.43、17.14、30.71 个百分点；
+这些模型还存在 checkpoint 步数、理解侧设置、物理表示、辅助目标等差异，
+只有单 seed 且噪声不逐 trial 配对，**不能单独归因于双视觉设计**。
+
+完成审计覆盖 140 个唯一 task/trial、固定初态索引、完整 horizon、
+有限且有界的 `(steps, 7)` 执行动作、45 个非空失败视频，
+以及全部首个 plan 的 canonical→native 重解码和已执行动作一致性。
+运行结束后所有权重文件完整 SHA256、源码、配置、归一化及初态/BDDL pins 均未变化。
+不声称重新生成或复核了上述历史模型的旧轨迹。
+
+正式输出为 `/Data/lzl/libero_evaluation/1112_dual_vision_12k_hard_20261112/`，
+含 `goal/results.json`、`spatial/results.json` 和已审计 `summary.json`。
+控制工件在 session `files/libero_dual_vision_12k_20261112/`，
+含冻结 runtime、preflight/receipt、逐文件权重 SHA256、原样策略配置、
+两套日志、实际双视觉执行记录、readiness 和最终状态。
+
+| 工件 | SHA256 |
+| --- | --- |
+| preflight | `b28f3de6252dd94dc423b72e4c6178ed22e746cc41e3e954d799698648719745` |
+| summary | `a453153149ac2efb37f1d335ac09eb5f53336b01b74205f9a4050d83048ddc99` |
+| Goal results | `35644a1681e767520804d542456fdd5823b14eeabe38d2f889b9fd5b6d80f1ad` |
+| Spatial results | `da1704831badcd170b8cbc939a6e6fc25f34d77daea420cf41967cd28b38c54f` |
+
 ### 重复权重核验：目录标作 v5 16k，内容与 v4 shift2 16k 相同（不计入新增正式结果）
 
 2026-11-05 按用户要求，对
@@ -4003,6 +4072,7 @@ Goal 的两个抽屉任务 0、3 均为 0/20；
 | `1107_basline_4nodes_8gpu`（12k，MLP/raw-space baseline，保留 queries） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step12k/model` |
 | `1107_basline_4nodes_8gpu`（16k，三范围均值选定，四套原版任务补齐） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step16k/model` |
 | `1107_basline_4nodes_8gpu`（18k，MLP/raw-space baseline，保留 queries） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step18k/model` |
+| `1112_dual_vision_4nodes_8gpu`（12k，dual vision，七个困难任务） | `/Data/lzl/qwen3vl_mot_weights/ft_on_libero/1112_dual_vision_4nodes_8gpu/step12k/model` |
 
 以上为评测时使用的位置；历史权重目录后续可能被归档或移除，结果以保存的
 `results.json` 为准。

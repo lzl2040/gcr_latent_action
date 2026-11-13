@@ -369,6 +369,7 @@ class Cosmos3Policy(PreTrainedPolicy):
             image_grid_thw=batch.get("image_grid_thw"),
             video_grid_thw=batch.get("video_grid_thw"),
             loss_mask=self.prepare_loss_mask(batch),
+            action_feature_mask=batch.get("action_mask"),
         )
         metrics = {name: value.item() for name, value in losses.items()}
         metrics.update(video_flow_loss=metrics["video_loss"], action_flow_loss=metrics["action_loss"])
@@ -403,7 +404,10 @@ class Cosmos3Policy(PreTrainedPolicy):
         if self.config.save_predicted_video:
             self.last_predicted_latents = video_latents.cpu()
         actions = actions[:, :, : self.config.original_action_dim]
-        return self.get_processor().unnormalize_action(actions) if raw_batch else actions
+        actions = self.get_processor().unnormalize_action(actions) if raw_batch else actions
+        if "action_mask" in batch:
+            actions = actions.where(batch["action_mask"].bool()[:, None, :], 0)
+        return actions
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor], **kwargs) -> Tensor:
@@ -546,6 +550,7 @@ class OmniMoTModel(nn.Module):
         video_sigmas: Tensor | None = None,
         action_sigmas: Tensor | None = None,
         loss_mask: Tensor | None = None,
+        action_feature_mask: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """
         Flow matching loss of a training batch.
@@ -571,6 +576,7 @@ class OmniMoTModel(nn.Module):
                 `sample_training_sigmas` when None (both or neither with `action_sigmas`).
             action_sigmas: Noise level of the actions of every sample `[batch]`.
             loss_mask: Boolean mask `[batch]` of the samples included in the loss. None includes every sample.
+            action_feature_mask: Optional `[batch, original_action_dim]` mask of real physical channels.
 
         Returns:
             The weighted sum of the video and the action losses, and both losses.
@@ -613,7 +619,9 @@ class OmniMoTModel(nn.Module):
             video_grid_thw=video_grid_thw,
         )
         target = FlowState(noise.video_latents - clean.video_latents, noise.actions - clean.actions)
-        video_loss, action_loss = self.flow_matching_loss(velocity, target, plan, loss_mask)
+        video_loss, action_loss = self.flow_matching_loss(
+            velocity, target, plan, loss_mask, action_feature_mask
+        )
         loss = self.config.video_loss_weight * video_loss + self.config.action_loss_weight * action_loss
         return loss, {"video_loss": video_loss.detach(), "action_loss": action_loss.detach()}
 
@@ -910,7 +918,12 @@ class OmniMoTModel(nn.Module):
         return FlowState(video_latents, actions)
 
     def flow_matching_loss(
-        self, velocity: FlowState, target: FlowState, plan: SequencePlan, loss_mask: Tensor | None = None
+        self,
+        velocity: FlowState,
+        target: FlowState,
+        plan: SequencePlan,
+        loss_mask: Tensor | None = None,
+        action_feature_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """
         Mean squared error of the velocity on the noisy frames and actions, averaged over the samples of
@@ -924,7 +937,15 @@ class OmniMoTModel(nn.Module):
 
         noisy_actions = ~plan.action_condition_mask[:, :, None]  # [B,T_act,1]
         action_error = (velocity.actions - target.actions)[..., : self.config.original_action_dim]
-        action_losses = (action_error**2 * noisy_actions).mean(dim=(1, 2))  # [B]
+        if action_feature_mask is None:
+            action_losses = (action_error**2 * noisy_actions).mean(dim=(1, 2))  # [B]
+        else:
+            if action_feature_mask.shape != (action_error.shape[0], action_error.shape[-1]):
+                raise ValueError("action_mask must have shape [batch, original_action_dim].")
+            valid = action_feature_mask.bool()[:, None, :]
+            action_error = action_error.where(valid, 0)
+            denominator = valid.sum(dim=(1, 2)).clamp(min=1) * action_error.shape[1]
+            action_losses = (action_error**2 * noisy_actions).sum(dim=(1, 2)) / denominator
 
         if loss_mask is None:
             loss_mask = torch.ones_like(video_losses, dtype=torch.bool)

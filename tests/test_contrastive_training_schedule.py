@@ -497,11 +497,17 @@ def test_stage2_resume_preserves_physical_flow_space_and_rejects_changes(tmp_pat
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("field", ["latent_action_prediction_enabled", "understanding_dual_vision"])
+@pytest.mark.parametrize(
+    "field", ["latent_action_prediction_enabled", "understanding_dual_vision", "stage1_physical_only"]
+)
 def test_stage2_resume_preserves_architecture_switch_and_rejects_changes(tmp_path, enabled, field):
+    options = {"require_stage1_vision_transfer": False} if field == "stage1_physical_only" else {}
+    if field == "stage1_physical_only":
+        options["latent_action_loss_weight"] = 0
     saved = Qwen3VLMoTConfig(
         stage1_policy_config={"vision_backbone": "qwen3vl"},
         initialize_from_stage1=False,
+        **options,
         **{field: enabled},
     )
     saved._save_pretrained(tmp_path)
@@ -518,7 +524,7 @@ def test_stage2_resume_preserves_architecture_switch_and_rejects_changes(tmp_pat
     assert getattr(cfg.policy, field) == enabled
     if field == "latent_action_prediction_enabled":
         assert cfg.policy.latent_action_loss_weight == (1.0 if enabled else 0.0)
-    cfg.policy = Qwen3VLMoTConfig(**{field: not enabled})
+    cfg.policy = Qwen3VLMoTConfig(**options, **{field: not enabled})
     with pytest.raises(ValueError, match=field):
         _load_stage2_resume_policy_config(cfg, args=[f"--policy.{field}={str(not enabled).lower()}"])
 

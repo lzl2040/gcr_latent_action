@@ -255,13 +255,7 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
     if cfg.seed is not None:
         set_seed(cfg.seed + rank)
 
-    if is_cosmos3:
-        from lerobot.common.datasets.cosmos3_dataset import Cosmos3LiberoDataset
-
-        dataset_class = Cosmos3LiberoDataset
-    else:
-        dataset_class = MultiModalContrastiveDataset
-    dataset = dataset_class(
+    dataset = MultiModalContrastiveDataset(
         cfg=cfg,
         data_mix=cfg.data_mix,
         seed=cfg.seed,
@@ -277,7 +271,12 @@ def _train(cfg: FSDPTrainPipelineConfig) -> None:
             else 0
         ),
         heldout_eval_seed=cfg.generation_eval.seed,
+        **({"normalize_physical": False, "require_full_window": True} if is_cosmos3 else {}),
     )
+    if is_cosmos3:
+        from lerobot.common.policies.cosmos3.dataset_adapter import Cosmos3DataAdapter
+
+        dataset.sample_transform = Cosmos3DataAdapter(dataset, cfg.policy)
     sampler = _make_training_sampler(cfg, dataset, cfg.batch_size, world_size, rank)
     epoch_schedule = _compute_epoch_schedule(
         total_source_frames=dataset.total_pool_anchors,

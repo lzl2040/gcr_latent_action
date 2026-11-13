@@ -12,10 +12,23 @@
 > - action/video 推理接口；
 > - FSDP、FP8 或 optimizer 对模型训练语义的影响。
 >
-> 当前说明覆盖 Edge/Nano 预训练生成、多视角生成与 physical embedding-space flow。
+> 当前说明覆盖 Edge/Nano 预训练生成、多视角生成、physical embedding-space flow，
+> 以及独立 opt-in 的 baseline + physical encoder raw-space 消融。
 
 LIBERO 实际微调配置、与官方 Cosmos3/LaWAM 的差异和待验证风险，见
 [LIBERO 微调审计](libero_finetuning_audit.md)。
+
+原生 LeRobot Cosmos3 policy 是独立基线，并非本文的 MoT。其集群启动器
+`train_cosmos3_fsdp.sh` 采用相同的数据/输出目录约定，但默认使用未经过 LIBERO 微调的
+`lerobot/Cosmos3-Nano`：本地缺失时在启动 workers 前缓存至节点本地盘，首次微调重置动作头，
+续训保留动作头；基座的 identity normalizer 无需统计文件，训练统计由数据适配器提供。
+Cosmos3 与 MoT 使用同一个 `MultiModalContrastiveDataset` 读取和采样：新增的
+`normalize_physical=False`、`require_full_window=True` 和 `sample_transform` 接口，
+允许模型侧 `Cosmos3DataAdapter` 消费未归一化的 canonical action/state，而不另建 dataset。
+LIBERO 与 house 等已注册数据均可接入；旋转转换、有效维度 loss mask 和每样本真实帧率
+由原生 Cosmos3 适配层处理。MoT 默认仍使用原有 mean/std 归一化和 episode 尾部 padding，
+不因新增接口改变行为。具体路径、下载与续训约定见
+[原生 Cosmos3 说明](cosmos3.md)，不改变本文的 MoT 配置或权重来源。
 
 ---
 
@@ -42,6 +55,56 @@ Stage 2 在 Stage 1 已学到的“视觉变化—物理变化”对齐基础上
 
 这里的 MoT 不是带路由门控的传统 MoE。Understanding 和 Generation 是两个职责不同的
 Transformer，信息只从 Understanding 单向流向 Generation。
+
+### Baseline + Stage 1 physical encoder：独立消融
+
+新增 `stage1_physical_only=true`，对应 **MLP baseline 的其余架构与配方不变，
+只把 state/action MLP 替换为可微调的 Stage 1 Physical Transformer**。
+这是新实验的初始化方式，不会将旧 MLP baseline checkpoint 自动转换为 Transformer。
+
+| 项目 | 新变体 |
+|---|---|
+| Understanding | 原始 Qwen3-VL 单视觉；语言 transformer layers full tune，视觉最后 4 blocks LoRA，与 baseline 相同 |
+| Learnable queries | 保留，参与 Generation 原生 K/V；无 Stage 1 query 蒸馏 |
+| Stage 1 迁移 | 只严格加载完整 `physical_encoder.*`；不构造 perception，不迁移其视觉或文本权重 |
+| Physical | Transformer full tune，默认 LR 为主 LR 的 0.3 倍 |
+| Flow | raw canonical state/action 空间加噪、预测 velocity、积分；无 embedding flow 或动作重建 decoder |
+| 默认训练配方 | Cosmos3-Nano、LIBERO、joint-only、primary/wrist、RGB 增强、shifted-uniform shift=5、BF16 |
+| Loss | 原 raw-space flow loss；latent-action loss=0，predicted action/state reconstruction loss=0 |
+
+Stage 1 的视觉类型、change-query 数量不再约束这个变体，但 physical 的窗口、group、
+hidden dimension、canonical 通道和 tactile token 几何仍须匹配。新初始化支持 Stage 1
+safetensors 导出和 DeepSpeed checkpoint；safetensors 只读取 physical tensors。
+导出的 Stage 2 checkpoint 内嵌 physical 架构，恢复不再依赖原 Stage 1 权重/配置文件。
+
+独立集群入口：
+
+```bash
+conda activate lerobot_v2
+STAGE1_CHECKPOINT=/path/to/stage1_checkpoint \
+JOB_NAME=libero_baseline_physical \
+bash train_qwen3vl_mot_baseline_physical_fsdp.sh
+```
+
+数据、预训练权重、节点数等沿用 `train_qwen3vl_mot_fsdp.sh` 的环境变量接口。
+默认新 job 为 `qwen3vl_mot_baseline_physical_libero`，
+输出为 `${OUTPUT_ROOT:-/mnt/wangxiaofa/qwen3vl_mot_exp}/${JOB_NAME}`；
+可显式设置 `OUTPUT_DIR`。默认 `WEIGHT_RESUME=false`，不允许覆盖非空目录。
+默认 Understanding LR scale=1、warmup/plateau/decay=1000/100/20000。
+续训同一新实验：
+
+```bash
+WEIGHT_RESUME=true JOB_NAME=libero_baseline_physical \
+bash train_qwen3vl_mot_baseline_physical_fsdp.sh
+```
+
+新入口拒绝续训其他变体；普通 `from_pretrained` 和 FSDP/DeepSpeed resume 也禁止切换
+`stage1_physical_only`。该字段默认 **false**，旧 checkpoint 缺失字段时仍按 false 恢复，
+原 launcher、默认模型、dual-vision 与既有训练目录均不改动。
+
+验证覆盖真实小型 Qwen/Physical Transformer 的 FP32/BF16 两步优化、physical/query 非零梯度、
+无未来真值泄漏、删除 Stage 1 源文件后的 checkpoint 往返、缺失 physical 权重拒载，
+以及旧模型/续训/launcher 回归。尚未进行新变体的完整训练或 LIBERO rollout。
 
 ---
 

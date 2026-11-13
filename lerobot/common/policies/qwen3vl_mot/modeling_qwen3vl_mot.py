@@ -15,7 +15,7 @@ from huggingface_hub import hf_hub_download
 from torch import distributed as dist
 
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
-from lerobot.common.policies.ace.modeling_robo_contrast import RoboContrast
+from lerobot.common.policies.ace.modeling_robo_contrast import PhysicalEncoder, RoboContrast
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.configs.policies import PreTrainedConfig
 
@@ -158,6 +158,38 @@ def _decode_stage1_config(payload: dict) -> RoboContrastConfig:
     return draccus.decode(RoboContrastConfig, encoded)
 
 
+def _load_stage1_physical_encoder(
+    checkpoint_path: Path, config_path: str, runtime_config: Qwen3VLMoTConfig
+) -> tuple[PhysicalEncoder, RoboContrastConfig]:
+    stage1_config = _override_stage1_model_paths(
+        _load_stage1_config(Path(config_path) if config_path else checkpoint_path), runtime_config
+    )
+    stage1_config.tactile_pretrained = False
+    physical = PhysicalEncoder(stage1_config)
+    exported = checkpoint_path / "model.safetensors" if checkpoint_path.is_dir() else checkpoint_path
+    if exported.is_file() and exported.suffix == ".safetensors":
+        from safetensors import safe_open
+
+        with safe_open(exported, framework="pt", device="cpu") as checkpoint:
+            names = checkpoint.keys()
+            weights = {
+                _strip_distributed_prefix(name).removeprefix("physical_encoder."): checkpoint.get_tensor(name)
+                for name in names
+                if _strip_distributed_prefix(name).startswith("physical_encoder.")
+            }
+    else:
+        payload = torch.load(
+            _resolve_deepspeed_model_file(checkpoint_path), map_location="cpu", weights_only=False
+        )
+        weights = {
+            _strip_distributed_prefix(name).removeprefix("physical_encoder."): value
+            for name, value in payload.get("module", payload).items()
+            if _strip_distributed_prefix(name).startswith("physical_encoder.")
+        }
+    physical.load_state_dict(weights, strict=True)
+    return physical, stage1_config
+
+
 class Qwen3VLMoTPolicy(PreTrainedPolicy):
     """Stage-two world model distilled from a frozen RoboContrast checkpoint."""
 
@@ -204,6 +236,11 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 "Cannot change `policy.understanding_dual_vision` when loading a checkpoint; "
                 "start a fresh output directory."
             )
+        if config.stage1_physical_only != saved_config.get("stage1_physical_only", False):
+            raise ValueError(
+                "Cannot change `policy.stage1_physical_only` when loading a checkpoint; "
+                "start a fresh output directory."
+            )
         return super().from_pretrained(pretrained_name_or_path, config=config, **kwargs)
 
     def __init__(self, config: Qwen3VLMoTConfig, dataset_stats=None):
@@ -212,7 +249,23 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         config.validate_features()
 
         restoring_embedded = not config.initialize_from_stage1
-        if restoring_embedded:
+        teacher = None
+        if config.stage1_physical_only:
+            if restoring_embedded:
+                if config.stage1_policy_config is None:
+                    raise ValueError("Physical-only restoration requires the embedded Stage 1 config.")
+                stage1_config = _decode_stage1_config(config.stage1_policy_config)
+                stage1_config.tactile_pretrained = False
+                self.physical_encoder = PhysicalEncoder(stage1_config)
+            else:
+                if not config.stage1_checkpoint:
+                    raise ValueError("Physical-only initialization requires `stage1_checkpoint`.")
+                self.physical_encoder, stage1_config = _load_stage1_physical_encoder(
+                    Path(config.stage1_checkpoint), config.stage1_config, config
+                )
+                config.stage1_policy_config = _encode_stage1_config(stage1_config)
+            self._validate_stage1_contract(stage1_config)
+        elif restoring_embedded:
             if config.stage1_policy_config is None:
                 raise ValueError(
                     "A stage-two restore requires the embedded `stage1_policy_config`; "
@@ -266,12 +319,13 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                     f"{missing_prefixes}."
                 )
             config.stage1_policy_config = _encode_stage1_config(teacher.config)
-        if teacher.physical_encoder is None:
+        if teacher is not None and teacher.physical_encoder is None:
             raise ValueError(
                 "The stage-one checkpoint was saved with perception_only=True and has no "
                 "physical transformer to transfer into stage two."
             )
-        self._validate_stage1_contract(teacher.config)
+        if teacher is not None:
+            self._validate_stage1_contract(teacher.config)
 
         # Transfer before attaching new LoRA; dual vision keeps the stock visual weights.
         requested_tuning = config.understanding_tuning_mode
@@ -303,7 +357,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 f"{config.generation_num_kv_heads} KV heads and "
                 f"{config.generation_hidden_dim // config.generation_num_heads}-dim heads."
             )
-        if not restoring_embedded:
+        if not restoring_embedded and not config.stage1_physical_only:
             vision_report, text_report = transfer_stage1_perception(
                 teacher.perception_encoder,
                 _base_qwen(self.understanding.model),
@@ -349,8 +403,9 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
 
         # The physical module itself becomes the stage-two conditioner; it is not copied.
         # Moving it out of the teacher avoids holding two 200M-parameter physical towers.
-        self.physical_encoder = teacher.physical_encoder
-        teacher.physical_encoder = None
+        if teacher is not None:
+            self.physical_encoder = teacher.physical_encoder
+            teacher.physical_encoder = None
         for parameter in self.physical_encoder.parameters():
             parameter.requires_grad_(config.physical_tuning_mode == "full")
         if self.physical_embedding_flow:
@@ -358,7 +413,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
 
         self.teacher_perception = (
             teacher.perception_encoder
-            if config.latent_action_prediction_enabled or config.understanding_dual_vision
+            if teacher is not None
+            and (config.latent_action_prediction_enabled or config.understanding_dual_vision)
             else None
         )
         if self.teacher_perception is not None:
@@ -372,6 +428,11 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             logger.info(
                 "Dual vision: retain pretrained Qwen vision with configured LoRA, reuse the frozen "
                 "stage-one teacher ViT, and fuse normalized patches with a zero-initialized tanh gate."
+            )
+        if config.stage1_physical_only:
+            logger.info(
+                "Baseline + physical encoder: stock Qwen vision and retained queries; "
+                "Stage 1 physical weights only, raw-space flow, no perception teacher or distillation."
             )
 
         from lerobot.common.policies.ace.cosmos3_encoders import build_cosmos3_vae
@@ -401,10 +462,14 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             persistent=False,
         )
 
-        self.latent_action_projection = nn.Sequential(
-            nn.LayerNorm(self.understanding.hidden_dim),
-            nn.Linear(self.understanding.hidden_dim, config.latent_action_dim),
-            nn.LayerNorm(config.latent_action_dim),
+        self.latent_action_projection = (
+            None
+            if config.stage1_physical_only
+            else nn.Sequential(
+                nn.LayerNorm(self.understanding.hidden_dim),
+                nn.Linear(self.understanding.hidden_dim, config.latent_action_dim),
+                nn.LayerNorm(config.latent_action_dim),
+            )
         )
         if not config.latent_action_prediction_enabled:
             # Preserve the initialization RNG of the unchanged Generation/decoder modules.
@@ -515,11 +580,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 or model.config.generation_backbone != "random"
                 or not model.config.latent_action_prediction_enabled
                 or model.config.understanding_dual_vision
+                or model.config.stage1_physical_only
             ),
         )
 
     def _validate_stage1_contract(self, stage1_config) -> None:
-        if getattr(stage1_config, "vision_backbone", None) != "qwen3vl":
+        if (
+            not self.config.stage1_physical_only
+            and getattr(stage1_config, "vision_backbone", None) != "qwen3vl"
+        ):
             raise ValueError(
                 "Stage two can inherit its understanding vision tower only from a "
                 "RoboContrast checkpoint trained with vision_backbone='qwen3vl'."
@@ -535,14 +604,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             "tactile_tokens_per_pad": self.config.tactile_tokens_per_pad,
             "tactile_frames": self.config.tactile_frames,
             "tactile_img_size": self.config.tactile_img_size,
-            "num_change_queries": self.config.num_latent_queries,
         }
+        if not self.config.stage1_physical_only:
+            expected["num_change_queries"] = self.config.num_latent_queries
         mismatches = {
             name: (getattr(stage1_config, name), value)
             for name, value in expected.items()
             if getattr(stage1_config, name) != value
         }
-        if stage1_config.hidden_dim != self.config.latent_action_dim:
+        if not self.config.stage1_physical_only and stage1_config.hidden_dim != self.config.latent_action_dim:
             mismatches["latent_action_dim"] = (
                 stage1_config.hidden_dim,
                 self.config.latent_action_dim,

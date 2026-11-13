@@ -26,6 +26,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     initialize_from_stage1: bool = True
     require_stage1_vision_transfer: bool = True
     require_stage1_text_transfer: bool = False
+    stage1_physical_only: bool = False
 
     qwen3vl_dir: str = "/mnt/wangxiaofa/pt_weights/Qwen3-VL-4B-Instruct"
     cosmos3_dir: str = "/mnt/wangxiaofa/pt_weights/Cosmos3-Edge"
@@ -215,6 +216,18 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
                 setattr(self, field_name, weight)
             if not (math.isfinite(weight) and weight >= 0):
                 raise ValueError(f"`{field_name}` must be finite and non-negative.")
+        if self.stage1_physical_only and (
+            self.understanding_dual_vision
+            or self.require_stage1_vision_transfer
+            or self.require_stage1_text_transfer
+            or not self.latent_action_prediction_enabled
+            or self.latent_action_loss_weight != 0
+            or self.physical_flow_space != "raw"
+        ):
+            raise ValueError(
+                "`stage1_physical_only` requires stock single vision (no Stage 1 perception transfer), "
+                "retained queries, latent_action_loss_weight=0 and physical_flow_space='raw'."
+            )
         if self.physical_reconstruction_loss_weight is not None:
             logging.getLogger(__name__).warning(
                 "Clean physical codec reconstruction has been removed; legacy "

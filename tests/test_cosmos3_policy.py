@@ -94,6 +94,96 @@ def test_native_canvas_prompt_normalization_and_roundtrip(config, stats, tmp_pat
         Cosmos3Processor(config, {"action": {"q01": torch.zeros(40), "q99": torch.ones(40)}})
 
 
+def test_base_identity_processors_need_no_state_files_and_use_finetuning_stats(config, stats, tmp_path):
+    Cosmos3Processor(config, stats).save_pretrained(tmp_path)
+    for name in ("policy_preprocessor", "policy_postprocessor"):
+        path = tmp_path / f"{name}.json"
+        pipeline = json.loads(path.read_text())
+        for step in pipeline["steps"]:
+            if step["registry_name"] in ("normalizer_processor", "unnormalizer_processor"):
+                del step["state_file"]
+                step["config"]["features"] = {}
+                step["config"]["norm_map"] = {"VISUAL": "IDENTITY", "STATE": "IDENTITY", "ACTION": "IDENTITY"}
+        path.write_text(json.dumps(pipeline))
+    processor = Cosmos3Processor(config, stats, pretrained_path=tmp_path)
+    batch = raw_batch(17)
+    batch["action"] = torch.zeros(2, 16, 10)
+    torch.testing.assert_close(processor(batch)["action"], torch.full((2, 16, 10), -1 / 3))
+    path = tmp_path / "policy_postprocessor.json"
+    pipeline = json.loads(path.read_text())
+    pipeline["steps"][0]["config"]["norm_map"]["ACTION"] = "QUANTILES"
+    path.write_text(json.dumps(pipeline))
+    with pytest.raises(ValueError, match="Missing normalization statistics"):
+        Cosmos3Processor(config, stats, pretrained_path=tmp_path)
+
+
+def test_processor_uses_each_samples_true_fps_and_rezeros_missing_action_slots(config, stats):
+    processor = Cosmos3Processor(config, stats)
+    batch = raw_batch(17)
+    batch.update(
+        action=torch.zeros(2, 16, 10),
+        action_mask=torch.tensor([[True] * 3 + [False] * 7, [True] * 10]),
+        sample_fps=torch.tensor([20.0, 10.0]),
+    )
+    captions = []
+    caption = processor.prompt.caption
+
+    def record(*args):
+        text = caption(*args)
+        captions.append(json.loads(text))
+        return text
+
+    processor.prompt.caption = record
+    prepared = processor(batch)
+    torch.testing.assert_close(prepared["second_per_grid_ts_gen"], torch.tensor([0.2, 0.4]))
+    assert [item["fps"] for item in captions] == [20.0, 10.0]
+    assert not prepared["action"][0, :, 3:].any()
+    torch.testing.assert_close(prepared["action"][1], torch.full((16, 10), -1 / 3))
+
+
+def test_idle_detection_ignores_absent_rotations_and_joints():
+    from lerobot.common.policies.cosmos3.dataset_adapter import _channel_names
+    from lerobot.common.policies.cosmos3.processor_cosmos3 import Cosmos3IdleFrameProcessorStep
+
+    step = Cosmos3IdleFrameProcessorStep(_channel_names()[:28], 20)
+    action = torch.zeros(2, 16, 28)
+    action[0, :, 3:9] = torch.tensor([1, 0, 0, 0, 1, 0])
+    action[0, :, 20:28] = torch.arange(16)[:, None] * 1000
+    mask = torch.zeros(2, 28, dtype=torch.bool)
+    mask[0, :10] = True
+    # Joint-only sample: absent end-effector rotations are not zero-rotation measurements.
+    action[1, :, 20:28] = 7
+    mask[1, 20:28] = True
+    assert step.count(action, None, torch.tensor([20.0, 10.0]), mask).tolist() == [16, 16]
+
+
+def test_flow_loss_masks_missing_physical_slots_and_preserves_native_all_valid_loss():
+    model = SimpleNamespace(config=SimpleNamespace(original_action_dim=10))
+    plan = SimpleNamespace(
+        video_condition_mask=torch.zeros(2, 5, dtype=torch.bool),
+        action_condition_mask=torch.zeros(2, 16, dtype=torch.bool),
+    )
+    errors = torch.full((2, 16, 64), 1000.0)
+    errors[0, :, :2] = 2
+    errors[1, :, :4] = 3
+    errors.requires_grad_()
+    velocity = modeling.FlowState(torch.zeros(2, 1, 5, 1, 1), errors)
+    target = modeling.FlowState(torch.zeros_like(velocity.video_latents), torch.zeros_like(errors))
+    mask = torch.zeros(2, 10, dtype=torch.bool)
+    mask[0, :2] = True
+    mask[1, :4] = True
+    _, loss = modeling.OmniMoTModel.flow_matching_loss(model, velocity, target, plan, None, mask)
+    torch.testing.assert_close(loss, torch.tensor(6.5))
+    loss.backward()
+    assert not errors.grad[0, :, 2:].any()
+    assert not errors.grad[1, :, 4:].any()
+    unmasked = modeling.OmniMoTModel.flow_matching_loss(model, velocity, target, plan)[1]
+    all_valid = modeling.OmniMoTModel.flow_matching_loss(
+        model, velocity, target, plan, None, torch.ones_like(mask),
+    )[1]
+    torch.testing.assert_close(all_valid, unmasked)
+
+
 def test_libero_native_axis_angle_and_continuous_gripper():
     controls = torch.tensor([[0.2, -0.1, 0.3, 0.2, -0.4, 0.5, 0.25]], dtype=torch.float64)
     matrix = torch.from_numpy(Rotation.from_rotvec(controls[0, 3:6].numpy()).as_matrix())
@@ -134,6 +224,43 @@ class TinyModel(nn.Module):
     def generate(self, **batch):
         size = batch["input_ids"].shape[0]
         return torch.zeros(size, self.config.chunk_size, self.config.max_action_dim), None
+
+
+def test_policy_receives_current_state_and_valid_action_dimensions(config, stats, monkeypatch):
+    config.use_state = True
+    config.input_features["observation.state"] = PolicyFeature(FeatureType.STATE, (10,))
+    monkeypatch.setattr(modeling, "OmniMoTModel", TinyModel)
+    policy = modeling.Cosmos3NanoPolicy(config, dataset_stats=stats)
+    original = policy.model.forward
+    captured = {}
+
+    def forward(**batch):
+        captured.update(batch)
+        return original(**batch)
+
+    monkeypatch.setattr(policy.model, "forward", forward)
+    batch = raw_batch(17)
+    batch.update(
+        action=torch.zeros(2, 16, 10),
+        action_mask=torch.tensor([[True] * 3 + [False] * 7] * 2),
+        state_mask=torch.tensor([[True] * 2 + [False] * 8] * 2),
+        **{"observation.state": torch.ones(2, 10)},
+    )
+    loss, _ = policy(batch)
+    loss.backward()
+    assert captured["state"].shape == (2, 64)
+    assert not captured["state"][:, 2:].any()
+    assert not captured["actions"][:, :, 3:].any()
+    torch.testing.assert_close(captured["action_feature_mask"], batch["action_mask"])
+    assert torch.isfinite(policy.model.network.action2llm.fc.weight.grad).all()
+    inference = raw_batch()
+    inference.update({
+        "observation.state": batch["observation.state"],
+        "state_mask": batch["state_mask"], "action_mask": batch["action_mask"],
+    })
+    actions = policy.predict_action_chunk(inference)
+    torch.testing.assert_close(actions[:, :, :3], torch.ones(2, 16, 3))
+    assert not actions[:, :, 3:].any()
 
 
 def test_strict_meta_loading_action_reinit_and_saved_resume(config, stats, tmp_path, monkeypatch):

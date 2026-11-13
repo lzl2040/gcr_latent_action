@@ -16,6 +16,17 @@ from lerobot.common.utils import stage2_model_cache as cache_module
 
 def _write_model(root, component):
     root.mkdir(parents=True, exist_ok=True)
+    if component == "cosmos3_policy":
+        (root / "config.json").write_text(json.dumps({"type": "cosmos3_nano"}))
+        save_file({"weight": np.ones(1, dtype=np.float32)}, str(root / "model.safetensors"))
+        for name in ("policy_preprocessor", "policy_postprocessor"):
+            (root / f"{name}.json").write_text(json.dumps({"steps": []}))
+        tokenizer = root / "tokenizer"
+        tokenizer.mkdir(exist_ok=True)
+        (tokenizer / "tokenizer_config.json").write_text("{}")
+        (tokenizer / "tokenizer.json").write_text("{}")
+        (tokenizer / "chat_template.jinja").write_text("template")
+        return
     if component == "text":
         for name in ("config", "tokenizer_config", "tokenizer"):
             (root / f"{name}.json").write_text("{}")
@@ -72,6 +83,50 @@ def test_complete_mounted_models_need_no_network_or_cache(tmp_path, downloads, m
     assert paths[2] == str(tmp_path / "blob/Cosmos3-Nano")
     assert downloads == []
     assert not (tmp_path / "local").exists()
+
+
+def test_native_cosmos3_cache_is_distinct_from_nvidia_generation_and_reused_offline(tmp_path, downloads):
+    source = tmp_path / "mounted/Cosmos3-Nano"
+    _write_model(source, "generation")
+    cache = tmp_path / "local"
+    _write_model(cache / "Cosmos3-Nano", "generation")
+    resolved = cache_module.resolve_cosmos3_policy_path(str(source), cache)
+    assert resolved == str(cache / "Cosmos3-Nano-LeRobot")
+    assert [call[:2] for call in downloads] == [("Cosmos3-Nano-LeRobot", "cosmos3_policy")]
+    assert not (source / "config.json").exists()
+    assert cache_module.resolve_cosmos3_policy_path(str(source), cache, auto_download=False) == resolved
+    assert len(downloads) == 1
+    with pytest.raises(FileNotFoundError, match="prohibits downloading"):
+        cache_module.resolve_cosmos3_policy_path(str(source), tmp_path / "offline", auto_download=False)
+    assert not (tmp_path / "offline").exists()
+
+
+def test_complete_native_cosmos3_mount_needs_no_network_or_cache(tmp_path, downloads, monkeypatch):
+    source = tmp_path / "mounted"
+    _write_model(source, "cosmos3_policy")
+    monkeypatch.setattr(cache_module, "_require_local_disk", lambda _: pytest.fail("No cache needed"))
+    assert cache_module.resolve_cosmos3_policy_path(str(source), tmp_path / "local") == str(source)
+    assert not downloads
+    assert not (tmp_path / "local").exists()
+
+
+@pytest.mark.parametrize(
+    "missing", ["tokenizer/chat_template.jinja", "model.safetensors", "normalizer.safetensors"]
+)
+def test_native_cosmos3_assets_must_be_complete(tmp_path, missing):
+    _write_model(tmp_path, "cosmos3_policy")
+    if missing == "normalizer.safetensors":
+        (tmp_path / "policy_preprocessor.json").write_text(
+            json.dumps(
+                {
+                    "steps": [{"registry_name": "normalizer_processor", "state_file": missing}],
+                }
+            )
+        )
+    else:
+        (tmp_path / missing).unlink()
+    with pytest.raises(FileNotFoundError):
+        cache_module.check_model_directory(tmp_path, "cosmos3_policy")
 
 
 def test_evaluation_defaults_download_only_base_qwen_vae_and_text_then_reuse(tmp_path, downloads):
@@ -254,29 +309,40 @@ def test_incomplete_download_is_rejected_before_training(tmp_path, monkeypatch):
     assert not (tmp_path / "blob").exists()
 
 
-def test_official_download_has_pinned_revision_and_node_local_hub_xet_paths(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "model,component,repo",
+    [
+        ("Cosmos3-Nano", "generation", "nvidia/Cosmos3-Nano"),
+        ("Cosmos3-Nano-LeRobot", "cosmos3_policy", "lerobot/Cosmos3-Nano"),
+    ],
+)
+def test_official_download_has_pinned_revision_and_node_local_hub_xet_paths(
+    tmp_path, monkeypatch, model, component, repo
+):
     import huggingface_hub
 
     files = [
         SimpleNamespace(rfilename="transformer/config.json", size=2),
         SimpleNamespace(rfilename="vae/config.json", size=2),
         SimpleNamespace(rfilename="audio/model.safetensors", size=100),
+        SimpleNamespace(rfilename="model.safetensors", size=10),
+        SimpleNamespace(rfilename="tokenizer/tokenizer.json", size=2),
     ]
     monkeypatch.setattr(
-        huggingface_hub, "HfApi",
+        huggingface_hub,
+        "HfApi",
         lambda: SimpleNamespace(model_info=lambda *args, **kwargs: SimpleNamespace(siblings=files)),
     )
     calls = []
     monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **kwargs: calls.append(kwargs))
     monkeypatch.setenv("HF_HOME", "/mounted/blob/hf")
     monkeypatch.setenv("HF_XET_CACHE", "/mounted/blob/xet")
-    cache_module._download_model("Cosmos3-Nano", "generation", tmp_path / "Cosmos3-Nano", tmp_path,
-                                 force=False)
-    assert calls[0]["repo_id"] == "nvidia/Cosmos3-Nano"
-    assert calls[0]["revision"] == cache_module._MODELS["Cosmos3-Nano"][1]
-    assert calls[0]["local_dir"] == str(tmp_path / "Cosmos3-Nano")
+    cache_module._download_model(model, component, tmp_path / model, tmp_path, force=False)
+    assert calls[0]["repo_id"] == repo
+    assert calls[0]["revision"] == cache_module._MODELS[model][1]
+    assert calls[0]["local_dir"] == str(tmp_path / model)
     assert calls[0]["cache_dir"] == str(tmp_path / "_hub")
-    assert calls[0]["allow_patterns"] == ["transformer/*", "vae/config.json"]
+    assert calls[0]["allow_patterns"] == cache_module._PATTERNS[component]
     assert os.environ["HF_XET_CACHE"] == str(tmp_path / "_xet")
 
 
@@ -359,6 +425,204 @@ def test_cli_emits_only_resolved_paths_on_stdout(tmp_path):
     assert result.stdout.splitlines() == [str(qwen), str(cosmos), ""]
     assert "Using existing" in result.stderr
     assert not (tmp_path / "cache").exists()
+
+
+def test_cli_resolves_native_cosmos3_without_mot_assets(tmp_path):
+    source = tmp_path / "native"
+    _write_model(source, "cosmos3_policy")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lerobot.common.utils.stage2_model_cache",
+            f"--cosmos3-policy-dir={source}",
+            f"--cache-dir={tmp_path / 'cache'}",
+            "--auto-download=false",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    assert result.stdout.splitlines() == [str(source)]
+    assert not (tmp_path / "cache").exists()
+
+
+def _cosmos3_launcher_env(tmp_path, **overrides):
+    env = dict(os.environ)
+    for name in (
+        "WEIGHTS_ROOT",
+        "MODEL_DIR",
+        "PARENT_DIR_V21",
+        "PARENT_DIR_V30",
+        "PARENT_DIR_EXTRA",
+        "DATA_ROOT_V21",
+        "DATA_ROOT_V30",
+        "DATA_ROOT_EXTRA",
+        "OUTPUT_ROOT",
+        "OUTPUT_DIR",
+        "LOG_DIR",
+        "JOB_NAME",
+        "LOAD_ACTION_MODULES",
+        "FFMPEG_LIB_DIR",
+        "TRAINING_ACTION_LAYOUT",
+        "FPS",
+        "RGB_VIEWS",
+        "USE_STATE",
+    ):
+        env.pop(name, None)
+    env.update(
+        {
+            "PYTHON_BIN": sys.executable,
+            "DRY_RUN": "true",
+            "CHECK_PATHS": "false",
+            "MODEL_AUTO_DOWNLOAD": "true",
+            "MODEL_LOCAL_CACHE": str(tmp_path / "cache"),
+            "WEIGHT_RESUME": "false",
+            "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+            "NNODES": "1",
+            "NODE_RANK": "0",
+            "NPROC_PER_NODE": "8",
+            "MASTER_ADDR": "10.0.0.1",
+            "MASTER_PORT": "29599",
+            "DISTRIBUTED_TIMEOUT_MINUTES": "17",
+        }
+    )
+    env.update(overrides)
+    return env
+
+
+def _cosmos3_launcher(env):
+    root = Path(__file__).resolve().parents[1]
+    return subprocess.run(
+        ["bash", str(root / "train_cosmos3_fsdp.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize("resume", ["false", "true"])
+def test_cosmos3_cluster_defaults_use_base_weights_and_resume_action_modules(tmp_path, resume):
+    result = _cosmos3_launcher(
+        _cosmos3_launcher_env(
+            tmp_path,
+            NNODES="2",
+            NODE_RANK="1",
+            WEIGHT_RESUME=resume,
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    for argument in (
+        "--policy.pretrained_path=/mnt/wangxiaofa/pt_weights/Cosmos3-Nano",
+        f"--policy.load_action_modules={resume}",
+        "--dataset.parent_dir_v21=/mnt/wangxiaofa/robot_dataset/lerobot-format-v30-0710/",
+        "--dataset.parent_dir_v30=/mnt/wangxiaofa/robot_dataset/lerobot-format-v30-0710/",
+        "--dataset.parent_dir_extra=/mnt/wangxiaofa/robot_dataset/lerobot-format-v30/",
+        "--output_dir=/mnt/wangxiaofa/qwen3vl_mot_exp/cosmos3_nano_fsdp",
+        "--log_dir=/mnt/wangxiaofa/ace_logs",
+        "--job_name=cosmos3_nano_fsdp",
+        "--nnodes=2",
+        "--node_rank=1",
+        "--master_addr=10.0.0.1",
+        "--master_port=29599",
+        "--rdzv_conf=timeout=1020",
+    ):
+        assert argument in result.stdout
+    assert "Policy-LIBERO" not in result.stdout
+    assert "--policy.fps=" not in result.stdout
+    if resume == "false":
+        assert "--policy.training_action_layout=auto" in result.stdout
+    else:
+        assert "--policy.training_action_layout=" not in result.stdout
+    assert not (tmp_path / "cache").exists()
+
+
+def test_cosmos3_launcher_exposes_generic_house_state_camera_and_fps_options(tmp_path):
+    import shlex
+
+    result = _cosmos3_launcher(_cosmos3_launcher_env(
+        tmp_path, DATA_MIX="real_house_stack", USE_STATE="true", RGB_VIEWS='["primary"]', FPS="10",
+    ))
+    assert result.returncode == 0, result.stderr
+    args = shlex.split(result.stdout.split("command:", 1)[1])
+    assert "--data_mix=real_house_stack" in args
+    assert "--policy.use_state=true" in args
+    assert '--policy.training_rgb_views=["primary"]' in args
+    assert "--policy.fps=10" in args
+
+
+def test_cosmos3_launcher_respects_dataset_aliases_extra_disable_and_output_overrides(tmp_path):
+    import shlex
+
+    env = _cosmos3_launcher_env(
+        tmp_path,
+        PARENT_DIR_V21="/primary data",
+        DATA_ROOT_V21="/ignored",
+        DATA_ROOT_V30="/legacy data",
+        PARENT_DIR_EXTRA="",
+        DATA_ROOT_EXTRA="/ignored",
+        OUTPUT_ROOT=str(tmp_path / "outputs"),
+        JOB_NAME="base_test",
+        LOG_DIR=str(tmp_path / "logs"),
+    )
+    result = _cosmos3_launcher(env)
+    assert result.returncode == 0, result.stderr
+    args = shlex.split(result.stdout.split("command:", 1)[1])
+    assert "--dataset.parent_dir_v21=/primary data" in args
+    assert "--dataset.parent_dir_v30=/legacy data" in args
+    assert "--dataset.parent_dir_extra=" in args
+    assert f"--output_dir={tmp_path / 'outputs/base_test'}" in args
+    assert f"--log_dir={tmp_path / 'logs'}" in args
+    assert not (tmp_path / "outputs").exists()
+
+
+@pytest.mark.parametrize(
+    "changes,message",
+    [
+        ({"NNODES": "2", "MASTER_PORT": ""}, "required for multi-node"),
+        ({"NNODES": "2", "MASTER_ADDR": "127.0.0.1"}, "reachable from other nodes"),
+        ({"NNODES": "2", "NODE_RANK": "2"}, "smaller than NNODES"),
+        ({"WEIGHT_RESUME": "true", "LOAD_ACTION_MODULES": "false"}, "reload trained action modules"),
+    ],
+)
+def test_cosmos3_launcher_rejects_bad_rendezvous_and_action_reset(tmp_path, changes, message):
+    result = _cosmos3_launcher(_cosmos3_launcher_env(tmp_path, **changes))
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert not (tmp_path / "cache").exists()
+
+
+def test_cosmos3_launcher_resolves_native_cache_before_workers(tmp_path):
+    python = tmp_path / "python"
+    calls = tmp_path / "calls.jsonl"
+    python.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        f"with open({str(calls)!r}, 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "if sys.argv[1:3] == ['-m', 'lerobot.common.utils.stage2_model_cache']:\n"
+        "    print('/node/Cosmos3-Nano-LeRobot')\n"
+        "elif sys.argv[1:3] != ['-m', 'torch.distributed.run']:\n"
+        "    raise SystemExit('unexpected invocation')\n"
+    )
+    python.chmod(0o755)
+    result = _cosmos3_launcher(
+        _cosmos3_launcher_env(
+            tmp_path,
+            PYTHON_BIN=str(python),
+            DRY_RUN="false",
+            MODEL_DIR="/mounted/Cosmos3-Nano",
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    helper, workers = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert helper[:2] == ["-m", "lerobot.common.utils.stage2_model_cache"]
+    assert "--cosmos3-policy-dir=/mounted/Cosmos3-Nano" in helper
+    assert "--auto-download=true" in helper
+    assert workers[:2] == ["-m", "torch.distributed.run"]
+    assert "--policy.pretrained_path=/node/Cosmos3-Nano-LeRobot" in workers
+    assert "--policy.load_action_modules=false" in workers
 
 
 @pytest.mark.parametrize("launcher", ["fsdp", "local"])

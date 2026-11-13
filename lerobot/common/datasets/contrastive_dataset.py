@@ -154,12 +154,18 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         heldout_eval_dataset_names: tuple[str, ...] = (),
         heldout_eval_episodes_per_dataset: int = 0,
         heldout_eval_seed: int = 20_260_927,
+        normalize_physical: bool = True,
+        require_full_window: bool = False,
+        sample_transform=None,
     ):
         super().__init__()
         self.cfg = cfg
         self.seed = seed
         self.epoch = 0
         self.image_transforms = image_transforms
+        self.normalize_physical = normalize_physical
+        self.require_full_window = require_full_window
+        self.sample_transform = sample_transform
 
         policy_cfg = cfg.policy
         self.rgb_augmentation = None
@@ -522,7 +528,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                 "%d episodes; validation_split=training. "
                 "Validation episodes remain in training; metrics are not held-out generalization.",
                 self.total_pool_anchors,
-                "unpadded native windows" if cfg.policy.type in ("cosmos3_nano", "cosmos3_edge")
+                "unpadded windows" if self.require_full_window
                 else "including padded episode tails",
                 self.total_source_episodes,
             )
@@ -570,12 +576,16 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         episodes_per_dataset: int,
         seed: int,
     ) -> tuple[list[np.ndarray], list[np.ndarray], list[dict]]:
+        split_ranges = [ranges.copy() for ranges in self.all_episode_ranges]
+        if getattr(self, "require_full_window", False):
+            for ranges, horizon in zip(split_ranges, self.frame_horizons, strict=True):
+                ranges[:, 1] = np.maximum(ranges[:, 0], ranges[:, 1] - horizon)
         if not requested_datasets:
             empty = [
                 np.empty((0, 2), dtype=np.int64)
                 for _ in self.all_episode_ranges
             ]
-            return [ranges.copy() for ranges in self.all_episode_ranges], empty, []
+            return split_ranges, empty, []
         if episodes_per_dataset <= 0:
             raise ValueError(
                 "heldout_eval_episodes_per_dataset must be positive when validation "
@@ -589,7 +599,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         for dataset_idx, (name, ranges, horizon, training_source) in enumerate(
             zip(
                 self.dataset_names,
-                self.all_episode_ranges,
+                split_ranges,
                 self.frame_horizons,
                 self.training_sources,
                 strict=True,
@@ -750,6 +760,10 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
                     dtype=np.int64
                 )
             )
+            if getattr(self, "require_full_window", False):
+                original = self.all_episode_ranges[self.dataset_names.index(name)]
+                selected = original[np.isin(original[:, 0], episode_ranges[:, 0])]
+                training_frames = int(np.maximum(selected[:, 1] - selected[:, 0], 0).sum())
             statistics.append(
                 {
                     "dataset": name,
@@ -1351,6 +1365,8 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             result = self._augment_rgb_window(result)
         result["data_read_fallback"] = torch.tensor(float(read_fallback), dtype=torch.float32)
         result["requested_frame_index"] = torch.tensor(requested_frame_idx, dtype=torch.long)
+        if getattr(self, "sample_transform", None) is not None:
+            result = self.sample_transform(result)
         return result
 
     def _augment_rgb_window(self, result: dict) -> dict:
@@ -1493,9 +1509,25 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "video_view_mask": torch.tensor(video_mask, dtype=torch.bool),
         }
 
-    def _build_canonical_vector(self, item, instructions, norm, is_chunk: bool, *, zero_pad: bool = False):
+    def get_raw_physical_values(self, dataset_idx: int, feature: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project parquet columns without video IO, normalization or episode padding."""
+        if feature not in ("action", "state"):
+            raise ValueError(f"Unknown physical feature: {feature!r}.")
+        dataset = self.datasets[dataset_idx]
+        instructions = self.specs[dataset_idx].get(feature, [])
+        keys = sorted({src for src, *_ in instructions} & set(dataset.hf_dataset.column_names))
+        item = dataset.hf_dataset.select_columns(keys).with_format("torch")[:] if keys else {}
+        return self._build_canonical_vector(
+            item, instructions, self.norm_stats[dataset_idx][feature], True,
+            normalize=False, length=len(dataset),
+        )
+
+    def _build_canonical_vector(
+        self, item, instructions, norm, is_chunk: bool, *, zero_pad: bool = False,
+        normalize: bool | None = None, length: int | None = None,
+    ):
         width = CANON_DIM
-        chunk = self.chunk_size if is_chunk else 1
+        chunk = (self.chunk_size if length is None else length) if is_chunk else 1
         out = torch.zeros(chunk, width, dtype=torch.float32)
         mask = torch.zeros(width, dtype=torch.float32)
 
@@ -1553,8 +1585,14 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             mask[d0 : d0 + span] = 1.0
 
         mask = mask * norm["mask"]
-        out = (out - norm["mean"]) / norm["std"]
-        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0) * mask
+        if normalize is None:
+            normalize = getattr(self, "normalize_physical", True)
+        if normalize:
+            out = (out - norm["mean"]) / norm["std"]
+            out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        elif not torch.isfinite(out[:, mask.bool()]).all():
+            raise ValueError("Nonfinite values in unnormalized physical data.")
+        out = out * mask
         return (out if is_chunk else out.squeeze(0)), mask
 
     def _build_tactile_signal(self, item, spec, norm):
@@ -1664,7 +1702,20 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
     def _to_canonical(self, item, ds_idx, frame_idx):
         spec = self.specs[ds_idx]
         norm = self.norm_stats[ds_idx]
+        if getattr(self, "require_full_window", False):
+            physical_keys = {src for kind in ("action", "state") for src, *_ in spec.get(kind, [])}
+            rgb_keys = {self.image_key_maps[ds_idx].get(role) for role in self.rgb_views}
+            for key in (physical_keys | rgb_keys) - {None}:
+                padding = item.get(f"{key}_is_pad")
+                if padding is not None and torch.as_tensor(padding).any():
+                    raise ValueError(f"A padded {key} reached a full-window training sample.")
+                value = item.get(key)
+                required = (self.world_video_frames or 2) if key in rgb_keys else self.chunk_size
+                if value is not None and (value.ndim < 2 or value.shape[0] < required):
+                    raise ValueError(f"An incomplete {key} reached a full-window training sample.")
         primary_key = self.image_key_maps[ds_idx]["primary"]
+        if getattr(self, "require_full_window", False):
+            primary_key = self.image_key_maps[ds_idx].get(self.rgb_views[0])
         action_padding = spec.get("action_padding", "zero_control")
         if action_padding not in ("zero_control", "repeat_last"):
             raise ValueError(f"Unsupported action padding mode: {action_padding!r}.")

@@ -16,6 +16,7 @@ _MODELS = {
     "Qwen3-VL-4B-Instruct": ("Qwen/Qwen3-VL-4B-Instruct", "ebb281ec70b05090aa6165b016eac8ec08e71b17"),
     "Cosmos3-Edge": ("nvidia/Cosmos3-Edge", "344d602b128d1bbdacb43b08d0a3626f46343e29"),
     "Cosmos3-Nano": ("nvidia/Cosmos3-Nano", "e59a53c25979a090fa8706c9acc0c254a6e89b92"),
+    "Cosmos3-Nano-LeRobot": ("lerobot/Cosmos3-Nano", "104d12ccc544e14984443b812233969f389ee8dc"),
     "siglip2-base-patch16-224": (
         "google/siglip2-base-patch16-224",
         "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
@@ -26,6 +27,15 @@ _PATTERNS = {
     "vae": ["vae/*"],
     "generation": ["transformer/*", "vae/config.json"],
     "text": ["*.json", "*.txt", "*.model", "*.safetensors"],
+    "cosmos3_policy": [
+        "config.json",
+        "model.safetensors",
+        "policy_*",
+        "tokenizer/*",
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+    ],
 }
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,7 +80,37 @@ def _check_weights(root: Path, basename: str) -> None:
 
 
 def check_model_directory(root: Path, component: str) -> None:
-    if component == "qwen":
+    if component == "cosmos3_policy":
+        if _read_json(root / "config.json").get("type") != "cosmos3_nano":
+            raise ValueError(
+                f"Expected a native LeRobot Cosmos3 Nano policy in {root}, not NVIDIA generation weights."
+            )
+        _safetensor_keys(root / "model.safetensors")
+        for name in ("policy_preprocessor", "policy_postprocessor"):
+            steps = _read_json(root / f"{name}.json").get("steps")
+            if not isinstance(steps, list):
+                raise ValueError(f"Missing processor steps in {root / name}.json.")
+            for step in steps:
+                if not isinstance(step, dict):
+                    raise ValueError(f"Invalid processor step in {root / name}.json.")
+                state_file = step.get("state_file")
+                if state_file is not None:
+                    if not isinstance(state_file, str) or not (root / state_file).resolve().is_relative_to(
+                        root.resolve()
+                    ):
+                        raise ValueError(f"Processor state must be inside its checkpoint: {state_file!r}.")
+                    _safetensor_keys(root / state_file)
+        tokenizer = root / "tokenizer"
+        tokenizer_config = _read_json(tokenizer / "tokenizer_config.json")
+        if (tokenizer / "tokenizer.json").stat().st_size == 0:
+            raise ValueError(f"Empty tokenizer in {tokenizer}.")
+        if not (
+            (tokenizer / "chat_template.jinja").is_file()
+            or (tokenizer / "chat_template.json").is_file()
+            or tokenizer_config.get("chat_template")
+        ):
+            raise FileNotFoundError(f"Missing Cosmos3 chat template in {tokenizer}.")
+    elif component == "qwen":
         for filename in ("config.json", "preprocessor_config.json", "tokenizer_config.json"):
             _read_json(root / filename)
         tokenizer = root / "tokenizer.json"
@@ -231,6 +271,19 @@ def resolve_model_paths(
     return qwen_dir, cosmos_dir, generation_dir
 
 
+def resolve_cosmos3_policy_path(
+    model_dir: str,
+    cache: Path,
+    *,
+    auto_download: bool = True,
+) -> str:
+    if any("\n" in path or "\r" in path for path in (model_dir, str(cache))):
+        raise ValueError("Model paths must not contain newlines.")
+    return _resolve_model(
+        model_dir, "Cosmos3-Nano-LeRobot", "cosmos3_policy", cache, auto_download=auto_download
+    )
+
+
 def resolve_evaluation_model_paths(
     qwen_dir: Path | None,
     cosmos_dir: Path | None,
@@ -264,8 +317,9 @@ def resolve_evaluation_model_paths(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--qwen-dir", required=True)
-    parser.add_argument("--cosmos-dir", required=True)
+    parser.add_argument("--qwen-dir")
+    parser.add_argument("--cosmos-dir")
+    parser.add_argument("--cosmos3-policy-dir")
     parser.add_argument("--generation-dir", default="")
     parser.add_argument("--generation-backbone", default="")
     parser.add_argument("--cache-dir", required=True, type=Path)
@@ -273,10 +327,28 @@ def main() -> None:
     parser.add_argument("--auto-download", choices=("true", "false"), default="true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="model cache: %(message)s")
-    paths = resolve_model_paths(
-        args.qwen_dir, args.cosmos_dir, args.generation_dir, args.generation_backbone, args.cache_dir,
-        need_generation=args.need_generation, auto_download=args.auto_download == "true",
-    )
+    if args.cosmos3_policy_dir is not None:
+        if args.qwen_dir is not None or args.cosmos_dir is not None:
+            parser.error("--cosmos3-policy-dir cannot be combined with MoT model paths.")
+        paths = (
+            resolve_cosmos3_policy_path(
+                args.cosmos3_policy_dir,
+                args.cache_dir,
+                auto_download=args.auto_download == "true",
+            ),
+        )
+    else:
+        if args.qwen_dir is None or args.cosmos_dir is None:
+            parser.error("--qwen-dir and --cosmos-dir are required for MoT.")
+        paths = resolve_model_paths(
+            args.qwen_dir,
+            args.cosmos_dir,
+            args.generation_dir,
+            args.generation_backbone,
+            args.cache_dir,
+            need_generation=args.need_generation,
+            auto_download=args.auto_download == "true",
+        )
     for path in paths:
         print(path)
 
