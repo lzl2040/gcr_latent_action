@@ -5687,3 +5687,33 @@ Actual videos are under each attempt's
 predictions are under `policy/predictions/reset_*/env_000/replan_*/`.
 The successful bottle head-camera recording is
 `episode_0000001_cam_head_success.mp4`.
+
+### Low-FPS step16k comparison (2026-11-15)
+
+The user requested the next checkpoint from the same
+`robodojo_2nodes_8gpu_high_noise_shift_5_fps12_decay32k` experiment.
+`step16k/model` is present and complete. Preflight verified35
+checkpoint/config files (23353964817 bytes), after a30s size/mtime
+stability check, with full SHA256 hashes and valid DCP storage ranges.
+All1357 tensor keys/shapes/dtypes match the verified physical-MLP model.
+All32 model-shard hashes differ from15k; policy/training root config
+hashes are identical.
+
+Comparison with the completed15k manifest confirmed identical dataset
+metadata/statistics/Parquet fingerprints, training action contract,
+original task/layout files and clean runtime commit
+`5a9dd0333ed63baaf0ce046e83596f5521b35ee3`. The761 original native asset
+hashes and25Hz simulator timing were rechecked. No evaluation/model
+source changes or dependency changes were needed.
+
+The comparison uses the same three tasks, original layouts0/1/2,
+seed0, BF16, sampling10 and10 model actions per request, each absolute
+target held for2 native ticks. Original task horizons and all actual/
+predicted video switches are unchanged. Only checkpoint/provenance,
+output path and server port change:16k uses port19216 and
+`outputs/evaluation/robodojo/fps12p5_mlp_step16k_three_tasks_sampling10_20261115_v1`.
+Provenance/preflight are under the same runtime-assets experiment cache:
+`checkpoint_provenance_step16k.json` and
+`three_tasks_step16k_preflight_20261115.json`.
+Strict model restoration and real rollout startup must still be verified;
+these preflight checks alone are not benchmark results.
