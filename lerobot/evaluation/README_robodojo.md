@@ -5731,3 +5731,40 @@ task specifications, training contract and all runtime file hashes
 are identical. The only setting differences are checkpoint,
 checkpoint provenance, output directory and port. Previous15k results
 remain untouched;16k success rates are pending, not inferred from startup.
+
+#### Completed16k results and comparison with15k
+
+The16k suite finished with exit0. All9 original-layout episodes passed
+the independent task audit, with0 infrastructure failures; the final
+checkpoint/dataset source SHA256 recheck and runtime hashes passed.
+
+| Task | 15k successes | 16k successes | 15k mean score /100 | 16k mean score /100 |
+|---|---:|---:|---:|---:|
+| `stack_bowls` | 0/3 | 0/3 | 0 | 0 |
+| `put_bottles_into_dustbin` | 1/3 | 1/3 | 60 | 55 |
+| `insert_tubes` | 0/3 | 0/3 | 0 | 0 |
+| Overall | 1/9 | 1/9 | 20 | 18.33 |
+
+Both checkpoints have11.11% success on these same9 layouts. The score
+difference is entirely bottle layout0: native reward0.4 at15k versus
+0.25 at16k. Bottle layout1 succeeds at both checkpoints, but16k takes
+617 native controls versus349 at15k; layout2 receives0.4 at both.
+Thus16k is slower and earns less partial credit on this small sample,
+not worse in the measured success count. These results alone cannot
+establish general regression or overfitting.
+
+16k native controls were bowls800/800/800, bottles700/617/700 and
+tubes500/500/500:5917 total, within original limits. All296 policy
+chunks passed finite/denormalization/integration/timebase checks.
+Maximum integration disagreement was below6e-8m translation,
+1.1e-7 in rotation-matrix entries and3e-8 gripper units. All27 actual
+videos passed frame-count/FPS/geometry checks;888 matched predicted
+MP4s and their prediction/conditioning PNGs were saved. Head-camera
+checks passed on127 passive snapshots. Full manual video review is
+not claimed.
+
+Final16k evidence is retained in
+`outputs/evaluation/robodojo/fps12p5_mlp_step16k_three_tasks_sampling10_20261115_v1/`:
+`progress.json`, `results.csv`, and per-task
+`tasks/<task>/attempt_001/{suite_audit,summary}.json`.
+Actual and predicted video paths follow the15k layout documented above.
