@@ -5717,3 +5717,17 @@ Provenance/preflight are under the same runtime-assets experiment cache:
 `three_tasks_step16k_preflight_20261115.json`.
 Strict model restoration and real rollout startup must still be verified;
 these preflight checks alone are not benchmark results.
+
+The16k nine-episode suite is now running. Startup verification passed:
+strict full-model restoration from `step16k/model`, no Stage1 teacher,
+BF16/sampling10, three finite32x20 delta chunks, model replan
+indices0/10/20 mapping to native0/20/40,50 advancing native controls,
+zero head-camera drift, live WebSocket and matched three-camera
+predictions ending at2.48s. Actual25FPS video streams are active.
+`startup_validation.json` is persisted in the16k output root.
+
+The live16k manifest was compared with the completed15k manifest:
+task specifications, training contract and all runtime file hashes
+are identical. The only setting differences are checkpoint,
+checkpoint provenance, output directory and port. Previous15k results
+remain untouched;16k success rates are pending, not inferred from startup.
