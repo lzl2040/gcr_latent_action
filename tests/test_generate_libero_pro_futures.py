@@ -58,7 +58,7 @@ def test_changed_saved_observation_cannot_be_used(tmp_path):
 
 
 @pytest.mark.parametrize("native_size", [2, 4])
-def test_comparison_requires_matched_resolution_and_preserves_time(tmp_path, monkeypatch, native_size):
+def test_comparison_downsamples_only_ours_and_preserves_time(tmp_path, monkeypatch, native_size):
     import imageio.v2 as imageio
 
     baseline, native, output = (tmp_path / name for name in ("baseline", "native", "comparison"))
@@ -86,17 +86,58 @@ def test_comparison_requires_matched_resolution_and_preserves_time(tmp_path, mon
 
     monkeypatch.setattr(imageio, "mimsave", save_video)
     args = SimpleNamespace(baseline_dir=baseline, cosmos3_dir=native, output_dir=output)
-    if native_size != 4:
-        with pytest.raises(ValueError, match="same decoded resolution"):
-            futures.compare(args)
-        assert not captured
-        return
     futures.compare(args)
     for frames, options in captured.values():
-        assert frames.shape == (9, 28, 8, 3)
-        np.testing.assert_array_equal(frames[:, 24:, :4], native_frames)
+        assert frames.shape == (9, native_size + 24, 2 * native_size, 3)
+        np.testing.assert_array_equal(frames[:, 24:, :native_size], native_frames)
         assert options["macro_block_size"] == 1
     with np.load(native / "frames.npz") as original:
         np.testing.assert_array_equal(original["primary"], native_frames)
     saved = json.loads((output / "metadata.json").read_text())
     assert saved["camera_display"]["primary"]["cosmos3_spatial_resampling"] == "none"
+    expected = "lanczos_downsample" if native_size < 4 else "none"
+    assert saved["camera_display"]["primary"]["ours_spatial_resampling"] == expected
+    filmstrip = imageio.imread(output / "primary_filmstrip_future8.png")
+    assert filmstrip.shape == (24 + 2 * native_size, 100 + 8 * native_size, 3)
+    for column, frame in enumerate(native_frames[1:]):
+        start = 100 + column * native_size
+        np.testing.assert_array_equal(filmstrip[24 : 24 + native_size, start : start + native_size], frame)
+
+
+def test_display_never_upscales_ours_or_changes_cosmos3():
+    with pytest.raises(ValueError, match="Do not upscale"):
+        futures.native_resolution_views(
+            np.zeros((9, 2, 2, 3), dtype=np.uint8),
+            np.zeros((9, 4, 4, 3), dtype=np.uint8),
+        )
+
+
+def test_native_trained_horizon_control_uses_only_exact_shared_times():
+    ours = {
+        "input_sha256": "same",
+        "instruction": "open the drawer",
+        "source_fps": 20,
+        "future_source_offsets": futures.future_offsets(),
+        "future_times_s": [offset / 20 for offset in futures.future_offsets()],
+    }
+    native = {
+        **ours,
+        "future_source_offsets": [4, 8, 12, 16],
+        "future_times_s": [0.2, 0.4, 0.6, 0.8],
+    }
+    with pytest.raises(ValueError, match="future_source_offsets"):
+        futures.aligned_indices(ours, native)
+    ours_indices, native_indices, offsets = futures.aligned_indices(ours, native, True)
+    assert ours_indices == native_indices == [0, 1, 2, 3, 4]
+    assert offsets == [4, 8, 12, 16]
+    with pytest.raises(ValueError, match="future_times_s"):
+        futures.aligned_indices(ours, {**native, "future_times_s": [0.3, 0.4, 0.6, 0.8]}, True)
+
+
+def test_preparation_batch_uses_separate_nonoverwriting_case_directories(tmp_path):
+    args = SimpleNamespace(command="prepare", task_indices=[3, 100], output_dir=tmp_path)
+    cases = list(futures.case_arguments(args))
+    assert [case.task_index for case in cases] == [3, 100]
+    assert [case.output_dir.name for case in cases] == ["case_003", "case_100"]
+    with pytest.raises(FileExistsError):
+        list(futures.case_arguments(args))

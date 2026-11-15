@@ -62,6 +62,12 @@ CUDA_VISIBLE_DEVICES=2 "$NATIVE_PY" scripts/generate_libero_pro_futures.py cosmo
 
 选择其他任务时使用 `prepare --task-index N --trial K`，并为 baseline 指定该任务
 `base_suite` 对应的训练数据目录，不能混用其他 suite 的归一化统计。
+批量准备可用 `prepare --task-indices 33 36 --output-dir "$OUT/inputs"`，
+其余必需参数同上，输出独立的 `case_033/`、`case_036/`。两个生成 backend 加
+`--all-cases --input-dir "$OUT/inputs"` 后只加载一次模型，逐例生成；
+**批量 baseline 的 `--dataset-root` 改为父目录 `/Data/lerobot_data_ort6d/v30`**，
+脚本根据每例的 `base_suite` 选择归一化数据集。每例在采样前重置固定 seed，
+不以批次位置或模型加载消耗的随机数决定采样噪声。
 默认 OSMesa 只使用 CPU 渲染；如改用 `--render-backend egl`，须保证
 `--render-gpu-device-id` 与 `CUDA_VISIBLE_DEVICES` 中的物理设备编号一致。
 所有子命令拒绝覆盖已有输出目录。
@@ -73,16 +79,24 @@ native Nano 将推理 chunk 从官方权重的 16 扩至 32，实际解码 33 �
 再取 `[0,4,8,12,16,19,23,27,31]` 与 baseline 对齐；不插帧或复制末帧。
 **这是 native 的推理长度扩展，不代表该权重在 32 步窗口上训练过，
 也不保证长时预测质量。**
-为匹配 Ours 的真实生成分辨率，仅在此推理进程中绕过 native canvas 的
-resolution-tier 缩小，保留每视角 256×256，生成 256×512 的双相机视频。
-条件像素、`[9,16,32]` latent 网格和完整解码输出形状均严格检查；
-这改变了 native 的默认推理分辨率规则，但不修改权重、原生训练源码或已有训练。
+分辨率保持官方 native resolution-tier 规则：两路输入拼接后使用 320×192
+画布，实际内容为 320×160；解码每视角为 **160×160**，
+32 步时内容 latent 网格为 `[9,10,20]`。不再绕过 canvas，也不改变 VAE 切片默认值。
+Ours 仍原生生成 256×256，仅展示时用 LANCZOS 降采样为 160×160；
+native 预测不做任何空间重采样。这是展示分辨率一致，不是两个模型生成配方完全相同。
 
 各模型保存双相机 PNG、MP4、`frames.npz` 与输入/权重配置/运行时元数据；
 native 还保存完整 33 帧拼接画布。`comparison/` 输出两相机各自的并排视频和
-8 张未来帧对比图。MP4 是等帧率展示，精确源时间以 `metadata.json` 为准。
-`compare` 拒绝不同解码分辨率的输入，不再通过放大低分辨率结果凑齐尺寸。
-这里只验证生成与对齐，不自动判断哪边更好，也不筛选“最优两个案例”。
+8 张未来帧对比图，以及两行八列的 `*_filmstrip_future8.png`。
+每个图像面板保持 160×160，不放大 native。MP4 是等帧率展示，
+精确源时间以 `metadata.json` 为准。脚本不将模型间像素差当作质量评分，
+定性案例需人工结合真实初帧、指令、双相机和时序检查。
+
+原生训练窗口复核使用 `cosmos3 --native-chunk-size 16`，其余生成参数同上，
+实际解码 17 帧，只抽取 `[0,4,8,12,16]`。比较时使用
+`compare --common-times-only`，精确取两者共有的 0.20/0.40/0.60/0.80 秒，
+不对 Ours 的后续帧插值，也不把 0.8 秒的预测拉长到 1.55 秒。
+复核结果与长窗结果分开保存；不同窗口的噪声形状不同，不能解释为完全相同噪声的因果对照。
 
 2026-11-15 已实际跑通以上两个 backend，使用 `libero_spatial_object` task 0、
 trial 0 的相同首帧与指令。结果保存在
@@ -97,6 +111,27 @@ trial 0 的相同首帧与指令。结果保存在
 **这次 native 256px 预测存在明显运动重影；使用原生默认的非切片 VAE 复测后仍存在，
 不能仅归因于 VAE 切片，也不能把改变默认推理分辨率后的画面退化当作 Ours 的模型优势。**
 最终 `cosmos3_256/` 保留非切片 VAE 结果；切片检查保存在 `cosmos3_256_tiled/`。
+
+2026-11-15 恢复官方 160px 后，另完成 16 个固定 trial 0、seed 0 的
+LIBERO-Pro 候选，保存在
+`/Data/lzl/future_generation/libero_pro_native160_selection_20261115/`。
+候选清单索引为 `3,6,13,30,33,36,50,56,80,83,100,103,130,133,150,156`；
+保留所有候选，而非只留下有利结果。人工挑出的两个**目标方向更合理的长窗定性案例**
+在 `selected/`，总览为 `overview.png`，各例保存双相机视频、八帧图、
+真实初帧、生成元数据、原始帧和原生 16 步窗口复核：
+
+| 目录 | 指令目标 | 可见差异 |
+|---|---|---|
+| `example_01_cabinet/` | 取右侧柜顶的碗 | 后半段 Ours 向柜顶移动，native 偏向左侧桌面；腕部视角也显示不同的接近目标 |
+| `example_02_stove/` | 取炉灶上的碗 | 后半段 Ours 更接近炉灶上的目标碗，native 向其左侧偏移 |
+
+这两例不是任务成功验证，也没有共同未来真值。原生 16 步控制未见严重形态退化；
+主要差异位于 0.95–1.55 秒，**仍不能排除 native 扩长推理的影响**。
+只能说明当前生成配方下这两例的可见目标方向差异，不能据此声称 native 原生短窗
+普遍更差或 Ours 总体成功率更高。Ours 额外使用当前 state，条件也非严格一致。
+`selected/selection.json` 记录筛选范围、具体观察和限制；例如 case 133 的 Ours
+会改变真实初帧中的黑色柜体外观，因而没有将这类大分歧误选为 Ours 优势。
+以上视频生成不增加本文正式 rollout 计数。
 
 ## LIBERO-Plus 环境安装
 

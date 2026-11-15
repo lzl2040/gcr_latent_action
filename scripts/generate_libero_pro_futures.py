@@ -106,6 +106,7 @@ def export_frames(directory, views, offsets, source_fps):
     import imageio.v2 as imageio
 
     fps = len(offsets) * source_fps / offsets[-1]
+    future_name = f"future{len(offsets)}"
     for view, frames in views.items():
         if frames.dtype != np.uint8 or frames.ndim != 4 or frames.shape[-1] != 3:
             raise ValueError("Decoded frames must be THWC uint8 RGB.")
@@ -118,9 +119,9 @@ def export_frames(directory, views, offsets, source_fps):
             imageio.imwrite(frame_dir / f"frame_{index:03d}.png", frame)
         imageio.mimsave(directory / f"{view}.mp4", frames, fps=fps, codec="libx264", macro_block_size=1)
         imageio.mimsave(
-            directory / f"{view}_future8.mp4", future, fps=fps, codec="libx264", macro_block_size=1
+            directory / f"{view}_{future_name}.mp4", future, fps=fps, codec="libx264", macro_block_size=1
         )
-        imageio.imwrite(directory / f"{view}_future8.png", np.concatenate(future, axis=1))
+        imageio.imwrite(directory / f"{view}_{future_name}.png", np.concatenate(future, axis=1))
     np.savez_compressed(directory / "frames.npz", **views)
 
 
@@ -154,7 +155,7 @@ def generation_metadata(args, source, backend, offsets, elapsed, **details):
     )
 
 
-def baseline(args):
+def baseline(args, policy=None, writer=None):
     import torch
 
     from lerobot.evaluation.eval_qwen3vl_mot_libero import (
@@ -171,7 +172,7 @@ def baseline(args):
     adapter = LiberoAdapter.from_dataset(args.dataset_root)
     if adapter.fps != source["source_fps"]:
         raise ValueError("Baseline normalization dataset and source FPS differ.")
-    policy = load_policy(
+    policy = policy or load_policy(
         SimpleNamespace(
             checkpoint=args.checkpoint,
             policy_config=None,
@@ -203,7 +204,7 @@ def baseline(args):
     ):
         prediction = policy.generate_validation(batch, seed=args.seed)
         actions = adapter.native_actions(prediction["action_normalized"])
-        writer = PredictionVideoWriter(policy.config, torch.device(args.device), adapter.fps)
+        writer = writer or PredictionVideoWriter(policy.config, torch.device(args.device), adapter.fps)
         exported = writer.save(
             prediction,
             actions,
@@ -236,6 +237,7 @@ def baseline(args):
         checkpoint_index_sha256=digest(model_dir / ".metadata"),
         normalization_stats_sha256=digest(args.dataset_root / "meta/stats.json"),
     )
+    return policy, writer
 
 
 def split_native_canvas(frames, content_size):
@@ -248,7 +250,7 @@ def split_native_canvas(frames, content_size):
     }
 
 
-def cosmos3(args):
+def cosmos3(args, policy=None):
     import torch
     from lerobot.common.policies.cosmos3.modeling_cosmos3 import Cosmos3NanoPolicy
     from lerobot.evaluation.eval_cosmos3_libero import observation_batch
@@ -258,13 +260,14 @@ def cosmos3(args):
     observation, source = load_input(args.input_dir)
     torch.cuda.set_device(args.device)
     offsets = source["future_source_offsets"]
-    config = PreTrainedConfig.from_pretrained(args.model_dir)
+    config = policy.config if policy is not None else PreTrainedConfig.from_pretrained(args.model_dir)
     if config.type != "cosmos3_nano" or config.use_state:
         raise ValueError("Expected the official native Nano policy with use_state=false.")
-    trained_chunk_size = config.chunk_size
-    config.chunk_size = (
+    trained_chunk_size = json.loads((args.model_dir / "config.json").read_text())["chunk_size"]
+    config.chunk_size = args.native_chunk_size or (
         math.ceil(offsets[-1] / config.vae.scale_factor_temporal) * config.vae.scale_factor_temporal
     )
+    offsets = [offset for offset in offsets if offset <= config.chunk_size]
     config.n_action_steps = config.chunk_size
     config.fps = float(source["source_fps"])
     config.dtype = torch.bfloat16
@@ -274,42 +277,38 @@ def cosmos3(args):
     if args.steps is not None:
         config.num_inference_steps = args.steps
     torch.manual_seed(args.seed)
-    policy = Cosmos3NanoPolicy.from_pretrained(args.model_dir, config=config, map_location="cpu")
+    policy = policy or Cosmos3NanoPolicy.from_pretrained(args.model_dir, config=config, map_location="cpu")
     policy.to(args.device).requires_grad_(False).eval()
     processor = policy.get_processor()
     view_h, view_w = config.view_size
-    content_size = (view_h, 2 * view_w)
     if len(config.image_features) != 2 or any(
-        size % config.vae.scale_factor_spatial for size in content_size
+        size % config.vae.scale_factor_spatial for size in (view_h, 2 * view_w)
     ):
         raise ValueError("Expected two camera views aligned to the native VAE spatial stride.")
-    official_tier_canvas_size = processor.canvas.canvas_size(*content_size)
-
-    def full_resolution_canvas(height, width):
-        return height, width
-
-    # The official tier would shrink each 256px camera to 160px.
-    # Override only this inference processor, not the native training implementation.
-    processor.canvas.canvas_size = full_resolution_canvas
+    official_tier_canvas_size = processor.canvas.canvas_size(view_h, 2 * view_w)
     batch = observation_batch([observation], source["task"]["instruction"], torch.device(args.device))
     with torch.inference_mode():
         prepared = processor(batch)
         if prepared["pixel_values_videos_gen"].shape[2] != 1:
             raise ValueError("Native inference must receive only the current frame, never future RGB.")
+        _, content_size = processor.canvas.fit_canvas(
+            torch.zeros(1, 1, 3, view_h, 2 * view_w, dtype=torch.uint8)
+        )
         expected_grid = [
             1 + config.chunk_size // config.vae.scale_factor_temporal,
             content_size[0] // config.vae.scale_factor_spatial,
             content_size[1] // config.vae.scale_factor_spatial,
         ]
         if (
-            tuple(prepared["pixel_values_videos_gen"].shape[-2:]) != content_size
+            tuple(prepared["pixel_values_videos_gen"].shape[-2:]) != official_tier_canvas_size
             or prepared["video_grid_thw_gen"][0].tolist() != expected_grid
         ):
             raise ValueError(
-                "Native conditioning pixels and latent grid must retain the full camera resolution."
+                "Native conditioning pixels and latent grid must follow the official canvas recipe."
             )
         torch.cuda.reset_peak_memory_stats()
         started = time.perf_counter()
+        torch.manual_seed(args.seed)
         actions = policy.predict_action_chunk(prepared)
         if (
             not torch.isfinite(actions).all()
@@ -341,13 +340,54 @@ def cosmos3(args):
         current_state_conditioning=False,
         content_size=list(content_size),
         official_tier_canvas_size=list(official_tier_canvas_size),
-        canvas_policy="preserve_configured_camera_resolution",
+        canvas_policy="official_resolution_tier",
         generation_latent_grid=expected_grid,
-        generated_per_camera_resolution=[view_h, view_w],
+        generated_per_camera_resolution=[content_size[0], content_size[1] // 2],
         vae_tiling_enabled=policy.model.network.vae.use_tiling,
         sampling_steps=config.num_inference_steps,
         horizon_changed_at_inference=config.chunk_size != trained_chunk_size,
     )
+    return policy
+
+
+def aligned_indices(ours, native, common_times_only=False):
+    for key in ("input_sha256", "instruction", "source_fps"):
+        if ours[key] != native[key]:
+            raise ValueError(f"Cannot compare predictions with different {key}.")
+    if not common_times_only:
+        for key in ("future_source_offsets", "future_times_s"):
+            if ours[key] != native[key]:
+                raise ValueError(f"Cannot compare predictions with different {key}.")
+    offsets = sorted(set(ours["future_source_offsets"]) & set(native["future_source_offsets"]))
+    if not offsets:
+        raise ValueError("The predictions have no common future timestamps.")
+    indices = [
+        [0, *[record["future_source_offsets"].index(offset) + 1 for offset in offsets]]
+        for record in (ours, native)
+    ]
+    if [ours["future_times_s"][index - 1] for index in indices[0][1:]] != [
+        native["future_times_s"][index - 1] for index in indices[1][1:]
+    ]:
+        raise ValueError("Cannot compare predictions with different future_times_s.")
+    return indices[0], indices[1], offsets
+
+
+def native_resolution_views(ours, native):
+    from PIL import Image
+
+    if ours.ndim != 4 or native.ndim != 4 or len(ours) != len(native):
+        raise ValueError("Camera predictions must contain the same number of THWC frames.")
+    height, width = native.shape[1:3]
+    if ours.shape[1] < height or ours.shape[2] < width:
+        raise ValueError("Do not upscale Ours or alter the native Cosmos3 prediction resolution.")
+    if ours.shape[1:3] != native.shape[1:3]:
+        ours = np.stack(
+            [
+                np.asarray(Image.fromarray(frame).resize((width, height), resample=Image.Resampling.LANCZOS))
+                for frame in ours
+            ]
+        )
+    return ours, native
 
 
 def compare(args):
@@ -356,9 +396,9 @@ def compare(args):
 
     baseline_meta = json.loads((args.baseline_dir / "metadata.json").read_text())
     native_meta = json.loads((args.cosmos3_dir / "metadata.json").read_text())
-    for key in ("input_sha256", "instruction", "future_source_offsets", "source_fps", "future_times_s"):
-        if baseline_meta[key] != native_meta[key]:
-            raise ValueError(f"Cannot compare predictions with different {key}.")
+    ours_indices, native_indices, offsets = aligned_indices(
+        baseline_meta, native_meta, getattr(args, "common_times_only", False)
+    )
     camera_display = {}
     with (
         np.load(args.baseline_dir / "frames.npz", allow_pickle=False) as ours,
@@ -367,31 +407,34 @@ def compare(args):
         if not set(CAMERAS) <= set(ours.files) & set(native.files):
             raise ValueError("Both primary and wrist predictions are required.")
         for view in CAMERAS:
-            if ours[view].ndim != 4 or ours[view].shape != native[view].shape:
-                raise ValueError(
-                    "Camera predictions must have the same decoded resolution and THWC shape; "
-                    "regenerate rather than upscale."
-                )
             if len(ours[view]) != len(baseline_meta["future_times_s"]) + 1:
                 raise ValueError("Predictions must contain the current frame and all aligned future frames.")
-            height, width = ours[view].shape[1:3]
+            if len(native[view]) != len(native_meta["future_times_s"]) + 1:
+                raise ValueError("Native predictions must contain all saved future timestamps.")
+            ours_frames, native_frames = native_resolution_views(
+                ours[view][ours_indices], native[view][native_indices]
+            )
+            height, width = native_frames.shape[1:3]
             camera_display[view] = {
                 "baseline_resolution": list(ours[view].shape[1:3]),
                 "cosmos3_resolution": list(native[view].shape[1:3]),
                 "cosmos3_spatial_resampling": "none",
+                "ours_spatial_resampling": "lanczos_downsample"
+                if ours[view].shape[1:3] != (height, width)
+                else "none",
                 "display_panel_resolution": [height, width],
             }
             frames = []
-            times = [0, *baseline_meta["future_times_s"]]
+            times = [0, *[offset / baseline_meta["source_fps"] for offset in offsets]]
             for index, seconds in enumerate(times):
-                row = np.concatenate([native[view][index], ours[view][index]], axis=1)
+                row = np.concatenate([native_frames[index], ours_frames[index]], axis=1)
                 canvas = Image.new("RGB", (row.shape[1], row.shape[0] + 24), "white")
                 canvas.paste(Image.fromarray(row), (0, 24))
                 draw = ImageDraw.Draw(canvas)
                 draw.text((4, 5), f"Cosmos3-Nano  t={seconds:.2f}s", fill="black")
                 draw.text((width + 4, 5), f"Ours  t={seconds:.2f}s", fill="black")
                 frames.append(np.asarray(canvas))
-            fps = 8 / times[-1]
+            fps = len(offsets) / times[-1]
             imageio.mimsave(
                 args.output_dir / f"{view}_comparison.mp4",
                 frames,
@@ -400,8 +443,18 @@ def compare(args):
                 macro_block_size=1,
             )
             imageio.imwrite(
-                args.output_dir / f"{view}_comparison_future8.png", np.concatenate(frames[1:], axis=0)
+                args.output_dir / f"{view}_comparison_future{len(offsets)}.png",
+                np.concatenate(frames[1:], axis=0),
             )
+            filmstrip = Image.new("RGB", (100 + len(offsets) * width, 24 + 2 * height), "white")
+            draw = ImageDraw.Draw(filmstrip)
+            for row, (label, sequence) in enumerate((("Cosmos3-Nano", native_frames), ("Ours", ours_frames))):
+                draw.text((4, 24 + row * height + height // 2), label, fill="black")
+                for column, frame in enumerate(sequence[1:]):
+                    filmstrip.paste(Image.fromarray(frame), (100 + column * width, 24 + row * height))
+            for column, seconds in enumerate(times[1:]):
+                draw.text((104 + column * width, 5), f"t={seconds:.2f}s", fill="black")
+            filmstrip.save(args.output_dir / f"{view}_filmstrip_future{len(offsets)}.png")
     write_json(
         args.output_dir / "metadata.json",
         {
@@ -409,8 +462,37 @@ def compare(args):
             "cosmos3": native_meta,
             "camera_display": camera_display,
             "display_labels": {"cosmos3": "Cosmos3-Nano", "ours": "Ours"},
+            "comparison_source_offsets": offsets,
+            "qualitative_selection_not_benchmark": True,
         },
     )
+
+
+def case_arguments(args):
+    if args.command == "prepare" and args.task_indices:
+        for index in args.task_indices:
+            child = SimpleNamespace(**vars(args))
+            child.task_index = index
+            child.output_dir = args.output_dir / f"case_{index:03d}"
+            child.output_dir.mkdir()
+            yield child
+    elif args.command in ("baseline", "cosmos3") and args.all_cases:
+        from lerobot.evaluation.eval_qwen3vl_mot_libero import SUITE_DATASETS
+
+        inputs = sorted(args.input_dir.glob("case_*/metadata.json"))
+        if not inputs:
+            raise ValueError("No prepared case_*/metadata.json inputs found.")
+        for path in inputs:
+            child = SimpleNamespace(**vars(args))
+            child.input_dir = path.parent
+            child.output_dir = args.output_dir / path.parent.name
+            child.output_dir.mkdir()
+            if args.command == "baseline":
+                source = json.loads(path.read_text())
+                child.dataset_root = args.dataset_root / SUITE_DATASETS[source["task"]["base_suite"]]
+            yield child
+    else:
+        yield args
 
 
 def build_parser():
@@ -424,6 +506,7 @@ def build_parser():
     prepare_parser.add_argument("--libero-root", type=Path, required=True)
     prepare_parser.add_argument("--task-manifest", type=Path, required=True)
     prepare_parser.add_argument("--task-index", type=int, default=0)
+    prepare_parser.add_argument("--task-indices", type=int, nargs="+")
     prepare_parser.add_argument("--trial", type=int, default=0)
     prepare_parser.add_argument("--wait-steps", type=int, default=10)
     prepare_parser.add_argument("--source-fps", type=int, default=20)
@@ -432,6 +515,9 @@ def build_parser():
     for backend in ("baseline", "cosmos3"):
         worker = commands.add_parser(backend, parents=[common])
         worker.add_argument("--input-dir", type=Path, required=True)
+        worker.add_argument(
+            "--all-cases", action="store_true", help="Reuse one loaded model over case_* inputs."
+        )
         worker.add_argument("--device", default="cuda:0")
         worker.add_argument("--steps", type=int)
         if backend == "baseline":
@@ -442,9 +528,13 @@ def build_parser():
             worker.add_argument("--cosmos3-dir", type=Path, required=True)
         else:
             worker.add_argument("--model-dir", type=Path, required=True)
+            worker.add_argument("--native-chunk-size", type=int, choices=(16, 32))
     comparison = commands.add_parser("compare", parents=[common])
     comparison.add_argument("--baseline-dir", type=Path, required=True)
     comparison.add_argument("--cosmos3-dir", type=Path, required=True)
+    comparison.add_argument(
+        "--common-times-only", action="store_true", help="Compare only exact shared source times."
+    )
     return parser
 
 
@@ -454,7 +544,15 @@ def main(argv=None):
     args.output_dir.mkdir(parents=True, exist_ok=False)
     sys.path.insert(0, str(args.repo_root.resolve()))
     LOGGER.info("Running %s; artifacts: %s", args.command, args.output_dir)
-    {"prepare": prepare, "baseline": baseline, "cosmos3": cosmos3, "compare": compare}[args.command](args)
+    policy, writer = None, None
+    for child in case_arguments(args):
+        LOGGER.info("Processing %s", child.output_dir)
+        if args.command == "baseline":
+            policy, writer = baseline(child, policy, writer)
+        elif args.command == "cosmos3":
+            policy = cosmos3(child, policy)
+        else:
+            {"prepare": prepare, "compare": compare}[args.command](child)
     LOGGER.info("Completed %s", args.command)
 
 
