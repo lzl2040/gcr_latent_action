@@ -20,6 +20,7 @@
 或成功率。默认选固定任务清单中的第一个任务、trial 0，静置 10 步后保存首个策略观测。
 输入包含当时的双相机 RGB、language 和 state；baseline 保留 state 条件，
 官方 Cosmos3-Nano LIBERO 版保留其原生的双相机加语言条件，不提供真实未来帧或未来动作。
+展示标签统一为 **Ours** 与 **Cosmos3-Nano**；`baseline` 仅保留为内部 backend/CLI 名称。
 
 两个 backend 必须使用独立 Python 进程，避免 baseline 的 Transformers 4 与
 native Cosmos3 的 Transformers 5 冲突。`NATIVE_REPO` 指向包含
@@ -72,10 +73,15 @@ native Nano 将推理 chunk 从官方权重的 16 扩至 32，实际解码 33 �
 再取 `[0,4,8,12,16,19,23,27,31]` 与 baseline 对齐；不插帧或复制末帧。
 **这是 native 的推理长度扩展，不代表该权重在 32 步窗口上训练过，
 也不保证长时预测质量。**
+为匹配 Ours 的真实生成分辨率，仅在此推理进程中绕过 native canvas 的
+resolution-tier 缩小，保留每视角 256×256，生成 256×512 的双相机视频。
+条件像素、`[9,16,32]` latent 网格和完整解码输出形状均严格检查；
+这改变了 native 的默认推理分辨率规则，但不修改权重、原生训练源码或已有训练。
 
 各模型保存双相机 PNG、MP4、`frames.npz` 与输入/权重配置/运行时元数据；
 native 还保存完整 33 帧拼接画布。`comparison/` 输出两相机各自的并排视频和
 8 张未来帧对比图。MP4 是等帧率展示，精确源时间以 `metadata.json` 为准。
+`compare` 拒绝不同解码分辨率的输入，不再通过放大低分辨率结果凑齐尺寸。
 这里只验证生成与对齐，不自动判断哪边更好，也不筛选“最优两个案例”。
 
 2026-11-15 已实际跑通以上两个 backend，使用 `libero_spatial_object` task 0、
@@ -83,10 +89,14 @@ trial 0 的相同首帧与指令。结果保存在
 `/Data/lzl/future_generation/libero_pro_smoke_20261115/`：
 `baseline/` 为 step16k 的 9 帧，`cosmos3/` 为官方 LIBERO 权重的完整 33 帧与
 抽帧结果，`comparison/` 为主视角/腕部相机的并排展示。
-native 按官方 canvas 规则得到 160×320 拼接视频，每个相机实际为 160×160；
-baseline 为 256×256。**原始输出保持不变，仅对比展示时将 native 双线性放大到
-256×256**，画面标签和元数据都记录原始分辨率，不能把这个定性展示当作
-严格等输入、等分辨率的质量评测。
+上述 `cosmos3/` 和 `comparison/` 为最初的 160px 检查结果，仅保留溯源。
+随后已用同一输入和 seed 在 `cosmos3_256/` 重新生成真实的每视角 256×256 预测，
+完整解码为 33×256×512 RGB；复用不变的 Ours 预测，在 `comparison_256/` 输出
+**Cosmos3-Nano / Ours** 标签的新版对比视频与图。两边均为 256×256，展示无空间放大，
+仍然不是严格等条件的质量评测（Ours 使用当前 state）。
+**这次 native 256px 预测存在明显运动重影；使用原生默认的非切片 VAE 复测后仍存在，
+不能仅归因于 VAE 切片，也不能把改变默认推理分辨率后的画面退化当作 Ours 的模型优势。**
+最终 `cosmos3_256/` 保留非切片 VAE 结果；切片检查保存在 `cosmos3_256_tiled/`。
 
 ## LIBERO-Plus 环境安装
 

@@ -276,22 +276,38 @@ def cosmos3(args):
     torch.manual_seed(args.seed)
     policy = Cosmos3NanoPolicy.from_pretrained(args.model_dir, config=config, map_location="cpu")
     policy.to(args.device).requires_grad_(False).eval()
-    policy.model.network.vae.enable_tiling()
     processor = policy.get_processor()
+    view_h, view_w = config.view_size
+    content_size = (view_h, 2 * view_w)
+    if len(config.image_features) != 2 or any(
+        size % config.vae.scale_factor_spatial for size in content_size
+    ):
+        raise ValueError("Expected two camera views aligned to the native VAE spatial stride.")
+    official_tier_canvas_size = processor.canvas.canvas_size(*content_size)
+
+    def full_resolution_canvas(height, width):
+        return height, width
+
+    # The official tier would shrink each 256px camera to 160px.
+    # Override only this inference processor, not the native training implementation.
+    processor.canvas.canvas_size = full_resolution_canvas
     batch = observation_batch([observation], source["task"]["instruction"], torch.device(args.device))
     with torch.inference_mode():
         prepared = processor(batch)
         if prepared["pixel_values_videos_gen"].shape[2] != 1:
             raise ValueError("Native inference must receive only the current frame, never future RGB.")
+        expected_grid = [
+            1 + config.chunk_size // config.vae.scale_factor_temporal,
+            content_size[0] // config.vae.scale_factor_spatial,
+            content_size[1] // config.vae.scale_factor_spatial,
+        ]
         if (
-            int(prepared["video_grid_thw_gen"][0, 0])
-            != 1 + config.chunk_size // config.vae.scale_factor_temporal
+            tuple(prepared["pixel_values_videos_gen"].shape[-2:]) != content_size
+            or prepared["video_grid_thw_gen"][0].tolist() != expected_grid
         ):
-            raise ValueError("Native processor did not adopt the extended generation horizon.")
-        view_h, view_w = config.view_size
-        _, content_size = processor.canvas.fit_canvas(
-            torch.zeros(1, 1, 3, view_h, 2 * view_w, dtype=torch.uint8)
-        )
+            raise ValueError(
+                "Native conditioning pixels and latent grid must retain the full camera resolution."
+            )
         torch.cuda.reset_peak_memory_stats()
         started = time.perf_counter()
         actions = policy.predict_action_chunk(prepared)
@@ -303,8 +319,8 @@ def cosmos3(args):
             raise ValueError("Native generation produced invalid actions or no video latents.")
         decoded = policy.decode_predicted_latents(policy.last_predicted_latents).numpy()
     torch.cuda.synchronize()
-    if len(decoded) != config.chunk_size + 1:
-        raise ValueError("Native video length does not match its requested horizon.")
+    if decoded.shape != (config.chunk_size + 1, *content_size, 3):
+        raise ValueError("Native decoded video must match the requested horizon and full camera resolution.")
     np.save(args.output_dir / "native_canvas_all_frames.npy", decoded)
     np.save(args.output_dir / "action_chunk.npy", actions.float().cpu().numpy())
     selected = decoded[[0, *offsets]]
@@ -324,6 +340,11 @@ def cosmos3(args):
         selected_video_indices=[0, *offsets],
         current_state_conditioning=False,
         content_size=list(content_size),
+        official_tier_canvas_size=list(official_tier_canvas_size),
+        canvas_policy="preserve_configured_camera_resolution",
+        generation_latent_grid=expected_grid,
+        generated_per_camera_resolution=[view_h, view_w],
+        vae_tiling_enabled=policy.model.network.vae.use_tiling,
         sampling_steps=config.num_inference_steps,
         horizon_changed_at_inference=config.chunk_size != trained_chunk_size,
     )
@@ -346,30 +367,29 @@ def compare(args):
         if not set(CAMERAS) <= set(ours.files) & set(native.files):
             raise ValueError("Both primary and wrist predictions are required.")
         for view in CAMERAS:
-            if ours[view].ndim != 4 or native[view].ndim != 4 or len(ours[view]) != len(native[view]):
-                raise ValueError("Camera predictions must have the same number of THWC frames.")
+            if ours[view].ndim != 4 or ours[view].shape != native[view].shape:
+                raise ValueError(
+                    "Camera predictions must have the same decoded resolution and THWC shape; "
+                    "regenerate rather than upscale."
+                )
             if len(ours[view]) != len(baseline_meta["future_times_s"]) + 1:
                 raise ValueError("Predictions must contain the current frame and all aligned future frames.")
             height, width = ours[view].shape[1:3]
-            resize_native = ours[view].shape[1:3] != native[view].shape[1:3]
             camera_display[view] = {
                 "baseline_resolution": list(ours[view].shape[1:3]),
                 "cosmos3_resolution": list(native[view].shape[1:3]),
-                "cosmos3_spatial_resampling": "bilinear" if resize_native else "none",
+                "cosmos3_spatial_resampling": "none",
                 "display_panel_resolution": [height, width],
             }
             frames = []
             times = [0, *baseline_meta["future_times_s"]]
             for index, seconds in enumerate(times):
-                native_frame = Image.fromarray(native[view][index])
-                if resize_native:
-                    native_frame = native_frame.resize((width, height), resample=Image.Resampling.BILINEAR)
-                row = np.concatenate([np.asarray(native_frame), ours[view][index]], axis=1)
+                row = np.concatenate([native[view][index], ours[view][index]], axis=1)
                 canvas = Image.new("RGB", (row.shape[1], row.shape[0] + 24), "white")
                 canvas.paste(Image.fromarray(row), (0, 24))
                 draw = ImageDraw.Draw(canvas)
-                draw.text((4, 5), f"Cosmos3-Nano {native[view].shape[1]}px  t={seconds:.2f}s", fill="black")
-                draw.text((width + 4, 5), f"MLP baseline {height}px  t={seconds:.2f}s", fill="black")
+                draw.text((4, 5), f"Cosmos3-Nano  t={seconds:.2f}s", fill="black")
+                draw.text((width + 4, 5), f"Ours  t={seconds:.2f}s", fill="black")
                 frames.append(np.asarray(canvas))
             fps = 8 / times[-1]
             imageio.mimsave(
@@ -388,6 +408,7 @@ def compare(args):
             "baseline": baseline_meta,
             "cosmos3": native_meta,
             "camera_display": camera_display,
+            "display_labels": {"cosmos3": "Cosmos3-Nano", "ours": "Ours"},
         },
     )
 

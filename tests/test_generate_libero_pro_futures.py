@@ -57,7 +57,8 @@ def test_changed_saved_observation_cannot_be_used(tmp_path):
         futures.load_input(tmp_path)
 
 
-def test_comparison_resizes_native_spatially_without_resampling_time(tmp_path, monkeypatch):
+@pytest.mark.parametrize("native_size", [2, 4])
+def test_comparison_requires_matched_resolution_and_preserves_time(tmp_path, monkeypatch, native_size):
     import imageio.v2 as imageio
 
     baseline, native, output = (tmp_path / name for name in ("baseline", "native", "comparison"))
@@ -72,7 +73,9 @@ def test_comparison_resizes_native_spatially_without_resampling_time(tmp_path, m
     }
     for directory in (baseline, native):
         (directory / "metadata.json").write_text(json.dumps(metadata))
-    native_frames = np.stack([np.full((2, 2, 3), index * 20, dtype=np.uint8) for index in range(9)])
+    native_frames = np.stack(
+        [np.full((native_size, native_size, 3), index * 20, dtype=np.uint8) for index in range(9)]
+    )
     ours = np.zeros((9, 4, 4, 3), dtype=np.uint8)
     np.savez(baseline / "frames.npz", primary=ours, wrist=ours)
     np.savez(native / "frames.npz", primary=native_frames, wrist=native_frames)
@@ -82,12 +85,18 @@ def test_comparison_resizes_native_spatially_without_resampling_time(tmp_path, m
         captured[path.name] = (np.stack(frames), kwargs)
 
     monkeypatch.setattr(imageio, "mimsave", save_video)
-    futures.compare(SimpleNamespace(baseline_dir=baseline, cosmos3_dir=native, output_dir=output))
+    args = SimpleNamespace(baseline_dir=baseline, cosmos3_dir=native, output_dir=output)
+    if native_size != 4:
+        with pytest.raises(ValueError, match="same decoded resolution"):
+            futures.compare(args)
+        assert not captured
+        return
+    futures.compare(args)
     for frames, options in captured.values():
         assert frames.shape == (9, 28, 8, 3)
-        np.testing.assert_array_equal(frames[:, 24:, :4], native_frames.repeat(2, axis=1).repeat(2, axis=2))
+        np.testing.assert_array_equal(frames[:, 24:, :4], native_frames)
         assert options["macro_block_size"] == 1
     with np.load(native / "frames.npz") as original:
         np.testing.assert_array_equal(original["primary"], native_frames)
     saved = json.loads((output / "metadata.json").read_text())
-    assert saved["camera_display"]["primary"]["cosmos3_spatial_resampling"] == "bilinear"
+    assert saved["camera_display"]["primary"]["cosmos3_spatial_resampling"] == "none"
