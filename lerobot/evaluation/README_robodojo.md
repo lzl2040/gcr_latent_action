@@ -5573,3 +5573,29 @@ holding and dependent suite/video regression coverage. Previous25FPS
 execution remains one target per native tick. Full checkpoint SHA256
 preflight, strict model restoration and real rollout verification are
 required separately before reporting this checkpoint's results.
+
+Preflight completed successfully before launch:35 checkpoint/config
+files were SHA256-hashed after a30s stability check; all1357 model
+tensor keys/shapes/dtypes match the previously evaluated physical-MLP
+checkpoint, and every DCP storage range lies inside a present shard.
+Saved policy configuration is identical to that verified baseline.
+Full12.5FPS dataset metadata/statistics and all3 data Parquets were
+hashed. Statistics SHA256:
+`2dcd4731dae0aeeca9c193a61dc51bf652426416b62fd60204dba95d9f8494a7`.
+Original selected task/layout files and761 native asset files were
+rechecked against the prior inventory without changes.
+`env_cfg/arx_x5.yml` declares25Hz capture/control and
+`env_cfg/sim/sim_config.yml` declares0.004s physics dt:10 physics steps
+per native control,20 per model action. Three tasks total9 episodes,
+at most6000 original native controls.
+
+The clean isolated runtime is
+`outputs/evaluation/robodojo/runtime_assets/runtime_sources/no_stage1_physical_mlp_8a2fce0e_fps12p5`
+at `5a9dd0333ed63baaf0ce046e83596f5521b35ee3`; compared with exact model
+baseline `8a2fce0e6f32b3edd73cef01f33851de35b57504`, only evaluation
+files and their tests differ. Its152 selected evaluation/MLP regressions
+pass (180 deselected). Previous baseline sweeps remain stopped.
+Preflight/provenance:
+`outputs/evaluation/robodojo/runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_fps12_decay32k/{three_tasks_step15k_preflight_20261115,checkpoint_provenance_step15k}.json`.
+Strict model restoration and real rollout startup remain a separate check;
+the preflight is not a successful-policy or benchmark-result claim.
