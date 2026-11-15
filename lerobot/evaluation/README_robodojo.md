@@ -5599,3 +5599,54 @@ Preflight/provenance:
 `outputs/evaluation/robodojo/runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_fps12_decay32k/{three_tasks_step15k_preflight_20261115,checkpoint_provenance_step15k}.json`.
 Strict model restoration and real rollout startup remain a separate check;
 the preflight is not a successful-policy or benchmark-result claim.
+
+The active run is
+`outputs/evaluation/robodojo/fps12p5_mlp_step15k_three_tasks_sampling10_20261115_v2`.
+Startup verification passed: strict full-model restore, no Stage1 teacher,
+BF16,10 denoising steps, three finite32x20 delta chunks, model replan
+indices0/10/20 corresponding to native0/20/40, and passive native camera
+snapshots at0/50 with zero head-camera drift. After50 native ticks,
+measured EE translations were0.003917m left and0.199437m right.
+The WebSocket handshake succeeded and all three predicted-camera videos
+were written with the correct2.48s endpoint. Native25FPS stream writers
+are active; temporary MP4s are finalized when their episode ends, not
+necessarily playable during an active episode.
+
+These are **startup checks, not completed benchmark results**.
+`startup_validation.json` records the evidence and owned process IDs;
+`progress.json`/`results.csv` record completed audited tasks. The stopped
+28k sweep remains interrupted. `_v1` contains only pre-model simulator
+EULA-environment startup rejections, not policy-failure episodes; it is
+retained for diagnostics. The baseline runtime fixes BF16 through parser
+defaults; do not pass its unsupported `--precision bf16` CLI flag.
+
+To reproduce with a new output directory:
+
+```bash
+conda activate wam
+BASE=/home/jianf/lzl_project/gcr_latent_action/outputs/evaluation/robodojo
+CODE="$BASE/runtime_assets/runtime_sources/no_stage1_physical_mlp_8a2fce0e_fps12p5"
+WEIGHTS=/data2/lizuolei/weights/qwen3vl_mot_weights/robodojo_2nodes_8gpu_high_noise_shift_5_fps12_decay32k
+export PYTHONPATH="$CODE" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+# Set only after the Isaac Sim EULA has been reviewed and accepted.
+export OMNI_KIT_ACCEPT_EULA=YES
+cd "$CODE"
+python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite eval \
+  --checkpoint "$WEIGHTS/step15k" \
+  --dataset-root /data2/lizuolei/data/lerobot_data/simulation_data/RoboDojo/data/RoboDojo_ee_lerobot_v30_video_fps12p5 \
+  --qwen3vl-dir "$BASE/runtime_assets/pretrained/Qwen3-VL-4B-Instruct" \
+  --cosmos3-dir "$BASE/runtime_assets/pretrained/Cosmos3-Edge" \
+  --robodojo-root /data2/guoqi/robodojo_pi05_repro \
+  --assets /data2/guoqi/robodojo_pi05_repro/Assets \
+  --gpu 0 --sim-gpu 1 --port 19215 \
+  --inference-steps 10 --replan-steps 10 --native-control-fps 25 \
+  --save-predicted-video --seed 0 --eval-num 3 --num-envs 1 \
+  --tasks stack_bowls put_bottles_into_dustbin insert_tubes \
+  --checkpoint-provenance "$BASE/runtime_assets/robodojo_2nodes_8gpu_high_noise_shift_5_fps12_decay32k/checkpoint_provenance_step15k.json" \
+  --camera-wrapper /home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/inspect_robodojo_camera_run.py \
+  --output-dir "$BASE/fps12p5_mlp_step15k_three_tasks_manual_new"
+```
+
+Use the accepted-EULA environment, available GPU/port IDs and a fresh output
+directory. Resume only with identical settings/source hashes and `--resume`;
+never run a second coordinator for an already active output.
