@@ -5650,3 +5650,40 @@ python -m lerobot.evaluation.eval_qwen3vl_mot_robodojo_suite eval \
 Use the accepted-EULA environment, available GPU/port IDs and a fresh output
 directory. Resume only with identical settings/source hashes and `--resume`;
 never run a second coordinator for an already active output.
+
+#### Completed step15k three-task results
+
+The `_v2` run finished with exit0: all3 tasks and9 original-layout
+episodes completed and passed the independent suite audit, with no
+infrastructure failures. Final source SHA256 recheck passed.
+
+| Task | Successes | Success rate | Native mean score /100 | Native controls, layouts0/1/2 |
+|---|---:|---:|---:|---|
+| `stack_bowls` | 0/3 | 0% | 0 | 800 /800 /800 |
+| `put_bottles_into_dustbin` | 1/3 | 33.33% | 60 | 700 /349 /700 |
+| `insert_tubes` | 0/3 | 0% | 0 | 500 /500 /500 |
+| Overall | 1/9 | 11.11% | 20 | 5649 total |
+
+The bottle task succeeded on original layout1. Layouts0 and2 each
+received0.4 native reward (partial score, not success). Bowls and tubes
+received0 reward on all layouts. With only3 layouts per task, these
+numbers are a small-sample smoke evaluation, not a full benchmark estimate.
+
+All283 policy chunks were finite and independently denormalized/integrated
+with the12.5FPS-to25Hz hold contract. Maximum integration disagreement
+was below6e-8m translation,1.1e-7 in rotation-matrix entries and3e-8
+gripper units. Native control counts stayed within original task limits.
+All27 actual-camera videos passed frame-count/FPS/geometry checks;
+849 matched future MP4s and their prediction/conditioning PNGs were
+saved. Static head-camera checks passed on121 passive camera snapshots.
+Audits do not constitute a manual full-video review.
+
+Results and videos are retained under
+`outputs/evaluation/robodojo/fps12p5_mlp_step15k_three_tasks_sampling10_20261115_v2/`:
+`progress.json`, `results.csv`, and
+`tasks/<task>/attempt_001/{suite_audit,summary}.json`.
+Actual videos are under each attempt's
+`simulator/eval_result/RoboDojo/<task>/Qwen3VLMoT/arx_x5/0_action_type=ee,simulator=isaacsim6/attempt_001/episode_*.mp4`;
+predictions are under `policy/predictions/reset_*/env_000/replan_*/`.
+The successful bottle head-camera recording is
+`episode_0000001_cam_head_success.mp4`.
