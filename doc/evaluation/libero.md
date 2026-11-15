@@ -13,6 +13,81 @@
 官方 Cosmos3/LaWAM 对照、实际微调配置与性能归因限制，见
 [LIBERO 微调审计](../libero_finetuning_audit.md)；该审计不增加正式 rollout 计数。
 
+## LIBERO-Pro 初始场景的未来视频生成
+
+`scripts/generate_libero_pro_futures.py` 提供独立的 `prepare`、`baseline`、
+`cosmos3`、`compare` 子命令，只生成视频，不执行预测动作，也不计入正式 rollout
+或成功率。默认选固定任务清单中的第一个任务、trial 0，静置 10 步后保存首个策略观测。
+输入包含当时的双相机 RGB、language 和 state；baseline 保留 state 条件，
+官方 Cosmos3-Nano LIBERO 版保留其原生的双相机加语言条件，不提供真实未来帧或未来动作。
+
+两个 backend 必须使用独立 Python 进程，避免 baseline 的 Transformers 4 与
+native Cosmos3 的 Transformers 5 冲突。`NATIVE_REPO` 指向包含
+`lerobot/common/policies/cosmos3` 和 LIBERO-Pro 适配器的独立源码 checkout，
+本机可用 revision 为 `bc0814f729e01b263fe2cb2ac1110b2ab9cedf80`；
+不需要切换当前 baseline 分支或修改训练代码。`MANIFEST` 使用已有
+LIBERO-Pro catalog 的 `task_manifest.json`，其中必须包含实际 BDDL 指令、
+初态文件和两者的 SHA256。
+
+```bash
+BASE_PY=/home/v-wangxiaofa/anaconda3/envs/libero_lerobot_qwen3vl/bin/python
+NATIVE_PY=/Data/lzl/venvs/lerobot_cosmos3/bin/python
+NATIVE_REPO=/path/to/native_cosmos3_checkout
+MANIFEST=/path/to/catalog/task_manifest.json
+OUT=/Data/lzl/future_generation/new_run
+export USE_TF=0 PYTHONNOUSERSITE=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+
+"$NATIVE_PY" scripts/generate_libero_pro_futures.py prepare \
+    --repo-root "$NATIVE_REPO" --libero-root /home/v-wangxiaofa/lzl/LIBERO_PRO \
+    --task-manifest "$MANIFEST" --output-dir "$OUT/input"
+
+CUDA_VISIBLE_DEVICES=1 "$BASE_PY" scripts/generate_libero_pro_futures.py baseline \
+    --input-dir "$OUT/input" --output-dir "$OUT/baseline" --steps 20 \
+    --checkpoint /Data/lzl/qwen3vl_mot_weights/ft_on_libero/1107_basline_4nodes_8gpu/step16k \
+    --dataset-root /Data/lerobot_data_ort6d/v30/libero_spatial_no_noops_lerobot \
+    --qwen3vl-dir /Data/lzl/huggingface/Qwen3-VL-4B-Instruct \
+    --cosmos3-dir /Data/lzl/huggingface/Cosmos3-Edge
+
+CUDA_VISIBLE_DEVICES=2 "$NATIVE_PY" scripts/generate_libero_pro_futures.py cosmos3 \
+    --repo-root "$NATIVE_REPO" --input-dir "$OUT/input" \
+    --output-dir "$OUT/cosmos3" --steps 30 \
+    --model-dir /Data/lzl/huggingface/Cosmos3-Nano-Policy-LIBERO
+
+"$BASE_PY" scripts/generate_libero_pro_futures.py compare \
+    --baseline-dir "$OUT/baseline" --cosmos3-dir "$OUT/cosmos3" \
+    --output-dir "$OUT/comparison"
+```
+
+选择其他任务时使用 `prepare --task-index N --trial K`，并为 baseline 指定该任务
+`base_suite` 对应的训练数据目录，不能混用其他 suite 的归一化统计。
+默认 OSMesa 只使用 CPU 渲染；如改用 `--render-backend egl`，须保证
+`--render-gpu-device-id` 与 `CUDA_VISIBLE_DEVICES` 中的物理设备编号一致。
+所有子命令拒绝覆盖已有输出目录。
+
+baseline 保持训练时的 32 步窗口和原生 9 帧（当前帧加 8 张未来帧）。
+20 Hz 下，未来源帧偏移为 `[4,8,12,16,19,23,27,31]`，
+对应 `[0.20,0.40,0.60,0.80,0.95,1.15,1.35,1.55]` 秒。
+native Nano 将推理 chunk 从官方权重的 16 扩至 32，实际解码 33 帧，
+再取 `[0,4,8,12,16,19,23,27,31]` 与 baseline 对齐；不插帧或复制末帧。
+**这是 native 的推理长度扩展，不代表该权重在 32 步窗口上训练过，
+也不保证长时预测质量。**
+
+各模型保存双相机 PNG、MP4、`frames.npz` 与输入/权重配置/运行时元数据；
+native 还保存完整 33 帧拼接画布。`comparison/` 输出两相机各自的并排视频和
+8 张未来帧对比图。MP4 是等帧率展示，精确源时间以 `metadata.json` 为准。
+这里只验证生成与对齐，不自动判断哪边更好，也不筛选“最优两个案例”。
+
+2026-11-15 已实际跑通以上两个 backend，使用 `libero_spatial_object` task 0、
+trial 0 的相同首帧与指令。结果保存在
+`/Data/lzl/future_generation/libero_pro_smoke_20261115/`：
+`baseline/` 为 step16k 的 9 帧，`cosmos3/` 为官方 LIBERO 权重的完整 33 帧与
+抽帧结果，`comparison/` 为主视角/腕部相机的并排展示。
+native 按官方 canvas 规则得到 160×320 拼接视频，每个相机实际为 160×160；
+baseline 为 256×256。**原始输出保持不变，仅对比展示时将 native 双线性放大到
+256×256**，画面标签和元数据都记录原始分辨率，不能把这个定性展示当作
+严格等输入、等分辨率的质量评测。
+
 ## LIBERO-Plus 环境安装
 
 2026-11-02 将官方源码安装到 `/home/v-wangxiaofa/lzl/LIBERO_PLUS`，
