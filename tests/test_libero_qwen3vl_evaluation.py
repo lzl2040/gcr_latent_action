@@ -412,7 +412,8 @@ class FakeVideoDecoder:
         return SimpleNamespace(sample=video)
 
 
-def test_prediction_videos_per_replan_multiview_timing_and_output_directory(tmp_path):
+@pytest.mark.parametrize("source_fps", [20, 12.5])
+def test_prediction_videos_per_replan_multiview_timing_and_output_directory(tmp_path, source_fps):
     import imageio.v2 as imageio
 
     config = SimpleNamespace(
@@ -421,7 +422,7 @@ def test_prediction_videos_per_replan_multiview_timing_and_output_directory(tmp_
         world_video_frames=9,
         video_image_size=4,
     )
-    writer = PredictionVideoWriter(config, torch.device("cpu"), source_fps=20)
+    writer = PredictionVideoWriter(config, torch.device("cpu"), source_fps=source_fps)
     decoder = FakeVideoDecoder()
     writer.decoder = decoder
     prediction = {
@@ -440,8 +441,11 @@ def test_prediction_videos_per_replan_multiview_timing_and_output_directory(tmp_
         assert metadata["replan_index"] == index and metadata["control_step"] == step
         assert metadata["run_seed"] == index
         assert metadata["sampling_rng"] == "run_seeded_continuous"
-        assert metadata["video_frame_times_s"] == [0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.15, 1.35, 1.55]
-        assert metadata["video_fps"] == pytest.approx(160 / 31)
+        assert metadata["video_frame_times_s"] == [
+            offset / source_fps for offset in (0, 4, 8, 12, 16, 19, 23, 27, 31)
+        ]
+        assert metadata["control_time_s"] == step / source_fps
+        assert metadata["video_fps"] == pytest.approx(source_fps * 8 / 31)
         assert metadata["includes_current_frame"] and metadata["video_frames"] == 9
         assert set(metadata["videos"]) == {"primary", "wrist"}
         assert not (directory / "secondary.mp4").exists()
@@ -451,7 +455,7 @@ def test_prediction_videos_per_replan_multiview_timing_and_output_directory(tmp_
             assert Path(path).parent == directory
             with imageio.get_reader(path) as video:
                 assert video.count_frames() == 9
-                assert video.get_meta_data()["fps"] == pytest.approx(160 / 31, abs=0.01)
+                assert video.get_meta_data()["fps"] == pytest.approx(source_fps * 8 / 31, abs=0.01)
                 assert video.get_data(0).max() == 0
                 assert video.get_data(8).min() == 255
     assert decoder.calls == 4

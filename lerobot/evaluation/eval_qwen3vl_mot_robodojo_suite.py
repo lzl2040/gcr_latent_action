@@ -143,6 +143,11 @@ def audit_task(root: Path, spec: dict, args) -> dict:
     if len(groups) != 3:
         raise ValueError("Expected one uninterrupted chunk group per native layout.")
     adapter = RoboDojoAdapter.from_dataset(args.dataset_root, action_mode="delta")
+    native_fps = getattr(args, "native_control_fps", 25.0)
+    ratio = native_fps / adapter.fps
+    if not math.isfinite(ratio) or ratio < 1 or not math.isclose(ratio, round(ratio), abs_tol=1e-8):
+        raise ValueError("Native control FPS must be an integer multiple of training FPS.")
+    repeat = round(ratio)
     mean, std = adapter.action_mean.numpy(), adapter.action_std.numpy()
     maxima = {"denormalization": 0.0, "translation": 0.0, "rotation_matrix": 0.0, "gripper": 0.0}
     tracking = {"left": [], "right": []}
@@ -184,7 +189,9 @@ def audit_task(root: Path, spec: dict, args) -> dict:
     if logged != set((root / "policy/chunks").glob("chunk_*.npz")):
         raise ValueError("Saved and logged policy chunks differ.")
     for layout, group in enumerate(groups.values()):
-        if [row["control_step"] for row in group] != list(range(0, controls[layout], 10)):
+        if [row["control_step"] for row in group] != [
+            step // repeat for step in range(0, controls[layout], 10 * repeat)
+        ]:
             raise ValueError("Missing or repeated replans.")
         captures = [c for c in cameras if c["layout"] == layout]
         if cameras and [c["control_step"] for c in captures] != list(range(0, controls[layout] + 1, 50)):
@@ -193,6 +200,14 @@ def audit_task(root: Path, spec: dict, args) -> dict:
         for index, row in enumerate(group):
             if row["action_mode"] != "delta" or row["executed_chunk_steps"] != 10:
                 raise ValueError("Unexpected action semantics or execution prefix.")
+            if repeat != 1 and (
+                row.get("native_action_repeat") != repeat
+                or row.get("native_control_fps") != native_fps
+                or row.get("training_fps") != adapter.fps
+                or row.get("native_control_step") != row["control_step"] * repeat
+                or row.get("served_native_steps") != 10 * repeat
+            ):
+                raise ValueError("Lower-rate action timing was not preserved.")
             with np.load(row["action_path"]) as chunk:
                 if any(
                     not np.isfinite(chunk[key]).all()
@@ -263,7 +278,7 @@ def audit_task(root: Path, spec: dict, args) -> dict:
         for frame in reader:
             count, last = count + 1, frame
         layout = int(path.name.split("_")[1])
-        if count != controls[layout] + 1 or metadata["fps"] != 25 or metadata["size"] != (640, 480):
+        if count != controls[layout] + 1 or metadata["fps"] != native_fps or metadata["size"] != (640, 480):
             raise ValueError(f"Wrong native video frame geometry/count: {path}.")
         image = Image.frombytes("RGB", metadata["size"], last)
         image.thumbnail((480, 360))
@@ -281,6 +296,9 @@ def audit_task(root: Path, spec: dict, args) -> dict:
         "result_sha256": digest(result_path),
         "control_steps": controls,
         "native_control_limit": spec["control_limit"],
+        "training_fps": adapter.fps,
+        "native_control_fps": native_fps,
+        "native_action_repeat": repeat,
         "chunks": len(rows),
         "integration_max_errors": maxima,
         "target_tracking_m": {
@@ -391,6 +409,7 @@ def task_command(args, spec: dict, output: Path) -> list[str]:
     for key in ("policy_config", "training_config", "physics_device"):
         if getattr(args, key):
             values[key.replace("_", "-")] = getattr(args, key)
+    values["native-control-fps"] = getattr(args, "native_control_fps", 25.0)
     if getattr(args, "cloth_gpu_physics", False) and spec["task"] == "fold_clothes":
         values["physics-device"] = "cuda:0"
     for name, value in values.items():

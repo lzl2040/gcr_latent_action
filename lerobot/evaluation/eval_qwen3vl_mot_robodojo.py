@@ -56,6 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inference-steps", type=int)
     parser.add_argument("--replan-steps", type=int, default=10)
     parser.add_argument(
+        "--native-control-fps",
+        type=float,
+        default=25.0,
+        choices=(25.0,),
+        help="Native simulator control rate; hold decoded targets when training FPS is a divisor.",
+    )
+    parser.add_argument(
         "--save-predicted-video",
         action="store_true",
         help="Export matching joint-sample future RGB and PNG frames.",
@@ -146,14 +153,14 @@ def validate_training_action_mode(args) -> dict:
     saved = json.loads(training_path.read_text())
     expected = {
         "absolute": ("robodojo",),
-        "delta": ("delta_robodojo_stack_bowl", "robodojo"),
+        "delta": ("delta_robodojo_stack_bowl", "robodojo", "robodojo_fps12"),
     }[args.action_mode]
     if saved["data_mix"] not in expected or saved["stage"] != "finetune":
         raise ValueError(
             f"Action mode {args.action_mode!r} requires finetuning data_mix in {expected!r}; "
             f"checkpoint declares {saved['data_mix']!r}/{saved['stage']!r}."
         )
-    if args.action_mode == "delta" and saved["data_mix"] == "robodojo":
+    if args.action_mode == "delta" and saved["data_mix"] in ("robodojo", "robodojo_fps12"):
         from lerobot.evaluation.robodojo_qwen3vl import RoboDojoAdapter
 
         RoboDojoAdapter.from_dataset(args.dataset_root, action_mode="delta")
@@ -164,6 +171,8 @@ def validate_training_action_mode(args) -> dict:
                 "Full-task delta evaluation requires the training dataset frame count; "
                 "do not substitute stack-bowls subset statistics."
             )
+        if saved["data_mix"] == "robodojo_fps12" and info["fps"] != 12.5:
+            raise ValueError("robodojo_fps12 requires the verified12.5FPS dataset, not25FPS statistics.")
     stats_path = args.dataset_root / "meta/stats.json"
     return {
         "action_mode": args.action_mode,
@@ -207,6 +216,7 @@ def load_model(args):
             else None
         ),
         seed=args.seed,
+        native_control_fps=args.native_control_fps,
     )
     model.reset()
     return model
@@ -377,6 +387,8 @@ def evaluate(args) -> None:
         args.device,
         "--replan-steps",
         str(args.replan_steps),
+        "--native-control-fps",
+        str(args.native_control_fps),
         "--seed",
         str(args.seed),
         "--host",
@@ -476,6 +488,7 @@ def evaluate(args) -> None:
         "simulator_gpu": args.sim_gpu,
         "physics_device_override": args.physics_device,
         "replan_steps": args.replan_steps,
+        "native_control_fps": args.native_control_fps,
         "save_predicted_video": args.save_predicted_video,
         "checkpoint": str(args.checkpoint.resolve()),
         "action_mode": args.action_mode,

@@ -769,6 +769,61 @@ def test_delta_uses_world_translation_left_rotations_and_stepwise_gripper_clippi
     assert "Clipping left" in caplog.text and "Clipping right" in caplog.text
 
 
+def test_fractional_fps_holds_absolute_targets_without_reintegrating_deltas(delta_adapter, tmp_path):
+    root = tmp_path / "delta"
+    info_path = root / "meta/info.json"
+    info = json.loads(info_path.read_text())
+    info["fps"] = 12.5
+    info_path.write_text(json.dumps(info))
+    adapter = RoboDojoAdapter.from_dataset(root, action_mode="delta")
+    raw = adapter.action_mean.repeat(32, 1)
+    raw[:, 0] = 0.01
+
+    def sample(batch):
+        assert batch["sample_rate"].item() == 12.5
+        return normalized_delta(adapter, raw)
+
+    policy = SimpleNamespace(config=config(), reset=lambda: None, sample_canonical_action=sample)
+    model = RoboDojoModel(policy, adapter, device="cpu", replan_steps=2, output_dir=tmp_path / "chunks")
+    model.reset()
+    model.update_obs(observation())
+    actions = model.get_action()
+    np.testing.assert_allclose(
+        [row["left_ee_pose"][0] for row in actions], [0.11, 0.11, 0.12, 0.12], atol=1e-7
+    )
+    actions[0]["left_ee_pose"][0] = 99
+    assert actions[1]["left_ee_pose"][0] == pytest.approx(0.11)
+    model.get_action()
+    rows = [json.loads(line) for line in (tmp_path / "chunks/inference.jsonl").read_text().splitlines()]
+    assert [row["native_control_step"] for row in rows] == [0, 4]
+    assert all(row["served_native_steps"] == 4 and row["native_action_repeat"] == 2 for row in rows)
+    assert all(row["training_fps"] == 12.5 and row["native_control_fps"] == 25 for row in rows)
+
+
+@pytest.mark.parametrize("fps", [True, 0, -1, float("nan"), float("inf"), "12.5"])
+def test_adapter_rejects_invalid_fps(adapter, tmp_path, fps):
+    path = tmp_path / "dataset/meta/info.json"
+    info = json.loads(path.read_text())
+    info["fps"] = fps
+    path.write_text(json.dumps(info))
+    with pytest.raises(ValueError, match="source fps"):
+        RoboDojoAdapter.from_dataset(path.parent.parent)
+
+
+@pytest.mark.parametrize("fps", [True, 0, 24, float("nan"), float("inf")])
+def test_lower_rate_rejects_mismatched_native_control_fps(adapter, tmp_path, fps):
+    adapter.fps = 12.5
+    with pytest.raises(ValueError, match="integer multiple"):
+        RoboDojoModel(
+            SimpleNamespace(config=config()),
+            adapter,
+            device="cpu",
+            replan_steps=2,
+            output_dir=tmp_path / "chunks",
+            native_control_fps=fps,
+        )
+
+
 def test_delta_model_reanchors_each_replan_and_keeps_environments_independent(delta_adapter, tmp_path):
     raw = delta_adapter.action_mean.repeat(32, 1)
     raw[:, 0] = 0.01
@@ -829,7 +884,10 @@ def test_delta_entrypoint_defaults_and_training_action_mode_guard(tmp_path):
 
 
 @pytest.mark.parametrize("invalid", [None, "subset", "contract", "statistics"])
-def test_full_task_delta_requires_matching_data_and_delta_statistics(delta_adapter, tmp_path, invalid):
+@pytest.mark.parametrize("data_mix", ["robodojo", "robodojo_fps12"])
+def test_full_task_delta_requires_matching_data_and_delta_statistics(
+    delta_adapter, tmp_path, invalid, data_mix
+):
     from lerobot.evaluation.eval_qwen3vl_mot_robodojo import validate_training_action_mode
     from lerobot.evaluation.eval_qwen3vl_mot_robodojo_delta import build_parser as delta_parser
 
@@ -843,7 +901,7 @@ def test_full_task_delta_requires_matching_data_and_delta_statistics(delta_adapt
             {
                 "policy": policy,
                 "stage": "finetune",
-                "data_mix": "robodojo",
+                "data_mix": data_mix,
                 "dataset": {"dataset_size_one_epoch": 1856102},
             }
         )
@@ -851,6 +909,8 @@ def test_full_task_delta_requires_matching_data_and_delta_statistics(delta_adapt
     root = tmp_path / "delta"
     info_path = root / "meta/info.json"
     info = json.loads(info_path.read_text())
+    if data_mix == "robodojo_fps12":
+        info["fps"] = 12.5
     info["total_frames"] = 44774 if invalid == "subset" else 1856102
     if invalid == "contract":
         info["delta_action_contract"]["reference"] = "consecutive_action_target"
@@ -868,11 +928,20 @@ def test_full_task_delta_requires_matching_data_and_delta_statistics(delta_adapt
             validate_training_action_mode(args)
     else:
         report = validate_training_action_mode(args)
-        assert report["training_configuration_verified"] and report["data_mix"] == "robodojo"
+        assert report["training_configuration_verified"] and report["data_mix"] == data_mix
         assert report["dataset_root"] == str(root.resolve())
         assert report["stats_sha256"]
         args.action_mode = "absolute"
-        assert validate_training_action_mode(args)["action_mode"] == "absolute"
+        if data_mix == "robodojo":
+            assert validate_training_action_mode(args)["action_mode"] == "absolute"
+        else:
+            with pytest.raises(ValueError, match="Action mode"):
+                validate_training_action_mode(args)
+            args.action_mode = "delta"
+            info["fps"] = 25
+            info_path.write_text(json.dumps(info))
+            with pytest.raises(ValueError, match="12.5FPS"):
+                validate_training_action_mode(args)
 
 
 def test_delta_contract_is_required_and_not_replaced_by_absolute_statistics(delta_adapter, tmp_path):
@@ -1199,11 +1268,13 @@ def test_suite_continues_after_error_and_resume_retries_only_incomplete_task(tmp
 
 
 @pytest.mark.parametrize("corrupt", [None, "translation", "video"])
-def test_suite_audit_checks_real_chunk_integration_and_video_length(tmp_path, monkeypatch, corrupt):
+@pytest.mark.parametrize("fps", [25, 12.5])
+def test_suite_audit_checks_real_chunk_integration_and_video_length(tmp_path, monkeypatch, corrupt, fps):
     import imageio_ffmpeg
 
     from lerobot.evaluation import eval_qwen3vl_mot_robodojo_suite as suite
 
+    controls = 10 * round(25 / fps) + 1
     result = {
         "success_rate": 1,
         "eval_time": 3,
@@ -1216,7 +1287,11 @@ def test_suite_audit_checks_real_chunk_integration_and_video_length(tmp_path, mo
     result_path.write_text(json.dumps(result))
     (native / "_physics_profile.json").write_text(
         json.dumps(
-            {"batches": [{"layout_ids": [i], "unstable_episodes": 0, "control_steps": [1]} for i in range(3)]}
+            {
+                "batches": [
+                    {"layout_ids": [i], "unstable_episodes": 0, "control_steps": [controls]} for i in range(3)
+                ]
+            }
         )
     )
     (tmp_path / "summary.json").write_text('{"status":"completed","evaluation_complete":true}')
@@ -1256,7 +1331,22 @@ def test_suite_audit_checks_real_chunk_integration_and_video_length(tmp_path, mo
                 "control_step": 0,
                 "action_mode": "delta",
                 "executed_chunk_steps": 10,
+                "training_fps": fps,
+                "native_control_fps": 25,
+                "native_action_repeat": round(25 / fps),
+                "native_control_step": 0,
+                "served_native_steps": 10 * round(25 / fps),
                 "action_path": str(path),
+            }
+        )
+        next_path = chunks / f"chunk_{layout + 3:06d}_env_000.npz"
+        next_path.write_bytes(path.read_bytes())
+        rows.append(
+            {
+                **rows[-1],
+                "control_step": 10,
+                "native_control_step": 10 * round(25 / fps),
+                "action_path": str(next_path),
             }
         )
         for camera in ("head", "left_wrist", "right_wrist"):
@@ -1266,12 +1356,14 @@ def test_suite_audit_checks_real_chunk_integration_and_video_length(tmp_path, mo
     monkeypatch.setattr(
         RoboDojoAdapter,
         "from_dataset",
-        lambda *args, **kwargs: SimpleNamespace(action_mean=torch.zeros(20), action_std=torch.ones(20)),
+        lambda *args, **kwargs: SimpleNamespace(
+            action_mean=torch.zeros(20), action_std=torch.ones(20), fps=fps
+        ),
     )
 
     def frames(*args, **kwargs):
         yield {"size": (640, 480), "fps": 25}
-        for _ in range(3 if corrupt == "video" else 2):
+        for _ in range(controls + (2 if corrupt == "video" else 1)):
             yield bytes(640 * 480 * 3)
 
     monkeypatch.setattr(imageio_ffmpeg, "read_frames", frames)
@@ -1282,7 +1374,7 @@ def test_suite_audit_checks_real_chunk_integration_and_video_length(tmp_path, mo
             suite.audit_task(tmp_path, spec, args)
     else:
         audit = suite.audit_task(tmp_path, spec, args)
-        assert audit["audit_passed"] and audit["control_steps"] == [1, 1, 1]
+        assert audit["audit_passed"] and audit["control_steps"] == [controls] * 3
         assert len(audit["native_videos"]) == 9
         assert suite.completed_result(tmp_path, spec)["native_result"] == result
         (tmp_path / "summary.json").write_text('{"status":"failed","evaluation_complete":false}')

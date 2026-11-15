@@ -178,7 +178,7 @@ class LiberoAdapter:
 
 
 class PredictionVideoWriter:
-    def __init__(self, config, device: torch.device, source_fps: int):
+    def __init__(self, config, device: torch.device, source_fps: float):
         self.config = config
         self.device = device
         self.source_fps = source_fps

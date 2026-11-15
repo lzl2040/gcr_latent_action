@@ -5540,3 +5540,36 @@ size/mtime snapshots were unchanged. Example counts: `stack_bowls`
 100 episodes/20935 frames; `task_005`100 episodes/32779 frames.
 Run log:
 `/home/jianf/lzl_project/.copilot/session-state/1341fac2-578e-4665-a582-dc35f01c3d5b/files/split_fps12p5_tasks.log`.
+
+### Low-FPS checkpoint evaluation (2026-11-15)
+
+The requested `robodojo_2nodes_8gpu_high_noise_shift_5_fps12_decay32k`
+directory contains `step15k`, not `step12k`. The user confirmed testing
+`step15k` on `stack_bowls`, `put_bottles_into_dustbin`, and
+`insert_tubes`, using original layouts0/1/2 for each task.
+
+Despite the mixture/directory name `robodojo_fps12`, the training dataset
+has **12.5FPS**,928940 frames, and measured-state-relative delta actions.
+Use the full `RoboDojo_ee_lerobot_v30_video_fps12p5` statistics, not
+25FPS statistics or recomputed per-task subset statistics. The evaluator
+checks the saved finetuning mixture, frame count,12.5FPS metadata, delta
+contract, and canonical delta/state statistics before loading the model.
+
+Native simulation remains25Hz. Each predicted delta is integrated once,
+then its decoded **absolute EE target** is held for2 native control ticks.
+Do not duplicate delta integration or execute12.5Hz deltas at25Hz.
+Sampling10/replanning10 means10 model actions per request and20 native
+ticks (0.8s), with original native task horizons unchanged. The requested
+native control rate is restricted to the verified25Hz protocol; unsupported
+noninteger training/native rate ratios fail instead of being rounded.
+Inference records preserve model step indices and explicitly record
+training/native FPS, repeat factor, native step index, and served ticks.
+The suite audits replans on this timebase; actual videos remain25FPS.
+Matched predictions retain9 frames spanning0..2.48s rather than the
+25FPS model's0..1.24s, with no change to the saved video/action horizon.
+
+Evaluation-only changes include fractional-FPS validation, absolute-target
+holding and dependent suite/video regression coverage. Previous25FPS
+execution remains one target per native tick. Full checkpoint SHA256
+preflight, strict model restoration and real rollout verification are
+required separately before reporting this checkpoint's results.

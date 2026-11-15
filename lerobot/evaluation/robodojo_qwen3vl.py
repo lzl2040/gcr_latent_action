@@ -54,7 +54,7 @@ class RoboDojoAdapter:
     state_std: torch.Tensor
     action_mean: torch.Tensor
     action_std: torch.Tensor
-    fps: int
+    fps: float
     action_mode: str = "absolute"
 
     @property
@@ -90,8 +90,8 @@ class RoboDojoAdapter:
                 (torch.tensor(mean, dtype=torch.float32), torch.tensor(std.clip(1e-3), dtype=torch.float32))
             )
         fps = info["fps"]
-        if not isinstance(fps, int) or isinstance(fps, bool) or fps <= 0:
-            raise ValueError("Training metadata must declare a positive integer source fps.")
+        if not isinstance(fps, (int, float)) or isinstance(fps, bool) or not np.isfinite(fps) or fps <= 0:
+            raise ValueError("Training metadata must declare a positive finite source fps.")
         return cls(*values, fps=fps, action_mode=action_mode)
 
     def observation_batch(self, observation: dict, config, device: torch.device) -> dict:
@@ -194,11 +194,22 @@ class RoboDojoModel:
         output_dir: Path,
         prediction_writer: PredictionVideoWriter | None = None,
         seed: int = 0,
+        native_control_fps: float = 25.0,
     ):
         if not 1 <= replan_steps <= policy.config.n_action_steps:
             raise ValueError("replan_steps must be in [1, saved n_action_steps].")
         self.policy = policy
         self.adapter = adapter
+        ratio = native_control_fps / adapter.fps
+        if (
+            isinstance(native_control_fps, bool)
+            or not np.isfinite(ratio)
+            or ratio < 1
+            or not np.isclose(ratio, round(ratio), atol=1e-8, rtol=0)
+        ):
+            raise ValueError("Native control FPS must be a positive integer multiple of training FPS.")
+        self.native_control_fps = native_control_fps
+        self.native_action_repeat = round(ratio)
         self.device = torch.device(device)
         self.replan_steps = replan_steps
         self.prediction_writer = prediction_writer
@@ -324,6 +335,11 @@ class RoboDojoModel:
             "control_step": control_step,
             "predicted_steps": len(actions),
             "executed_chunk_steps": self.replan_steps,
+            "training_fps": self.adapter.fps,
+            "native_control_fps": self.native_control_fps,
+            "native_action_repeat": self.native_action_repeat,
+            "native_control_step": control_step * self.native_action_repeat,
+            "served_native_steps": self.replan_steps * self.native_action_repeat,
             "action_path": str(path.resolve()),
         }
         if future is not None:
@@ -333,7 +349,12 @@ class RoboDojoModel:
         self.calls += 1
         self.control_steps[index] = control_step + self.replan_steps
         logger.info("env=%d chunk=%d steps=%d inference=%.3fs", index, self.calls, self.replan_steps, seconds)
-        return actions[: self.replan_steps]
+        # Hold decoded absolute targets; integrating a lower-rate delta twice would double motion.
+        return [
+            {key: value.copy() for key, value in action.items()}
+            for action in actions[: self.replan_steps]
+            for _ in range(self.native_action_repeat)
+        ]
 
     def get_action(self):
         if self.single_env_idx is None:
