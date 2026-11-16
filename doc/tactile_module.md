@@ -240,6 +240,9 @@ GT 和重建使用同一固定显示范围，不做逐帧对比度增强。
 另外保存 `gt_tactile_figure/ours_tactile_figure`。带阶段标签的例子还导出
 `contact_detail.pdf/png`，额外展示未裁剪的原生 GT，便于区分原始接触变化和重建丢失的细节。
 
+混合数据集导出时，可在候选清单中为每例指定 `figure_rgb_key` 和 `figure_rgb_crop`，
+以使用各自可用的相机和固定裁剪框；显式 CLI 参数优先于清单设置，原始 RGB 仍完整保存。
+
 ---
 
 ## 4. AnyTouch 权重加载

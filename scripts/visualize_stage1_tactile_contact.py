@@ -496,6 +496,10 @@ def make_figure(record, rgb, gt, prediction, native_gt=None):
 
 
 def export_case(record, codec, output_dir, figure_rgb_key=None, rgb_crop=None, tactile_crop=None):
+    if figure_rgb_key is None:
+        figure_rgb_key = record.get("figure_rgb_key")
+    if rgb_crop is None:
+        rgb_crop = record.get("figure_rgb_crop")
     root = Path(record["dataset_root"])
     info = json.loads((root / "meta/info.json").read_text())
     episode, indices = record["episode"], record["frame_indices"]

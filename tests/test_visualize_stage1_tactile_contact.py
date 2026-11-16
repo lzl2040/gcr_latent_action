@@ -1,3 +1,4 @@
+import json
 from fractions import Fraction
 from types import SimpleNamespace
 
@@ -162,3 +163,59 @@ def test_rgb_presentation_crop_is_fixed_across_time_and_preserves_originals():
         visualization.crop_rgb(images, [0, 0.9, 1, 0.5])
     with pytest.raises(ValueError, match="empty"):
         visualization.crop_rgb(images, [0, 0, 0.001, 1])
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_export_respects_per_case_rgb_view_and_crop_with_explicit_overrides(tmp_path, monkeypatch, override):
+    from PIL import Image
+
+    root = tmp_path / "dataset"
+    (root / "meta").mkdir(parents=True)
+    tactile, wrist, ego = (
+        "observation.images.tactile_right_0",
+        "observation.images.right_wrist_camera",
+        "observation.images.ego",
+    )
+    (root / "meta/info.json").write_text(
+        json.dumps({"features": {key: {"dtype": "video"} for key in (tactile, wrist, ego)}})
+    )
+    pattern = np.broadcast_to(np.arange(32, dtype=np.uint8)[None, None, :, None], (5, 32, 32, 3))
+    frames = {key: pattern + offset for key, offset in ((tactile, 20), (wrist, 60), (ego, 100))}
+    monkeypatch.setattr(
+        visualization, "read_frames", lambda root, info, episode, key, *a, **k: (frames[key], {})
+    )
+    monkeypatch.setattr(
+        visualization,
+        "episode_frame_times",
+        lambda *args: {"timestamp_s": [index / 30 for index in range(5)]},
+    )
+    record = {
+        "dataset_root": str(root),
+        "dataset": "test",
+        "task": "grasp",
+        "episode": {"episode_index": 0},
+        "frame_indices": list(range(5)),
+        "fps": 30,
+        "tactile_key": tactile,
+        "pixel_mean_01": [0] * 3,
+        "pixel_std_01": [1] * 3,
+        "figure_rgb_key": ego,
+        "figure_rgb_crop": [0, 0, 0.5, 1],
+    }
+    codec = SimpleNamespace(
+        provenance={"image_size": 32},
+        reconstruct=lambda images, mean, std: images.float() / 255,
+    )
+    options = {"figure_rgb_key": wrist, "rgb_crop": [0.5, 0, 1, 1]} if override else {}
+    directory = visualization.export_case(record, codec, tmp_path / "output", **options)
+    chosen = wrist if override else ego
+    expected_crop = frames[chosen][0, :, 16:] if override else frames[chosen][0, :, :16]
+    np.testing.assert_array_equal(
+        np.array(Image.open(next((directory / "rgb").glob("00_*.png")))), frames[chosen][0]
+    )
+    np.testing.assert_array_equal(
+        np.array(Image.open(next((directory / "rgb_figure").glob("00_*.png")))), expected_crop
+    )
+    np.testing.assert_array_equal(
+        np.array(Image.open(next((directory / "gt_tactile").glob("00_*.png")))), frames[tactile][0]
+    )
