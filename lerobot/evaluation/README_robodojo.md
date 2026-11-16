@@ -5797,3 +5797,18 @@ Provenance/preflight are in the same experiment runtime-assets cache:
 `three_tasks_step22k_preflight_20261116.json`.
 Strict model restoration and real rollout startup remain separate checks;
 these preflight checks alone are not benchmark results.
+
+The22k suite is running and real startup verification passed: strict
+full-model restore from `step22k/model`, no Stage1 teacher, BF16,
+sampling10, three finite32x20 delta chunks, model replan0/10/20
+mapping to native0/20/40,50 advancing native controls and zero
+head-camera drift. Measured left/right EE translation after50 controls
+was0.001949m/0.245743m. The live WebSocket, three matched predicted
+camera videos (2.48s endpoint) and native25FPS stream writers were
+verified; `startup_validation.json` is persisted in the22k output root.
+
+Live22k manifests were compared to both15k and16k: task specifications,
+training contract and runtime file hashes are identical; only checkpoint,
+checkpoint provenance, output directory and port settings differ.
+Previous results are untouched. Full nine-episode22k results remain
+pending; startup evidence is not a benchmark-success claim.
