@@ -5812,3 +5812,43 @@ training contract and runtime file hashes are identical; only checkpoint,
 checkpoint provenance, output directory and port settings differ.
 Previous results are untouched. Full nine-episode22k results remain
 pending; startup evidence is not a benchmark-success claim.
+
+#### Completed22k results and comparison
+
+The22k suite finished with exit0. All9 original-layout episodes passed
+the independent task audit, with0 infrastructure failures. Final source
+SHA256 recheck and runtime file hashes passed.
+
+| Task | 15k successes | 16k successes | 22k successes | 22k mean score /100 |
+|---|---:|---:|---:|---:|
+| `stack_bowls` | 0/3 | 0/3 | 0/3 | 5 |
+| `put_bottles_into_dustbin` | 1/3 | 1/3 | 2/3 | 80 |
+| `insert_tubes` | 0/3 | 0/3 | 0/3 | 6.67 |
+| Overall | 1/9 | 1/9 | 2/9 | 30.56 |
+
+22k achieves22.22% success on these same9 layouts versus11.11% at15k
+and16k; mean score is30.56 versus20 and18.33, respectively. The
+additional success is bottle layout2, completed in647 native controls.
+Bottle layout1 also succeeds in345 controls (349 at15k,617 at16k),
+while layout0 fails with0.4 native reward. Bowls layout0 receives0.15
+and tubes layout0 receives0.2 partial reward; their other layouts score0.
+Partial reward is not success. With only3 layouts per task, this is a
+small-sample comparison, not a statistically established general gain.
+
+Native controls were bowls800/800/800, bottles700/345/647 and
+tubes500/500/500:5592 total within original limits. All281 finite
+policy chunks passed independent denormalization/integration/timebase
+checks. Maximum integration disagreement was below6e-8m translation,
+1.1e-7 in rotation-matrix entries and3e-8 gripper units. All27 actual
+videos passed frame-count/FPS/geometry checks;843 matched predicted
+MP4s and their prediction/conditioning PNGs were saved. Head-camera
+checks passed on119 passive snapshots. Full manual video review is
+not claimed.
+
+Final evidence is retained in
+`outputs/evaluation/robodojo/fps12p5_mlp_step22k_three_tasks_sampling10_20261116_v1/`:
+`progress.json`, `results.csv`, and per-task
+`tasks/<task>/attempt_001/{suite_audit,summary}.json`.
+Actual and predicted video paths follow the15k layout above. Successful
+bottle head-camera videos are `episode_0000001_cam_head_success.mp4`
+and `episode_0000002_cam_head_success.mp4`.
