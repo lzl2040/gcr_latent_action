@@ -186,6 +186,48 @@ decode: (B,V,512,4,4)   → (B,V,3,112,112)
 Decoder 当前预测按数据集 mean/std 标准化后的 RGB；恢复 `[0,1]` 图像时使用对应 view 的统计量
 反标准化。第二阶段应冻结 ResNet encoder 和 spatial decoder，以固定 future latent 的目标空间。
 
+### 3.2 接触过程的论文可视化
+
+`scripts/visualize_stage1_tactile_contact.py` 从 LeRobot v3 的 OpenNeo/FTP-1 数据中搜索
+5 个按真实时间排列、等帧间隔的弱到强接触候选。默认只在 CPU 严格加载 checkpoint 中的
+ResNet 触觉 encoder 和 spatial decoder，不构造完整 Stage-1，也不下载预训练参数：
+
+```bash
+conda run -n lerobot_v2 python scripts/visualize_stage1_tactile_contact.py \
+  --checkpoint /Data/lzl/weights/world_stage1_weights/step50k \
+  --output-dir /Data/lzl/tactile_contact_search \
+  search \
+  --dataset open_neo_ur=/mnt/msra-datahub/OpenNeoData/ur \
+  --task-pattern 'rubber|paper cup' --episodes-per-task 2 --previews 6
+```
+
+`candidates.json` 保留搜索范围、失败记录、权重指纹、接触外观变化和 PSNR/SSIM。
+筛选同时检查重建是否保留触觉变化，避免仅凭静态背景的高 PSNR 选例；仍需人工核对 RGB
+中的真实接触和图像重建细节。接触分数只是相对 episode 初始背景的图像形变指标，不是标定压力。
+
+查看 `previews/` 后，用清单中的 `candidate_id` 显式导出：
+
+```bash
+conda run -n lerobot_v2 python scripts/visualize_stage1_tactile_contact.py \
+  --checkpoint /Data/lzl/weights/world_stage1_weights/step50k \
+  --output-dir /Data/lzl/tactile_contact_selected \
+  export --manifest /Data/lzl/tactile_contact_search/candidates.json \
+  --candidate-ids CANDIDATE_ID_1 CANDIDATE_ID_2
+```
+
+输出按 `dataset/task/episode_xxxxxx/` 组织，包括原始 RGB、原分辨率 GT、
+模型实际输入尺度的 GT 和重建 PNG、三行五列的 PDF/PNG、浮点结果及同步元数据；
+另有多页 `selected_examples.pdf`。每个视角都使用自己的视频文件和 episode 起始偏移，
+最终导出还核验 data parquet 的 `frame_index/timestamp`，不跨 episode 或重复补帧。
+GT 和重建使用同一固定显示范围，不做逐帧对比度增强。
+
+这是 **GT tactile → encoder → decoder 的自编码重建**，不是 RGB 到触觉或未来触觉预测；
+按接触变化及重建质量人工挑选的论文案例也不代表全数据集平均性能。所有全局参数放在
+`search/export` 之前，输出目录必须尚不存在，避免覆盖已有论文图。
+可加 `--figure-rgb-key observation.images.ego --rgb-crop 0 0.3 1 1`：
+主图使用 ego 视角，在所有时刻应用相同的 RGB 裁剪框，原始 RGB 仍完整保存，
+另存 `rgb_figure/`；GT 和重建触觉不裁剪、不增强，其他视角的附图也保留全图。
+
 ---
 
 ## 4. AnyTouch 权重加载
