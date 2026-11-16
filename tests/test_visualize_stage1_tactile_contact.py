@@ -24,6 +24,27 @@ def test_onset_windows_reject_static_releasing_or_nonmonotonic_contact(curve):
     assert visualization.onset_windows(curve, [0, 3, 6, 9, 12]) == []
 
 
+def test_pre_post_windows_require_two_stable_before_and_three_changed_after_frames():
+    images = torch.full((5, 3, 32, 32), 100, dtype=torch.uint8)
+    for index in range(2, 5):
+        images[index, :, 10:22, 10:22] += 30 + index * 10
+    windows = visualization.pre_post_windows(images, [0, 3, 6, 9, 12], gaps=[3])
+    assert len(windows) == 1
+    assert windows[0]["frame_indices"] == [0, 3, 6, 9, 12]
+    assert windows[0]["frame_phases"] == ["Before change"] * 2 + ["After change"] * 3
+    assert windows[0]["contact_boundary_interval_frames"] == [3, 6]
+    assert windows[0]["pre_contact_variation"] == 0
+    images[1] = images[2]
+    assert visualization.pre_post_windows(images, [0, 3, 6, 9, 12], gaps=[3]) == []
+
+
+def test_pre_post_windows_reject_static_contact_or_a_single_transient_change():
+    images = torch.full((5, 3, 32, 32), 100, dtype=torch.uint8)
+    assert visualization.pre_post_windows(images, [0, 3, 6, 9, 12], gaps=[3]) == []
+    images[2, :, 10:22, 10:22] = 220
+    assert visualization.pre_post_windows(images, [0, 3, 6, 9, 12], gaps=[3]) == []
+
+
 def test_decoder_uses_linear_inverse_zscore_not_sigmoid():
     predicted = torch.tensor([[[[2.0]], [[-3.0]], [[0.5]]]])
     restored = visualization.denormalize_tactile(predicted, [0.3, 0.4, 0.5], [0.1, 0.1, 0.2])

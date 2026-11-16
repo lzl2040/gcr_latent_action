@@ -228,6 +228,18 @@ GT 和重建使用同一固定显示范围，不做逐帧对比度增强。
 主图使用 ego 视角，在所有时刻应用相同的 RGB 裁剪框，原始 RGB 仍完整保存，
 另存 `rgb_figure/`；GT 和重建触觉不裁剪、不增强，其他视角的附图也保留全图。
 
+需要“接触前 2 帧＋接触后 3 帧”时，`search` 使用 `--selection-mode pre-post`，
+并可指定 `--scan-stride 6 --gaps 12 18 24 30`。这个模式要求前两帧稳定、后三帧相对
+这两帧的局部基准持续变化，并优先按变化对比度而非重建质量排名。它只自动标记
+`Before change/After change`；变化也可能来自松开物体，必须核对 RGB 和夹爪状态，
+确认确为建立接触后才能在候选清单中标为 `Pre-contact/Post-contact`，并记录核验依据。
+这种帧标签不会由模型预测。
+
+全局参数 `--tactile-crop X0 Y0 X1 Y1` 可在图中对 GT 和 Ours 应用相同的固定归一化 ROI，
+所有时刻使用同一个框，不改对比度。完整 GT、重建、原生 GT 和全图指标仍保留，
+另外保存 `gt_tactile_figure/ours_tactile_figure`。带阶段标签的例子还导出
+`contact_detail.pdf/png`，额外展示未裁剪的原生 GT，便于区分原始接触变化和重建丢失的细节。
+
 ---
 
 ## 4. AnyTouch 权重加载

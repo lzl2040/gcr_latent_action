@@ -292,6 +292,54 @@ def onset_windows(curve, sampled_indices, gaps=(3, 6, 9, 12)):
     return sorted(windows, key=lambda x: x["onset_score"], reverse=True)
 
 
+def pre_post_windows(images, sampled_indices, gaps=(3, 6, 9, 12)):
+    """Propose two stable reference frames followed by three persistently changed frames.
+
+    These are appearance onsets; physical contact still requires RGB verification.
+    """
+    values = functional.avg_pool2d(images.float() / 255, 5, stride=1, padding=2)
+    values = values[..., 10:-10, 10:-10]
+    positions = {frame: index for index, frame in enumerate(sampled_indices)}
+    windows = []
+    for gap in gaps:
+        for start in sampled_indices:
+            frames = [start + gap * i for i in range(5)]
+            if any(frame not in positions for frame in frames):
+                continue
+            indices = [positions[frame] for frame in frames]
+            selected = values[indices]
+            reference = selected[:2].mean(0)
+            before_noise = float((selected[1] - selected[0]).square().mean().sqrt())
+            changes = (selected - reference).square().mean((1, 2, 3)).sqrt().numpy()
+            after = changes[2:]
+            if after.min() < 0.025 or before_noise > min(0.008, float(after.min()) / 3):
+                continue
+            if after[1:].min() < after[0] * 0.8:
+                continue
+            windows.append(
+                {
+                    "frame_indices": frames,
+                    "sample_positions": indices,
+                    "frame_gap": gap,
+                    "contact_proxy": changes.tolist(),
+                    "contact_gain": float(after.mean() - changes[:2].mean()),
+                    "onset_score": float(after.min() - 3 * before_noise),
+                    "pre_contact_variation": before_noise,
+                    "contact_boundary_interval_frames": frames[1:3],
+                    "frame_phases": ["Before change"] * 2 + ["After change"] * 3,
+                    "contact_label_status": "appearance_candidate_requires_rgb_verification",
+                }
+            )
+    return sorted(windows, key=lambda row: row["onset_score"], reverse=True)
+
+
+def candidate_rank(record):
+    quality = (record["metrics"]["nonconstant_contact_reconstruction"], record["quality_score"])
+    if record.get("selection_mode") == "pre-post":
+        return (record["onset_score"], *quality)
+    return quality
+
+
 def reconstruction_metrics(gt, prediction):
     from skimage.metrics import structural_similarity
 
@@ -386,30 +434,44 @@ def crop_rgb(images, rectangle):
     return images[:, top:bottom, left:right]
 
 
-def make_figure(record, rgb, gt, prediction):
+def make_figure(record, rgb, gt, prediction, native_gt=None):
     import matplotlib.pyplot as plt
 
     rectangle = record.get("figure_rgb_crop")
     rgb = crop_rgb(rgb, rectangle)
+    tactile_rectangle = record.get("figure_tactile_crop")
+    gt = crop_rgb(gt, tactile_rectangle)
+    prediction = crop_rgb(prediction, tactile_rectangle)
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 8, "pdf.fonttype": 42, "ps.fonttype": 42})
-    rgb_ratio = rgb.shape[1] / rgb.shape[2]
+    rows = [("RGB\n(crop)" if rectangle else "RGB", rgb)]
+    if native_gt is not None:
+        rows.append(("GT tactile\n(native)", native_gt))
+    rows.extend(
+        [
+            (
+                "GT tactile\n(fixed ROI)"
+                if tactile_rectangle
+                else "GT tactile\n(model input)"
+                if native_gt is not None
+                else "GT tactile",
+                gt,
+            ),
+            ("Ours\n(ROI reconstruction)" if tactile_rectangle else "Ours\n(reconstruction)", prediction),
+        ]
+    )
+    ratios = [images.shape[1] / images.shape[2] for _, images in rows]
     figure, axes = plt.subplots(
-        3,
+        len(rows),
         5,
-        figsize=(7.1, 1.3 * (2 + rgb_ratio)),
-        gridspec_kw={"hspace": 0.04, "wspace": 0.035, "height_ratios": [rgb_ratio, 1, 1]},
+        figsize=(7.1, 1.3 * sum(ratios)),
+        gridspec_kw={"hspace": 0.04, "wspace": 0.035, "height_ratios": ratios},
     )
     times = np.asarray(
         record.get("dataset_frame_timestamps_s", np.asarray(record["frame_indices"]) / record["fps"])
     )
     times = times - times[0]
-    for row, (label, images) in enumerate(
-        (
-            ("RGB\n(crop)" if rectangle else "RGB", rgb),
-            ("GT tactile", gt),
-            ("Ours\n(reconstruction)", prediction),
-        )
-    ):
+    phases = record.get("frame_phases")
+    for row, (label, images) in enumerate(rows):
         for column, image in enumerate(images):
             axis = axes[row, column]
             axis.imshow(image, interpolation="nearest", vmin=0, vmax=255)
@@ -418,20 +480,35 @@ def make_figure(record, rgb, gt, prediction):
             for spine in axis.spines.values():
                 spine.set_visible(False)
             if row == 0:
-                axis.set_title(f"$t={times[column]:.2f}$ s", fontsize=8, pad=4)
+                title = f"$t={times[column]:.2f}$ s"
+                if phases:
+                    title = phases[column] + "\n" + title
+                axis.set_title(
+                    title,
+                    fontsize=8,
+                    pad=4,
+                    color=("#245b8a" if column < 2 else "#a84d14") if phases else "black",
+                )
             if column == 0:
                 axis.set_ylabel(label, rotation=0, ha="right", va="center", labelpad=8)
-    figure.subplots_adjust(left=0.17, right=0.995, bottom=0.015, top=0.92)
+    figure.subplots_adjust(left=0.17, right=0.995, bottom=0.015, top=0.88 if phases else 0.92)
     return figure
 
 
-def export_case(record, codec, output_dir, figure_rgb_key=None, rgb_crop=None):
+def export_case(record, codec, output_dir, figure_rgb_key=None, rgb_crop=None, tactile_crop=None):
     root = Path(record["dataset_root"])
     info = json.loads((root / "meta/info.json").read_text())
     episode, indices = record["episode"], record["frame_indices"]
     data_sync = episode_frame_times(root, info, episode, indices)
     times = data_sync["timestamp_s"]
-    record = {**record, "dataset_frame_timestamps_s": times, "figure_rgb_crop": rgb_crop}
+    record = {
+        **record,
+        "dataset_frame_timestamps_s": times,
+        "figure_rgb_crop": rgb_crop,
+        "figure_tactile_crop": tactile_crop
+        if tactile_crop is not None
+        else record.get("figure_tactile_crop"),
+    }
     tactile, tactile_sync = read_frames(
         root, info, episode, record["tactile_key"], indices, episode_times=times
     )
@@ -444,6 +521,11 @@ def export_case(record, codec, output_dir, figure_rgb_key=None, rgb_crop=None):
     save_images(directory / "gt_tactile_native", tactile, indices)
     save_images(directory / "gt_tactile", gt, indices)
     save_images(directory / "ours_tactile", prediction, indices)
+    if record["figure_tactile_crop"] is not None:
+        save_images(directory / "gt_tactile_figure", crop_rgb(gt, record["figure_tactile_crop"]), indices)
+        save_images(
+            directory / "ours_tactile_figure", crop_rgb(prediction, record["figure_tactile_crop"]), indices
+        )
     synchronization = {record["tactile_key"]: tactile_sync}
     rgbs = {}
     import matplotlib.pyplot as plt
@@ -466,6 +548,11 @@ def export_case(record, codec, output_dir, figure_rgb_key=None, rgb_crop=None):
         figure.savefig(directory / f"comparison{suffix}.pdf", bbox_inches="tight", pad_inches=0.025)
         figure.savefig(directory / f"comparison{suffix}.png", dpi=220, bbox_inches="tight", pad_inches=0.025)
         plt.close(figure)
+        if index == 0 and record.get("frame_phases"):
+            figure = make_figure(record, rgb, gt, prediction, native_gt=tactile)
+            figure.savefig(directory / "contact_detail.pdf", bbox_inches="tight", pad_inches=0.025)
+            figure.savefig(directory / "contact_detail.png", dpi=220, bbox_inches="tight", pad_inches=0.025)
+            plt.close(figure)
     np.savez_compressed(
         directory / "frames.npz",
         gt_tactile=gt,
@@ -517,7 +604,11 @@ def search(args, codec):
                         root, info, episode, key, sampled, size=codec.provenance["image_size"]
                     )
                     images = torch.from_numpy(frames.copy()).permute(0, 3, 1, 2)
-                    windows = onset_windows(contact_curve(images), sampled, args.gaps)
+                    windows = (
+                        pre_post_windows(images, sampled, args.gaps)
+                        if args.selection_mode == "pre-post"
+                        else onset_windows(contact_curve(images), sampled, args.gaps)
+                    )
                     if not windows:
                         continue
                     mean, std = pixel_statistics(name, keys, key)
@@ -539,6 +630,7 @@ def search(args, codec):
                             "episode": episode,
                             "tactile_key": key,
                             "fps": info["fps"],
+                            "selection_mode": args.selection_mode,
                             "pixel_mean_01": mean.tolist(),
                             "pixel_std_01": std.tolist(),
                             **window,
@@ -546,10 +638,7 @@ def search(args, codec):
                             "quality_score": score,
                             "contact_proxy_not_calibrated_force": True,
                         }
-                        if best is None or (metrics["nonconstant_contact_reconstruction"], score) > (
-                            best["metrics"]["nonconstant_contact_reconstruction"],
-                            best["quality_score"],
-                        ):
+                        if best is None or candidate_rank(record) > candidate_rank(best):
                             best = record
                     records.append(best)
                 except (OSError, ValueError, RuntimeError) as error:
@@ -562,10 +651,7 @@ def search(args, codec):
                             "error": str(error),
                         }
                     )
-    records.sort(
-        key=lambda row: (row["metrics"]["nonconstant_contact_reconstruction"], row["quality_score"]),
-        reverse=True,
-    )
+    records.sort(key=candidate_rank, reverse=True)
     manifest = {
         "codec": codec.provenance,
         "scope": scope,
@@ -581,7 +667,9 @@ def search(args, codec):
         identity = (record["dataset"], record["episode"]["episode_index"])
         if identity in used:
             continue
-        export_case(record, codec, args.output_dir / "previews", args.figure_rgb_key, args.rgb_crop)
+        export_case(
+            record, codec, args.output_dir / "previews", args.figure_rgb_key, args.rgb_crop, args.tactile_crop
+        )
         used.add(identity)
         if len(used) >= args.previews:
             break
@@ -603,7 +691,8 @@ def export(args, codec):
     if len(set(identities)) != len(identities):
         raise ValueError("Choose only one tactile pad/window per episode.")
     directories = [
-        export_case(record, codec, args.output_dir, args.figure_rgb_key, args.rgb_crop) for record in selected
+        export_case(record, codec, args.output_dir, args.figure_rgb_key, args.rgb_crop, args.tactile_crop)
+        for record in selected
     ]
     with PdfPages(args.output_dir / "selected_examples.pdf") as pdf:
         for directory in directories:
@@ -645,8 +734,16 @@ def build_parser():
         metavar=("X0", "Y0", "X1", "Y1"),
         help="Fixed normalized crop for main-figure RGB only; raw frames are preserved.",
     )
+    parser.add_argument(
+        "--tactile-crop",
+        type=float,
+        nargs=4,
+        metavar=("X0", "Y0", "X1", "Y1"),
+        help="Identical fixed model-space ROI for GT/Ours figures only; full images and metrics are preserved.",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     scan = commands.add_parser("search")
+    scan.add_argument("--selection-mode", choices=["progressive", "pre-post"], default="progressive")
     scan.add_argument("--dataset", action="append", default=[], metavar="REGISTRY_NAME=ROOT")
     scan.add_argument(
         "--task-pattern", default="rubber|fragile|paper cup|fruit|press|trash|shampoo|plates|balloon"
