@@ -5882,7 +5882,7 @@ Provenance/preflight are in the same experiment runtime-assets cache:
 Strict model restoration and real rollout startup remain separate checks;
 these preflight checks alone are not benchmark results.
 
-The32k suite is running and real startup verification passed: strict
+Real startup verification passed before the32k suite completed: strict
 full-model restore from `step32k/model`, no Stage1 teacher, BF16,
 sampling10, three finite32x20 delta chunks, model replan0/10/20
 mapping to native0/20/40,50 advancing native controls and zero
@@ -5894,5 +5894,47 @@ were verified; `startup_validation.json` is persisted in the32k root.
 Live32k manifests were compared to15k,16k and22k: task specifications,
 training contract and runtime file hashes are identical; only checkpoint,
 checkpoint provenance, output directory and port settings differ.
-Previous results are untouched. Full nine-episode32k results remain
-pending; startup evidence is not a benchmark-success claim.
+Previous results are untouched. At startup, full nine-episode32k results
+were still pending; startup evidence alone is not a benchmark-success
+claim. Completed results follow.
+
+#### Completed32k results and comparison
+
+The32k suite finished with exit0. All9 original-layout episodes passed
+the independent task audit, with0 infrastructure failures. Final source
+SHA256 verification passed. Result hashes, per-task summaries, suite
+progress and CSV results were independently cross-checked after exit.
+
+| Task | 15k successes | 16k successes | 22k successes | 32k successes | 32k mean score /100 |
+|---|---:|---:|---:|---:|---:|
+| `stack_bowls` | 0/3 | 0/3 | 0/3 | 0/3 | 5 |
+| `put_bottles_into_dustbin` | 1/3 | 1/3 | 2/3 | 2/3 | 80 |
+| `insert_tubes` | 0/3 | 0/3 | 0/3 | 0/3 | 13.33 |
+| Overall | 1/9 | 1/9 | 2/9 | 2/9 | 32.78 |
+
+32k achieves22.22% success, unchanged from22k, versus11.11% at15k
+and16k. Mean score is32.78 versus30.56 at22k,20 at15k and18.33 at16k.
+The score increase over22k comes from tubes partial reward, not an
+additional successful episode:32k tubes layouts0/1/2 score0/0.2/0.2,
+versus0.2/0/0 at22k. Bowls rewards remain0.15/0/0 and bottle rewards
+remain0.4/1/1. Bottle layouts1/2 succeed in345/557 native controls
+(345/647 at22k). With only3 layouts per task, this is a small-sample
+comparison, not evidence of a statistically established general gain.
+
+Native controls were bowls800/800/800, bottles700/345/557 and
+tubes500/500/500:5502 total within original limits. All276 finite
+policy chunks passed independent denormalization/integration/timebase
+checks. Maximum integration disagreement was below6e-8m translation,
+1.1e-7 in rotation-matrix entries and3e-8 gripper units. All27 actual
+videos passed the task video audits;828 matched predicted MP4s were
+saved. Artifact existence and recorded actual-video sizes were checked
+again after exit. Head-camera checks passed on118 passive snapshots.
+Full manual video review is not claimed.
+
+Final evidence is retained in
+`outputs/evaluation/robodojo/fps12p5_mlp_step32k_three_tasks_sampling10_20261117_v1/`:
+`progress.json`, `results.csv`, and per-task
+`tasks/<task>/attempt_001/{suite_audit,summary}.json`.
+Actual and predicted video paths follow the15k layout above. Successful
+bottle head-camera videos are `episode_0000001_cam_head_success.mp4`
+and `episode_0000002_cam_head_success.mp4`.
