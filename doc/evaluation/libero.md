@@ -133,6 +133,23 @@ LIBERO-Pro 候选，保存在
 会改变真实初帧中的黑色柜体外观，因而没有将这类大分歧误选为 Ours 优势。
 以上视频生成不增加本文正式 rollout 计数。
 
+### 闭环执行中的未来预测图
+
+`scripts/compare_libero_pro_closed_loop.py` 将完整闭环执行与生成图一起留档。
+`rollout` 子命令分别在原 baseline 和 native Cosmos3 Python/源码环境中运行，
+使用 `--manifest` 指定的固定任务及初态。每次联合采样的动作前缀真正送入环境；
+仅在执行结束后解码首、中、末三次重规划的同批视频 latent，避免将实拍帧冒充预测。
+baseline 沿用 10 步执行前缀，Cosmos3 沿用原生 16 步窗口及执行前缀，不扩长窗口。
+两者均导出每次重规划后 `+0.8 s` 的实际生成帧，并分别标注条件时刻和预测时刻；
+因此不是单张初始图像无反馈生成完整任务，三次预测也不必来自相同绝对时刻。
+
+`figure --selection JSON --output-dir NEW_DIR` 要求四个不同基础任务，
+重新测得 Ours 成功、Cosmos3 失败，且两者初态、任务和初始 RGB 一致。
+每行排列初始图、三张 Cosmos3 预测和三张 Ours 预测。native 保持原生 160px，
+Ours 仅降采样展示；原尺寸图片、执行视频、逐条件观测、动作、latent 和成败记录保留。
+这是手选的系统级对比：MLP baseline 未接入 Stage-I physical grounding，
+不能将结果归因为 grounding，也不能当作对该机制的消融证据或整体成功率。
+
 ## LIBERO-Plus 环境安装
 
 2026-11-02 将官方源码安装到 `/home/v-wangxiaofa/lzl/LIBERO_PLUS`，
