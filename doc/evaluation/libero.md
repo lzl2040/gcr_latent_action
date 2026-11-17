@@ -171,6 +171,15 @@ selection 可逐例设置 `display_view` 为 `primary` 或 `wrist`，额外生�
 `comparison_selected_views.pdf/png`；同一行的初始图和两模型始终使用同一相机，
 图中文字及 metadata 同时记录相机选择，两套统一相机版本和原尺寸图片仍完整保留。
 
+`python -m scripts.export_libero_pro_prediction_gallery --selection JSON --output-dir NEW_DIR`
+支持任意数量的不同基础任务及每次 rollout 不同数量的真实预测快照。
+每例输出双视角完整预测时间线，按扰动类型生成总览，并提供本地 `index.html`、
+合集 PDF 与 CSV/JSON 索引。`generated_originals` 保存全部原尺寸解码帧，
+`display` 只保存真实 `+0.8 s` 预测，输入、参考图与执行审计独立存放。
+每张展示图都记录其原始预测目录、条件观测、源帧下标、真实时间和 SHA256。
+默认仍要求新测 Ours 成功、Cosmos3 失败；若保留其他成败结果供筛选，
+必须显式传 `--include-other-outcomes`，且图中仍标注新测真实成败。
+
 ## LIBERO-Plus 环境安装
 
 2026-11-02 将官方源码安装到 `/home/v-wangxiaofa/lzl/LIBERO_PLUS`，

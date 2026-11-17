@@ -161,13 +161,13 @@ def describe_perturbation(row, libero_root):
     }
 
 
-def check_pair(ours, native):
+def check_pair(ours, native, require_advantage=True):
     for key in ("case_id", "task", "trial", "initial_state_sha256"):
         if ours[key] != native[key]:
             raise ValueError(f"Different paired rollout {key}.")
     if ours.get("perturbation") != native.get("perturbation"):
         raise ValueError("Different paired rollout perturbation metadata.")
-    if not ours["success"] or native["success"]:
+    if require_advantage and (not ours["success"] or native["success"]):
         raise ValueError("Require newly measured Ours success and Cosmos3 failure.")
     if not ours["outcome_from_environment"] or not native["outcome_from_environment"]:
         raise ValueError("Image-only or archived outcomes cannot label these new predictions.")

@@ -82,6 +82,24 @@ def test_pair_requires_same_initial_state_and_actual_measured_failure(field, val
         comparison.check_pair(ours, native)
 
 
+def test_screening_other_outcomes_requires_explicit_opt_in_and_keeps_identity_checks():
+    ours = {
+        "case_id": "same",
+        "task": {"task_id": 1},
+        "trial": 0,
+        "initial_state_sha256": "same",
+        "success": False,
+        "outcome_from_environment": True,
+    }
+    native = {**ours, "success": True}
+    with pytest.raises(ValueError, match="Ours success"):
+        comparison.check_pair(ours, native)
+    comparison.check_pair(ours, native, require_advantage=False)
+    native["trial"] = 1
+    with pytest.raises(ValueError, match="trial"):
+        comparison.check_pair(ours, native, require_advantage=False)
+
+
 @pytest.mark.parametrize("change", ["duplicate", "current_frame", "wrong_time", "not_executed"])
 def test_forecast_validation_rejects_misleading_replanned_futures(change):
     record = {"snapshots": snapshots([0, 4, 8, 12, 16, 19, 23, 27, 31])}
