@@ -1,4 +1,6 @@
 import copy
+import csv
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -43,6 +45,7 @@ def test_future_selection_rejects_conditioning_or_interpolated_frames(offset):
         ("trial", 8),
         ("initial_state_sha256", "different"),
         ("outcome_from_environment", False),
+        ("perturbation", {"category": "task"}),
     ],
 )
 def test_pair_requires_same_initial_state_and_actual_measured_failure(field, value):
@@ -77,6 +80,53 @@ def test_forecast_validation_rejects_misleading_replanned_futures(change):
         comparison.check_snapshots(record)
 
 
+@pytest.mark.parametrize("category", ["environment", "object"])
+def test_perturbation_metadata_describes_actual_bddl_changes(tmp_path, category):
+    root = tmp_path / "libero"
+    original = root / "libero/libero/bddl_files/libero_goal/example.bddl"
+    variant = tmp_path / "variant/example.bddl"
+    original.parent.mkdir(parents=True)
+    variant.parent.mkdir()
+    before = (
+        "(define (problem LIBERO_Tabletop_Manipulation) "
+        "(:language place the bowl) "
+        "(:objects bowl_1 bowl_2 - bowl plate_1 - plate) "
+        "(:goal (And (On bowl_1 plate_1))))"
+    )
+    after = (
+        before.replace("LIBERO_Tabletop_Manipulation", "LIBERO_Living_Room_Tabletop_Manipulation")
+        if category == "environment"
+        else before.replace("bowl", "bigger_bowl").replace("place the bigger_bowl", "place the bowl")
+    )
+    original.write_text(before)
+    variant.write_text(after)
+    row = {
+        "base_suite": "libero_goal",
+        "suite": f"libero_goal_{'env' if category == 'environment' else 'object'}",
+        "category": category,
+        "bddl_file": str(variant),
+        "bddl_sha256": comparison.digest(variant),
+        "initial_state_source": "fixed_test_states",
+        "original_environment": "main_table",
+        "target_environment": "living_room_table",
+    }
+    result = comparison.describe_perturbation(row, root)
+    assert result["suite"] == row["suite"]
+    assert result["category"] == category
+    assert result["environment_changed"] == (category == "environment")
+    assert result["original_objects"]["bowl"] == ["bowl_1", "bowl_2"]
+    assert result["variant_instruction"] == result["original_instruction"]
+    if category == "object":
+        assert result["objects_removed"] == {"bowl": ["bowl_1", "bowl_2"]}
+        assert result["objects_added"] == {"bigger_bowl": ["bigger_bowl_1", "bigger_bowl_2"]}
+        assert result["original_goal"] != result["variant_goal"]
+    else:
+        assert result["summary"] == "main_table -> living_room_table"
+    variant.write_text(after + "\n")
+    with pytest.raises(ValueError, match="BDDL changed"):
+        comparison.describe_perturbation(row, root)
+
+
 def test_four_row_export_keeps_originals_and_only_downsamples_ours(tmp_path, monkeypatch):
     import matplotlib.pyplot as plt
 
@@ -91,7 +141,16 @@ def test_four_row_export_keeps_originals_and_only_downsamples_ours(tmp_path, mon
             offsets = [0, 4, 8, 12, 16, 19, 23, 27, 31] if name == "ours" else list(range(17))
             record = {
                 "case_id": f"case{task}",
-                "task": {"base_suite": "libero_goal", "task_id": task},
+                "task": {
+                    "base_suite": "libero_goal",
+                    "suite": "libero_goal_env" if task < 2 else "libero_goal_object",
+                    "category": "environment" if task < 2 else "object",
+                    "task_id": task,
+                },
+                "perturbation": {
+                    "label": "Env" if task < 2 else "Object",
+                    "summary": "main_table -> living_room_table" if task < 2 else "bowl -> bigger_bowl",
+                },
                 "trial": 0,
                 "initial_state_sha256": "shared",
                 "success": name == "ours",
@@ -109,7 +168,7 @@ def test_four_row_export_keeps_originals_and_only_downsamples_ours(tmp_path, mon
             for i, snapshot in enumerate(record["snapshots"]):
                 prediction = directory / f"prediction{i}"
                 prediction.mkdir()
-                np.savez_compressed(prediction / "frames.npz", primary=frames, wrist=frames)
+                np.savez_compressed(prediction / "frames.npz", primary=frames, wrist=frames[:, :, ::-1])
                 np.savez_compressed(prediction / "condition.npz", current_rgb=initial)
                 snapshot.update(
                     prediction_directory=str(prediction),
@@ -120,7 +179,21 @@ def test_four_row_export_keeps_originals_and_only_downsamples_ours(tmp_path, mon
             expected[task, name] = frames[offsets.index(16)]
             comparison.write_json(directory / "result.json", record)
             paths[f"{'cosmos3' if name == 'cosmos3' else 'ours'}_directory"] = str(directory)
-        cases.append({"case_id": f"case{task}", "title": f"Task {task}", **paths})
+        reference = tmp_path / "references" / f"case{task}"
+        reference.mkdir(parents=True)
+        for view in comparison.CAMERAS:
+            Image.fromarray(initial).save(reference / f"ordinary_{view}.png")
+            Image.fromarray(initial).save(reference / f"pro_{view}.png")
+        comparison.write_json(reference / "ordinary_reset.json", {"reference_only": True})
+        cases.append(
+            {
+                "case_id": f"case{task}",
+                "title": f"Task {task}",
+                "reference_directory": str(reference),
+                "display_view": "wrist" if task == 1 else "primary",
+                **paths,
+            }
+        )
     selection = tmp_path / "selection.json"
     comparison.write_json(selection, {"cases": cases})
     output = tmp_path / "figure"
@@ -128,9 +201,17 @@ def test_four_row_export_keeps_originals_and_only_downsamples_ours(tmp_path, mon
 
     def save_without_overlapping_labels(figure, *args, **kwargs):
         figure.canvas.draw()
-        bounds = [text.get_window_extent(figure.canvas.get_renderer()) for text in figure.texts]
+        texts = list(figure.texts)
+        for axis in figure.axes:
+            texts.extend([axis.title, *axis.texts])
+        bounds = [text.get_window_extent(figure.canvas.get_renderer()) for text in texts if text.get_text()]
         for index, box in enumerate(bounds):
             assert not any(box.overlaps(other) for other in bounds[index + 1 :])
+        if str(args[0]).endswith("comparison_selected_views.pdf"):
+            expected_wrist = np.asarray(
+                Image.fromarray(expected[1, "ours"][:, ::-1]).resize((160, 160), Image.Resampling.LANCZOS)
+            )
+            np.testing.assert_array_equal(figure.axes[11].images[0].get_array(), expected_wrist)
         return savefig(figure, *args, **kwargs)
 
     monkeypatch.setattr(plt.Figure, "savefig", save_without_overlapping_labels)
@@ -150,5 +231,16 @@ def test_four_row_export_keeps_originals_and_only_downsamples_ours(tmp_path, mon
             np.testing.assert_array_equal(display, reference)
     assert (output / "comparison_primary.pdf").is_file()
     assert (output / "comparison_wrist.pdf").is_file()
+    assert (output / "comparison_selected_views.pdf").is_file()
+    assert (output / "perturbation_reference.pdf").is_file()
+    metadata = json.loads((output / "cases_metadata.json").read_text())["cases"]
+    assert [row["perturbation_type"] for row in metadata] == ["Env", "Env", "Object", "Object"]
+    with (output / "cases_metadata.csv").open(newline="") as stream:
+        assert [row["suite"] for row in csv.DictReader(stream)] == [row["suite"] for row in metadata]
+    assert json.loads((output / "case0/metadata.json").read_text())["suite"] == "libero_goal_env"
+    assert json.loads((output / "case1/metadata.json").read_text())["display_view"] == "wrist"
+    np.testing.assert_array_equal(
+        np.asarray(Image.open(output / "case0/ordinary_reference_primary.png")), initial
+    )
     with pytest.raises(FileExistsError):
         comparison.figure(SimpleNamespace(selection=selection, output_dir=output))

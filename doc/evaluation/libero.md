@@ -150,6 +150,22 @@ Ours 仅降采样展示；原尺寸图片、执行视频、逐条件观测、动
 这是手选的系统级对比：MLP baseline 未接入 Stage-I physical grounding，
 不能将结果归因为 grounding，也不能当作对该机制的消融证据或整体成功率。
 
+`scenes --repo-root REPO --libero-root LIBERO_PRO --manifest JSON --output-dir NEW_DIR`
+可先在 CPU 上渲染普通 LIBERO 与 Pro 的固定初态，核对环境、物体变化是否实际生效。
+两者使用各自的固定初态，并非同一物体位姿；这些参考图是环境渲染图，不是模型预测。
+在 selection 的每例中设置 `reference_directory` 指向对应场景目录，`figure` 会额外输出
+`perturbation_reference.pdf/png`，并核对 Pro 参考输入与两模型的实际初始图逐像素一致。
+
+`rollout` 从原始及扰动 BDDL 提取 suite、扰动类型、环境类、物体 asset、指令、
+目标谓词及文件差异，保存 `perturbation.json`、两份 BDDL 和实际环境 XML。
+物体 asset 的名称不一定等于其实际颜色，外观应以场景渲染和 XML 为准。
+图中逐行标注 suite、Env/Object 等类型、trial 与变化摘要；详细信息另存为每例
+`metadata.json` 和根目录的 `cases_metadata.json/csv`。环境扰动继续保留 catalog 中的
+`initial_state_source`，不会将本地生成的固定初态标成官方提供的原始初态。
+selection 可逐例设置 `display_view` 为 `primary` 或 `wrist`，额外生成
+`comparison_selected_views.pdf/png`；同一行的初始图和两模型始终使用同一相机，
+图中文字及 metadata 同时记录相机选择，两套统一相机版本和原尺寸图片仍完整保留。
+
 ## LIBERO-Plus 环境安装
 
 2026-11-02 将官方源码安装到 `/home/v-wangxiaofa/lzl/LIBERO_PLUS`，

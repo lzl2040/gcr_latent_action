@@ -2,10 +2,13 @@
 """Export actual closed-loop outcomes and the futures sampled with their executed action chunks."""
 
 import argparse
+import csv
+import difflib
 import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,6 +23,13 @@ REVISION = "eafdb809426b13153aa1e4c42d6601844217dfec"
 CAMERAS = {"primary": "agentview_image", "wrist": "robot0_eye_in_hand_image"}
 STATE_KEYS = ("robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos")
 MAX_STEPS = {"libero_spatial": 220, "libero_object": 280, "libero_goal": 300, "libero_10": 520}
+CATEGORY_LABELS = {
+    "environment": "Env",
+    "object": "Object",
+    "position": "Position",
+    "semantic": "Semantic",
+    "task": "Task",
+}
 
 
 def digest(path):
@@ -42,10 +52,93 @@ def forecast_index(offsets, offset):
     return offsets.index(offset)
 
 
+def bddl_section(text, name):
+    match = re.search(rf"\(:{re.escape(name)}\b", text)
+    if match is None:
+        return ""
+    depth = 1
+    for index in range(match.end(), len(text)):
+        depth += (text[index] == "(") - (text[index] == ")")
+        if depth == 0:
+            return text[match.end() : index]
+    raise ValueError(f"Unclosed BDDL {name} section.")
+
+
+def object_assets(text):
+    tokens = bddl_section(text, "objects").split()
+    objects, names, index = {}, [], 0
+    while index < len(tokens):
+        if tokens[index] == "-":
+            objects[tokens[index + 1]] = names
+            names = []
+            index += 2
+        else:
+            names.append(tokens[index])
+            index += 1
+    if names:
+        raise ValueError("Object declarations require explicit asset types.")
+    return objects
+
+
+def describe_perturbation(row, libero_root):
+    variant = Path(row["bddl_file"])
+    original = libero_root / "libero/libero/bddl_files" / row["base_suite"] / variant.name
+    before, after = original.read_text(), variant.read_text()
+    if digest(variant) != row["bddl_sha256"]:
+        raise ValueError("The selected task BDDL changed.")
+    if row.get("original_bddl_sha256", digest(original)) != digest(original):
+        raise ValueError("The ordinary LIBERO reference BDDL changed.")
+    old_objects, new_objects = object_assets(before), object_assets(after)
+    removed = {key: value for key, value in old_objects.items() if new_objects.get(key) != value}
+    added = {key: value for key, value in new_objects.items() if old_objects.get(key) != value}
+    old_problem = re.search(r"\(problem\s+([^\s)]+)", before).group(1)
+    new_problem = re.search(r"\(problem\s+([^\s)]+)", after).group(1)
+    category = row["category"]
+    if category == "environment":
+        summary = f"{row['original_environment']} -> {row['target_environment']}"
+    elif removed or added:
+        summary = f"{', '.join(removed)} -> {', '.join(added)}"
+    else:
+        summary = f"{category} perturbation; see BDDL differences"
+    return {
+        "base_suite": row["base_suite"],
+        "suite": row["suite"],
+        "category": category,
+        "label": CATEGORY_LABELS[category],
+        "summary": summary,
+        "original_bddl_file": str(original.resolve()),
+        "original_bddl_sha256": digest(original),
+        "variant_bddl_file": str(variant.resolve()),
+        "variant_bddl_sha256": digest(variant),
+        "original_problem": old_problem,
+        "variant_problem": new_problem,
+        "environment_changed": old_problem != new_problem,
+        "original_environment": row.get("original_environment"),
+        "target_environment": row.get("target_environment"),
+        "objects_removed": removed,
+        "objects_added": added,
+        "original_objects": old_objects,
+        "variant_objects": new_objects,
+        "original_instruction": " ".join(bddl_section(before, "language").split()),
+        "variant_instruction": " ".join(bddl_section(after, "language").split()),
+        "original_goal": " ".join(bddl_section(before, "goal").split()),
+        "variant_goal": " ".join(bddl_section(after, "goal").split()),
+        "initial_state_source": row["initial_state_source"],
+        "bddl_diff": "".join(
+            difflib.unified_diff(
+                before.splitlines(True), after.splitlines(True), fromfile=str(original), tofile=str(variant)
+            )
+        ),
+        "asset_name_caveat": "Identifiers are asset names, not inferred visible colors; inspect rendered references.",
+    }
+
+
 def check_pair(ours, native):
     for key in ("case_id", "task", "trial", "initial_state_sha256"):
         if ours[key] != native[key]:
             raise ValueError(f"Different paired rollout {key}.")
+    if ours.get("perturbation") != native.get("perturbation"):
+        raise ValueError("Different paired rollout perturbation metadata.")
     if not ours["success"] or native["success"]:
         raise ValueError("Require newly measured Ours success and Cosmos3 failure.")
     if not ours["outcome_from_environment"] or not native["outcome_from_environment"]:
@@ -86,16 +179,10 @@ def load_states(row, trial):
     return values[trial]
 
 
-def rollout(args):
-    import imageio.v2 as imageio
-    import torch
-
+def configure_simulator(args):
     sys.path.insert(0, str(args.repo_root.resolve()))
     from lerobot.evaluation import eval_qwen3vl_mot_libero as common
 
-    torch.set_num_threads(4)
-    device = torch.device(args.device)
-    torch.cuda.set_device(device)
     revision = subprocess.check_output(
         ["git", "-C", str(args.libero_root), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -109,7 +196,80 @@ def rollout(args):
     os.environ.update(MUJOCO_GL="osmesa", PYOPENGL_PLATFORM="osmesa")
     from libero.libero.envs import OffScreenRenderEnv
 
+    return common, OffScreenRenderEnv
+
+
+def scenes(args):
+    import imageio.v2 as imageio
+    import torch
+
+    torch.set_num_threads(4)
+    common, env_type = configure_simulator(args)
+    for case in json.loads(args.manifest.read_text())["cases"]:
+        row, trial = case["task"], case["trial"]
+        details = describe_perturbation(row, args.libero_root)
+        directory = args.output_dir / case["case_id"]
+        directory.mkdir()
+        write_json(directory / "perturbation.json", details)
+        for name in ("ordinary", "pro"):
+            bddl = Path(details[f"{'original' if name == 'ordinary' else 'variant'}_bddl_file"])
+            reference = (
+                args.libero_root / "libero/libero/init_files" / row["base_suite"] / f"{bddl.stem}.pruned_init"
+            )
+            state_row = (
+                {"initial_state_file": str(reference), "initial_states_sha256": digest(reference)}
+                if name == "ordinary"
+                else row
+            )
+            initial = load_states(state_row, trial)
+            env = env_type(
+                bddl_file_name=str(bddl),
+                camera_heights=256,
+                camera_widths=256,
+                control_freq=20,
+                render_gpu_device_id=-1,
+            )
+            try:
+                env.seed(0)
+                np.random.seed(0)
+                env.reset()
+                observation = env.set_init_state(initial)
+                for _ in range(10):
+                    observation, _, _, _ = env.step(common.DUMMY_ACTION)
+                for view, key in CAMERAS.items():
+                    imageio.imwrite(
+                        directory / f"{name}_{view}.png",
+                        common.libero_image(observation, key, 256).permute(1, 2, 0).numpy(),
+                    )
+                (directory / f"{name}_environment.xml").write_text(env.env.model.get_xml())
+                write_json(
+                    directory / f"{name}_reset.json",
+                    {
+                        "trial": trial,
+                        "initial_state_file": state_row["initial_state_file"],
+                        "initial_state_sha256": hashlib.sha256(initial.tobytes()).hexdigest(),
+                        "problem": env.problem_name,
+                        "reference_only": name == "ordinary",
+                        "reset_caveat": "Ordinary and Pro use their own fixed reset states, not matched object poses.",
+                    },
+                )
+            finally:
+                env.close()
+        LOGGER.info("SCENE %s %s: %s", case["case_id"], details["label"], details["summary"])
+
+
+def rollout(args):
+    import imageio.v2 as imageio
+    import torch
+
+    torch.set_num_threads(4)
+    device = torch.device(args.device)
+    torch.cuda.set_device(device)
+    common, env_type = configure_simulator(args)
     manifest = json.loads(args.manifest.read_text())
+    descriptions = {
+        case["case_id"]: describe_perturbation(case["task"], args.libero_root) for case in manifest["cases"]
+    }
     if args.backend == "ours":
         policy = common.load_policy(
             SimpleNamespace(
@@ -177,12 +337,16 @@ def rollout(args):
         initial = load_states(row, trial)
         directory = args.output_dir / case["case_id"]
         directory.mkdir()
+        details = descriptions[case["case_id"]]
+        write_json(directory / "perturbation.json", details)
+        shutil.copy2(details["original_bddl_file"], directory / "ordinary_task.bddl")
+        shutil.copy2(details["variant_bddl_file"], directory / "pro_task.bddl")
         adapter = (
             common.LiberoAdapter.from_dataset(args.dataset_root / common.SUITE_DATASETS[row["base_suite"]])
             if args.backend == "ours"
             else None
         )
-        env = OffScreenRenderEnv(
+        env = env_type(
             bddl_file_name=row["bddl_file"],
             camera_heights=256,
             camera_widths=256,
@@ -203,6 +367,14 @@ def rollout(args):
                     raise ValueError("Task ended during the fixed ten-step settling period.")
             if env.check_success():
                 raise ValueError("Do not select a task already successful before control.")
+            model_xml = env.env.model.get_xml()
+            (directory / "environment.xml").write_text(model_xml)
+            environment_identity = {
+                "problem": env.problem_name,
+                "model_xml_sha256": digest(directory / "environment.xml"),
+            }
+            if env.problem_name.lower() != details["variant_problem"].lower():
+                raise ValueError("The runtime environment does not match the Pro BDDL.")
             policy.reset()
             torch.manual_seed(args.seed)
             success = done = False
@@ -340,6 +512,8 @@ def rollout(args):
             **identity,
             "case_id": case["case_id"],
             "task": row,
+            "perturbation": details,
+            "environment_identity": environment_identity,
             "trial": trial,
             "initial_state_sha256": hashlib.sha256(initial.tobytes()).hexdigest(),
             "success": success,
@@ -365,8 +539,10 @@ def figure(args):
     selection = json.loads(args.selection.read_text())
     if len(selection["cases"]) != 4:
         raise ValueError("The requested publication figure requires exactly four tasks.")
-    tasks = set()
+    tasks, metadata = set(), []
     for case in selection["cases"]:
+        if case.get("display_view", "primary") not in CAMERAS:
+            raise ValueError("Select an existing primary or wrist camera, not an edited view.")
         ours = json.loads((Path(case["ours_directory"]) / "result.json").read_text())
         native = json.loads((Path(case["cosmos3_directory"]) / "result.json").read_text())
         check_pair(ours, native)
@@ -375,17 +551,40 @@ def figure(args):
         if case["case_id"] != ours["case_id"]:
             raise ValueError("Figure case label and measured rollout do not match.")
         tasks.add((ours["task"]["base_suite"], ours["task"]["task_id"]))
+        details = ours.get("perturbation", {})
+        metadata.append(
+            {
+                "case_id": case["case_id"],
+                "base_suite": ours["task"]["base_suite"],
+                "suite": ours["task"].get("suite", ours["task"]["base_suite"]),
+                "perturbation_type": details.get("label", "Unspecified"),
+                "category": ours["task"].get("category", "unspecified"),
+                "summary": details.get("summary", "No perturbation details in this older export"),
+                "task_id": ours["task"]["task_id"],
+                "trial": ours["trial"],
+                "display_view": case.get("display_view", "primary"),
+                "instruction": ours["task"].get("instruction", case["title"]),
+                "initial_state_sha256": ours["initial_state_sha256"],
+                "ours_success": ours["success"],
+                "cosmos3_success": native["success"],
+                "details": details,
+            }
+        )
     if len(tasks) != 4:
         raise ValueError("Use four different base tasks, not four variants of the same task.")
     args.output_dir.mkdir(parents=True, exist_ok=False)
     plt.rcParams.update({"font.family": "DejaVu Sans", "pdf.fonttype": 42, "font.size": 9})
-    for view in CAMERAS:
-        fig, axes = plt.subplots(4, 7, figsize=(14, 9.7))
-        fig.subplots_adjust(left=0.025, right=0.995, bottom=0.08, top=0.87, wspace=0.035, hspace=0.45)
+    output_views = list(CAMERAS)
+    if any("display_view" in case for case in selection["cases"]):
+        output_views.append("selected_views")
+    for output_view in output_views:
+        fig, axes = plt.subplots(4, 7, figsize=(14, 11))
+        fig.subplots_adjust(left=0.025, right=0.995, bottom=0.08, top=0.85, wspace=0.035, hspace=0.65)
         fig.text(0.09, 0.965, "Initial observation", ha="center", fontsize=12)
         fig.text(0.365, 0.965, "Cosmos3-Nano: generated futures", ha="center", fontsize=12)
         fig.text(0.79, 0.965, "Ours: generated futures", ha="center", fontsize=12)
         for row_index, case in enumerate(selection["cases"]):
+            view = case.get("display_view", "primary") if output_view == "selected_views" else output_view
             ours_dir, native_dir = Path(case["ours_directory"]), Path(case["cosmos3_directory"])
             ours = json.loads((ours_dir / "result.json").read_text())
             native = json.loads((native_dir / "result.json").read_text())
@@ -394,13 +593,29 @@ def figure(args):
             np.testing.assert_array_equal(initial, np.asarray(Image.open(native_dir / f"initial_{view}.png")))
             directory = args.output_dir / case["case_id"]
             directory.mkdir(exist_ok=True)
+            if output_view == "primary":
+                write_json(directory / "metadata.json", metadata[row_index])
+                for key, name in [
+                    ("original_bddl_file", "ordinary_task.bddl"),
+                    ("variant_bddl_file", "pro_task.bddl"),
+                ]:
+                    if key in metadata[row_index]["details"]:
+                        shutil.copy2(metadata[row_index]["details"][key], directory / name)
+            if "reference_directory" in case:
+                reference = Path(case["reference_directory"])
+                np.testing.assert_array_equal(initial, np.asarray(Image.open(reference / f"pro_{view}.png")))
+                shutil.copy2(reference / f"ordinary_{view}.png", directory / f"ordinary_reference_{view}.png")
+                if output_view == "primary":
+                    shutil.copy2(
+                        reference / "ordinary_reset.json", directory / "ordinary_reference_reset.json"
+                    )
             initial_display = np.asarray(
                 Image.fromarray(initial).resize((160, 160), Image.Resampling.LANCZOS)
             )
             images, titles = [initial_display], ["Input"]
             Image.fromarray(initial).save(directory / f"initial_{view}_original.png")
-            for name, metadata, source in [("cosmos3", native, native_dir), ("ours", ours, ours_dir)]:
-                for index, snapshot in enumerate(metadata["snapshots"]):
+            for name, model_record, source in [("cosmos3", native, native_dir), ("ours", ours, ours_dir)]:
+                for index, snapshot in enumerate(model_record["snapshots"]):
                     prediction = Path(snapshot["prediction_directory"])
                     if digest(prediction / "frames.npz") != snapshot["prediction_sha256"]:
                         raise ValueError("A decoded prediction changed.")
@@ -419,7 +634,7 @@ def figure(args):
                     Image.fromarray(display).save(directory / f"{name}_{view}_{index + 1:02d}_display.png")
                     images.append(display)
                     titles.append(f"{snapshot['forecast_start_s']:.1f} -> {snapshot['forecast_end_s']:.1f} s")
-                if view == "primary":
+                if output_view == "primary":
                     shutil.copy2(source / "result.json", directory / f"{name}_rollout_result.json")
                     shutil.copy2(source / "actual_rollout.mp4", directory / f"{name}_actual_rollout.mp4")
                     shutil.copy2(source / "actual_final_primary.png", directory / f"{name}_actual_final.png")
@@ -429,7 +644,15 @@ def figure(args):
                 axis.set_axis_off()
                 axis.set_title(title, fontsize=8, pad=3)
             position = axes[row_index, 0].get_position()
-            fig.text(0.025, position.y1 + 0.038, case["title"], fontsize=10, weight="bold")
+            fig.text(0.025, position.y1 + 0.064, case["title"], fontsize=10, weight="bold")
+            info = metadata[row_index]
+            fig.text(
+                0.025,
+                position.y1 + 0.038,
+                f"{info['suite']} | {info['perturbation_type']} | trial {info['trial']} | {view} | {info['summary']}",
+                fontsize=8,
+                color="#35485c",
+            )
             axes[row_index, 2].text(
                 0.5,
                 -0.07,
@@ -453,10 +676,45 @@ def figure(args):
             "Outcomes are environment-verified. Hand-selected system comparison, not a physical-grounding ablation. Native 160 px; Ours downsampled.",
             fontsize=8,
         )
-        fig.savefig(args.output_dir / f"comparison_{view}.pdf", bbox_inches="tight", pad_inches=0.04)
-        fig.savefig(args.output_dir / f"comparison_{view}.png", dpi=220, bbox_inches="tight", pad_inches=0.04)
+        fig.savefig(args.output_dir / f"comparison_{output_view}.pdf", bbox_inches="tight", pad_inches=0.04)
+        fig.savefig(
+            args.output_dir / f"comparison_{output_view}.png", dpi=220, bbox_inches="tight", pad_inches=0.04
+        )
         plt.close(fig)
     write_json(args.output_dir / "selection.json", selection)
+    write_json(args.output_dir / "cases_metadata.json", {"cases": metadata})
+    columns = [key for key in metadata[0] if key != "details"]
+    with (args.output_dir / "cases_metadata.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(metadata)
+    if all("reference_directory" in case for case in selection["cases"]):
+        fig, axes = plt.subplots(4, 2, figsize=(9, 14))
+        fig.subplots_adjust(left=0.04, right=0.98, top=0.91, bottom=0.06, hspace=0.65, wspace=0.05)
+        for index, case in enumerate(selection["cases"]):
+            reference = Path(case["reference_directory"])
+            for column, name in enumerate(("ordinary", "pro")):
+                axes[index, column].imshow(Image.open(reference / f"{name}_primary.png"))
+                axes[index, column].set_axis_off()
+                axes[index, column].set_title(
+                    "Ordinary LIBERO reference" if column == 0 else "LIBERO-PRO input"
+                )
+            pos = axes[index, 0].get_position()
+            info = metadata[index]
+            fig.text(0.04, pos.y1 + 0.055, f"{info['suite']} | {info['perturbation_type']}", weight="bold")
+            fig.text(0.04, pos.y1 + 0.032, info["summary"], fontsize=8)
+        fig.text(
+            0.04,
+            0.018,
+            "Environment-rendered initial scenes, not model predictions. Independently initialized reference poses;\n"
+            "this panel identifies the perturbation, not a matched-state causal comparison.",
+            fontsize=8,
+        )
+        fig.savefig(args.output_dir / "perturbation_reference.pdf", bbox_inches="tight", pad_inches=0.04)
+        fig.savefig(
+            args.output_dir / "perturbation_reference.png", dpi=180, bbox_inches="tight", pad_inches=0.04
+        )
+        plt.close(fig)
 
 
 def main(argv=None):
@@ -475,12 +733,17 @@ def main(argv=None):
     worker.add_argument("--model-dir", type=Path)
     worker.add_argument("--device", default="cuda:0")
     worker.add_argument("--seed", type=int, default=0)
+    inspect = commands.add_parser("scenes")
+    inspect.add_argument("--repo-root", type=Path, required=True)
+    inspect.add_argument("--libero-root", type=Path, required=True)
+    inspect.add_argument("--manifest", type=Path, required=True)
+    inspect.add_argument("--output-dir", type=Path, required=True)
     export = commands.add_parser("figure")
     export.add_argument("--selection", type=Path, required=True)
     export.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    {"rollout": rollout, "figure": figure}[args.command](args)
+    {"rollout": rollout, "figure": figure, "scenes": scenes}[args.command](args)
 
 
 if __name__ == "__main__":
