@@ -54,6 +54,7 @@ def archive_case(case, records, directory):
         "suite": ours["task"]["suite"],
         "task_id": ours["task"]["task_id"],
         "trial": ours["trial"],
+        "sampling_seed": ours.get("seed"),
         "category": ours["task"]["category"],
         "instruction": ours["task"]["instruction"],
         "summary": details["summary"],

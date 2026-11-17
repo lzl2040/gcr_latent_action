@@ -177,6 +177,8 @@ selection 可逐例设置 `display_view` 为 `primary` 或 `wrist`，额外生�
 合集 PDF 与 CSV/JSON 索引。`generated_originals` 保存全部原尺寸解码帧，
 `display` 只保存真实 `+0.8 s` 预测，输入、参考图与执行审计独立存放。
 每张展示图都记录其原始预测目录、条件观测、源帧下标、真实时间和 SHA256。
+索引同时记录每例 `sampling_seed`，配对模型必须使用相同采样 seed。
+探索多个 seed 后选例仍是手选系统展示，不能作为无偏成功率或机制消融。
 默认仍要求新测 Ours 成功、Cosmos3 失败；若保留其他成败结果供筛选，
 必须显式传 `--include-other-outcomes`，且图中仍标注新测真实成败。
 

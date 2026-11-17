@@ -61,6 +61,7 @@ def test_future_selection_rejects_conditioning_or_interpolated_frames(offset):
     [
         ("success", True),
         ("trial", 8),
+        ("seed", 1),
         ("initial_state_sha256", "different"),
         ("outcome_from_environment", False),
         ("perturbation", {"category": "task"}),

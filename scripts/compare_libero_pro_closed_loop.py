@@ -165,6 +165,8 @@ def check_pair(ours, native, require_advantage=True):
     for key in ("case_id", "task", "trial", "initial_state_sha256"):
         if ours[key] != native[key]:
             raise ValueError(f"Different paired rollout {key}.")
+    if ours.get("seed") != native.get("seed"):
+        raise ValueError("Different paired rollout sampling seed.")
     if ours.get("perturbation") != native.get("perturbation"):
         raise ValueError("Different paired rollout perturbation metadata.")
     if require_advantage and (not ours["success"] or native["success"]):

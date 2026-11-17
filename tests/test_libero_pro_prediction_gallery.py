@@ -34,6 +34,7 @@ def test_dense_gallery_preserves_all_original_frames_and_links_only_future_predi
             "perturbation": {"summary": "Bowl and cheese placements swapped", "label": "Position"},
             "initial_state_sha256": "same",
             "trial": 3,
+            "seed": 1,
             "success": name == "ours",
             "steps": steps[-1] + 10,
             "outcome_from_environment": True,
@@ -88,6 +89,7 @@ def test_dense_gallery_preserves_all_original_frames_and_links_only_future_predi
     metadata = json.loads((output / "cases_metadata.json").read_text())["cases"][0]
     archive = output / metadata["relative_directory"]
     assert len(metadata["tiles"]) == 14
+    assert metadata["sampling_seed"] == 1
     for tile in metadata["tiles"]:
         frames = expected[tile["model"], tile["control_step"]]
         with np.load(archive / tile["source_prediction_directory"] / "frames.npz") as data:
