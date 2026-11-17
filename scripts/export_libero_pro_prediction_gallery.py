@@ -44,7 +44,27 @@ def read_pair(case, require_advantage):
     return records
 
 
-def archive_case(case, records, directory):
+def check_task_diversity(pairs, allow_repeated_base_tasks):
+    tasks = [pair["ours"]["task"] for pair in pairs]
+    bases = [(task["base_suite"], task["task_id"]) for task in tasks]
+    variants = [(*base, task["category"]) for base, task in zip(bases, tasks, strict=True)]
+    if len(set(bases)) != len(bases) and not allow_repeated_base_tasks:
+        raise ValueError("Use different base tasks, not multiple variants of one task.")
+    if len(set(variants)) != len(variants):
+        raise ValueError("Repeated base tasks must have different perturbation categories.")
+    return {
+        "different_base_tasks": len(set(bases)),
+        "different_task_category_variants": len(set(variants)),
+        "allow_repeated_base_tasks": allow_repeated_base_tasks,
+        "repeated_base_tasks": [
+            {"base_suite": suite, "task_id": task_id}
+            for suite, task_id in sorted(set(bases))
+            if bases.count((suite, task_id)) > 1
+        ],
+    }
+
+
+def archive_case(case, records, directory, *, repeated_base_task=False):
     directory.mkdir()
     ours = records["ours"]
     details = ours["perturbation"]
@@ -53,6 +73,7 @@ def archive_case(case, records, directory):
         "base_suite": ours["task"]["base_suite"],
         "suite": ours["task"]["suite"],
         "task_id": ours["task"]["task_id"],
+        "base_task_reused_with_different_category": repeated_base_task,
         "trial": ours["trial"],
         "sampling_seed": ours.get("seed"),
         "category": ours["task"]["category"],
@@ -169,7 +190,12 @@ def timeline(metadata, directory, view):
             fontsize=9,
             color="#237441" if metadata[f"{name}_success"] else "#a63726",
         )
-    fig.text(0.075, 0.955, f"{metadata['case_id']} | {view}", fontsize=11, weight="bold")
+    reuse = (
+        " | base task reused across perturbations"
+        if metadata["base_task_reused_with_different_category"]
+        else ""
+    )
+    fig.text(0.075, 0.955, f"{metadata['case_id']} | {view}{reuse}", fontsize=11, weight="bold")
     fig.text(
         0.075,
         0.895,
@@ -242,7 +268,18 @@ def overview(rows, root, view, title):
             f"{'Ours' if name == 'ours' else 'Cosmos3'}: {'success' if row[f'{name}_success'] else 'failure'}"
             for name in ("cosmos3", "ours")
         )
-        fig.text(0.025, top + 19 / height_points, f"{row['suite']} | {outcomes}", fontsize=8, color="#35485c")
+        reuse = (
+            " | base task reused across perturbations"
+            if row.get("base_task_reused_with_different_category")
+            else ""
+        )
+        fig.text(
+            0.025,
+            top + 19 / height_points,
+            f"{row['suite']} | {outcomes}{reuse}",
+            fontsize=8,
+            color="#35485c",
+        )
     fig.text(
         0.025,
         0.025,
@@ -261,9 +298,7 @@ def export_gallery(args):
     if not selection["cases"]:
         raise ValueError("Select at least one measured comparison.")
     pairs = [read_pair(case, not args.include_other_outcomes) for case in selection["cases"]]
-    tasks = [(pair["ours"]["task"]["base_suite"], pair["ours"]["task"]["task_id"]) for pair in pairs]
-    if len(set(tasks)) != len(tasks):
-        raise ValueError("Use different base tasks, not multiple variants of one task.")
+    diversity = check_task_diversity(pairs, args.allow_repeated_base_tasks)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     (args.output_dir / "cases").mkdir()
     plt.rcParams.update({"font.family": "DejaVu Sans", "pdf.fonttype": 42, "font.size": 9})
@@ -275,7 +310,16 @@ def export_gallery(args):
         for index, (case, pair) in enumerate(zip(selection["cases"], pairs, strict=True), 1):
             relative = Path("cases") / f"{index:02d}_{case['case_id']}"
             directory = args.output_dir / relative
-            row = archive_case(case, pair, directory)
+            row = archive_case(
+                case,
+                pair,
+                directory,
+                repeated_base_task={
+                    "base_suite": pair["ours"]["task"]["base_suite"],
+                    "task_id": pair["ours"]["task"]["task_id"],
+                }
+                in diversity["repeated_base_tasks"],
+            )
             row["relative_directory"] = str(relative)
             rows.append(row)
             for view, pdf in (("primary", primary_pdf), ("wrist", wrist_pdf)):
@@ -299,7 +343,7 @@ def export_gallery(args):
                 fig.savefig(args.output_dir / f"{name}.pdf")
                 plt.close(fig)
     common.write_json(args.output_dir / "selection.json", selection)
-    common.write_json(args.output_dir / "cases_metadata.json", {"cases": rows})
+    common.write_json(args.output_dir / "cases_metadata.json", {"task_diversity": diversity, "cases": rows})
     columns = [key for key in rows[0] if key not in ("tiles", "perturbation", "sources")]
     with (args.output_dir / "cases_metadata.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
@@ -308,9 +352,14 @@ def export_gallery(args):
     links = []
     for row in rows:
         relative = html.escape(row["relative_directory"], quote=True)
+        reuse = (
+            " | Base task reused with a different perturbation category"
+            if row["base_task_reused_with_different_category"]
+            else ""
+        )
         links.append(
             f"<h2>{html.escape(row['case_id'])}</h2><p>{html.escape(row['instruction'])}</p>"
-            f"<p>{html.escape(row['suite'])} | Ours: {row['ours_success']} | Cosmos3: {row['cosmos3_success']}</p>"
+            f"<p>{html.escape(row['suite'])} | Ours: {row['ours_success']} | Cosmos3: {row['cosmos3_success']}{reuse}</p>"
             f'<a href="{relative}/comparison_primary.pdf">Primary PDF</a> | '
             f'<a href="{relative}/comparison_wrist.pdf">Wrist PDF</a> | '
             f'<a href="{relative}/metadata.json">Metadata and source frame links</a>'
@@ -321,6 +370,8 @@ def export_gallery(args):
         "<!doctype html><meta charset=utf-8><title>LIBERO-PRO generated prediction screening</title>"
         "<body style='max-width:1700px;margin:20px auto;font:15px sans-serif'>"
         "<h1>LIBERO-PRO generated prediction screening</h1>"
+        f"<p>{len(rows)} comparisons across {diversity['different_base_tasks']} different base tasks. "
+        "Any repeated base task uses a different perturbation category and is explicitly labeled.</p>"
         "<p>Only future tiles are model generated. Initial inputs, independent perturbation references and "
         "execution audits are environment renders. Each future is a +0.8 s forecast from its own replanning "
         "observation. This is a hand-selected system comparison, not a Stage-I grounding ablation.</p>"
@@ -334,6 +385,11 @@ def main():
     parser.add_argument("--selection", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--include-other-outcomes", action="store_true")
+    parser.add_argument(
+        "--allow-repeated-base-tasks",
+        action="store_true",
+        help="Allow multiple perturbation categories of a base task, never repeated trials of the same category.",
+    )
     export_gallery(parser.parse_args())
 
 

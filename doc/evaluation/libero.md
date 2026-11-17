@@ -181,6 +181,10 @@ selection 可逐例设置 `display_view` 为 `primary` 或 `wrist`，额外生�
 探索多个 seed 后选例仍是手选系统展示，不能作为无偏成功率或机制消融。
 默认仍要求新测 Ours 成功、Cosmos3 失败；若保留其他成败结果供筛选，
 必须显式传 `--include-other-outcomes`，且图中仍标注新测真实成败。
+若经确认允许少量基础任务复用，另显式传 `--allow-repeated-base-tasks`；
+同一基础任务只能选不同扰动类别，不能用同类不同 trial 或 seed 凑数。
+该选项不放宽成败或来源校验；图库记录不同基础任务数，并在图、HTML 与 metadata
+中标明复用项，默认及原四例导出仍要求基础任务不重复。
 
 ## LIBERO-Plus 环境安装
 

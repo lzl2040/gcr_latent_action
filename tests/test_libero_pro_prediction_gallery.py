@@ -9,6 +9,31 @@ from scripts import compare_libero_pro_closed_loop as common
 from scripts import export_libero_pro_prediction_gallery as gallery
 
 
+@pytest.mark.parametrize(
+    ("categories", "allowed", "error"),
+    [
+        (["position", "object"], False, "different base tasks"),
+        (["position", "object"], True, None),
+        (["object", "object"], True, "different perturbation categories"),
+    ],
+)
+def test_repeated_base_tasks_require_opt_in_and_different_categories(categories, allowed, error):
+    pairs = [
+        {"ours": {"task": {"base_suite": "libero_goal", "task_id": 4, "category": category}}}
+        for category in categories
+    ]
+    if error:
+        with pytest.raises(ValueError, match=error):
+            gallery.check_task_diversity(pairs, allowed)
+    else:
+        assert gallery.check_task_diversity(pairs, allowed) == {
+            "different_base_tasks": 1,
+            "different_task_category_variants": 2,
+            "allow_repeated_base_tasks": True,
+            "repeated_base_tasks": [{"base_suite": "libero_goal", "task_id": 4}],
+        }
+
+
 def test_dense_gallery_preserves_all_original_frames_and_links_only_future_predictions(tmp_path, monkeypatch):
     import matplotlib.pyplot as plt
 
@@ -84,12 +109,18 @@ def test_dense_gallery_preserves_all_original_frames_and_links_only_future_predi
 
     monkeypatch.setattr(plt.Figure, "savefig", checked_savefig)
     gallery.export_gallery(
-        SimpleNamespace(selection=selection, output_dir=output, include_other_outcomes=False)
+        SimpleNamespace(
+            selection=selection,
+            output_dir=output,
+            include_other_outcomes=False,
+            allow_repeated_base_tasks=False,
+        )
     )
     metadata = json.loads((output / "cases_metadata.json").read_text())["cases"][0]
     archive = output / metadata["relative_directory"]
     assert len(metadata["tiles"]) == 14
     assert metadata["sampling_seed"] == 1
+    assert not metadata["base_task_reused_with_different_category"]
     for tile in metadata["tiles"]:
         frames = expected[tile["model"], tile["control_step"]]
         with np.load(archive / tile["source_prediction_directory"] / "frames.npz") as data:
@@ -109,5 +140,10 @@ def test_dense_gallery_preserves_all_original_frames_and_links_only_future_predi
     assert (output / "index.html").is_file()
     with pytest.raises(FileExistsError):
         gallery.export_gallery(
-            SimpleNamespace(selection=selection, output_dir=output, include_other_outcomes=False)
+            SimpleNamespace(
+                selection=selection,
+                output_dir=output,
+                include_other_outcomes=False,
+                allow_repeated_base_tasks=False,
+            )
         )
