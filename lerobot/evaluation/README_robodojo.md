@@ -5852,3 +5852,32 @@ Final evidence is retained in
 Actual and predicted video paths follow the15k layout above. Successful
 bottle head-camera videos are `episode_0000001_cam_head_success.mp4`
 and `episode_0000002_cam_head_success.mp4`.
+
+### Low-FPS step32k comparison (2026-11-17)
+
+The user requested `step32k` from the same
+`robodojo_2nodes_8gpu_high_noise_shift_5_fps12_decay32k` experiment.
+The checkpoint passed a30s size/mtime stability check and full SHA256
+verification of35 checkpoint/config files (23353964817 bytes), valid
+DCP storage ranges and1357 tensor keys/shapes/dtypes matching the
+verified no-Stage1 physical-MLP model.
+
+Against completed15k,16k and22k, all32 model-shard hashes differ;
+policy/training config hashes, full12.5FPS dataset metadata/statistics/
+Parquet fingerprints, training action contract, original task/layout
+specifications,761 native asset hashes and clean runtime commit
+`5a9dd0333ed63baaf0ce046e83596f5521b35ee3` are identical. Original25Hz
+simulator timing was rechecked. No evaluation/model code or dependency
+changes were needed.
+
+Use the same tasks (`stack_bowls`, `put_bottles_into_dustbin`,
+`insert_tubes`), original layouts0/1/2, seed0, BF16, sampling10,
+10 model actions per request and2 native ticks per decoded absolute
+target. Preserve original horizons, stability gates, cameras and
+actual/predicted video switches.32k uses port19232 and output
+`outputs/evaluation/robodojo/fps12p5_mlp_step32k_three_tasks_sampling10_20261117_v1`.
+Provenance/preflight are in the same experiment runtime-assets cache:
+`checkpoint_provenance_step32k.json` and
+`three_tasks_step32k_preflight_20261117.json`.
+Strict model restoration and real rollout startup remain separate checks;
+these preflight checks alone are not benchmark results.
