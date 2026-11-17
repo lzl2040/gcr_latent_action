@@ -32,6 +32,24 @@ def test_three_replans_never_duplicates_an_observation():
         comparison.three_replans(2)
 
 
+@pytest.mark.parametrize(
+    "count,maximum,expected",
+    [(1, 9, [0]), (2, 9, [0, 1]), (3, 9, [0, 1, 2]), (14, 3, [0, 6, 13]), (14, 5, [0, 3, 6, 9, 13])],
+)
+def test_dense_replans_include_endpoints_without_duplicating_short_rollouts(count, maximum, expected):
+    assert comparison.prediction_replans(count, maximum) == expected
+
+
+def test_dense_forecast_validation_keeps_the_executed_action_check():
+    record = {"snapshots": snapshots(list(range(17)))[:2]}
+    comparison.check_snapshots(record, expected_count=None)
+    with pytest.raises(ValueError, match="expected count"):
+        comparison.check_snapshots(record)
+    record["snapshots"][1]["jointly_sampled_with_executed_action_prefix"] = False
+    with pytest.raises(ValueError, match="correspondence"):
+        comparison.check_snapshots(record, expected_count=None)
+
+
 @pytest.mark.parametrize("offset", [0, 3, 32])
 def test_future_selection_rejects_conditioning_or_interpolated_frames(offset):
     with pytest.raises(ValueError, match="strictly future"):
@@ -80,7 +98,7 @@ def test_forecast_validation_rejects_misleading_replanned_futures(change):
         comparison.check_snapshots(record)
 
 
-@pytest.mark.parametrize("category", ["environment", "object"])
+@pytest.mark.parametrize("category", ["environment", "object", "position"])
 def test_perturbation_metadata_describes_actual_bddl_changes(tmp_path, category):
     root = tmp_path / "libero"
     original = root / "libero/libero/bddl_files/libero_goal/example.bddl"
@@ -91,12 +109,17 @@ def test_perturbation_metadata_describes_actual_bddl_changes(tmp_path, category)
         "(define (problem LIBERO_Tabletop_Manipulation) "
         "(:language place the bowl) "
         "(:objects bowl_1 bowl_2 - bowl plate_1 - plate) "
+        "(:init (On bowl_1 table_left_region) (On plate_1 table_right_region)) "
         "(:goal (And (On bowl_1 plate_1))))"
     )
     after = (
         before.replace("LIBERO_Tabletop_Manipulation", "LIBERO_Living_Room_Tabletop_Manipulation")
         if category == "environment"
-        else before.replace("bowl", "bigger_bowl").replace("place the bigger_bowl", "place the bowl")
+        else (
+            before.replace("table_left_region", "table_middle_region")
+            if category == "position"
+            else before.replace("bowl", "bigger_bowl").replace("place the bigger_bowl", "place the bowl")
+        )
     )
     original.write_text(before)
     variant.write_text(after)
@@ -120,8 +143,14 @@ def test_perturbation_metadata_describes_actual_bddl_changes(tmp_path, category)
         assert result["objects_removed"] == {"bowl": ["bowl_1", "bowl_2"]}
         assert result["objects_added"] == {"bigger_bowl": ["bigger_bowl_1", "bigger_bowl_2"]}
         assert result["original_goal"] != result["variant_goal"]
-    else:
+    elif category == "environment":
         assert result["summary"] == "main_table -> living_room_table"
+    else:
+        assert result["placement_changes"] == {
+            "bowl_1": {"original_region": "table_left_region", "variant_region": "table_middle_region"}
+        }
+        assert result["original_objects"] == result["variant_objects"]
+        assert result["original_goal"] == result["variant_goal"]
     variant.write_text(after + "\n")
     with pytest.raises(ValueError, match="BDDL changed"):
         comparison.describe_perturbation(row, root)

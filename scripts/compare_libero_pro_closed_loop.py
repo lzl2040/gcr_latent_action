@@ -46,6 +46,15 @@ def three_replans(count):
     return [0, (count - 1) // 2, count - 1]
 
 
+def prediction_replans(count, maximum):
+    if count < 1 or maximum < 3:
+        raise ValueError("Require at least one executed plan and a snapshot limit of at least three.")
+    selected = min(count, maximum)
+    if selected == 1:
+        return [0]
+    return [(count - 1) * index // (selected - 1) for index in range(selected)]
+
+
 def forecast_index(offsets, offset):
     if offset <= 0 or offset not in offsets:
         raise ValueError("The forecast must be an actual, strictly future decoded frame.")
@@ -93,9 +102,23 @@ def describe_perturbation(row, libero_root):
     added = {key: value for key, value in new_objects.items() if old_objects.get(key) != value}
     old_problem = re.search(r"\(problem\s+([^\s)]+)", before).group(1)
     new_problem = re.search(r"\(problem\s+([^\s)]+)", after).group(1)
+    placements = [
+        dict(re.findall(r"\((?:On|In)\s+([^\s()]+)\s+([^\s()]+)\)", bddl_section(text, "init")))
+        for text in (before, after)
+    ]
+    moved = {
+        name: {"original_region": region, "variant_region": placements[1][name]}
+        for name, region in placements[0].items()
+        if name in placements[1] and region != placements[1][name]
+    }
     category = row["category"]
     if category == "environment":
         summary = f"{row['original_environment']} -> {row['target_environment']}"
+    elif category == "position" and moved:
+        names = list(moved)
+        summary = "Reassigned placements: " + ", ".join(names[:2])
+        if len(names) > 2:
+            summary += f" (+{len(names) - 2} others)"
     elif removed or added:
         summary = f"{', '.join(removed)} -> {', '.join(added)}"
     else:
@@ -123,6 +146,11 @@ def describe_perturbation(row, libero_root):
         "variant_instruction": " ".join(bddl_section(after, "language").split()),
         "original_goal": " ".join(bddl_section(before, "goal").split()),
         "variant_goal": " ".join(bddl_section(after, "goal").split()),
+        "placement_changes": moved,
+        "original_initial_predicates": " ".join(bddl_section(before, "init").split()),
+        "variant_initial_predicates": " ".join(bddl_section(after, "init").split()),
+        "original_regions": " ".join(bddl_section(before, "regions").split()),
+        "variant_regions": " ".join(bddl_section(after, "regions").split()),
         "initial_state_source": row["initial_state_source"],
         "bddl_diff": "".join(
             difflib.unified_diff(
@@ -145,11 +173,16 @@ def check_pair(ours, native):
         raise ValueError("Image-only or archived outcomes cannot label these new predictions.")
 
 
-def check_snapshots(record):
+def check_snapshots(record, expected_count=3):
     snapshots = record["snapshots"]
     steps = [snapshot["control_step"] for snapshot in snapshots]
-    if len(steps) != 3 or steps[0] < 0 or not np.all(np.diff(steps) > 0):
-        raise ValueError("Require three chronological, distinct replanning observations.")
+    if (
+        not steps
+        or (expected_count is not None and len(steps) != expected_count)
+        or steps[0] < 0
+        or not np.all(np.diff(steps) > 0)
+    ):
+        raise ValueError("Require chronological, distinct replanning observations and the expected count.")
     for snapshot in snapshots:
         index = forecast_index(snapshot["decoded_source_offsets"], 16)
         if (
@@ -177,6 +210,16 @@ def load_states(row, trial):
     if values.ndim != 2 or not 0 <= trial < len(values) or not np.isfinite(values[trial]).all():
         raise ValueError("Invalid fixed initial state.")
     return values[trial]
+
+
+def object_poses(env):
+    return {
+        name: {
+            "world_position_m": env.env.sim.data.body_xpos[body_id].tolist(),
+            "world_quaternion_wxyz": env.env.sim.data.body_xquat[body_id].tolist(),
+        }
+        for name, body_id in env.env.obj_body_id.items()
+    }
 
 
 def configure_simulator(args):
@@ -249,6 +292,7 @@ def scenes(args):
                         "initial_state_file": state_row["initial_state_file"],
                         "initial_state_sha256": hashlib.sha256(initial.tobytes()).hexdigest(),
                         "problem": env.problem_name,
+                        "object_poses": object_poses(env),
                         "reference_only": name == "ordinary",
                         "reset_caveat": "Ordinary and Pro use their own fixed reset states, not matched object poses.",
                     },
@@ -263,6 +307,7 @@ def rollout(args):
     import torch
 
     torch.set_num_threads(4)
+    prediction_replans(1, args.prediction_snapshots)
     device = torch.device(args.device)
     torch.cuda.set_device(device)
     common, env_type = configure_simulator(args)
@@ -327,6 +372,7 @@ def rollout(args):
         manifest_sha256=digest(args.manifest),
         future_ground_truth_conditioning=False,
         protocol="new_single_episode_closed_loop_joint_prediction",
+        decoded_replan_limit=args.prediction_snapshots,
     )
     write_json(args.output_dir / "run.json", identity)
     results = []
@@ -372,6 +418,7 @@ def rollout(args):
             environment_identity = {
                 "problem": env.problem_name,
                 "model_xml_sha256": digest(directory / "environment.xml"),
+                "initial_object_poses": object_poses(env),
             }
             if env.problem_name.lower() != details["variant_problem"].lower():
                 raise ValueError("The runtime environment does not match the Pro BDDL.")
@@ -454,7 +501,7 @@ def rollout(args):
         np.testing.assert_array_equal(planned[: len(executed)], np.asarray(executed))
         np.save(directory / "executed_actions.npy", np.asarray(executed, dtype=np.float32))
         torch.save(plans, directory / "all_joint_plans.pt")
-        selected = three_replans(len(plans))
+        selected = prediction_replans(len(plans), args.prediction_snapshots)
         snapshots = []
         for index in selected:
             plan = plans[index]
@@ -733,6 +780,7 @@ def main(argv=None):
     worker.add_argument("--model-dir", type=Path)
     worker.add_argument("--device", default="cuda:0")
     worker.add_argument("--seed", type=int, default=0)
+    worker.add_argument("--prediction-snapshots", type=int, default=3)
     inspect = commands.add_parser("scenes")
     inspect.add_argument("--repo-root", type=Path, required=True)
     inspect.add_argument("--libero-root", type=Path, required=True)

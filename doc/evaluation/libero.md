@@ -138,7 +138,10 @@ LIBERO-Pro 候选，保存在
 `scripts/compare_libero_pro_closed_loop.py` 将完整闭环执行与生成图一起留档。
 `rollout` 子命令分别在原 baseline 和 native Cosmos3 Python/源码环境中运行，
 使用 `--manifest` 指定的固定任务及初态。每次联合采样的动作前缀真正送入环境；
-仅在执行结束后解码首、中、末三次重规划的同批视频 latent，避免将实拍帧冒充预测。
+仅在执行结束后解码重规划的同批视频 latent，避免将实拍帧冒充预测。
+默认取首、中、末三次；`--prediction-snapshots 9` 可均匀选取至多九次，
+每次保留双相机的全部原生预测帧，不重新采样，也不改变实际执行的动作。
+不足九次重规划时只保存真实发生的重规划，绝不重复或插帧凑数。
 baseline 沿用 10 步执行前缀，Cosmos3 沿用原生 16 步窗口及执行前缀，不扩长窗口。
 两者均导出每次重规划后 `+0.8 s` 的实际生成帧，并分别标注条件时刻和预测时刻；
 因此不是单张初始图像无反馈生成完整任务，三次预测也不必来自相同绝对时刻。
@@ -159,6 +162,8 @@ Ours 仅降采样展示；原尺寸图片、执行视频、逐条件观测、动
 `rollout` 从原始及扰动 BDDL 提取 suite、扰动类型、环境类、物体 asset、指令、
 目标谓词及文件差异，保存 `perturbation.json`、两份 BDDL 和实际环境 XML。
 物体 asset 的名称不一定等于其实际颜色，外观应以场景渲染和 XML 为准。
+Position 扰动另存各物体原始/扰动后的初始区域、完整初始谓词与区域定义；
+场景参考和实际 rollout 同时记录 reset 后的物体世界坐标及 wxyz 四元数。
 图中逐行标注 suite、Env/Object 等类型、trial 与变化摘要；详细信息另存为每例
 `metadata.json` 和根目录的 `cases_metadata.json/csv`。环境扰动继续保留 catalog 中的
 `initial_state_source`，不会将本地生成的固定初态标成官方提供的原始初态。
