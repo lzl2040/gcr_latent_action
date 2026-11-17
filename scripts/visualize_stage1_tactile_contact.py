@@ -346,7 +346,8 @@ def reconstruction_metrics(gt, prediction):
     gt = gt.float() / 255
     prediction = prediction.float().clamp(0, 1)
     mse = (gt - prediction).square().mean(dim=(1, 2, 3)).numpy()
-    delta_gt, delta_prediction = gt[-1] - gt[0], prediction[-1] - prediction[0]
+    changed = (gt - gt[0]).square().mean(dim=(1, 2, 3)).argmax().item()
+    delta_gt, delta_prediction = gt[changed] - gt[0], prediction[changed] - prediction[0]
     mask = delta_gt.abs().mean(0) > 0.025
     a, b = delta_gt[:, mask].flatten(), delta_prediction[:, mask].flatten()
     correlation = float(functional.cosine_similarity(a[None], b[None]).item()) if a.numel() else 0.0
@@ -367,6 +368,7 @@ def reconstruction_metrics(gt, prediction):
         "mean_ssim": float(np.mean(ssim)),
         "changing_pixel_fraction": float(mask.float().mean()),
         "contact_delta_cosine": correlation,
+        "contact_delta_frame_pair_positions": [0, changed],
         "reconstructed_delta_norm_ratio": ratio,
         "nonconstant_contact_reconstruction": correlation > 0.2 and 0.15 < ratio < 3,
     }
@@ -405,7 +407,7 @@ def rgb_keys(info, tactile_key):
     side = "right" if "right" in tactile_key and "left" not in tactile_key.split("wrist")[0] else "left"
     wrist = next((key for key in keys if side in key and "wrist" in key), None)
     primary = next((key for key in keys if "third_view" in key or key.endswith(".ego")), None)
-    return list(dict.fromkeys(key for key in (wrist, primary, *keys[:1]) if key))
+    return list(dict.fromkeys(key for key in (wrist, primary, *keys) if key))
 
 
 def case_directory(root, record):
@@ -459,40 +461,138 @@ def make_figure(record, rgb, gt, prediction, native_gt=None):
             ("Ours\n(ROI reconstruction)" if tactile_rectangle else "Ours\n(reconstruction)", prediction),
         ]
     )
+    count = len(record["frame_indices"])
+    if not count or any(len(images) != count for _, images in rows):
+        raise ValueError("RGB, GT, reconstruction, and frame indices must have matching nonzero lengths.")
+    columns = record.get("figure_columns", 5)
+    if not isinstance(columns, int) or columns < 1:
+        raise ValueError("Figure columns must be a positive integer.")
+    columns = min(columns, count)
+    blocks = (count + columns - 1) // columns
     ratios = [images.shape[1] / images.shape[2] for _, images in rows]
+    hspace = 0.17 if blocks > 1 else 0.04
+    phases = record.get("frame_phases")
+    if phases is not None and len(phases) != count:
+        raise ValueError("Phase labels must match the chronological frames.")
+    top = 0.88 if phases else 0.92
+    height = 1.3 * sum(ratios)
+    if blocks > 1 or columns != 5:
+        column_width = 7.1 * (0.995 - 0.17) / (columns + 0.035 * (columns - 1))
+        heights = ratios * blocks
+        height = column_width * (sum(heights) + hspace * np.mean(heights) * (len(heights) - 1))
+        height /= top - 0.015
     figure, axes = plt.subplots(
-        len(rows),
-        5,
-        figsize=(7.1, 1.3 * sum(ratios)),
-        gridspec_kw={"hspace": 0.04, "wspace": 0.035, "height_ratios": ratios},
+        len(rows) * blocks,
+        columns,
+        squeeze=False,
+        figsize=(7.1, height),
+        gridspec_kw={"hspace": hspace, "wspace": 0.035, "height_ratios": ratios * blocks},
     )
     times = np.asarray(
         record.get("dataset_frame_timestamps_s", np.asarray(record["frame_indices"]) / record["fps"])
     )
     times = times - times[0]
-    phases = record.get("frame_phases")
-    for row, (label, images) in enumerate(rows):
-        for column, image in enumerate(images):
-            axis = axes[row, column]
-            axis.imshow(image, interpolation="nearest", vmin=0, vmax=255)
-            axis.set_xticks([])
-            axis.set_yticks([])
-            for spine in axis.spines.values():
-                spine.set_visible(False)
-            if row == 0:
-                title = f"$t={times[column]:.2f}$ s"
-                if phases:
-                    title = phases[column] + "\n" + title
-                axis.set_title(
-                    title,
-                    fontsize=8,
-                    pad=4,
-                    color=("#245b8a" if column < 2 else "#a84d14") if phases else "black",
-                )
-            if column == 0:
-                axis.set_ylabel(label, rotation=0, ha="right", va="center", labelpad=8)
-    figure.subplots_adjust(left=0.17, right=0.995, bottom=0.015, top=0.88 if phases else 0.92)
+    for block in range(blocks):
+        for row, (label, images) in enumerate(rows):
+            for column in range(columns):
+                axis = axes[block * len(rows) + row, column]
+                index = block * columns + column
+                if index >= count:
+                    axis.set_axis_off()
+                    continue
+                axis.imshow(images[index], interpolation="nearest", vmin=0, vmax=255)
+                axis.set_xticks([])
+                axis.set_yticks([])
+                for spine in axis.spines.values():
+                    spine.set_visible(False)
+                if row == 0:
+                    title = f"$t={times[index]:.2f}$ s"
+                    if phases:
+                        title = phases[index] + "\n" + title
+                    axis.set_title(
+                        title,
+                        fontsize=8,
+                        pad=4,
+                        color=("#245b8a" if index < 2 else "#a84d14") if phases else "black",
+                    )
+                if column == 0:
+                    axis.set_ylabel(label, rotation=0, ha="right", va="center", labelpad=8)
+    figure.subplots_adjust(left=0.17, right=0.995, bottom=0.015, top=top)
     return figure
+
+
+def export_dense_sequence(record, codec, directory):
+    """Keep the original-time motion that can be ambiguous in sparse contact figures."""
+    import imageio.v2 as imageio
+    from PIL import ImageDraw, ImageOps
+
+    root = Path(record["dataset_root"])
+    info = json.loads((root / "meta/info.json").read_text())
+    indices = list(range(record["frame_indices"][0], record["frame_indices"][-1] + 1))
+    data_sync = episode_frame_times(root, info, record["episode"], indices)
+    times = data_sync["timestamp_s"]
+    tactile, tactile_sync = read_frames(
+        root, info, record["episode"], record["tactile_key"], indices, episode_times=times
+    )
+    rgb, rgb_sync = read_frames(
+        root, info, record["episode"], record["figure_rgb_key"], indices, episode_times=times
+    )
+    gt = resize_tactile(tactile, codec.provenance["image_size"])
+    predictions = [
+        codec.reconstruct(batch, record["pixel_mean_01"], record["pixel_std_01"]) for batch in gt.split(16)
+    ]
+    ours = torch.cat(predictions).clamp(0, 1).mul(255).round().to(torch.uint8).permute(0, 2, 3, 1).numpy()
+    gt = gt.permute(0, 2, 3, 1).numpy()
+    np.savez_compressed(
+        directory / "dense_sequence.npz",
+        frame_indices=indices,
+        timestamp_s=times,
+        rgb_original=rgb,
+        gt_tactile=gt,
+        ours_tactile=ours,
+    )
+    display_rgb = crop_rgb(rgb, record.get("figure_rgb_crop"))
+    videos = []
+    for speed, filename in ((1.0, "sequence.mp4"), (0.5, "sequence_half_speed.mp4")):
+        with imageio.get_writer(
+            directory / filename,
+            fps=info["fps"] * speed,
+            codec="libx264",
+            macro_block_size=1,
+            output_params=["-threads", "2"],
+        ) as writer:
+            for index in range(len(indices)):
+                canvas = Image.new("RGB", (672, 256), "white")
+                draw = ImageDraw.Draw(canvas)
+                for column, (label, frame) in enumerate(
+                    (
+                        ("RGB", display_rgb[index]),
+                        ("GT tactile", gt[index]),
+                        ("Ours reconstruction", ours[index]),
+                    )
+                ):
+                    tile = ImageOps.pad(
+                        Image.fromarray(frame),
+                        (224, 224),
+                        method=Image.Resampling.LANCZOS if column == 0 else Image.Resampling.NEAREST,
+                        color="white",
+                    )
+                    canvas.paste(tile, (column * 224, 32))
+                    draw.text((column * 224 + 5, 4), label, fill="black")
+                draw.text((5, 18), f"t={times[index] - times[0]:.3f}s | {speed:g}x playback", fill="black")
+                writer.append_data(np.asarray(canvas))
+        videos.append({"file": filename, "playback_speed": speed, "encoded_fps": info["fps"] * speed})
+    return {
+        "frames_file": "dense_sequence.npz",
+        "frame_count": len(indices),
+        "start_frame": indices[0],
+        "end_frame": indices[-1],
+        "source_fps": info["fps"],
+        "videos": videos,
+        "dataset_synchronization": data_sync,
+        "synchronization": {record["tactile_key"]: tactile_sync, record["figure_rgb_key"]: rgb_sync},
+        "interpretation": "Every source frame in the interval, without temporal interpolation. GT tactile autoencoding, not future prediction. Image response and visible hand action are not calibrated force.",
+    }
 
 
 def export_case(record, codec, output_dir, figure_rgb_key=None, rgb_crop=None, tactile_crop=None):
@@ -575,6 +675,8 @@ def export_case(record, codec, output_dir, figure_rgb_key=None, rgb_crop=None, t
         "display": "GT and Ours use the same fixed RGB range; no per-frame contrast adjustment.",
         "interpretation": "Hand-selected tactile autoencoder reconstruction; not future tactile prediction, calibrated pressure, or a dataset-wide benchmark.",
     }
+    if record.get("export_dense_sequence", False):
+        metadata["dense_sequence"] = export_dense_sequence(metadata, codec, directory)
     write_json(directory / "metadata.json", metadata)
     LOGGER.info("Saved %s", directory)
     return directory

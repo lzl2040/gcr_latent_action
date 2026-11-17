@@ -64,6 +64,18 @@ def test_good_static_background_is_not_enough_for_contact_reconstruction():
     assert not constant["nonconstant_contact_reconstruction"]
 
 
+def test_contact_reconstruction_is_checked_even_when_the_object_is_released_at_the_end():
+    gt = torch.full((5, 3, 32, 32), 30, dtype=torch.uint8)
+    gt[1:4, :, 10:22, 10:22] = 180
+    gt[2, :, 10:22, 10:22] = 230
+    correct = visualization.reconstruction_metrics(gt, gt.float() / 255)
+    constant = visualization.reconstruction_metrics(gt, gt[:1].expand_as(gt).float() / 255)
+    assert correct["contact_delta_frame_pair_positions"] == [0, 2]
+    assert correct["contact_delta_cosine"] == pytest.approx(1)
+    assert correct["nonconstant_contact_reconstruction"]
+    assert not constant["nonconstant_contact_reconstruction"]
+
+
 def test_video_reader_uses_each_camera_file_offset_and_preserves_episode_times(tmp_path, monkeypatch):
     import av
 
@@ -171,16 +183,20 @@ def test_export_respects_per_case_rgb_view_and_crop_with_explicit_overrides(tmp_
 
     root = tmp_path / "dataset"
     (root / "meta").mkdir(parents=True)
-    tactile, wrist, ego = (
+    tactile, wrist, opposite_wrist, ego = (
         "observation.images.tactile_right_0",
         "observation.images.right_wrist_camera",
+        "observation.images.left_wrist_camera",
         "observation.images.ego",
     )
     (root / "meta/info.json").write_text(
-        json.dumps({"features": {key: {"dtype": "video"} for key in (tactile, wrist, ego)}})
+        json.dumps({"features": {key: {"dtype": "video"} for key in (tactile, wrist, opposite_wrist, ego)}})
     )
     pattern = np.broadcast_to(np.arange(32, dtype=np.uint8)[None, None, :, None], (5, 32, 32, 3))
-    frames = {key: pattern + offset for key, offset in ((tactile, 20), (wrist, 60), (ego, 100))}
+    frames = {
+        key: pattern + offset
+        for key, offset in ((tactile, 20), (wrist, 60), (opposite_wrist, 80), (ego, 100))
+    }
     monkeypatch.setattr(
         visualization, "read_frames", lambda root, info, episode, key, *a, **k: (frames[key], {})
     )
@@ -206,9 +222,9 @@ def test_export_respects_per_case_rgb_view_and_crop_with_explicit_overrides(tmp_
         provenance={"image_size": 32},
         reconstruct=lambda images, mean, std: images.float() / 255,
     )
-    options = {"figure_rgb_key": wrist, "rgb_crop": [0.5, 0, 1, 1]} if override else {}
+    options = {"figure_rgb_key": opposite_wrist, "rgb_crop": [0.5, 0, 1, 1]} if override else {}
     directory = visualization.export_case(record, codec, tmp_path / "output", **options)
-    chosen = wrist if override else ego
+    chosen = opposite_wrist if override else ego
     expected_crop = frames[chosen][0, :, 16:] if override else frames[chosen][0, :, :16]
     np.testing.assert_array_equal(
         np.array(Image.open(next((directory / "rgb").glob("00_*.png")))), frames[chosen][0]
@@ -219,3 +235,96 @@ def test_export_respects_per_case_rgb_view_and_crop_with_explicit_overrides(tmp_
     np.testing.assert_array_equal(
         np.array(Image.open(next((directory / "gt_tactile").glob("00_*.png")))), frames[tactile][0]
     )
+
+
+@pytest.mark.parametrize("count", [8, 9])
+def test_long_figures_wrap_without_dropping_or_reordering_synchronized_frames(count):
+    import matplotlib.pyplot as plt
+
+    record = {
+        "frame_indices": [index * 3 for index in range(count)],
+        "fps": 30,
+        "figure_columns": 4,
+        "frame_phases": ["Before change"] * 2 + ["During manipulation"] * (count - 2),
+    }
+    rgb = np.broadcast_to(np.arange(count, dtype=np.uint8)[:, None, None, None], (count, 16, 16, 3))
+    rows = (rgb, rgb + 20, rgb + 40)
+    figure = visualization.make_figure(record, *rows)
+    try:
+        for index in range(count):
+            block, column = divmod(index, 4)
+            for row, frames in enumerate(rows):
+                axis = figure.axes[(block * 3 + row) * 4 + column]
+                np.testing.assert_array_equal(axis.images[0].get_array(), frames[index])
+                if row == 0:
+                    assert f"{index / 10:.2f}" in axis.get_title()
+        if count % 4:
+            assert not figure.axes[-1].images and not figure.axes[-1].axison
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        text_boxes = [axis.title.get_window_extent(renderer) for axis in figure.axes if axis.title.get_text()]
+        assert not any(
+            left.overlaps(right) for index, left in enumerate(text_boxes) for right in text_boxes[index + 1 :]
+        )
+    finally:
+        plt.close(figure)
+
+
+def test_dense_sequence_keeps_every_source_frame_and_its_actual_timestamp(tmp_path, monkeypatch):
+    import imageio.v2 as imageio
+
+    root = tmp_path / "source"
+    (root / "meta").mkdir(parents=True)
+    (root / "meta/info.json").write_text(json.dumps({"fps": 30}))
+    indices = list(range(3, 10))
+    times = [index / 30 + 1e-6 for index in indices]
+    monkeypatch.setattr(visualization, "episode_frame_times", lambda *args: {"timestamp_s": times})
+
+    def frames(root, info, episode, key, requested, episode_times):
+        assert requested == indices and episode_times == times
+        pixels = np.asarray(indices, dtype=np.uint8)[:, None, None, None] + (20 if key == "rgb" else 60)
+        return np.broadcast_to(pixels, (7, 32, 32, 3)).copy(), {"actual_episode_times_s": times}
+
+    monkeypatch.setattr(visualization, "read_frames", frames)
+    writers = []
+
+    class Writer:
+        def __init__(self, path, **options):
+            self.path, self.options, self.frames = path, options, []
+            writers.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def append_data(self, image):
+            self.frames.append(image.copy())
+
+    monkeypatch.setattr(imageio, "get_writer", Writer)
+    codec = SimpleNamespace(
+        provenance={"image_size": 32},
+        reconstruct=lambda images, mean, std: images.float() / 255,
+    )
+    record = {
+        "dataset_root": str(root),
+        "episode": {},
+        "frame_indices": [3, 6, 9],
+        "tactile_key": "tactile",
+        "figure_rgb_key": "rgb",
+        "pixel_mean_01": [0] * 3,
+        "pixel_std_01": [1] * 3,
+    }
+    result = visualization.export_dense_sequence(record, codec, tmp_path)
+    with np.load(tmp_path / "dense_sequence.npz", allow_pickle=False) as data:
+        np.testing.assert_array_equal(data["frame_indices"], indices)
+        np.testing.assert_array_equal(data["timestamp_s"], times)
+        np.testing.assert_array_equal(data["rgb_original"][:, 0, 0, 0], np.asarray(indices) + 20)
+        np.testing.assert_array_equal(data["gt_tactile"], data["ours_tactile"])
+    assert result["frame_count"] == 7
+    assert [writer.options["fps"] for writer in writers] == [30, 15]
+    assert all(len(writer.frames) == 7 for writer in writers)
+    for index, frame in enumerate(writers[0].frames):
+        assert frame[100, 100, 0] == indices[index] + 20
+        assert frame[100, 300, 0] == frame[100, 500, 0] == indices[index] + 60

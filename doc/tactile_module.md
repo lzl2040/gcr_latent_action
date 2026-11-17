@@ -204,6 +204,8 @@ conda run -n lerobot_v2 python scripts/visualize_stage1_tactile_contact.py \
 `candidates.json` 保留搜索范围、失败记录、权重指纹、接触外观变化和 PSNR/SSIM。
 筛选同时检查重建是否保留触觉变化，避免仅凭静态背景的高 PSNR 选例；仍需人工核对 RGB
 中的真实接触和图像重建细节。接触分数只是相对 episode 初始背景的图像形变指标，不是标定压力。
+变化重建指标比较首帧与 GT 相对首帧变化最大的时刻，并记录这两个帧的位置；
+因此“夹紧后释放”的序列不会仅因末帧恢复基准而被误判为没有触觉变化。
 
 查看 `previews/` 后，用清单中的 `candidate_id` 显式导出：
 
@@ -216,7 +218,7 @@ conda run -n lerobot_v2 python scripts/visualize_stage1_tactile_contact.py \
 ```
 
 输出按 `dataset/task/episode_xxxxxx/` 组织，包括原始 RGB、原分辨率 GT、
-模型实际输入尺度的 GT 和重建 PNG、三行五列的 PDF/PNG、浮点结果及同步元数据；
+模型实际输入尺度的 GT 和重建 PNG、按时间排列的 PDF/PNG、浮点结果及同步元数据；
 另有多页 `selected_examples.pdf`。每个视角都使用自己的视频文件和 episode 起始偏移，
 最终导出还核验 data parquet 的 `frame_index/timestamp`，不跨 episode 或重复补帧。
 GT 和重建使用同一固定显示范围，不做逐帧对比度增强。
@@ -242,6 +244,15 @@ GT 和重建使用同一固定显示范围，不做逐帧对比度增强。
 
 混合数据集导出时，可在候选清单中为每例指定 `figure_rgb_key` 和 `figure_rgb_crop`，
 以使用各自可用的相机和固定裁剪框；显式 CLI 参数优先于清单设置，原始 RGB 仍完整保存。
+所有可用 RGB 视角（含另一只手的 wrist）都会保留，便于选择更清楚的接触视角。
+自定义候选的 `frame_indices` 可以超过五帧，`figure_columns`（默认 5）控制每个时间块的列数。
+例如八帧配 `figure_columns: 4` 时，先展示前四帧的 RGB／GT／Ours，再展示后四帧；
+三种图像使用同一时间索引，并保留真实时间标签，不会为了排版丢帧或重排接触强弱。
+候选还可设置 `export_dense_sequence: true`，保存首末选帧之间每个原始时刻的
+`dense_sequence.npz`，以及同步 RGB／GT／Ours 的 `sequence.mp4` 和半速版本
+`sequence_half_speed.mp4`。半速只改变播放帧率，画面时间戳仍是真实数据时间。
+原始 RGB、112 尺度 GT／重建和逐流时间同步记录同时保留，无时间插帧；
+动态片段有助于看清手指闭合、顶压和释放，但不提供经过标定的力值。
 
 ---
 
