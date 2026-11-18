@@ -1348,11 +1348,48 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
         result = self._to_canonical(item, ds_idx, frame_idx)
         if getattr(self, "visual_history_enabled", False):
             result.update(self._visual_context(item, result, ds_idx, frame_idx))
+        if getattr(self.cfg.policy, "physical_history_steps", 0):
+            result.update(self._physical_history(ds_idx, frame_idx))
         if augment_rgb and getattr(self, "rgb_augmentation", None) is not None:
             result = self._augment_rgb_window(result)
         result["data_read_fallback"] = torch.tensor(float(read_fallback), dtype=torch.float32)
         result["requested_frame_index"] = torch.tensor(requested_frame_idx, dtype=torch.long)
         return result
+
+    def _physical_history(self, ds_idx, frame_idx):
+        ranges = self.all_episode_ranges[ds_idx]
+        episode = int(np.searchsorted(ranges[:, 0], frame_idx, side="right") - 1)
+        if episode < 0 or frame_idx >= ranges[episode, 1]:
+            raise ValueError("Physical history frame is outside its episode.")
+        start = int(ranges[episode, 0])
+        steps = self.cfg.policy.physical_history_steps
+        indices = list(range(max(start, frame_idx - steps), frame_idx))
+        spec, norm = self.specs[ds_idx], self.norm_stats[ds_idx]
+        modalities = self.cfg.policy.physical_history_modalities
+        table = self.datasets[ds_idx].hf_dataset
+        columns = ["episode_index"] + sorted(
+            {
+                source
+                for name in modalities
+                for source, *_ in spec.get(name, [])
+                if source in table.column_names
+            }
+        )
+        table = table.select_columns(columns)
+        episode_id = int(_to_tensor(table[frame_idx]["episode_index"]).item())
+        rows = [table[index] for index in indices]
+        if any(int(_to_tensor(row["episode_index"]).item()) != episode_id for row in rows):
+            raise ValueError("Physical history attempted to cross episode boundaries.")
+        history = {}
+        for name in modalities:
+            values = torch.zeros(steps, CANON_DIM, dtype=torch.float32)
+            mask = torch.zeros(steps, CANON_DIM, dtype=torch.bool)
+            for position, row in enumerate(rows, steps - len(rows)):
+                vector, keep = self._build_canonical_vector(row, spec.get(name, []), norm[name], False)
+                values[position], mask[position] = vector, keep.bool()
+            history[f"history_{name}"] = values
+            history[f"history_{name}_mask"] = mask
+        return history
 
     def _visual_context(self, item, result, ds_idx, frame_idx):
         from collections import OrderedDict

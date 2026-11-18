@@ -70,6 +70,8 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     rgb_views: tuple[str, ...] = ("primary",)
     visual_history_offsets: tuple[int, ...] = ()
     visual_history_include_first: bool = False
+    physical_history_steps: int = 0
+    physical_history_mode: str = "state_action"
     load_vae_decoder: bool = False
 
     chunk_size: int = 32
@@ -147,6 +149,12 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
         ):
             raise ValueError("visual_history_offsets must be distinct negative frame offsets in ascending order.")
         self.visual_history_offsets = tuple(offsets)
+        if type(self.physical_history_steps) is not int or self.physical_history_steps < 0:
+            raise ValueError("physical_history_steps must be a nonnegative integer.")
+        if self.physical_history_mode not in ("state", "action", "state_action"):
+            raise ValueError("physical_history_mode must be state, action or state_action.")
+        if self.physical_history_steps and self.physical_encoder_type != "mlp":
+            raise ValueError("Physical history currently requires the MLP baseline.")
         if not self.latent_action_prediction_enabled:
             self.latent_action_loss_weight = 0.0
         if self.task_contract_version != TASK_CONTRACT_VERSION:
@@ -336,6 +344,10 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     @property
     def visual_history_enabled(self) -> bool:
         return self.visual_history_include_first or bool(self.visual_history_offsets)
+
+    @property
+    def physical_history_modalities(self) -> tuple[str, ...]:
+        return tuple(self.physical_history_mode.split("_")) if self.physical_history_steps else ()
 
     @property
     def observation_delta_indices(self) -> None:

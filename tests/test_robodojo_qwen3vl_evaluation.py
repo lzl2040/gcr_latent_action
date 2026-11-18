@@ -332,22 +332,94 @@ def test_history_deploy_forwards_observations_inside_action_chunks(batched):
     class Client:
         def __init__(self):
             self.frames = []
+            self.executed = []
 
         def call(self, func_name, obs=None):
             if func_name == "reset":
                 return True
             if func_name in ("update_obs", "update_obs_batch"):
-                self.frames.extend(value["frame"] for value in (obs if batched else [obs]))
+                observations = obs if batched else [obs]
+                self.frames.extend(value["frame"] for value in observations)
+                self.executed.extend(value["_executed_action"] for value in observations)
             if func_name == "get_action":
-                return [{}, {}]
+                return [{"step": len(self.frames)}, {"step": len(self.frames) + 1}]
             if func_name == "get_action_batch":
-                return [[{}, {}]]
+                return [[{"step": len(self.frames)}, {"step": len(self.frames) + 1}]]
             return None
 
     client = Client()
     runner = eval_one_episode_batch if batched else eval_one_episode
     runner(TASK_ENV=Env(), model_client=client)
     assert client.frames == list(range(6))
+    assert client.executed == [None] + [{"step": step} for step in range(1, 6)]
+
+
+@pytest.mark.parametrize("mode", ["state", "action", "state_action"])
+def test_physical_history_tracks_executed_commands_per_environment_and_resets(tmp_path, mode):
+    adapter = RoboDojoAdapter(torch.zeros(20), torch.ones(20), torch.zeros(20), torch.ones(20), fps=25)
+
+    class Policy:
+        config = config()
+        config.physical_history_steps = 3
+        config.physical_history_modalities = tuple(mode.split("_"))
+
+        def reset(self):
+            pass
+
+        def sample_canonical_action(self, batch):
+            self.last_batch = batch
+            values = torch.zeros(1, 32, 40)
+            values[:, :, :20] = torch.from_numpy(state_to_canonical(observation()))
+            values[0, :, 0] = batch["observation.state"][0, 0] + torch.arange(1, 33) * 0.125
+            return values
+
+    policy = Policy()
+    model = RoboDojoModel(policy, adapter, device="cpu", replan_steps=2, output_dir=tmp_path)
+    assert model.reset() is True
+    for index in (3, 7):
+        initial = observation(index)
+        initial["state"]["left_ee_pose"][0] = index
+        model.update_obs(initial)
+        actions = model.get_action()
+        assert all(
+            not policy.last_batch[f"history_{name}_mask"].any()
+            for name in policy.config.physical_history_modalities
+        )
+        for step in (1, 2):
+            current = observation(index)
+            current["state"]["left_ee_pose"][0] = index + step
+            current["_executed_action"] = actions[step - 1]
+            model.update_obs(current)
+        model.get_action()
+        for name in policy.config.physical_history_modalities:
+            assert policy.last_batch[f"history_{name}_mask"][0, :, 0].tolist() == [False, True, True]
+        if "action" in policy.config.physical_history_modalities:
+            torch.testing.assert_close(
+                policy.last_batch["history_action"][0, :, 0], torch.tensor([0, index + 0.125, index + 0.25])
+            )
+        if "state" in policy.config.physical_history_modalities:
+            assert policy.last_batch["history_state"][0, :, 0].tolist() == [0, index, index + 1]
+    assert set(model.physical_histories) == {3, 7}
+    if "action" in policy.config.physical_history_modalities:
+        with pytest.raises(ValueError, match="actually executed"):
+            model.update_obs(observation(3))
+    model.reset()
+    assert not model.physical_histories
+
+
+def test_delta_action_history_uses_realized_measurements_not_unexecuted_target_motion():
+    adapter = RoboDojoAdapter(
+        torch.zeros(20), torch.ones(20), torch.zeros(20), torch.ones(20), fps=25, action_mode="delta"
+    )
+    previous, current = observation(), observation()
+    current["state"]["left_ee_pose"][0] += 0.02
+    current["state"]["left_ee_joint_state"][0] += 0.01
+    command = {key: value.copy() for key, value in previous["state"].items()}
+    command["left_ee_pose"][0] += 1.0
+    normalized = adapter.normalize_executed_action(command, previous, current)
+    assert normalized[0, 0].item() == pytest.approx(0.02)
+    assert normalized[0, 9].item() == pytest.approx(0.01)
+    np.testing.assert_allclose(normalized[0, 3:9].numpy(), np.eye(3)[:, :2].reshape(6), atol=1e-6)
 
 
 @pytest.mark.parametrize("joint_task", ["joint_prediction", "va_prediction"])

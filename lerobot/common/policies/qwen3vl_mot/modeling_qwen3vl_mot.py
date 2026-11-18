@@ -202,7 +202,12 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 "Cannot change `policy.latent_action_prediction_enabled` when loading a checkpoint; "
                 "start a fresh output directory."
             )
-        for field, default in (("visual_history_offsets", ()), ("visual_history_include_first", False)):
+        for field, default in (
+            ("visual_history_offsets", ()),
+            ("visual_history_include_first", False),
+            ("physical_history_steps", 0),
+            ("physical_history_mode", "state_action"),
+        ):
             saved = saved_config.get(field, default)
             if field == "visual_history_offsets":
                 saved = tuple(saved)
@@ -768,6 +773,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
         if self.physical_embedding_flow:
             return self._sample_embedding_action(batch, understanding, generator=generator)
+        history = self._physical_history_streams(batch)
         image = self._current_image(batch)
         device = next(self.generation.parameters()).device
         action = torch.randn(
@@ -822,6 +828,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                         sigma_batch,
                         action_keep,
                     ),
+                    *history,
                 ],
                 understanding.hidden_states,
                 understanding.attention_mask,
@@ -1353,6 +1360,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             raise ValueError(
                 "Generation validation requires the enabled task 'i2v', joint_prediction or va_prediction."
             )
+        history = self._physical_history_streams(batch)
         stream, geometry = self._initial_video_sampling_stream(batch, generator)
         assert stream.noise_mask is not None
         schedule = torch.linspace(
@@ -1364,7 +1372,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         for sigma, next_sigma in zip(schedule[:-1], schedule[1:], strict=True):
             stream.sigma = sigma.expand(stream.values.shape[0])
             prediction = self.generation(
-                [stream],
+                [stream, *history],
                 understanding.hidden_states,
                 understanding.attention_mask,
                 "i2v",
@@ -1390,6 +1398,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         if task_name not in ("joint_prediction", "va_prediction") or task_name not in self.generation.task_to_id:
             raise ValueError("Joint sampling requires an enabled joint_prediction or va_prediction task.")
         predict_state = TASK_SPECS[task_name].state.is_target
+        history = self._physical_history_streams(batch)
         target_names = ("state", "action") if predict_state else ("action",)
         device = next(self.generation.parameters()).device
         batch_size = self._current_image(batch).shape[0]
@@ -1468,7 +1477,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                     for index, name in enumerate(("state", "action"))
                 ]
             predictions = self.generation(
-                [video, *streams], understanding.hidden_states, understanding.attention_mask, task_name,
+                [video, *streams, *history],
+                understanding.hidden_states,
+                understanding.attention_mask,
+                task_name,
                 understanding_key_values=understanding.key_values,
                 understanding_rotary=getattr(understanding, "rotary_embeddings", None),
                 understanding_position_ids=getattr(understanding, "position_ids", None),
@@ -1561,6 +1573,30 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             group_keep,
             sigma,
         )
+
+    def _physical_history_streams(self, batch: dict) -> list[GenerationStream]:
+        streams = []
+        for name in getattr(self.config, "physical_history_modalities", ()):
+            key = f"history_{name}"
+            if key not in batch or f"{key}_mask" not in batch:
+                raise ValueError(f"History-enabled policies require causal {key} and {key}_mask.")
+            if batch[key].shape[1] != self.config.physical_history_steps:
+                raise ValueError(f"{key} must contain exactly physical_history_steps past steps.")
+            tokens, keep = self.physical_encoder.encode_history(name, batch[key], batch[f"{key}_mask"])
+            positions = torch.zeros(tokens.shape[1], 3, device=tokens.device)
+            positions[:, 0] = torch.arange(-tokens.shape[1], 0, device=tokens.device)
+            streams.append(
+                GenerationStream(
+                    name,
+                    tokens,
+                    torch.zeros(tokens.shape[0], device=tokens.device),
+                    keep,
+                    position_ids=positions,
+                    noise_mask=torch.zeros_like(keep),
+                    condition_only=True,
+                )
+            )
+        return streams
 
     def _physical_context(
         self,
@@ -2138,6 +2174,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             if tactile_target is not None:
                 targets["tactile"] = (tactile_target, tactile_mask)
 
+        if task.understanding_image:
+            streams.extend(self._physical_history_streams(batch))
         predictions = self.generation(
             streams,
             understanding.hidden_states,

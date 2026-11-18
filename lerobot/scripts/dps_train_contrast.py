@@ -316,7 +316,12 @@ def _load_stage2_resume_policy_config(
             "Cannot change `policy.latent_action_prediction_enabled` while resuming; "
             "start a fresh output directory."
         )
-    for field_name in ("visual_history_offsets", "visual_history_include_first"):
+    for field_name in (
+        "visual_history_offsets",
+        "visual_history_include_first",
+        "physical_history_steps",
+        "physical_history_mode",
+    ):
         if (
             parser.parse_arg(f"policy.{field_name}", args) is not None
             and getattr(runtime_policy, field_name) != getattr(saved_policy, field_name)

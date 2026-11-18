@@ -78,6 +78,56 @@ RoboDojo 绝对动作评测允许 `robodojo_fps12` 配置，但必须传入对�
 
 ---
 
+## 可选的 baseline 历史 state/action 条件
+
+此选项与视觉历史独立，仅适用于 MLP baseline，默认关闭：
+
+| 配置 | 默认值 | 含义 |
+|---|---|---|
+| `physical_history_steps` | `0` | 引入当前时刻之前连续 n 个控制/数据帧；0 关闭 |
+| `physical_history_mode` | `state_action` | `state`、`action` 或 `state_action` |
+
+例如同时启用视觉历史和最近 8 步物理历史，另开输出目录训练：
+
+```bash
+WEIGHT_RESUME=false JOB_NAME=baseline_history_state_action \
+bash train_qwen3vl_mot_baseline_history_fsdp.sh \
+  --policy.physical_history_steps=8 \
+  --policy.physical_history_mode=state_action
+```
+
+改为 `state` 或 `action` 可只保留对应模态。原 baseline 启动命令也可追加这两个
+`--policy.*` 参数，不要求开启视觉历史。resume/from_pretrained 不允许静默更改历史长度
+或模式；旧 checkpoint 缺少新字段时仍按关闭处理，开启历史需要新实验。
+
+训练只从实际样本所属 episode 的 `t-n ... t-1` 读取原始物理列，使用原 canonical
+slot mapping、mean/std 和维度 mask；不读取历史 RGB/未来 clip。缺少的模态和 episode
+开头不足的历史填零并 mask，不复制首个有效动作，也不跨 episode。当前 state 仍走原条件，
+当前/未来 action/state 仍按原 task 定义加噪和监督；历史不能从当前预测 chunk 中截取。
+
+单样本的 `history_state` / `history_action` 和各自 `*_mask` 为 `(n, canonical_dim)`。
+历史复用对应的 PhysicalMLP，按原 `group_size` 编为 token，不足一组时左侧补无效步。
+这些 token 使用负时间位置、原 modality projection 和 `sigma=0`，作为独立
+`condition_only` stream 与待去噪 token 一起做 attention；没有历史预测 head、loss
+或采样积分，不会覆盖同名的当前/未来输出。每个 chunk 只编码一次历史，所有去噪迭代复用。
+不增加可训练参数，每模态增加 `ceil(n/group_size)` 个 token；仍会增加少量 attention
+计算，尚未实测全尺寸训练吞吐。纯 `t2v` 不附加历史，保持其文本条件语义。
+
+LIBERO / LIBERO-Plus 在每个实际执行控制步之后记录动作，再由下一观测更新历史；
+动作是经过原 native 解码、夹爪离散化和裁剪后的实际命令，重新转回 canonical 归一化空间，
+不缓存尚未执行的 chunk 尾部。RoboDojo 的 deploy 在逐步观测中附带 `_executed_action`
+确认，server 按 env 独立缓存，reset 清空；缺少已执行动作确认或漏掉中间观测会报错。
+RoboDojo absolute 模式记录已下发的绝对目标；delta 模式沿用数据集的
+`next_measured_state` 契约，记录刚刚完成控制步的实测 state 增量，而非尚未到达的目标位移。
+
+自定义部署可使用 `PhysicalHistoryBuffer(n, ("state", "action"))`：
+首个观测调用 `update(batch)`，此后每步调用
+`update(batch, executed_action=normalized_executed_action)`，规划时 `attach(batch)`。
+这里的 action 必须是刚刚实际执行的一步 canonical 归一化命令，不是整个预测 chunk；
+仅 state 模式不要求传 action。真实执行频率仍需与训练帧率对应，本功能不改变控制频率。
+
+---
+
 ## 1. 设计目标
 
 Stage 2 在 Stage 1 已学到的“视觉变化—物理变化”对齐基础上，进一步训练一个统一的

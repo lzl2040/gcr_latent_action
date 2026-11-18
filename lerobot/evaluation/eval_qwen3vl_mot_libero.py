@@ -22,6 +22,7 @@ import torch
 from scipy.spatial.transform import Rotation
 from torch.nn import functional
 
+from lerobot.common.datasets.physical_history import PhysicalHistoryBuffer
 from lerobot.common.datasets.visual_history import VisualHistoryBuffer
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,54 @@ class LiberoAdapter:
                 np.count_nonzero(clipped != actions),
             )
         return clipped
+
+    def normalize_executed_action(self, action) -> torch.Tensor:
+        action = _finite_array(action, (7,), "executed LIBERO action")
+        rotation = Rotation.from_euler("xyz", action[3:6]).as_matrix()[:, :2].reshape(6)
+        raw = torch.tensor(np.concatenate((action[:3], rotation, (1 - action[6:7]) / 2)), dtype=torch.float32)
+        normalized = torch.zeros(1, CANONICAL_DIM)
+        normalized[0, :10] = (raw - self.action_mean) / self.action_std
+        return normalized
+
+
+class LiberoHistory:
+    def __init__(self, adapter, config, instruction):
+        self.adapter, self.config, self.instruction = adapter, config, instruction
+        self.visual = (
+            VisualHistoryBuffer(config.visual_history_offsets, config.visual_history_include_first)
+            if getattr(config, "visual_history_enabled", False)
+            else None
+        )
+        self.physical = (
+            PhysicalHistoryBuffer(config.physical_history_steps, config.physical_history_modalities)
+            if getattr(config, "physical_history_steps", 0)
+            else None
+        )
+        self.enabled = self.visual is not None or self.physical is not None
+        self.executed_action = None
+
+    def observe_action(self, action):
+        if self.physical is not None and "action" in self.physical.modalities:
+            if self.executed_action is not None:
+                raise ValueError("Observe every control frame before recording another executed action.")
+            self.executed_action = self.adapter.normalize_executed_action(action)
+
+    def observe(self, observation):
+        batch = self.adapter.observation_batch(
+            observation, self.instruction, self.config, torch.device("cpu")
+        )
+        if self.visual is not None:
+            self.visual.update(batch)
+        if self.physical is not None:
+            self.physical.update(batch, executed_action=self.executed_action)
+            self.executed_action = None
+
+    def attach(self, batch):
+        if self.visual is not None:
+            batch = self.visual.attach(batch)
+        if self.physical is not None:
+            batch = self.physical.attach(batch)
+        return batch
 
 
 class PredictionVideoWriter:
@@ -487,6 +536,7 @@ def rollout_episode(
     replan_steps: int,
     save_video: bool,
     observe=None,
+    observe_action=None,
 ) -> tuple[dict, list]:
     env.reset()
     observation = env.set_init_state(initial_state)
@@ -522,6 +572,8 @@ def rollout_episode(
         action = queue.popleft()
         actions.append(action.tolist())
         observation, _, done, _ = env.step(action.tolist())
+        if observe_action is not None:
+            observe_action(action)
         steps += 1
         success = bool(env.check_success())
     if save_video:
@@ -756,16 +808,7 @@ def main(argv: list[str] | None = None) -> None:
         try:
             for trial in range(args.trials_per_task):
                 policy.reset()
-                history = (
-                    VisualHistoryBuffer(
-                        policy.config.visual_history_offsets, policy.config.visual_history_include_first
-                    ) if getattr(policy.config, "visual_history_enabled", False) else None
-                )
-
-                def observe(observation, history=history, instruction=task.language):
-                    history.update(adapter.observation_batch(
-                        observation, instruction, policy.config, torch.device("cpu")
-                    ))
+                history = LiberoHistory(adapter, policy.config, task.language)
                 stem = f"task_{task_id:02d}_trial_{trial:03d}"
                 prediction_root = output_dir / "predictions" / stem
                 prediction_records = []
@@ -786,8 +829,7 @@ def main(argv: list[str] | None = None) -> None:
                 ):
                     started_inference = time.perf_counter()
                     batch = adapter.observation_batch(observation, instruction, policy.config, device)
-                    if history is not None:
-                        batch = history.attach(batch)
+                    batch = history.attach(batch)
                     fingerprint = (
                         sampling_fingerprint(batch, device)
                         if args.capture_first_plan and replan_index == 0
@@ -855,7 +897,8 @@ def main(argv: list[str] | None = None) -> None:
                     wait_steps=args.wait_steps,
                     replan_steps=args.replan_steps,
                     save_video=not args.no_save_video,
-                    observe=observe if history is not None else None,
+                    observe=history.observe if history.enabled else None,
+                    observe_action=history.observe_action if history.enabled else None,
                 )
                 episode["planning_seconds"] = episode["inference_seconds"]
                 episode["inference_seconds"] = sum(timing[0] for timing in plan_timings)

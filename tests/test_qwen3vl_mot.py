@@ -1063,8 +1063,9 @@ def _mlp_baseline_config(**overrides):
 
 @pytest.mark.parametrize("generation_kind", ["random", "nano"])
 @pytest.mark.parametrize("history", [False, True])
+@pytest.mark.parametrize("physical_history", ["", "state", "action", "state_action"])
 def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_restore(
-    tmp_path, monkeypatch, generation_kind, history
+    tmp_path, monkeypatch, generation_kind, history, physical_history
 ):
     import lerobot.common.policies.ace.cosmos3_encoders as vae_module
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
@@ -1138,17 +1139,27 @@ def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_resto
             },
             source_file,
         )
-    names = ("t2v", "joint_prediction", "forward_dynamics", "inverse_dynamics", "va_prediction")
+    names = (
+        "t2v",
+        "joint_prediction",
+        "forward_dynamics",
+        "inverse_dynamics",
+        "va_prediction",
+        "action_prediction",
+        "i2v",
+    )
     config = _mlp_baseline_config(
         generation_backbone=generation_kind,
         generation_pretrained_dir=str(generator_dir),
         cosmos3_dir=str(generator_dir),
         task_names=names,
-        task_weights=(0.2,) * len(names),
+        task_weights=(1 / len(names),) * len(names),
         tactile_generation_target="spatial_patches",
         rgb_views=("primary", "wrist"),
         visual_history_offsets=(-4, -2) if history else (),
         visual_history_include_first=history,
+        physical_history_steps=3 if physical_history else 0,
+        physical_history_mode=physical_history or "state_action",
     )
     policy = stage2.Qwen3VLMoTPolicy(config).train()
     assert policy.teacher_perception is None and policy.latent_action_projection is None
@@ -1183,16 +1194,29 @@ def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_resto
             context_image_mask=torch.ones(2, 4, 2, dtype=torch.bool),
             context_frame_offsets=torch.tensor([[-6, -4, -2, 0]]).expand(2, -1),
         )
+    for name in config.physical_history_modalities:
+        batch[f"history_{name}"] = torch.randn(2, 3, 4, requires_grad=True)
+        batch[f"history_{name}_mask"] = torch.ones(2, 3, 4, dtype=torch.bool)
+        batch[f"history_{name}_mask"][0, :, -1] = False
     optimizer = torch.optim.AdamW(policy.get_optim_params(), lr=1e-3)
     before = policy.physical_encoder.action_mlp[0].weight.detach().clone()
     for task in names:
         optimizer.zero_grad(set_to_none=True)
+        for name in config.physical_history_modalities:
+            batch[f"history_{name}"].grad = None
         loss, metrics = policy(batch, task_type=task)
         assert torch.isfinite(loss)
         assert metrics["latent_action_loss"] == metrics["latent_action_elements"] == 0
         assert metrics["action_prediction_reconstruction_loss"] == 0
         assert metrics["state_prediction_reconstruction_loss"] == 0
         loss.backward()
+        for name in config.physical_history_modalities:
+            gradient = batch[f"history_{name}"].grad
+            if task == "t2v":
+                assert gradient is None
+            else:
+                assert gradient is not None and gradient.abs().sum() > 0
+                assert not gradient[~batch[f"history_{name}_mask"]].any()
         assert all(
             p.grad is not None and torch.isfinite(p.grad).all() for p in policy.physical_encoder.parameters()
         )
@@ -1202,7 +1226,7 @@ def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_resto
             assert "state_flow_loss" not in metrics
         optimizer.step()
     assert not torch.equal(before, policy.physical_encoder.action_mlp[0].weight)
-    policy.config.task_weights = (0.0, 0.0, 0.0, 0.0, 1.0)
+    policy.config.task_weights = tuple(float(name == "va_prediction") for name in names)
     policy.eval()
     expected = policy.generate_validation(batch, seed=17)
     assert expected["action_normalized"].shape == (2, 2, 4)
@@ -1212,9 +1236,23 @@ def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_resto
     changed["observation.state"][:, 1:] += 1000
     changed["action"] += 1000
     changed["video_views"][:, :, 1:] = 255
+    for name in config.physical_history_modalities:
+        changed[f"history_{name}"].data[~batch[f"history_{name}_mask"]] = float("nan")
     repeated = policy.generate_validation(changed, seed=17)
     for name in expected:
         torch.testing.assert_close(expected[name], repeated[name])
+    if physical_history:
+        changed = copy.deepcopy(batch)
+        for name in config.physical_history_modalities:
+            changed[f"history_{name}"].data[:, -1, :2] += 5
+        guided = policy.generate_validation(changed, seed=17)
+        assert not torch.equal(guided["action_normalized"], expected["action_normalized"])
+        policy.config.task_weights = tuple(float(name in ("action_prediction", "i2v")) for name in names)
+        separate = policy.generate_validation(batch, seed=17)
+        guided = policy.generate_validation(changed, seed=17)
+        assert not torch.equal(guided["action_normalized"], separate["action_normalized"])
+        assert not torch.equal(guided["video_latents"], separate["video_latents"])
+        policy.config.task_weights = tuple(float(name == "va_prediction") for name in names)
     checkpoint = tmp_path / "baseline"
     checkpoint.mkdir()
     policy._save_pretrained(checkpoint)

@@ -13,6 +13,7 @@ import torch
 from scipy.spatial.transform import Rotation
 from torch.nn import functional
 
+from lerobot.common.datasets.physical_history import PhysicalHistoryBuffer
 from lerobot.common.datasets.visual_history import VisualHistoryBuffer
 from lerobot.evaluation.eval_qwen3vl_mot_libero import (
     PredictionVideoWriter,
@@ -181,6 +182,24 @@ class RoboDojoAdapter:
                 action[f"{arm}_ee_joint_state"] = gripper.astype(np.float32)
         return chunks
 
+    def normalize_executed_action(self, action, previous_observation, observation):
+        raw = state_to_canonical({"state": action})
+        if self.action_mode == "delta":
+            # Delta training columns are realized measured-state increments, not target increments.
+            previous = state_to_canonical(previous_observation)
+            current = state_to_canonical(observation)
+            for offset in (0, 10):
+                raw[offset : offset + 3] = current[offset : offset + 3] - previous[offset : offset + 3]
+                before = previous[offset + 3 : offset + 9].reshape(3, 2)
+                after = current[offset + 3 : offset + 9].reshape(3, 2)
+                before = np.column_stack((before, np.cross(before[:, 0], before[:, 1])))
+                after = np.column_stack((after, np.cross(after[:, 0], after[:, 1])))
+                raw[offset + 3 : offset + 9] = (after @ before.T)[:, :2].reshape(6)
+                raw[offset + 9] = current[offset + 9] - previous[offset + 9]
+        normalized = torch.zeros(1, 40)
+        normalized[0, :20] = (torch.from_numpy(raw) - self.action_mean) / self.action_std
+        return normalized
+
 
 class RoboDojoModel:
     """XPolicyLab model interface; one model, independent latest observations per environment."""
@@ -222,34 +241,64 @@ class RoboDojoModel:
         self.reset_index = -1
         self.control_steps: dict[int, int] = {}
         self.visual_histories: dict[int, VisualHistoryBuffer] = {}
+        self.physical_histories: dict[int, PhysicalHistoryBuffer] = {}
 
     def reset(self):
         self.observations.clear()
         self.single_env_idx = None
         self.control_steps.clear()
         self.visual_histories.clear()
+        self.physical_histories.clear()
         self.policy.reset()
         self.reset_index += 1
-        return bool(getattr(self.policy.config, "visual_history_enabled", False))
+        return bool(
+            getattr(self.policy.config, "visual_history_enabled", False)
+            or getattr(self.policy.config, "physical_history_steps", 0)
+        )
 
-    def update_obs(self, obs):
+    def update_obs(self, obs, executed_action=None):
         index = int(obs["env_idx"])
-        self.observations[index] = obs
-        self.single_env_idx = index
-        if getattr(self.policy.config, "visual_history_enabled", False):
+        if executed_action is None:
+            executed_action = obs.get("_executed_action")
+        visual = getattr(self.policy.config, "visual_history_enabled", False)
+        physical = getattr(self.policy.config, "physical_history_steps", 0)
+        if visual or physical:
+            batch = self.adapter.observation_batch(obs, self.policy.config, torch.device("cpu"))
+        if physical:
+            if index not in self.physical_histories:
+                self.physical_histories[index] = PhysicalHistoryBuffer(
+                    physical, self.policy.config.physical_history_modalities
+                )
+            history = self.physical_histories[index]
+            action = None
+            if executed_action is not None and "action" in history.modalities:
+                if index not in self.observations:
+                    raise ValueError(
+                        "The first observation cannot acknowledge an action from a prior episode."
+                    )
+                action = self.adapter.normalize_executed_action(
+                    executed_action, self.observations[index], obs
+                )
+            history.update(batch, executed_action=action)
+        if visual:
             if index not in self.visual_histories:
                 self.visual_histories[index] = VisualHistoryBuffer(
                     self.policy.config.visual_history_offsets, self.policy.config.visual_history_include_first
                 )
-            batch = self.adapter.observation_batch(obs, self.policy.config, torch.device("cpu"))
             self.visual_histories[index].update(batch)
+        self.observations[index] = obs
+        self.single_env_idx = index
 
-    def update_obs_batch(self, obs_list):
+    def update_obs_batch(self, obs_list, executed_actions=None):
         indices = [int(obs["env_idx"]) for obs in obs_list]
         if not indices or len(set(indices)) != len(indices):
             raise ValueError("Observation batches must have distinct environment indices.")
-        for obs in obs_list:
-            self.update_obs(obs)
+        if executed_actions is None:
+            executed_actions = [None] * len(obs_list)
+        if len(executed_actions) != len(obs_list):
+            raise ValueError("Executed actions must align with the observed environment indices.")
+        for obs, action in zip(obs_list, executed_actions, strict=True):
+            self.update_obs(obs, executed_action=action)
 
     @torch.inference_mode()
     def _predict(self, index: int) -> list[dict]:
@@ -262,6 +311,11 @@ class RoboDojoModel:
                     "History requires update_obs at every control frame, including inside action chunks. "
                     "Use the updated deploy module or replan_steps=1."
                 )
+            batch = history.attach(batch)
+        if getattr(self.policy.config, "physical_history_steps", 0):
+            history = self.physical_histories[index]
+            if history.step != self.control_steps.get(index, 0):
+                raise ValueError("Physical history requires every executed control step and its observation.")
             batch = history.attach(batch)
         started = time.perf_counter()
         prediction = None

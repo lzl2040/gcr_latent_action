@@ -57,3 +57,23 @@ class PhysicalMLP(nn.Module):
             tokens.append(torch.where(keep.unsqueeze(-1), encoded, torch.zeros_like(encoded)))
             masks.append(keep)
         return torch.cat(tokens, dim=1), torch.cat(masks, dim=1), {}
+
+    def encode_history(self, name: str, values: torch.Tensor, mask: torch.Tensor):
+        mlp = getattr(self, f"{name}_mlp")
+        values = values.to(device=mlp[0].weight.device, dtype=mlp[0].weight.dtype)
+        mask = mask.to(device=values.device, dtype=torch.bool)
+        width = getattr(self.config, f"max_{name}_dim")
+        if values.ndim != 3 or values.shape[-1] != width or mask.shape != values.shape:
+            raise ValueError(f"History {name} and its mask must have shape (B,N,{width}).")
+        values = torch.where(mask, values, torch.zeros_like(values))
+        if not torch.isfinite(values).all():
+            raise ValueError(f"Valid history {name} values must be finite.")
+        padding = -values.shape[1] % self.config.group_size
+        values = torch.nn.functional.pad(values, (0, 0, padding, 0))
+        mask = torch.nn.functional.pad(mask, (0, 0, padding, 0))
+        features = torch.cat((values, mask.to(values.dtype)), dim=-1).reshape(
+            values.shape[0], -1, self.config.group_size * width * 2
+        )
+        keep = mask.reshape(values.shape[0], -1, self.config.group_size * width).any(-1)
+        encoded = mlp(features)
+        return torch.where(keep[..., None], encoded, torch.zeros_like(encoded)), keep

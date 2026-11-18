@@ -52,6 +52,7 @@ class GenerationStream:
     view_ids: torch.Tensor | None = None
     noise_mask: torch.Tensor | None = None
     fps: torch.Tensor | None = None
+    condition_only: bool = False
 
     def validate(self, input_dim: int) -> None:
         if self.values.ndim != 3 or self.values.shape[-1] != input_dim:
@@ -561,13 +562,14 @@ class GenerationExpert(nn.Module):
         slices: dict[str, slice] = {}
         offset = 0
         for stream in streams:
-            if stream.name in slices:
+            if not stream.condition_only and stream.name in slices:
                 raise ValueError(f"Generation stream {stream.name!r} was supplied twice.")
             hidden, position_ids = self._embed_stream(stream, task_embedding)
             hidden_parts.append(hidden)
             keep_parts.append(stream.keep.to(hidden.device, dtype=torch.bool))
             position_parts.append(position_ids)
-            slices[stream.name] = slice(offset, offset + hidden.shape[1])
+            if not stream.condition_only:
+                slices[stream.name] = slice(offset, offset + hidden.shape[1])
             offset += hidden.shape[1]
 
         generation = torch.cat(hidden_parts, dim=1)

@@ -239,9 +239,10 @@ def offline(args) -> None:
     )
     observation = recorded_observation(args.robodojo_root, episode, args.frame)
     model = load_model(args)
-    if getattr(model.policy.config, "visual_history_enabled", False) and (
-        args.frame != 0 or args.repeat != 1
-    ):
+    if (
+        getattr(model.policy.config, "visual_history_enabled", False)
+        or getattr(model.policy.config, "physical_history_steps", 0)
+    ) and (args.frame != 0 or args.repeat != 1):
         raise ValueError(
             "History-enabled offline inference supports only frame=0, repeat=1. "
             "Other frames require a sequential episode observation stream, not a single recorded frame."

@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from lerobot.common.datasets.contrastive_dataset import MultiModalContrastiveDataset
+from lerobot.common.datasets.physical_history import PhysicalHistoryBuffer
 from lerobot.common.datasets.visual_history import VisualHistoryBuffer
 from lerobot.common.policies.qwen3vl_mot.configuration_qwen3vl_mot import Qwen3VLMoTConfig
 from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import Qwen3VLMoTPolicy
@@ -313,7 +314,8 @@ def test_libero_rollouts_observe_every_control_frame_after_settling(plus):
     assert planned[-1] == [0, 2, 4, 6]
 
 
-def test_history_launcher_isolated_recipe_and_real_parser(tmp_path):
+@pytest.mark.parametrize("physical_mode", [None, "state", "action", "state_action"])
+def test_history_launcher_isolated_recipe_and_real_parser(tmp_path, physical_mode):
     root = Path(__file__).resolve().parents[1]
     env = {
         **os.environ,
@@ -326,8 +328,13 @@ def test_history_launcher_isolated_recipe_and_real_parser(tmp_path):
         "OUTPUT_ROOT": str(tmp_path),
         "DATA_MIX": "robodojo_fps12",
     }
+    arguments = (
+        ["--policy.physical_history_steps=5", f"--policy.physical_history_mode={physical_mode}"]
+        if physical_mode
+        else []
+    )
     result = subprocess.run(
-        ["bash", str(root / "train_qwen3vl_mot_baseline_history_fsdp.sh")],
+        ["bash", str(root / "train_qwen3vl_mot_baseline_history_fsdp.sh"), *arguments],
         cwd=root,
         env=env,
         text=True,
@@ -353,3 +360,195 @@ def test_history_launcher_isolated_recipe_and_real_parser(tmp_path):
     assert parsed.visual_history_include_first
     assert parsed.physical_encoder_type == "mlp"
     assert parsed.task_weights == (0.15, 0.15, 0.7)
+    assert parsed.physical_history_steps == (5 if physical_mode else 0)
+    assert parsed.physical_history_modalities == (tuple(physical_mode.split("_")) if physical_mode else ())
+
+
+@pytest.mark.parametrize("mode", ["state", "action", "state_action"])
+def test_physical_training_history_matches_executed_step_buffer_without_future_or_episode_leaks(mode):
+    from datasets import Dataset
+
+    dataset = MultiModalContrastiveDataset.__new__(MultiModalContrastiveDataset)
+    cfg = history_config(physical_history_steps=3, physical_history_mode=mode)
+    dataset.cfg = SimpleNamespace(policy=cfg)
+    table = Dataset.from_dict(
+        {
+            "episode_index": [0] * 5 + [1] * 6,
+            "state": [[index, index + 0.5] for index in range(11)],
+            "action": [[index * 2, index * 3] for index in range(11)],
+            "irrelevant_video": ["never decoded"] * 11,
+        }
+    ).with_format("torch")
+    dataset.datasets = [SimpleNamespace(hf_dataset=table)]
+    dataset.all_episode_ranges = [np.array([[0, 5], [5, 11]])]
+    dataset.specs = [{"state": [("state", 0, 2, 0)], "action": [("action", 0, 2, 0)]}]
+    norm = {
+        "mean": torch.ones(40),
+        "std": torch.full((40,), 2.0),
+        "mask": torch.tensor([1.0, 1.0] + [0.0] * 38),
+    }
+    dataset.norm_stats = [{"state": norm, "action": norm}]
+    buffer = PhysicalHistoryBuffer(3, cfg.physical_history_modalities)
+    for frame in range(5, 10):
+        state, state_mask = dataset._build_canonical_vector(
+            table[frame], dataset.specs[0]["state"], norm, False
+        )
+        current = {
+            "observation.state": state[None],
+            "state_mask": state_mask[None],
+            "action_mask": state_mask[None],
+        }
+        action = None
+        if frame > 5 and "action" in cfg.physical_history_modalities:
+            action = dataset._build_canonical_vector(
+                table[frame - 1], dataset.specs[0]["action"], norm, False
+            )[0][None]
+        online = buffer.update(current, executed_action=action)
+        offline = dataset._physical_history(0, frame)
+        for key, value in offline.items():
+            torch.testing.assert_close(value, online[key][0])
+        if frame == 5:
+            assert all(not value.any() for value in offline.values())
+        if frame == 6:
+            for name in cfg.physical_history_modalities:
+                assert offline[f"history_{name}_mask"][:, 0].tolist() == [False, False, True]
+    for name in cfg.physical_history_modalities:
+        source = [6, 7, 8] if name == "state" else [12, 14, 16]
+        torch.testing.assert_close(offline[f"history_{name}"][:, 0], (torch.tensor(source) - 1) / 2)
+    dataset.specs[0][cfg.physical_history_modalities[0]] = [("missing_source", 0, 2, 0)]
+    missing = dataset._physical_history(0, 9)
+    assert not missing[f"history_{cfg.physical_history_modalities[0]}_mask"].any()
+
+
+def test_physical_buffer_rejects_unacknowledged_actions_and_stale_observations():
+    buffer = PhysicalHistoryBuffer(3, ("state", "action"))
+    batch = {
+        "observation.state": torch.zeros(1, 4),
+        "state_mask": torch.ones(1, 4),
+        "action_mask": torch.ones(1, 4),
+    }
+    with pytest.raises(ValueError, match="every control observation"):
+        buffer.attach(batch)
+    buffer.update(batch)
+    changed = {**batch, "observation.state": torch.ones(1, 4)}
+    with pytest.raises(ValueError, match="actually executed"):
+        buffer.update(changed)
+    with pytest.raises(ValueError, match="every control observation"):
+        buffer.attach(changed)
+    buffer.update(changed, executed_action=torch.full((1, 4), 0.5))
+    result = buffer.attach(changed)
+    assert result["history_action"][0, :, 0].tolist() == [0, 0, 0.5]
+    assert not result["history_state"].any()
+    assert result["history_state_mask"][0, :, 0].tolist() == [False, False, True]
+
+
+@pytest.mark.parametrize(
+    "field,changed", [("physical_history_steps", 4), ("physical_history_mode", "action")]
+)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_physical_history_checkpoint_contract_and_legacy_defaults(tmp_path, field, changed, enabled):
+    saved = history_config(physical_history_steps=3 if enabled else 0)
+    saved._save_pretrained(tmp_path)
+    if not enabled:
+        path = tmp_path / "config.json"
+        payload = json.loads(path.read_text())
+        del payload["physical_history_steps"], payload["physical_history_mode"]
+        path.write_text(json.dumps(payload))
+    cfg = SimpleNamespace(
+        weight_resume=True,
+        output_dir=tmp_path,
+        policy=history_config(),
+        use_policy_training_preset=False,
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.physical_history_steps == (3 if enabled else 0)
+    cfg.policy = (
+        history_config(physical_history_steps=saved.physical_history_steps, **{field: changed})
+        if field != "physical_history_steps"
+        else history_config(physical_history_steps=changed)
+    )
+    with pytest.raises(ValueError, match=field):
+        _load_stage2_resume_policy_config(cfg, args=[f"--policy.{field}={json.dumps(changed)}"])
+    with pytest.raises(ValueError, match=field):
+        Qwen3VLMoTPolicy.from_pretrained(tmp_path, config=cfg.policy)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"physical_history_steps": -1},
+        {"physical_history_steps": True},
+        {"physical_history_mode": "video"},
+    ],
+)
+def test_physical_history_invalid_options(options):
+    with pytest.raises(ValueError, match="physical_history"):
+        history_config(**options)
+
+
+@pytest.mark.parametrize("plus", [False, True])
+def test_libero_physical_history_records_only_executed_prefix_after_settling(plus):
+    from lerobot.evaluation import eval_qwen3vl_mot_libero as original
+    from lerobot.evaluation import eval_qwen3vl_mot_libero_plus as extended
+
+    class Adapter:
+        def observation_batch(self, observation, instruction, config, device):
+            return {
+                "observation.state": torch.full((1, 2), float(observation)),
+                "state_mask": torch.ones(1, 2),
+                "action_mask": torch.ones(1, 2),
+            }
+
+        def normalize_executed_action(self, action):
+            return torch.tensor(action[:2])[None]
+
+    class Env:
+        count = 0
+
+        def reset(self):
+            self.count = 0
+
+        def set_init_state(self, initial):
+            return self.count
+
+        def check_success(self):
+            return False
+
+        def step(self, action):
+            self.count += 1
+            return self.count, 0, False, {}
+
+    history = original.LiberoHistory(
+        Adapter(),
+        history_config(
+            physical_history_steps=3,
+            visual_history_offsets=(),
+            visual_history_include_first=False,
+        ),
+        "move",
+    )
+    planned = []
+
+    def plan(observation, **kwargs):
+        batch = history.adapter.observation_batch(observation, "", None, None)
+        planned.append(history.attach(batch))
+        return np.array([[0.2] * 7, [0.3] * 7, [0.4] * 7, [99.0] * 7])
+
+    runner = extended.rollout_episode if plus else original.rollout_episode
+    runner(
+        Env(),
+        None,
+        plan,
+        max_steps=7,
+        replan_steps=3,
+        save_video=False,
+        observe=history.observe,
+        observe_action=history.observe_action,
+        **({} if plus else {"wait_steps": 2}),
+    )
+    assert len(planned) == 3
+    assert not planned[0]["history_action_mask"].any()
+    torch.testing.assert_close(planned[1]["history_action"][0, :, 0], torch.tensor([0.2, 0.3, 0.4]))
+    settling = 10 if plus else 2
+    assert planned[1]["history_state"][0, :, 0].tolist() == [settling, settling + 1, settling + 2]
+    assert not any((batch["history_action"] == 99).any() for batch in planned)
