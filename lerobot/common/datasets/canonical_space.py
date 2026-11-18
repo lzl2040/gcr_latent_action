@@ -702,7 +702,33 @@ PHYSICAL_SPECS: dict[str, dict] = {
         "action": [_seg("delta_action.ee_ort6d_pos", 0, 20, 0)],
         "state": [_seg("observation.ee_ort6d_pos", 0, 20, 0)],
     },
+    # real-world
     "real_house_stack": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 10, 0)],
+        "state": [_seg("observation.state", 0, 10, 0)],
+    },
+    "sauce_4hz": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 10, 0)],
+        "state": [_seg("observation.state", 0, 10, 0)],
+    },
+    "pizza_sub1_15hz": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 10, 0)],
+        "state": [_seg("observation.state", 0, 10, 0)],
+    },
+    "pizza_sub2_15hz": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 10, 0)],
+        "state": [_seg("observation.state", 0, 10, 0)],
+    },
+    "pizza_sub3_15hz": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 10, 0)],
+        "state": [_seg("observation.state", 0, 10, 0)],
+    },
+    "pizza_sub4_15hz": {
         # TO DO: 20-50 is 10 finger xyz
         "action": [_seg("action", 0, 10, 0)],
         "state": [_seg("observation.state", 0, 10, 0)],

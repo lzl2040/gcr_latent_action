@@ -1135,25 +1135,32 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
-    "pizza_sub2": {
-        "image_obs_keys": {"primary": "right_rgb", "secondary": "top_rgb", "wrist": "wrist_rgb"},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
-        "state_obs_keys": ["EEF_state", None, "gripper_state"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "pizza_sub4": {
-        "image_obs_keys": {"primary": "right_rgb", "secondary": "top_rgb", "wrist": "wrist_rgb"},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
-        "state_obs_keys": ["EEF_state", None, "gripper_state"],
-        "state_encoding": StateEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "pizza_sub1": {
+    "pizza_sub1_15hz": {
         "image_obs_keys": {"primary": "right_rgb", "secondary": "top_rgb", "wrist": "wrist_rgb"},
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "state_obs_keys": ["EEF_state", None, "gripper_state"],
         "state_encoding": StateEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "pizza_sub2_15hz": {
+        "image_obs_keys": {"primary": "right_rgb", "secondary": "top_rgb", "wrist": "wrist_rgb"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "pizza_sub3_15hz": {
+        "image_obs_keys": {"primary": "right_rgb", "secondary": "top_rgb", "wrist": "wrist_rgb"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "pizza_sub4_15hz": {
+        "image_obs_keys": {"primary": "right_rgb", "secondary": "top_rgb", "wrist": "wrist_rgb"},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": ["EEF_state", None, "gripper_state"],
+        "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "real_house_stack": {
