@@ -24,6 +24,7 @@ from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import (
 )
 from lerobot.common.policies.qwen3vl_mot.stage1_transfer import TransferReport, transfer_matching_module
 from lerobot.common.policies.qwen3vl_mot.tasks import (
+    DEFAULT_TASK_NAMES,
     DEFAULT_TASK_WEIGHTS,
     TASK_SPECS,
     ModalityRole,
@@ -1304,6 +1305,361 @@ def test_mlp_physical_tokens_respect_masks_groups_and_independent_modalities():
     assert encoder.action_mlp[0].weight.grad is not None
 
 
+@pytest.mark.parametrize("source_format", ["safetensors", "deepspeed_nano_bf16_history"])
+def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, monkeypatch, source_format):
+    import lerobot.common.policies.ace.cosmos3_encoders as vae_module
+    import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
+    from lerobot.common.policies.qwen3vl_mot.modeling_physical import PhysicalMLPWithTactile
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("The hybrid baseline must not load a Stage-1 teacher or transfer Qwen weights.")
+
+    monkeypatch.setattr(stage2, "RoboContrast", forbidden)
+    monkeypatch.setattr(stage2, "_load_stage1_policy", forbidden)
+    monkeypatch.setattr(stage2, "transfer_stage1_perception", forbidden)
+    monkeypatch.setattr(torch.hub, "load_state_dict_from_url", forbidden)
+    monkeypatch.setattr(stage2, "Qwen3VLUnderstandingExpert", _FakeUnderstanding)
+    monkeypatch.setattr(
+        vae_module,
+        "build_cosmos3_vae",
+        lambda *args, **kwargs: (_FakeVAE(4), 4, 4, torch.zeros(4), torch.ones(4)),
+    )
+    codec_config = {"tactile_feat_dim": 6, "tactile_recon_size": 8}
+    source_encoder = PhysicalMLPWithTactile(
+        _mlp_baseline_config(
+            physical_encoder_type="mlp_tactile",
+            initialize_from_stage1=False,
+            stage1_tactile_config=codec_config,
+            tactile_generation_target="spatial_patches",
+        )
+    )
+    weights = {
+        f"physical_encoder.{name}": tensor
+        for name, tensor in source_encoder.state_dict().items()
+        if name.startswith("tactile_")
+    }
+    weights["physical_encoder.action_mlp.0.weight"] = torch.full_like(source_encoder.action_mlp[0].weight, 99)
+    weights["perception_encoder.unused"] = torch.ones(1)
+    stage1_dir = tmp_path / "stage1"
+    stage1_dir.mkdir()
+    RoboContrastConfig(
+        vision_backbone="dinov3",
+        tactile_backbone="resnet18",
+        tactile_recon_weight=1,
+        **codec_config,
+    )._save_pretrained(stage1_dir)
+    history = source_format != "safetensors"
+    if history:
+        source_file = stage1_dir / "step10/mp_rank_00_model_states.pt"
+        source_file.parent.mkdir()
+        torch.save({"module": {f"module.{name}": tensor for name, tensor in weights.items()}}, source_file)
+        (stage1_dir / "latest").write_text("step10")
+    else:
+        source_file = stage1_dir / "model.safetensors"
+        save_file(weights, source_file)
+    generator_dir = tmp_path / "cosmos"
+    generation_file = None
+    if history:
+        import json
+
+        from lerobot.common.policies.qwen3vl_mot.cosmos3_pretrained import (
+            COSMOS_GENERATION_CONFIGS,
+            generation_checkpoint_mapping,
+        )
+
+        native = {
+            **COSMOS_GENERATION_CONFIGS["nano"],
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "head_dim": 4,
+            "intermediate_size": 32,
+            "rope_axes_dim": [1, 1, 0],
+            "latent_channel": 4,
+            "patch_latent_dim": 16,
+        }
+        monkeypatch.setitem(COSMOS_GENERATION_CONFIGS, "nano", native)
+        (generator_dir / "transformer").mkdir(parents=True)
+        (generator_dir / "vae").mkdir()
+        (generator_dir / "transformer/config.json").write_text(json.dumps(native))
+        (generator_dir / "vae/config.json").write_text(json.dumps({"z_dim": 4}))
+        source = GenerationExpert(
+            understanding_dim=12,
+            hidden_dim=16,
+            depth=1,
+            num_heads=4,
+            num_kv_heads=4,
+            intermediate_dim=32,
+            hidden_act=native["hidden_act"],
+            dropout=0,
+            input_dims={"video": 16},
+            output_dims={"video": 16},
+            task_names=("i2v",),
+            gradient_checkpointing=False,
+            cosmos_config=native,
+        )
+        parameters = dict(source.named_parameters())
+        generation_file = generator_dir / "transformer/diffusion_pytorch_model.safetensors"
+        save_file(
+            {
+                original: parameters[target].detach().contiguous()
+                for target, original in generation_checkpoint_mapping(source).items()
+            },
+            generation_file,
+        )
+    config = _mlp_baseline_config(
+        physical_encoder_type="mlp_tactile",
+        stage1_checkpoint=str(stage1_dir),
+        tactile_generation_target="spatial_patches",
+        task_names=("all_modality_prediction", "joint_prediction", "tactile_prediction", "t2v"),
+        task_weights=(1, 0, 0, 0),
+        rgb_views=("primary", "wrist"),
+        physical_history_steps=3 if history else 0,
+        visual_history_offsets=(-2,) if history else (),
+        visual_history_include_first=history,
+        generation_backbone="nano" if history else "random",
+        generation_pretrained_dir=str(generator_dir),
+        cosmos3_dir=str(generator_dir),
+    )
+    policy = stage2.Qwen3VLMoTPolicy(config).train()
+    assert policy.teacher_perception is policy.latent_action_projection is None
+    assert config.stage1_policy_config is None and config.stage1_tactile_config == codec_config
+    assert not any(isinstance(module, nn.MultiheadAttention) for module in policy.physical_encoder.modules())
+    for name, tensor in policy.physical_encoder.state_dict().items():
+        if name.startswith("tactile_"):
+            torch.testing.assert_close(tensor, weights[f"physical_encoder.{name}"])
+    assert not (policy.physical_encoder.action_mlp[0].weight == 99).any()
+    if history:
+        policy.to(dtype=torch.bfloat16)
+    for module in (policy.physical_encoder.tactile_cnn, policy.physical_encoder.tactile_recon):
+        assert not module.training and not any(p.requires_grad for p in module.parameters())
+    with torch.no_grad():
+        for head in policy.generation.output_heads.values():
+            head.weight.normal_(std=0.02)
+    batch = {
+        "image_t0": torch.zeros(3, 3, 8, 8, dtype=torch.uint8),
+        "video": torch.zeros(3, 9, 3, 8, 8, dtype=torch.uint8),
+        "images_t0": torch.zeros(3, 2, 3, 8, 8, dtype=torch.uint8),
+        "image_view_mask": torch.ones(3, 2, dtype=torch.bool),
+        "video_views": torch.zeros(3, 2, 9, 3, 8, 8, dtype=torch.uint8),
+        "video_view_mask": torch.tensor([[1, 1], [1, 1], [0, 0]], dtype=torch.bool),
+        "task": ["move", "place", "touch"],
+        "has_text": torch.ones(3),
+        "pair_is_valid": torch.tensor([1, 1, 0]),
+        "observation.state": torch.randn(3, 4, 4),
+        "state_mask": torch.ones(3, 4),
+        "action": torch.randn(3, 4, 4),
+        "action_mask": torch.tensor([[1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]]),
+        "tactile_signal_mask": torch.zeros(3),
+        "tactile_image": torch.randint(0, 256, (3, 2, 2, 3, 8, 8), dtype=torch.uint8),
+        "tactile_image_mask": torch.tensor([[1.0, 0.0], [0.0, 0.0], [1.0, 1.0]]),
+    }
+    if history:
+        batch.update(
+            context_images=torch.zeros(3, 3, 2, 3, 8, 8, dtype=torch.uint8),
+            context_image_mask=torch.ones(3, 3, 2, dtype=torch.bool),
+            context_frame_offsets=torch.tensor([[-8, -2, 0]]).expand(3, -1),
+        )
+    for name in config.physical_history_modalities:
+        batch[f"history_{name}"] = torch.randn(3, 3, 4, requires_grad=True)
+        batch[f"history_{name}_mask"] = torch.ones(3, 3, 4, dtype=torch.bool)
+    recorded = []
+    encoded_images = []
+    policy.physical_encoder.tactile_cnn.register_forward_pre_hook(
+        lambda module, args: encoded_images.append(args[0].clone())
+    )
+
+    def record(module, args):
+        recorded.append(
+            {
+                s.name: (s.values.detach().clone(), s.sigma.clone(), s.keep.clone())
+                for s in args[0]
+                if not s.condition_only
+            }
+        )
+
+    hook = policy.generation.register_forward_pre_hook(record)
+    optimizer = torch.optim.AdamW(policy.get_optim_params(), lr=1e-3)
+    torch.manual_seed(7)
+    loss, metrics = policy(batch, task_type="all_modality_prediction")
+    assert torch.isfinite(loss) and metrics["valid_rows"] == 2
+    assert metrics["tactile_target_elements"] == 6
+    assert len(encoded_images) == 1
+    torch.testing.assert_close(encoded_images[0][0, 0], batch["tactile_image"][0, 0, -1])
+    for name in ("video", "state", "action", "tactile"):
+        assert metrics[f"{name}_flow_loss"] > 0
+        torch.testing.assert_close(recorded[0][name][1], recorded[0]["video"][1])
+        assert not recorded[0][name][2][2].any()
+    assert recorded[0]["state"][2][1].any() and not recorded[0]["tactile"][2][1].any()
+    padded = copy.deepcopy(batch)
+    padded["tactile_image"][0, 1] = 255
+    padded["tactile_image"][1:] = 255
+    torch.manual_seed(7)
+    padded_loss, _ = policy(padded, task_type="all_modality_prediction")
+    torch.testing.assert_close(loss, padded_loss)
+    no_tactile = {**batch, "tactile_image_mask": torch.zeros_like(batch["tactile_image_mask"])}
+    no_tactile_loss, no_tactile_metrics = policy(no_tactile, task_type="all_modality_prediction")
+    assert torch.isfinite(no_tactile_loss) and no_tactile_metrics["valid_rows"] == 2
+    assert no_tactile_metrics["tactile_target_elements"] == no_tactile_metrics["tactile_flow_loss"] == 0
+    loss.backward()
+    for name in ("state", "action"):
+        assert getattr(policy.physical_encoder, f"{name}_mlp")[0].weight.grad.abs().sum() > 0
+    for name in ("video", "state", "action", "tactile"):
+        assert policy.generation.output_heads[name].weight.grad.abs().sum() > 0
+    assert all(
+        p.grad is None
+        for name, p in policy.physical_encoder.named_parameters()
+        if name.startswith("tactile_")
+    )
+    optimizer.step()
+    policy.eval()
+    monkeypatch.setattr(policy, "_sample_tactile_images", forbidden)
+    recorded.clear()
+    encoder_calls = len(encoded_images)
+    expected = policy.generate_validation(batch, seed=19)
+    assert len(encoded_images) == encoder_calls
+    assert len(recorded) == config.inference_steps
+    for streams in recorded:
+        assert {"video", "state", "action", "tactile"} <= streams.keys()
+        for name in ("state", "action", "tactile"):
+            torch.testing.assert_close(streams[name][1], streams["video"][1])
+    assert expected["action_normalized"].shape == (3, 2, 4)
+    assert expected["state_normalized"].shape == (3, 4, 4)
+    assert expected["video_latents_views"].shape == (3, 2, 4, 3, 2, 2)
+    assert expected["tactile_decoded_z"].shape == (3, 2, 3, 8, 8)
+    assert not expected["tactile_decoded_z"][~expected["tactile_mask"]].any()
+    assert not expected["action_normalized"][0, :, 2:].any()
+    torch.testing.assert_close(expected["state_normalized"][:, 0], batch["observation.state"][:, 0])
+    changed = copy.deepcopy(batch)
+    changed["observation.state"][:, 1:] = float("nan")
+    changed["action"][:] = float("nan")
+    changed["video_views"][:, :, 1:] = 255
+    changed["video"][:, 1:] = 255
+    changed["tactile_image"][:] = 255
+    actual = policy.generate_validation(changed, seed=19)
+    for name in expected:
+        torch.testing.assert_close(expected[name], actual[name])
+    minimal = {
+        key: value
+        for key, value in batch.items()
+        if key not in ("video", "video_views", "action", "tactile_image")
+    }
+    minimal["observation.state"] = batch["observation.state"][:, 0]
+    actual = policy.generate_validation(minimal, seed=19)
+    for name in expected:
+        torch.testing.assert_close(expected[name], actual[name])
+    hook.remove()
+    checkpoint = tmp_path / "hybrid"
+    checkpoint.mkdir()
+    policy._save_pretrained(checkpoint)
+    source_file.unlink()
+    if generation_file is not None:
+        generation_file.unlink()
+    (stage1_dir / "config.json").unlink()
+    monkeypatch.setattr(stage2, "_load_stage1_tactile_codec", forbidden)
+    monkeypatch.setattr(stage2, "_load_stage1_config", forbidden)
+    restored = (
+        stage2.Qwen3VLMoTPolicy.from_pretrained(checkpoint).to(dtype=next(policy.parameters()).dtype).eval()
+    )
+    for name, tensor in policy.state_dict().items():
+        torch.testing.assert_close(tensor, restored.state_dict()[name])
+    actual = restored.generate_validation(minimal, seed=19)
+    for name in expected:
+        torch.testing.assert_close(expected[name], actual[name])
+
+
+@pytest.mark.parametrize("defect", ["missing_decoder", "extra_encoder_key", "wrong_shape"])
+def test_hybrid_tactile_codec_loading_is_strict(tmp_path, defect):
+    from lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot import _load_stage1_tactile_codec
+
+    encoder = nn.Module()
+    encoder.tactile_cnn = nn.Linear(2, 2)
+    encoder.tactile_recon = nn.Linear(2, 2)
+    encoder.action_mlp = nn.Linear(2, 2)
+    weights = {
+        f"physical_encoder.{name}": value
+        for name, value in encoder.state_dict().items()
+        if name.startswith("tactile_")
+    }
+    if defect == "missing_decoder":
+        del weights["physical_encoder.tactile_recon.weight"]
+    elif defect == "extra_encoder_key":
+        weights["physical_encoder.tactile_cnn.unexpected"] = torch.zeros(1)
+    else:
+        weights["physical_encoder.tactile_recon.weight"] = torch.zeros(1, 2)
+    save_file(weights, tmp_path / "model.safetensors")
+    with pytest.raises((ValueError, RuntimeError), match="incomplete or incompatible|size mismatch"):
+        _load_stage1_tactile_codec(encoder, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"use_tactile_conditioning": True}, "disable use_tactile_conditioning"),
+        ({"tactile_generation_target": "context_tokens"}, "spatial_patches"),
+        ({"initialize_from_stage1": False}, "embedded stage1_tactile_config"),
+        ({"stage1_tactile_config": {"tactile_feat_dim": 6}}, "positive codec dimensions"),
+        (
+            {"stage1_tactile_config": {"tactile_feat_dim": 6, "tactile_recon_size": 0}},
+            "positive codec dimensions",
+        ),
+    ],
+)
+def test_hybrid_baseline_rejects_missing_or_incompatible_codec_contract(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        _mlp_baseline_config(
+            **(
+                {
+                    "physical_encoder_type": "mlp_tactile",
+                    "stage1_checkpoint": "/stage1",
+                    "tactile_generation_target": "spatial_patches",
+                    "task_names": ("all_modality_prediction",),
+                    "task_weights": (1,),
+                }
+                | overrides
+            )
+        )
+
+
+def test_hybrid_fresh_model_requires_codec_source_before_loading_qwen(monkeypatch):
+    import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
+
+    monkeypatch.setattr(
+        stage2,
+        "Qwen3VLUnderstandingExpert",
+        lambda *args, **kwargs: pytest.fail("Missing codec source must be rejected before loading Qwen."),
+    )
+    config = _mlp_baseline_config(
+        physical_encoder_type="mlp_tactile",
+        tactile_generation_target="spatial_patches",
+    )
+    with pytest.raises(ValueError, match="codec checkpoint"):
+        stage2.Qwen3VLMoTPolicy(config)
+
+
+@pytest.mark.parametrize("backbone, recon_weight", [("ftp1_vit", 1), ("resnet18", 0)])
+def test_hybrid_rejects_nondecodable_stage1_codec(monkeypatch, backbone, recon_weight):
+    import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
+
+    monkeypatch.setattr(stage2, "Qwen3VLUnderstandingExpert", _FakeUnderstanding)
+    monkeypatch.setattr(
+        stage2,
+        "_load_stage1_config",
+        lambda *args: SimpleNamespace(
+            tactile_backbone=backbone,
+            tactile_recon_weight=recon_weight,
+        ),
+    )
+    config = _mlp_baseline_config(
+        physical_encoder_type="mlp_tactile",
+        stage1_checkpoint="/stage1",
+        tactile_generation_target="spatial_patches",
+    )
+    with pytest.raises(ValueError, match="trained ResNet tactile encoder and decoder"):
+        stage2.Qwen3VLMoTPolicy(config)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -1535,7 +1891,7 @@ def _check_policy_routes_and_roundtrip(
         time_sampling_distribution=time_distribution,
         time_sampling_shift=3.0,
         inference_steps=3,
-        task_names=tuple(TASK_SPECS),
+        task_names=(*DEFAULT_TASK_NAMES, "va_prediction"),
         task_weights=(*DEFAULT_TASK_WEIGHTS, 0.0),
     )
     policy = stage2.Qwen3VLMoTPolicy(config)
@@ -1615,7 +1971,7 @@ def _check_policy_routes_and_roundtrip(
                 lambda module, args, name=name: decoder_inputs[name].append(args[0].detach().clone())
             )
 
-    for task_name in TASK_SPECS:
+    for task_name in config.task_names:
         policy.physical_encoder.include_tactile_history.clear()
         sigma_calls.clear()
         for recorded in decoder_inputs.values():
@@ -1837,7 +2193,9 @@ def _check_policy_routes_and_roundtrip(
         policy.physical_encoder.last_state,
         batch["observation.state"][:, :1].expand(-1, 4, -1),
     )
-    policy.config.task_weights = tuple(1.0 if name == "joint_prediction" else 0.0 for name in TASK_SPECS)
+    policy.config.task_weights = tuple(
+        1.0 if name == "joint_prediction" else 0.0 for name in config.task_names
+    )
     joint = policy.generate_validation(batch, seed=37)
     assert joint["action_normalized"].shape == (2, 2, 4)
     assert joint["state_normalized"].shape == (2, 4, 4)

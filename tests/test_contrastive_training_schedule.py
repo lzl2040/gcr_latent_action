@@ -347,25 +347,38 @@ def test_stage2_resume_uses_saved_embedded_stage1_config(tmp_path) -> None:
     assert cfg.scheduler.num_decay_steps == 77_000
 
 
-def test_stage2_mlp_resume_needs_no_embedded_teacher_and_rejects_architecture_swap(tmp_path):
+@pytest.mark.parametrize("physical_type", ["mlp", "mlp_tactile"])
+def test_stage2_mlp_resume_needs_no_embedded_teacher_and_rejects_architecture_swap(tmp_path, physical_type):
     baseline = Qwen3VLMoTConfig(
-        physical_encoder_type="mlp",
+        physical_encoder_type=physical_type,
         physical_tuning_mode="full",
         physical_flow_space="raw",
         latent_action_loss_weight=0,
         task_names=("va_prediction",),
         task_weights=(1.0,),
         initialize_from_stage1=False,
+        tactile_generation_target="spatial_patches",
+        stage1_tactile_config=(
+            {"tactile_feat_dim": 6, "tactile_recon_size": 8} if physical_type == "mlp_tactile" else None
+        ),
     )
     baseline._save_pretrained(tmp_path)
     cfg = SimpleNamespace(
         weight_resume=True,
         output_dir=tmp_path,
-        policy=Qwen3VLMoTConfig(),
+        policy=Qwen3VLMoTConfig(
+            physical_encoder_type=physical_type,
+            physical_tuning_mode="full",
+            physical_flow_space="raw",
+            latent_action_loss_weight=0,
+            tactile_generation_target="spatial_patches",
+        )
+        if physical_type == "mlp_tactile"
+        else Qwen3VLMoTConfig(),
         use_policy_training_preset=False,
     )
     _load_stage2_resume_policy_config(cfg, args=[])
-    assert cfg.policy.physical_encoder_type == "mlp"
+    assert cfg.policy.physical_encoder_type == physical_type
     assert cfg.policy.physical_tuning_mode == "full"
     assert cfg.policy.stage1_policy_config is None
     assert cfg.policy.latent_action_loss_weight == 0

@@ -387,7 +387,7 @@ def load_policy(args):
     validate_saved_task_contract(payload)
     if payload.pop("type", None) != "qwen3vl_mot":
         raise ValueError("Expected a self-contained qwen3vl_mot policy configuration.")
-    needs_stage1 = payload.get("physical_encoder_type", "stage1_transformer") != "mlp"
+    needs_stage1 = payload.get("physical_encoder_type", "stage1_transformer") not in ("mlp", "mlp_tactile")
     if needs_stage1 and not payload.get("stage1_policy_config"):
         raise ValueError("Expected a self-contained qwen3vl_mot policy configuration.")
     for field, path in (("qwen3vl_dir", args.qwen3vl_dir), ("cosmos3_dir", args.cosmos3_dir)):

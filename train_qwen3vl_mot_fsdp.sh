@@ -261,8 +261,8 @@ if [[ -z "$PHYSICAL_ENCODER_TYPE" && "$WEIGHT_RESUME" != "true" ]]; then
 fi
 BASELINE_ARGS=()
 if [[ -n "$PHYSICAL_ENCODER_TYPE" ]]; then
-    [[ "$PHYSICAL_ENCODER_TYPE" == "stage1_transformer" || "$PHYSICAL_ENCODER_TYPE" == "mlp" ]] \
-        || die "PHYSICAL_ENCODER_TYPE must be stage1_transformer or mlp"
+    [[ "$PHYSICAL_ENCODER_TYPE" == "stage1_transformer" || "$PHYSICAL_ENCODER_TYPE" == "mlp" || "$PHYSICAL_ENCODER_TYPE" == "mlp_tactile" ]] \
+        || die "PHYSICAL_ENCODER_TYPE must be stage1_transformer, mlp or mlp_tactile"
     BASELINE_ARGS+=(--policy.physical_encoder_type="$PHYSICAL_ENCODER_TYPE")
 fi
 if [[ -n "$PHYSICAL_HISTORY_STEPS" ]]; then
@@ -274,7 +274,7 @@ if [[ -n "$PHYSICAL_HISTORY_MODE" ]]; then
         || die "PHYSICAL_HISTORY_MODE must be state, action or state_action"
     BASELINE_ARGS+=(--policy.physical_history_mode="$PHYSICAL_HISTORY_MODE")
 fi
-if [[ "$PHYSICAL_ENCODER_TYPE" == "mlp" ]]; then
+if [[ "$PHYSICAL_ENCODER_TYPE" == "mlp" || "$PHYSICAL_ENCODER_TYPE" == "mlp_tactile" ]]; then
     PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-raw}"
     PHYSICAL_TUNING_MODE="${PHYSICAL_TUNING_MODE:-full}"
     LATENT_ACTION_LOSS_WEIGHT="${LATENT_ACTION_LOSS_WEIGHT:-0}"
@@ -462,7 +462,7 @@ echo "  resume=${WEIGHT_RESUME}${RESUME_CHECKPOINT:+ (${RESUME_CHECKPOINT})}"
 echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "  rgb_augmentation=${RGB_AUG_ENABLED} (training only; crop 90-100%, mild color jitter; no rotation)"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
-echo "  physical_encoder=${PHYSICAL_ENCODER_TYPE:-<from checkpoint>} (mlp: no stage1, trainable raw-space inputs)"
+echo "  physical_encoder=${PHYSICAL_ENCODER_TYPE:-<from checkpoint>} (mlp: no stage1; mlp_tactile: frozen stage1 tactile codec only)"
 echo "  physical_history: steps=${PHYSICAL_HISTORY_STEPS:-<saved config; default 0>} mode=${PHYSICAL_HISTORY_MODE:-<saved config; default state_action>}"
 echo "  predicted_recon_weights: action=${ACTION_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} state=${STATE_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} (no clean codec loss)"
 echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} shift=${TIME_SAMPLING_SHIFT:-<saved config; default 1>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"

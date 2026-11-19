@@ -205,7 +205,8 @@ def test_dcp_single_process_strict_load(tmp_path):
         load_dcp_model(torch.nn.Sequential(torch.nn.Linear(3, 2)), tmp_path)
 
 
-def test_mlp_evaluation_load_needs_no_stage1_assets(tmp_path, monkeypatch):
+@pytest.mark.parametrize("physical_type", ["mlp", "mlp_tactile"])
+def test_mlp_evaluation_load_needs_no_stage1_assets(tmp_path, monkeypatch, physical_type):
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as modeling
     import lerobot.evaluation.eval_qwen3vl_mot_libero as evaluator
     from lerobot.common.policies.qwen3vl_mot.configuration_qwen3vl_mot import Qwen3VLMoTConfig
@@ -214,9 +215,14 @@ def test_mlp_evaluation_load_needs_no_stage1_assets(tmp_path, monkeypatch):
     (checkpoint / "model").mkdir(parents=True)
     (checkpoint / "model/.metadata").touch()
     config = Qwen3VLMoTConfig(
-        physical_encoder_type="mlp",
+        physical_encoder_type=physical_type,
         physical_tuning_mode="full",
         latent_action_loss_weight=0,
+        initialize_from_stage1=False,
+        tactile_generation_target="spatial_patches",
+        stage1_tactile_config=(
+            {"tactile_feat_dim": 6, "tactile_recon_size": 8} if physical_type == "mlp_tactile" else None
+        ),
         task_names=("va_prediction",),
         task_weights=(1.0,),
     )
@@ -249,7 +255,7 @@ def test_mlp_evaluation_load_needs_no_stage1_assets(tmp_path, monkeypatch):
         )
     )
     assert loaded_configs[0].stage1_policy_config is None
-    assert loaded_configs[0].physical_encoder_type == "mlp"
+    assert loaded_configs[0].physical_encoder_type == physical_type
     assert loaded_configs[0].initialize_from_stage1 is False
     assert loaded_models == [checkpoint / "model"]
     assert not policy.training

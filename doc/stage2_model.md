@@ -13,7 +13,7 @@
 > - FSDP、FP8 或 optimizer 对模型训练语义的影响。
 >
 > 当前说明覆盖 Edge/Nano 预训练生成、多视角生成、physical embedding-space flow，
-> 以及可选的无 Stage 1、独立 MLP 物理编码 baseline。未指定新选项时，原模型不变。
+> 以及独立 MLP baseline、仅继承 Stage 1 触觉 codec 的混合 baseline。未指定新选项时，原模型不变。
 
 LIBERO 实际微调配置、与官方 Cosmos3/LaWAM 的差异和待验证风险，见
 [LIBERO 微调审计](libero_finetuning_audit.md)。
@@ -256,6 +256,49 @@ bash train_qwen3vl_mot_fsdp.sh
 可使用原命令的 `WEIGHT_RESUME=true`，未显式传入的物理模式从 checkpoint 读取。
 不允许在同一输出目录将 Physical Transformer 与 MLP 相互替换。
 LIBERO 及复用其加载器的评测同样支持该自包含 baseline，无需 Stage 1 text 资源。
+
+### 2.2 混合 baseline：MLP + 冻结 Stage 1 tactile codec
+
+`physical_encoder_type="mlp_tactile"` 保留 2.1 的独立 action/state MLP、raw/full flow、
+原始 Qwen 初始化和零蒸馏；只额外加载 Stage 1 的 `physical_encoder.tactile_cnn`
+和 `physical_encoder.tactile_recon`。不加载 Stage 1 perception、Physical Transformer、
+temporal tactile tower 或跨模态 grounding 权重。Stage 1 的视觉 backbone 可以是 DINOv3，
+不需要与 Qwen 相同。codec 始终冻结且保持 eval，训练中只有目标触觉帧经过 encoder。
+
+要求 Stage 1 使用 `tactile_backbone="resnet18"`、`tactile_recon_weight>0`，且 encoder、
+decoder 权重完整；不支持用随机 decoder、FTP-1/AnyTouch pooled features 冒充可解码 codec。
+支持 exported `model.safetensors`（只读取 codec tensors）或原有 DeepSpeed checkpoint 格式；
+后者需要读取 checkpoint payload，但两者都不构造完整 Stage 1 模型。配置不在 checkpoint
+根目录时，用 `STAGE1_CONFIG=/path/to/config.json` 单独指定。
+
+新增独立任务 `all_modality_prediction`：同一次 Generation forward 联合预测 action、
+未来 state、未来 RGB video 和**窗口末帧的光学触觉图像 patch latent**，不是整段触觉视频。
+四路 target 共用每个样本的 sigma，噪声独立；current RGB latent 和 raw state 第 0 帧保持干净。
+各模态按现有 loss weight 和全局有效元素数分别归一化，不新增隐式图像像素重建 loss。
+触觉 encoder 的 patch 宽度沿用 Stage 1 的 `tactile_feat_dim`，不强制等于物理 MLP 宽度。
+默认 112×112 触觉对应每 pad 4×4 patches，decoder 输出 dataset z-score RGB，
+`tactile_decoded_z` 需要按数据集统计反归一化后才能显示。
+
+缺触觉的样本仍训练 video/action/state，触觉 loss 只在有效光学 pad 上计算；整批缺触觉时
+触觉 loss 为零，不把填充图像当作标签。只有低维 signal 的样本也按此处理，**本变体尚不生成
+低维触觉 signal**。`use_tactile_conditioning` 仍须关闭：这里的联合条件交互发生在
+Generation 四路 noisy streams 内，不走旧 Physical Transformer 的 tactile conditioning。
+
+新增入口只默认启用该新任务，不改变旧 launcher、默认任务列表或原 `joint_prediction`：
+
+```bash
+conda activate lerobot_v2
+STAGE1_CHECKPOINT=/path/to/stage1_with_trained_tactile_codec \
+WEIGHT_RESUME=false RGB_VIEWS=primary,wrist \
+bash train_qwen3vl_mot_baseline_all_modality_fsdp.sh
+```
+
+通用 FSDP/local launcher 同样接受 `PHYSICAL_ENCODER_TYPE=mlp_tactile`，
+`STAGE2_TASK_NAMES=all_modality_prediction STAGE2_TASK_WEIGHTS=1.0`；
+自动配置 raw/full/零蒸馏，保留 Stage 1 codec 路径参数。视觉历史 CLI 和 FSDP 的
+`PHYSICAL_HISTORY_STEPS` / `PHYSICAL_HISTORY_MODE` 仍可独立开启，默认关闭。
+Stage 2 保存 codec 权重及最小 `stage1_tactile_config`，恢复无需原 Stage 1 路径、
+完整 Stage 1 配置或 text 资源；不能在既有实验中切换 physical encoder 类型或 codec 架构。
 
 ## 3. 输入数据契约
 
@@ -963,6 +1006,7 @@ lerobot/common/policies/qwen3vl_mot/tasks.py
 | `t2v` | text | 无 | 完整 video |
 | `i2v` | image + available text | video 当前 latent frame | 未来 video |
 | `joint_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action + 未来 state |
+| `all_modality_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action + 未来 state + 末帧触觉 patches |
 | `va_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action，不预测 state |
 | `forward_dynamics` | image + available text | video 当前 latent frame + action | 未来 video |
 | `inverse_dynamics` | image + available text | 完整窗口 video | 该窗口的 action |
@@ -983,7 +1027,10 @@ state_prediction    0.10
 tactile_prediction  0.10
 ```
 
-`va_prediction` 为显式启用的新任务，不加入上述默认任务列表或改变已有权重。
+`all_modality_prediction` 与 `va_prediction` 均须显式启用，不加入上述默认列表或改变已有权重。
+前者要求 `tactile_generation_target="spatial_patches"`，缺触觉时仅屏蔽该路 target；
+它与不含触觉的 `joint_prediction` 是不同任务。
+以下为 `va_prediction` 的语义：
 它只取 state chunk 的第 0 帧并重复到整个 chunk；不把未来 GT state 作为条件或目标，
 state 的 sigma 始终为 0，没有 state flow loss 或 state decoder 重建 loss。
 video/action 共用每个样本的 sigma，分别采样独立高斯噪声。
@@ -1067,6 +1114,8 @@ resume 保留保存值，显式 CLI 参数可以覆盖，旧配置缺字段时 s
 
 `joint_prediction` 每个样本只采一次 sigma，video/action/state 的目标共用该值，
 但每个模态各自生成独立高斯噪声；所有 RGB 视角也共用同一 sigma。
+`all_modality_prediction` 将相同同步规则扩展到 tactile patches；`va_prediction`
+只同步 video/action，current state 始终干净。
 已知当前图像和独立 current-state 条件 token 保持干净。
 其他任务只给需要预测的模态加噪，干净条件的 sigma 保持 `0`。
 分布开关不改变推理时默认 20 步 `1 -> 0` 等间隔 Euler schedule。
@@ -1221,6 +1270,12 @@ $$
 
 ### 11.2 生成验证接口
 
+`all_modality_prediction` 权重为正时优先使用四模态联合采样：每个 Euler step 只调用一次
+Generation，同时更新四路 noisy targets，最后调用冻结 decoder 得到 `tactile_decoded_z`
+及 `tactile_mask`；无效 pad 输出清零。不再调用使用 GT video/action/state 条件的独立
+tactile sampler。推理只需当前 RGB/state、维度 masks、`tactile_image_mask` 和显式启用的历史；
+触觉几何来自配置，不读取未来真值，也不需要当前或未来触觉像素。
+
 `generate_validation(batch, seed=...)` 在 joint 权重为正时，使用同一次 Generation forward
 和同一轮 Euler 积分联合生成 action、未来 video 和未来 state。只编码 current state，
 不读取 ground-truth action、未来 state 或未来 video 作为条件；current RGB latent、
@@ -1231,7 +1286,7 @@ embedding 模式的额外 current-state token（raw 模式的第 0 帧）在积�
 
 joint 未启用且 va 权重为正时，改为使用 `va_prediction` 联合生成 video/action，
 返回结果不含 `state_normalized`，也不导出 state 预测图或 state MAE。
-两种联合任务均未启用时沿用固定 seed 的 action、i2v 分别采样路径；可解码触觉单独采样，
+三种联合任务均未启用时沿用固定 seed 的 action、i2v 分别采样路径；原 `tactile_prediction` 可单独采样，
 未配置 tactile task 或没有有效触觉图像时跳过。
 视频从当前 RGB 独立 VAE 编码和未来 Gaussian noise 开始做 Euler 更新，
 每一路的首 temporal latent 始终固定，不读取未来图像作为推理条件。
@@ -1371,13 +1426,15 @@ camera embedding 和角色文本区分 primary/secondary/wrist，但没有显式
 
 已实现 Euler sampler、latent unpatchify 和验证 VAE decoder；尚无 classifier-free guidance。
 
-### 14.3 Tactile 是 feature prediction
+### 14.3 Tactile 的两种目标与限制
 
-当前 tactile task 预测 Physical Encoder 产生的 1024 维 tactile tokens，不是直接预测
-未来触觉原始图像或低维信号。
+`context_tokens` 预测 Physical Encoder 的 contextual tactile tokens，不能解码成原始图像。
+`spatial_patches` 则使用 Stage 1 ResNet codec 的窗口末帧空间 latents，可由冻结 decoder
+还原为 z-scored 光学触觉图像；`all_modality_prediction` 和混合 baseline 要求此模式。
+目前均不支持生成完整触觉视频或未来低维触觉信号。
 
-当前 `use_tactile_conditioning=False`，且现有任务中没有把 tactile 标为 `CLEAN`，因此 tactile
-只在 `tactile_prediction` 中作为预测目标，尚未作为 video、state 或 action 任务的条件。
+现有任务没有把 tactile 标为 `CLEAN`。独立 `tactile_prediction` 使用干净 GT video/state/action
+作为条件；新的 `all_modality_prediction` 使用四路 noisy targets 联合去噪，不使用未来 GT 条件。
 
 ### 14.4 Teacher 只在训练时需要
 

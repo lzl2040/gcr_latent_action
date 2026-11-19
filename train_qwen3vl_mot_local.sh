@@ -17,12 +17,12 @@ fi
 BASELINE_ARGS=()
 if [[ -n "$PHYSICAL_ENCODER_TYPE" ]]; then
     case "$PHYSICAL_ENCODER_TYPE" in
-        stage1_transformer|mlp) ;;
-        *) echo "Error: PHYSICAL_ENCODER_TYPE must be stage1_transformer or mlp" >&2; exit 1 ;;
+        stage1_transformer|mlp|mlp_tactile) ;;
+        *) echo "Error: PHYSICAL_ENCODER_TYPE must be stage1_transformer, mlp or mlp_tactile" >&2; exit 1 ;;
     esac
     BASELINE_ARGS+=(--policy.physical_encoder_type="$PHYSICAL_ENCODER_TYPE")
 fi
-if [[ "$PHYSICAL_ENCODER_TYPE" == "mlp" ]]; then
+if [[ "$PHYSICAL_ENCODER_TYPE" == "mlp" || "$PHYSICAL_ENCODER_TYPE" == "mlp_tactile" ]]; then
     PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-raw}"
     PHYSICAL_TUNING_MODE="${PHYSICAL_TUNING_MODE:-full}"
     LATENT_ACTION_LOSS_WEIGHT="${LATENT_ACTION_LOSS_WEIGHT:-0}"

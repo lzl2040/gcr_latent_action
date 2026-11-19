@@ -21,7 +21,7 @@ from lerobot.configs.policies import PreTrainedConfig
 
 from .configuration_qwen3vl_mot import Qwen3VLMoTConfig
 from .modeling_generation import GenerationExpert, GenerationStream
-from .modeling_physical import PhysicalMLP
+from .modeling_physical import PhysicalMLP, PhysicalMLPWithTactile
 from .modeling_understanding import Qwen3VLUnderstandingExpert, _base_qwen
 from .stage1_transfer import merge_peft_module, transfer_stage1_perception
 from .tasks import (
@@ -151,6 +151,34 @@ def _encode_stage1_config(config: RoboContrastConfig) -> dict:
     return payload
 
 
+def _load_stage1_tactile_codec(encoder: PhysicalMLPWithTactile, checkpoint_path: Path) -> None:
+    prefixes = ("physical_encoder.tactile_cnn.", "physical_encoder.tactile_recon.")
+    exported = checkpoint_path / "model.safetensors" if checkpoint_path.is_dir() else checkpoint_path
+    if exported.is_file() and exported.suffix == ".safetensors":
+        from safetensors import safe_open
+
+        with safe_open(exported, framework="pt", device="cpu") as source:
+            names = source.keys()
+            weights = {name: source.get_tensor(name) for name in names if name.startswith(prefixes)}
+    else:
+        payload = torch.load(
+            _resolve_deepspeed_model_file(checkpoint_path), map_location="cpu", weights_only=False
+        )
+        weights = {
+            _strip_distributed_prefix(name): value
+            for name, value in payload.get("module", payload).items()
+            if _strip_distributed_prefix(name).startswith(prefixes)
+        }
+    weights = {name.removeprefix("physical_encoder."): value for name, value in weights.items()}
+    expected = {name for name in encoder.state_dict() if name.startswith(("tactile_cnn.", "tactile_recon."))}
+    if set(weights) != expected:
+        raise ValueError(
+            "Stage 1 tactile encoder/decoder weights are incomplete or incompatible: "
+            f"missing={sorted(expected - weights.keys())}, unexpected={sorted(weights.keys() - expected)}."
+        )
+    encoder.load_state_dict({**encoder.state_dict(), **weights}, strict=True)
+
+
 def _decode_stage1_config(payload: dict) -> RoboContrastConfig:
     import draccus
 
@@ -207,6 +235,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             ("visual_history_include_first", False),
             ("physical_history_steps", 0),
             ("physical_history_mode", "state_action"),
+            ("stage1_tactile_config", None),
         ):
             saved = saved_config.get(field, default)
             if field == "visual_history_offsets":
@@ -221,7 +250,13 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         config.validate_features()
 
         restoring_embedded = not config.initialize_from_stage1
-        mlp_baseline = config.physical_encoder_type == "mlp"
+        mlp_baseline = config.is_mlp_baseline
+        if (
+            config.physical_encoder_type == "mlp_tactile"
+            and not restoring_embedded
+            and not config.stage1_checkpoint
+        ):
+            raise ValueError("The hybrid baseline requires a Stage 1 tactile codec checkpoint.")
         teacher = None
         if not mlp_baseline and restoring_embedded:
             if config.stage1_policy_config is None:
@@ -359,7 +394,29 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             self.understanding.tuning_mode = requested_tuning
 
         if mlp_baseline:
-            self.physical_encoder = PhysicalMLP(config)
+            if config.physical_encoder_type == "mlp_tactile":
+                if not restoring_embedded:
+                    source = Path(config.stage1_checkpoint)
+                    tactile_config = _load_stage1_config(
+                        Path(config.stage1_config) if config.stage1_config else source
+                    )
+                    if (
+                        tactile_config.tactile_backbone != "resnet18"
+                        or tactile_config.tactile_recon_weight <= 0
+                    ):
+                        raise ValueError(
+                            "The hybrid baseline requires a trained ResNet tactile encoder and decoder."
+                        )
+                    config.stage1_tactile_config = {
+                        "tactile_feat_dim": tactile_config.tactile_feat_dim,
+                        "tactile_recon_size": tactile_config.tactile_recon_size,
+                    }
+                    config.validate_features()
+                self.physical_encoder = PhysicalMLPWithTactile(config)
+                if not restoring_embedded:
+                    _load_stage1_tactile_codec(self.physical_encoder, source)
+            else:
+                self.physical_encoder = PhysicalMLP(config)
             self.teacher_perception = None
             logger.info(
                 "MLP baseline: original pretrained Qwen, trainable action/state MLPs, no stage-one teacher."
@@ -425,7 +482,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 "Latent-action prediction disabled: no queries, teacher, projection or distillation; "
                 "Generation retains image/language K/V and the unchanged physical streams."
             )
-        if not mlp_baseline and config.tactile_generation_target == "spatial_patches":
+        if config.physical_encoder_type != "mlp" and config.tactile_generation_target == "spatial_patches":
             if (
                 self.physical_encoder.use_ftp1_tactile
                 or self.physical_encoder.use_anytouch_tactile
@@ -439,6 +496,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 self.physical_encoder.tactile_cnn,
                 self.physical_encoder.tactile_recon,
             ):
+                module.eval()
                 for parameter in module.parameters():
                     parameter.requires_grad_(False)
             tactile_generation_dim = self.physical_encoder.tactile_feat_dim
@@ -519,10 +577,13 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
     @classmethod
     def _load_as_safetensor(cls, model, model_file, map_location, strict):
         return super()._load_as_safetensor(
-            model, model_file, map_location,
+            model,
+            model_file,
+            map_location,
             strict=(
-                strict or model.config.generation_backbone != "random"
-                or getattr(model.config, "physical_encoder_type", "stage1_transformer") == "mlp"
+                strict
+                or model.config.generation_backbone != "random"
+                or model.config.is_mlp_baseline
                 or not model.config.latent_action_prediction_enabled
             ),
         )
@@ -966,6 +1027,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             return pair & has_action
         if task.name in (
             "joint_prediction",
+            "all_modality_prediction",
             "va_prediction",
             "state_prediction",
         ):
@@ -1385,7 +1447,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         return self._sampled_video_latents(stream, geometry)
 
     def _joint_sampling_task(self) -> str | None:
-        for name in ("joint_prediction", "va_prediction"):
+        for name in ("all_modality_prediction", "joint_prediction", "va_prediction"):
             task_id = self.generation.task_to_id.get(name)
             if task_id is not None and self.config.task_weights[task_id] > 0:
                 return name
@@ -1395,9 +1457,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         self, batch: dict, understanding, *, generator: torch.Generator | None = None,
         task_name: str = "joint_prediction",
     ) -> dict[str, torch.Tensor]:
-        if task_name not in ("joint_prediction", "va_prediction") or task_name not in self.generation.task_to_id:
-            raise ValueError("Joint sampling requires an enabled joint_prediction or va_prediction task.")
+        if (
+            task_name not in ("joint_prediction", "va_prediction", "all_modality_prediction")
+            or task_name not in self.generation.task_to_id
+        ):
+            raise ValueError(
+                "Joint sampling requires an enabled joint_prediction, va_prediction or all_modality_prediction task."
+            )
         predict_state = TASK_SPECS[task_name].state.is_target
+        predict_tactile = TASK_SPECS[task_name].tactile.is_target
         history = self._physical_history_streams(batch)
         target_names = ("state", "action") if predict_state else ("action",)
         device = next(self.generation.parameters()).device
@@ -1410,6 +1478,34 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         if not valid.all():
             raise ValueError("Joint sampling requires valid current state and action dimension masks for every row.")
         video, geometry = self._initial_video_sampling_stream(batch, generator)
+        tactile = None
+        if predict_tactile:
+            tactile_mask = batch["tactile_image_mask"].to(device).bool()
+            if tactile_mask.shape != (batch_size, self.config.max_tactile_views):
+                raise ValueError("Joint tactile sampling requires a (B,max_tactile_views) image mask.")
+            # Only geometry is needed: the target is the endpoint, not current tactile pixels.
+            grid = (self.config.tactile_img_size + 31) // 32
+            tactile_geometry = (tactile_mask.shape[1], grid, grid)
+            tactile_keep = tactile_mask.repeat_interleave(grid * grid, dim=1)
+            tactile_positions = torch.cartesian_prod(
+                torch.arange(tactile_geometry[0], device=device),
+                torch.arange(grid, device=device),
+                torch.arange(grid, device=device),
+            )
+            tactile_values = torch.randn(
+                *tactile_keep.shape,
+                self.physical_encoder.tactile_feat_dim,
+                device=device,
+                dtype=torch.float32,
+                generator=generator,
+            )
+            tactile = GenerationStream(
+                "tactile",
+                torch.where(tactile_keep[..., None], tactile_values, 0.0),
+                torch.ones(batch_size, device=device),
+                tactile_keep,
+                position_ids=tactile_positions,
+            )
         assert video.noise_mask is not None
         masks: dict[str, torch.Tensor] = {}
         values: dict[str, torch.Tensor] = {}
@@ -1444,6 +1540,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         for sigma, next_sigma in zip(schedule[:-1], schedule[1:], strict=True):
             sigma_batch = sigma.expand(batch_size)
             video.sigma = sigma_batch
+            if tactile is not None:
+                tactile.sigma = sigma_batch
             if self.physical_embedding_flow:
                 state_values = current
                 state_keep = current_keep
@@ -1477,7 +1575,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                     for index, name in enumerate(("state", "action"))
                 ]
             predictions = self.generation(
-                [video, *streams, *history],
+                [video, *streams, *([tactile] if tactile is not None else []), *history],
                 understanding.hidden_states,
                 understanding.attention_mask,
                 task_name,
@@ -1487,6 +1585,12 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             )
             velocity = torch.where(video.noise_mask.unsqueeze(-1), predictions["video"].float(), 0.0)
             video.values = video.values + (next_sigma - sigma) * velocity
+            if tactile is not None:
+                tactile.values = torch.where(
+                    tactile.keep[..., None],
+                    tactile.values + (next_sigma - sigma) * predictions["tactile"].float(),
+                    0.0,
+                )
             for name in target_names:
                 velocity = predictions[name][:, :self.config.num_groups].float().reshape_as(values[name])
                 values[name] = values[name] + (next_sigma - sigma) * velocity
@@ -1507,6 +1611,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         if predict_state:
             values["state"][:, 0] = physical_batch["observation.state"][:, 0] * physical_batch["state_mask"]
             output["state_normalized"] = values["state"]
+        if tactile is not None:
+            views, height, width = tactile_geometry
+            patches = tactile.values.reshape(
+                batch_size, views, height, width, self.physical_encoder.tactile_feat_dim
+            ).permute(0, 1, 4, 2, 3)
+            decoder_dtype = next(self.physical_encoder.tactile_recon.parameters(), patches).dtype
+            decoded = self.physical_encoder.decode_tactile_patches(patches.to(decoder_dtype)).float()
+            output["tactile_mask"] = tactile_mask
+            output["tactile_decoded_z"] = torch.where(tactile_mask[..., None, None, None], decoded, 0.0)
         return output
 
     def _prepare_grouped_modality(
@@ -1771,6 +1884,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         task: TaskSpec,
         batch: dict,
         valid_rows: torch.Tensor,
+        sigma: torch.Tensor | None = None,
     ):
         if task.tactile is ModalityRole.ABSENT:
             return None, None, None, None
@@ -1794,7 +1908,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                     None,
                     sigma,
                 )
-            sigma = self._sample_sigma(clean.shape[0], clean.device)
+            sigma = self._sample_sigma(clean.shape[0], clean.device) if sigma is None else sigma
             noisy, target = self._flow_corrupt(clean, sigma)
             noisy = torch.where(keep.unsqueeze(-1), noisy, torch.zeros_like(noisy))
             target = torch.where(keep.unsqueeze(-1), target, torch.zeros_like(target))
@@ -1822,7 +1936,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         if task.tactile is ModalityRole.CLEAN:
             sigma = torch.zeros(clean.shape[0], device=clean.device)
             return GenerationStream("tactile", clean, sigma, keep), None, None, sigma
-        sigma = self._sample_sigma(clean.shape[0], clean.device)
+        sigma = self._sample_sigma(clean.shape[0], clean.device) if sigma is None else sigma
         noisy, target = self._flow_corrupt(clean, sigma)
         loss_mask = keep.unsqueeze(-1).expand_as(target)
         return GenerationStream("tactile", noisy, sigma, keep), target, loss_mask, sigma
@@ -1835,7 +1949,9 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         valid_rows: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[int, int, int]]:
         images = batch["tactile_image"][:, :, frame_index]
-        image_mask = batch["tactile_image_mask"].to(images.device) > 0
+        image_mask = (batch["tactile_image_mask"].to(images.device) > 0) & valid_rows.to(images.device)[
+            :, None
+        ]
         batch_size, views = images.shape[:2]
         selected = image_mask.reshape(-1).nonzero(as_tuple=True)[0]
         grid_height = (images.shape[-2] + 31) // 32
@@ -2089,11 +2205,15 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 understanding,
                 generator=self._generation_rng(device, seed + 1 if seed is not None else None),
             )
-        tactile_decoded_z, tactile_mask = self._sample_tactile_images(
-            batch,
-            understanding,
-            generator=self._generation_rng(device, seed + 2 if seed is not None else None),
-        )
+        if "tactile_decoded_z" in joint_output:
+            tactile_decoded_z = joint_output["tactile_decoded_z"]
+            tactile_mask = joint_output["tactile_mask"]
+        else:
+            tactile_decoded_z, tactile_mask = self._sample_tactile_images(
+                batch,
+                understanding,
+                generator=self._generation_rng(device, seed + 2 if seed is not None else None),
+            )
         output = {
             "action_normalized": action,
             "video_latents": video_latents[:, 0] if len(self.rgb_views) > 1 else video_latents,
@@ -2140,7 +2260,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         sigmas: dict[str, torch.Tensor] = {}
         joint_sigma = (
             self._sample_sigma(valid_rows.shape[0], valid_rows.device)
-            if task.name in ("joint_prediction", "va_prediction") else None
+            if task.name in ("joint_prediction", "va_prediction", "all_modality_prediction")
+            else None
         )
         video_stream, video_target, video_mask, video_sigma = self._prepare_video_stream(
             task.video,
@@ -2167,6 +2288,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             task,
             batch,
             valid_rows,
+            joint_sigma,
         )
         if tactile_stream is not None:
             streams.append(tactile_stream)
@@ -2196,7 +2318,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             if predicted_latent_action is not None
             else understanding.latent_queries.sum() * 0.0
         )
-        if self.config.physical_encoder_type == "mlp" and not physical_streams:
+        if self.config.is_mlp_baseline and not physical_streams:
             loss = loss + sum(
                 parameter.reshape(-1)[0] * 0.0 for parameter in self.physical_encoder.parameters()
             )

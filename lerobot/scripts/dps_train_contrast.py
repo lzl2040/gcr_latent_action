@@ -321,6 +321,7 @@ def _load_stage2_resume_policy_config(
         "visual_history_include_first",
         "physical_history_steps",
         "physical_history_mode",
+        "stage1_tactile_config",
     ):
         if (
             parser.parse_arg(f"policy.{field_name}", args) is not None

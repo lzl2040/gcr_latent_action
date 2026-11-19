@@ -408,9 +408,20 @@ def test_fsdp_launcher_resolves_complete_checkpoint(tmp_path, fsdp_checkpoint_fa
         assert "--weight_resume=true" in result.stdout
 
 
-@pytest.mark.parametrize("launcher", ["fsdp", "local"])
+@pytest.mark.parametrize(
+    "launcher, physical_type",
+    [
+        ("fsdp", "mlp"),
+        ("local", "mlp"),
+        ("fsdp", "mlp_tactile"),
+        ("local", "mlp_tactile"),
+        ("baseline_all_modality_fsdp", "mlp_tactile"),
+    ],
+)
 @pytest.mark.parametrize("latent_enabled", [None, "false"])
-def test_mlp_baseline_launchers_skip_stage1_and_configure_raw_flow(tmp_path, launcher, latent_enabled):
+def test_mlp_baseline_launchers_configure_raw_flow_and_codec_source(
+    tmp_path, launcher, physical_type, latent_enabled
+):
     root = Path(__file__).resolve().parents[1]
     weights = tmp_path / "weights"
     qwen = weights / "Qwen3-VL-4B-Instruct"
@@ -454,7 +465,7 @@ def test_mlp_baseline_launchers_skip_stage1_and_configure_raw_flow(tmp_path, lau
         "LOG_DIR": str(tmp_path / "logs"),
         "JOB_NAME": "baseline",
         "WEIGHT_RESUME": "false",
-        "PHYSICAL_ENCODER_TYPE": "mlp",
+        "PHYSICAL_ENCODER_TYPE": physical_type,
         "STAGE1_CHECKPOINT": str(tmp_path / "missing-stage1"),
         "STAGE1_CONFIG": str(tmp_path / "missing-stage1-config.json"),
         "STAGE2_TASK_NAMES": "va_prediction",
@@ -480,6 +491,21 @@ def test_mlp_baseline_launchers_skip_stage1_and_configure_raw_flow(tmp_path, lau
         env.pop(key, None)
     if latent_enabled is not None:
         env["LATENT_ACTION_PREDICTION_ENABLED"] = latent_enabled
+    hybrid = physical_type == "mlp_tactile"
+    if hybrid:
+        stage1 = tmp_path / "stage1"
+        stage1.mkdir()
+        stage1_config = stage1 / "config.json"
+        stage1_config.write_text("{}")
+        env.update(
+            STAGE1_CHECKPOINT=str(stage1),
+            STAGE1_CONFIG=str(stage1_config),
+            STAGE2_TASK_NAMES="all_modality_prediction",
+            STAGE2_TASK_WEIGHTS="1.0",
+        )
+    if launcher == "baseline_all_modality_fsdp":
+        for key in ("PHYSICAL_ENCODER_TYPE", "STAGE2_TASK_NAMES", "STAGE2_TASK_WEIGHTS"):
+            env.pop(key)
     result = subprocess.run(
         ["bash", str(root / f"train_qwen3vl_mot_{launcher}.sh")],
         cwd=root,
@@ -490,15 +516,34 @@ def test_mlp_baseline_launchers_skip_stage1_and_configure_raw_flow(tmp_path, lau
     )
     assert result.returncode == 0, result.stdout + result.stderr
     for flag in (
-        "--policy.physical_encoder_type=mlp",
+        f"--policy.physical_encoder_type={physical_type}",
         "--policy.physical_flow_space=raw",
         "--policy.physical_tuning_mode=full",
         "--policy.latent_action_loss_weight=0",
         "--policy.generation_backbone=nano",
     ):
         assert flag in result.stdout
-    assert "--policy.stage1_checkpoint=" not in result.stdout
-    assert "--policy.stage1_config=" not in result.stdout
+    assert ("--policy.stage1_checkpoint=" in result.stdout) == hybrid
+    assert ("--policy.stage1_config=" in result.stdout) == hybrid
+    if hybrid:
+        import shlex
+
+        import draccus
+
+        from lerobot.common.policies.qwen3vl_mot.configuration_qwen3vl_mot import Qwen3VLMoTConfig
+
+        tokens = result.stdout.splitlines() if launcher == "local" else shlex.split(result.stdout)
+        config = draccus.parse(
+            Qwen3VLMoTConfig,
+            args=[
+                "--" + token.removeprefix("--policy.")
+                for token in tokens
+                if token.startswith("--policy.") and not token.startswith("--policy.type=")
+            ],
+        )
+        assert config.physical_encoder_type == "mlp_tactile"
+        assert config.task_names == ("all_modality_prediction",)
+        assert config.stage1_checkpoint == str(stage1)
     if latent_enabled is None:
         assert "--policy.latent_action_prediction_enabled=" not in result.stdout
     else:

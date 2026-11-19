@@ -17,12 +17,13 @@ from .tasks import DEFAULT_TASK_NAMES, DEFAULT_TASK_WEIGHTS, TASK_CONTRACT_VERSI
 @PreTrainedConfig.register_subclass("qwen3vl_mot")
 @dataclass
 class Qwen3VLMoTConfig(PreTrainedConfig):
-    """Stage two: Qwen understanding, stage-one physical tokens, and flow generation."""
+    """Stage two: Qwen understanding, configurable physical encoders, and flow generation."""
 
     pretrained_path: str | None = None
     stage1_checkpoint: str = ""
     stage1_config: str = ""
     stage1_policy_config: dict[str, Any] | None = None
+    stage1_tactile_config: dict[str, int] | None = None
     initialize_from_stage1: bool = True
     require_stage1_vision_transfer: bool = True
     require_stage1_text_transfer: bool = False
@@ -153,7 +154,7 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
             raise ValueError("physical_history_steps must be a nonnegative integer.")
         if self.physical_history_mode not in ("state", "action", "state_action"):
             raise ValueError("physical_history_mode must be state, action or state_action.")
-        if self.physical_history_steps and self.physical_encoder_type != "mlp":
+        if self.physical_history_steps and not self.is_mlp_baseline:
             raise ValueError("Physical history currently requires the MLP baseline.")
         if not self.latent_action_prediction_enabled:
             self.latent_action_loss_weight = 0.0
@@ -332,10 +333,14 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
                 "primary, secondary, wrist."
             )
         resolve_task_specs(self.task_names, self.task_weights)
-        if self.physical_encoder_type not in ("stage1_transformer", "mlp"):
-            raise ValueError("`physical_encoder_type` must be 'stage1_transformer' or 'mlp'.")
-        if self.physical_encoder_type == "mlp":
+        if self.physical_encoder_type not in ("stage1_transformer", "mlp", "mlp_tactile"):
+            raise ValueError("`physical_encoder_type` must be stage1_transformer, mlp or mlp_tactile.")
+        if self.is_mlp_baseline:
             self.validate_features()
+
+    @property
+    def is_mlp_baseline(self) -> bool:
+        return self.physical_encoder_type in ("mlp", "mlp_tactile")
 
     @property
     def num_groups(self) -> int:
@@ -369,21 +374,48 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
             )
         ):
             raise ValueError("Predicted physical reconstruction requires embedding-space physical flow.")
-        if self.physical_encoder_type == "mlp":
+        if self.is_mlp_baseline:
             if self.physical_flow_space != "raw" or self.physical_tuning_mode != "full":
                 raise ValueError("The MLP baseline requires raw-space flow and physical_tuning_mode='full'.")
             if self.latent_action_loss_weight != 0:
                 raise ValueError("The no-stage1 MLP baseline requires latent_action_loss_weight=0.")
-            if self.stage1_checkpoint or self.stage1_config or self.stage1_policy_config is not None:
+            if self.stage1_policy_config is not None:
                 raise ValueError("The MLP baseline must not specify a stage1 checkpoint or configuration.")
             task_specs, task_weights = resolve_task_specs(self.task_names, self.task_weights)
-            if self.use_tactile_conditioning or any(
+            tactile_tasks = any(
                 task.tactile.is_present and weight > 0
                 for task, weight in zip(task_specs, task_weights, strict=True)
-            ):
+            )
+            if self.physical_encoder_type == "mlp" and (self.stage1_checkpoint or self.stage1_config):
+                raise ValueError("The MLP baseline must not specify a stage1 checkpoint or configuration.")
+            if self.physical_encoder_type == "mlp" and (self.use_tactile_conditioning or tactile_tasks):
                 raise ValueError(
                     "The MLP baseline supports action/state only; disable tactile tasks and conditioning."
                 )
+            if self.physical_encoder_type == "mlp_tactile":
+                if self.use_tactile_conditioning:
+                    raise ValueError(
+                        "The hybrid baseline uses Generation tactile streams; disable use_tactile_conditioning."
+                    )
+                if self.tactile_generation_target != "spatial_patches":
+                    raise ValueError(
+                        "The hybrid baseline requires tactile_generation_target='spatial_patches'."
+                    )
+                if not self.initialize_from_stage1 and not self.stage1_tactile_config:
+                    raise ValueError("Hybrid baseline restore requires embedded stage1_tactile_config.")
+                if self.stage1_tactile_config is not None and (
+                    set(self.stage1_tactile_config) != {"tactile_feat_dim", "tactile_recon_size"}
+                    or any(
+                        type(value) is not int or value < 1 for value in self.stage1_tactile_config.values()
+                    )
+                ):
+                    raise ValueError("stage1_tactile_config must contain positive codec dimensions.")
+        if (
+            "all_modality_prediction" in self.task_names
+            and self.task_weights[self.task_names.index("all_modality_prediction")] > 0
+            and self.tactile_generation_target != "spatial_patches"
+        ):
+            raise ValueError("all_modality_prediction requires decodable spatial_patches tactile targets.")
         return None
 
     def get_optimizer_preset(self) -> AdamW8bitConfig:

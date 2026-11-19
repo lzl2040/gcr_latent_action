@@ -104,6 +104,14 @@ TASK_SPECS: dict[str, TaskSpec] = {
         state=ModalityRole.CURRENT_ONLY,
         action=ModalityRole.NOISY,
     ),
+    "all_modality_prediction": TaskSpec(
+        name="all_modality_prediction",
+        understanding_image=True,
+        video=ModalityRole.FUTURE_NOISY,
+        state=ModalityRole.FUTURE_NOISY,
+        action=ModalityRole.NOISY,
+        tactile=ModalityRole.NOISY,
+    ),
 }
 
 DEFAULT_TASK_NAMES = (

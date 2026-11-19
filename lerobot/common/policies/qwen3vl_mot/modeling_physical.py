@@ -1,4 +1,4 @@
-"""Independent grouped MLP encoders for the no-stage-one baseline."""
+"""Independent grouped MLPs with an optional Stage-1 tactile image codec."""
 
 from __future__ import annotations
 
@@ -77,3 +77,27 @@ class PhysicalMLP(nn.Module):
         keep = mask.reshape(values.shape[0], -1, self.config.group_size * width).any(-1)
         encoded = mlp(features)
         return torch.where(keep[..., None], encoded, torch.zeros_like(encoded)), keep
+
+
+class PhysicalMLPWithTactile(PhysicalMLP):
+    """Independent MLPs plus only the reusable Stage-1 tactile image codec."""
+
+    def __init__(self, config: Qwen3VLMoTConfig):
+        super().__init__(config)
+        from lerobot.common.policies.ace.modeling_robo_contrast import (
+            TactileImageEncoder,
+            TactilePatchDecoder,
+        )
+
+        self.tactile_feat_dim = config.stage1_tactile_config["tactile_feat_dim"]
+        self.use_ftp1_tactile = self.use_anytouch_tactile = False
+        self.tactile_cnn = TactileImageEncoder(self.tactile_feat_dim, pretrained=False)
+        self.tactile_recon = TactilePatchDecoder(
+            self.tactile_feat_dim, config.stage1_tactile_config["tactile_recon_size"]
+        )
+
+    def encode_tactile_patches(self, images: torch.Tensor) -> torch.Tensor:
+        return self.tactile_cnn(images)[1]
+
+    def decode_tactile_patches(self, patches: torch.Tensor) -> torch.Tensor:
+        return self.tactile_recon(patches.to(self.tactile_recon.input_projection[0].weight.dtype))
