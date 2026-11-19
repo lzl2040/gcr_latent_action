@@ -46,6 +46,9 @@ RGB_VIEWS="${RGB_VIEWS:-}"
 RGB_AUG_ENABLED="${RGB_AUG_ENABLED:-false}"
 PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-}"
 PHYSICAL_ENCODER_TYPE="${PHYSICAL_ENCODER_TYPE:-}"
+# MLP history: use 8/action for past actions; empty values preserve saved settings on resume.
+PHYSICAL_HISTORY_STEPS="${PHYSICAL_HISTORY_STEPS:-}"
+PHYSICAL_HISTORY_MODE="${PHYSICAL_HISTORY_MODE:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
 STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
 TIME_SAMPLING_DISTRIBUTION="${TIME_SAMPLING_DISTRIBUTION:-}"
@@ -262,6 +265,15 @@ if [[ -n "$PHYSICAL_ENCODER_TYPE" ]]; then
         || die "PHYSICAL_ENCODER_TYPE must be stage1_transformer or mlp"
     BASELINE_ARGS+=(--policy.physical_encoder_type="$PHYSICAL_ENCODER_TYPE")
 fi
+if [[ -n "$PHYSICAL_HISTORY_STEPS" ]]; then
+    require_nonnegative_int "PHYSICAL_HISTORY_STEPS" "$PHYSICAL_HISTORY_STEPS"
+    BASELINE_ARGS+=(--policy.physical_history_steps="$PHYSICAL_HISTORY_STEPS")
+fi
+if [[ -n "$PHYSICAL_HISTORY_MODE" ]]; then
+    [[ "$PHYSICAL_HISTORY_MODE" == "state" || "$PHYSICAL_HISTORY_MODE" == "action" || "$PHYSICAL_HISTORY_MODE" == "state_action" ]] \
+        || die "PHYSICAL_HISTORY_MODE must be state, action or state_action"
+    BASELINE_ARGS+=(--policy.physical_history_mode="$PHYSICAL_HISTORY_MODE")
+fi
 if [[ "$PHYSICAL_ENCODER_TYPE" == "mlp" ]]; then
     PHYSICAL_FLOW_SPACE="${PHYSICAL_FLOW_SPACE:-raw}"
     PHYSICAL_TUNING_MODE="${PHYSICAL_TUNING_MODE:-full}"
@@ -451,6 +463,7 @@ echo "  rgb_views=${RGB_VIEWS:-saved config on resume; primary on fresh run}"
 echo "  rgb_augmentation=${RGB_AUG_ENABLED} (training only; crop 90-100%, mild color jitter; no rotation)"
 echo "  physical_flow_space=${PHYSICAL_FLOW_SPACE:-<from checkpoint>}"
 echo "  physical_encoder=${PHYSICAL_ENCODER_TYPE:-<from checkpoint>} (mlp: no stage1, trainable raw-space inputs)"
+echo "  physical_history: steps=${PHYSICAL_HISTORY_STEPS:-<saved config; default 0>} mode=${PHYSICAL_HISTORY_MODE:-<saved config; default state_action>}"
 echo "  predicted_recon_weights: action=${ACTION_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} state=${STATE_PRED_RECON_WEIGHT:-<saved config; embedding default 0.1>} (no clean codec loss)"
 echo "  time_sampling=${TIME_SAMPLING_DISTRIBUTION:-<saved config; default uniform>} shift=${TIME_SAMPLING_SHIFT:-<saved config; default 1>} beta_alpha=${TIME_SAMPLING_BETA_ALPHA:-<saved config; default 1.5>} beta_beta=${TIME_SAMPLING_BETA_BETA:-<saved config; default 1>} beta_probability=${TIME_SAMPLING_BETA_PROBABILITY:-<saved config; default 0.5>} joint_sigma=shared"
 echo "  generation_backbone=${GENERATION_BACKBONE:-<from checkpoint>} pretrained=${GENERATION_PRETRAINED_DIR:-<not required on resume>}"

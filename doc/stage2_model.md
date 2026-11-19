@@ -96,6 +96,21 @@ bash train_qwen3vl_mot_baseline_history_fsdp.sh \
   --policy.physical_history_mode=state_action
 ```
 
+`train_qwen3vl_mot_fsdp.sh` 的参数区也提供 `PHYSICAL_HISTORY_STEPS` 和
+`PHYSICAL_HISTORY_MODE`，可直接修改脚本中的默认值，或通过环境变量设置。例如只加入
+最近 8 步已执行 action：
+
+```bash
+WEIGHT_RESUME=false JOB_NAME=baseline_history_action \
+PHYSICAL_HISTORY_STEPS=8 PHYSICAL_HISTORY_MODE=action \
+bash train_qwen3vl_mot_baseline_history_fsdp.sh
+```
+
+环境变量留空时不传覆盖参数：新实验保持 `0/state_action`，resume 沿用 checkpoint；
+`PHYSICAL_HISTORY_STEPS=0` 显式关闭。模式还可选 `state`、`state_action`；
+命令行 `--policy.physical_history_*` 参数优先于环境变量。通用 FSDP 入口的 MLP baseline
+同样支持，不要求使用视觉历史启动脚本。
+
 改为 `state` 或 `action` 可只保留对应模态。原 baseline 启动命令也可追加这两个
 `--policy.*` 参数，不要求开启视觉历史。resume/from_pretrained 不允许静默更改历史长度
 或模式；旧 checkpoint 缺少新字段时仍按关闭处理，开启历史需要新实验。

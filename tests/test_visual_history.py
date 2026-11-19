@@ -327,14 +327,11 @@ def test_history_launcher_isolated_recipe_and_real_parser(tmp_path, physical_mod
         "LOG_DIR": str(tmp_path),
         "OUTPUT_ROOT": str(tmp_path),
         "DATA_MIX": "robodojo_fps12",
+        "PHYSICAL_HISTORY_STEPS": "5" if physical_mode else "",
+        "PHYSICAL_HISTORY_MODE": physical_mode or "",
     }
-    arguments = (
-        ["--policy.physical_history_steps=5", f"--policy.physical_history_mode={physical_mode}"]
-        if physical_mode
-        else []
-    )
     result = subprocess.run(
-        ["bash", str(root / "train_qwen3vl_mot_baseline_history_fsdp.sh"), *arguments],
+        ["bash", str(root / "train_qwen3vl_mot_baseline_history_fsdp.sh")],
         cwd=root,
         env=env,
         text=True,
@@ -362,6 +359,107 @@ def test_history_launcher_isolated_recipe_and_real_parser(tmp_path, physical_mod
     assert parsed.task_weights == (0.15, 0.15, 0.7)
     assert parsed.physical_history_steps == (5 if physical_mode else 0)
     assert parsed.physical_history_modalities == (tuple(physical_mode.split("_")) if physical_mode else ())
+
+
+@pytest.mark.parametrize(
+    "steps,mode,overrides,expected",
+    [
+        ("", "", [], None),
+        ("0", "action", [], (0, ())),
+        ("8", "action", [], (8, ("action",))),
+        (
+            "8",
+            "action",
+            ["--policy.physical_history_steps=3", "--policy.physical_history_mode=state"],
+            (3, ("state",)),
+        ),
+    ],
+)
+def test_nonvisual_history_launcher_environment_and_cli_precedence(
+    tmp_path, fsdp_checkpoint_factory, steps, mode, overrides, expected
+):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "run"
+    if expected is None:
+        fsdp_checkpoint_factory(output)
+    env = {
+        **os.environ,
+        "WEIGHT_RESUME": "true" if expected is None else "false",
+        "DRY_RUN": "true",
+        "CHECK_PATHS": "false",
+        "MODEL_AUTO_DOWNLOAD": "false",
+        "OUTPUT_DIR": str(output),
+        "LOG_DIR": str(tmp_path),
+        "PHYSICAL_ENCODER_TYPE": "mlp",
+        "GENERATION_BACKBONE": "random",
+        "STAGE2_TASK_NAMES": "va_prediction",
+        "STAGE2_TASK_WEIGHTS": "1.0",
+        "PHYSICAL_HISTORY_STEPS": steps,
+        "PHYSICAL_HISTORY_MODE": mode,
+        "NNODES": "1",
+        "NPROC_PER_NODE": "1",
+        "NODE_RANK": "0",
+    }
+    result = subprocess.run(
+        ["bash", str(root / "train_qwen3vl_mot_fsdp.sh"), *overrides],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    command = next(
+        line for line in result.stdout.splitlines() if "lerobot/scripts/fsdp_train_contrast.py" in line
+    )
+    if expected is None:
+        assert "--policy.physical_history_steps=" not in command
+        assert "--policy.physical_history_mode=" not in command
+        return
+    import draccus
+
+    policy_args = [
+        argument.removeprefix("--policy.")
+        for argument in shlex.split(command)
+        if argument.startswith("--policy.") and not argument.startswith("--policy.type=")
+    ]
+    parsed = draccus.parse(Qwen3VLMoTConfig, args=[f"--{argument}" for argument in policy_args])
+    assert (parsed.physical_history_steps, parsed.physical_history_modalities) == expected
+    assert not parsed.visual_history_enabled
+
+
+@pytest.mark.parametrize(
+    "variable,value,message",
+    [
+        ("PHYSICAL_HISTORY_STEPS", "-1", "PHYSICAL_HISTORY_STEPS must be a non-negative integer"),
+        ("PHYSICAL_HISTORY_STEPS", "1.5", "PHYSICAL_HISTORY_STEPS must be a non-negative integer"),
+        ("PHYSICAL_HISTORY_MODE", "vision", "PHYSICAL_HISTORY_MODE must be state, action or state_action"),
+    ],
+)
+def test_history_launcher_rejects_invalid_environment(tmp_path, variable, value, message):
+    root = Path(__file__).resolve().parents[1]
+    env = {
+        **os.environ,
+        "DRY_RUN": "true",
+        "CHECK_PATHS": "false",
+        "MODEL_AUTO_DOWNLOAD": "false",
+        "WEIGHT_RESUME": "false",
+        "OUTPUT_DIR": str(tmp_path / "run"),
+        "LOG_DIR": str(tmp_path),
+        "PHYSICAL_HISTORY_STEPS": "",
+        "PHYSICAL_HISTORY_MODE": "",
+        variable: value,
+    }
+    result = subprocess.run(
+        ["bash", str(root / "train_qwen3vl_mot_baseline_history_fsdp.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
 
 
 @pytest.mark.parametrize("mode", ["state", "action", "state_action"])
