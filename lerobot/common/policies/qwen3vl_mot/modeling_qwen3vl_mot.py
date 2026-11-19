@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from torch import distributed as dist
 
+from lerobot.common.datasets.dataset_fps import evenly_spaced_frame_timestamps
 from lerobot.common.policies.ace.configuration_robo_contrast import RoboContrastConfig
 from lerobot.common.policies.ace.modeling_robo_contrast import RoboContrast
 from lerobot.common.policies.pretrained import PreTrainedPolicy
@@ -236,12 +237,17 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             ("physical_history_steps", 0),
             ("physical_history_mode", "state_action"),
             ("stage1_tactile_config", None),
+            ("tactile_sequence_prediction", False),
         ):
             saved = saved_config.get(field, default)
             if field == "visual_history_offsets":
                 saved = tuple(saved)
             if getattr(config, field) != saved:
                 raise ValueError(f"Cannot change `policy.{field}` when loading a checkpoint.")
+        if config.tactile_sequence_prediction and config.tactile_frames != saved_config.get(
+            "tactile_frames", 4
+        ):
+            raise ValueError("Cannot change `policy.tactile_frames` for a tactile sequence checkpoint.")
         return super().from_pretrained(pretrained_name_or_path, config=config, **kwargs)
 
     def __init__(self, config: Qwen3VLMoTConfig, dataset_stats=None):
@@ -1479,19 +1485,31 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             raise ValueError("Joint sampling requires valid current state and action dimension masks for every row.")
         video, geometry = self._initial_video_sampling_stream(batch, generator)
         tactile = None
+        tactile_sequence = predict_tactile and self.config.tactile_sequence_prediction
         if predict_tactile:
             tactile_mask = batch["tactile_image_mask"].to(device).bool()
             if tactile_mask.shape != (batch_size, self.config.max_tactile_views):
                 raise ValueError("Joint tactile sampling requires a (B,max_tactile_views) image mask.")
-            # Only geometry is needed: the target is the endpoint, not current tactile pixels.
-            grid = (self.config.tactile_img_size + 31) // 32
-            tactile_geometry = (tactile_mask.shape[1], grid, grid)
-            tactile_keep = tactile_mask.repeat_interleave(grid * grid, dim=1)
-            tactile_positions = torch.cartesian_prod(
-                torch.arange(tactile_geometry[0], device=device),
-                torch.arange(grid, device=device),
-                torch.arange(grid, device=device),
-            )
+            if tactile_sequence:
+                current_tactile, current_keep, _, current_geometry = self._tactile_sequence_tokens(
+                    batch, valid, current_only=True
+                )
+                tactile_geometry = (self.config.tactile_frames, *current_geometry[1:])
+                tactile_positions, tactile_offsets = self._tactile_sequence_positions(
+                    tactile_geometry, device
+                )
+                tactile_keep = (
+                    current_keep[:, None].expand(-1, self.config.tactile_frames, -1).reshape(batch_size, -1)
+                )
+            else:
+                grid = (self.config.tactile_img_size + 31) // 32
+                tactile_geometry = (tactile_mask.shape[1], grid, grid)
+                tactile_keep = tactile_mask.repeat_interleave(grid * grid, dim=1)
+                tactile_positions = torch.cartesian_prod(
+                    torch.arange(tactile_geometry[0], device=device),
+                    torch.arange(grid, device=device),
+                    torch.arange(grid, device=device),
+                )
             tactile_values = torch.randn(
                 *tactile_keep.shape,
                 self.physical_encoder.tactile_feat_dim,
@@ -1506,6 +1524,10 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
                 tactile_keep,
                 position_ids=tactile_positions,
             )
+            if tactile_sequence:
+                tactile.values[:, : current_tactile.shape[1]] = current_tactile.float()
+                tactile.noise_mask = tactile.keep.clone()
+                tactile.noise_mask[:, : current_tactile.shape[1]] = False
         assert video.noise_mask is not None
         masks: dict[str, torch.Tensor] = {}
         values: dict[str, torch.Tensor] = {}
@@ -1586,9 +1608,11 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             velocity = torch.where(video.noise_mask.unsqueeze(-1), predictions["video"].float(), 0.0)
             video.values = video.values + (next_sigma - sigma) * velocity
             if tactile is not None:
+                noise_mask = tactile.keep if tactile.noise_mask is None else tactile.noise_mask
+                velocity = torch.where(noise_mask[..., None], predictions["tactile"].float(), 0.0)
                 tactile.values = torch.where(
                     tactile.keep[..., None],
-                    tactile.values + (next_sigma - sigma) * predictions["tactile"].float(),
+                    tactile.values + (next_sigma - sigma) * velocity,
                     0.0,
                 )
             for name in target_names:
@@ -1612,14 +1636,22 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
             values["state"][:, 0] = physical_batch["observation.state"][:, 0] * physical_batch["state_mask"]
             output["state_normalized"] = values["state"]
         if tactile is not None:
-            views, height, width = tactile_geometry
-            patches = tactile.values.reshape(
-                batch_size, views, height, width, self.physical_encoder.tactile_feat_dim
-            ).permute(0, 1, 4, 2, 3)
+            if tactile_sequence:
+                frames, views, height, width = tactile_geometry
+                patches = tactile.values.reshape(
+                    batch_size, frames, views, height, width, self.physical_encoder.tactile_feat_dim
+                ).permute(0, 2, 1, 5, 3, 4)
+                output["tactile_frame_offsets"] = tactile_offsets
+            else:
+                views, height, width = tactile_geometry
+                patches = tactile.values.reshape(
+                    batch_size, views, height, width, self.physical_encoder.tactile_feat_dim
+                ).permute(0, 1, 4, 2, 3)
             decoder_dtype = next(self.physical_encoder.tactile_recon.parameters(), patches).dtype
             decoded = self.physical_encoder.decode_tactile_patches(patches.to(decoder_dtype)).float()
             output["tactile_mask"] = tactile_mask
-            output["tactile_decoded_z"] = torch.where(tactile_mask[..., None, None, None], decoded, 0.0)
+            pixel_mask = tactile_mask.reshape(batch_size, views, *([1] * (decoded.ndim - 2)))
+            output["tactile_decoded_z"] = torch.where(pixel_mask, decoded, 0.0)
         return output
 
     def _prepare_grouped_modality(
@@ -1888,6 +1920,22 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
     ):
         if task.tactile is ModalityRole.ABSENT:
             return None, None, None, None
+        if task.name == "all_modality_prediction" and self.config.tactile_sequence_prediction:
+            clean, keep, positions, geometry = self._tactile_sequence_tokens(batch, valid_rows)
+            sigma = self._sample_sigma(clean.shape[0], clean.device) if sigma is None else sigma
+            noisy, target = self._flow_corrupt(clean, sigma)
+            noise_mask = keep.clone()
+            noise_mask[:, : geometry[1] * geometry[2] * geometry[3]] = False
+            noisy = torch.where(noise_mask[..., None], noisy, clean)
+            target = torch.where(noise_mask[..., None], target, 0.0)
+            return (
+                GenerationStream(
+                    "tactile", noisy, sigma, keep, position_ids=positions, noise_mask=noise_mask
+                ),
+                target,
+                noise_mask[..., None].expand_as(target),
+                sigma,
+            )
         if self.config.tactile_generation_target == "spatial_patches":
             clean, keep, position_ids, _ = self._tactile_patch_tokens(
                 batch,
@@ -1940,6 +1988,72 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         noisy, target = self._flow_corrupt(clean, sigma)
         loss_mask = keep.unsqueeze(-1).expand_as(target)
         return GenerationStream("tactile", noisy, sigma, keep), target, loss_mask, sigma
+
+    def _tactile_sequence_positions(self, geometry: tuple[int, int, int, int], device):
+        frames, views, height, width = geometry
+        offsets = torch.tensor(
+            evenly_spaced_frame_timestamps(self.config.chunk_size - 1, self.config.tactile_frames, 1.0),
+            device=device,
+            dtype=torch.float32,
+        )[:frames]
+        indices = torch.cartesian_prod(
+            torch.arange(frames, device=device),
+            torch.arange(views, device=device),
+            torch.arange(height, device=device),
+            torch.arange(width, device=device),
+        )
+        # Stack pad grids horizontally, leaving the first position axis for physical time.
+        positions = torch.stack(
+            (offsets[indices[:, 0]], indices[:, 2], indices[:, 1] * width + indices[:, 3]), dim=-1
+        )
+        return positions, offsets
+
+    def _tactile_sequence_tokens(self, batch: dict, valid_rows: torch.Tensor, *, current_only: bool = False):
+        device = next(self.generation.parameters()).device
+        mask = batch["tactile_image_mask"].to(device).bool()
+        batch_size, views = mask.shape
+        frames = 1 if current_only else self.config.tactile_frames
+        images = batch.get("tactile_image")
+        if images is None:
+            if mask.any():
+                raise ValueError("Tactile sequence sampling requires current tactile_image for valid pads.")
+            height = width = (self.config.tactile_img_size + 31) // 32
+            values = self.generation.input_projections["tactile"].weight.new_zeros(
+                batch_size, frames * views * height * width, self.physical_encoder.tactile_feat_dim
+            )
+            keep = torch.zeros(values.shape[:2], dtype=torch.bool, device=device)
+        else:
+            if current_only and images.ndim == 5:
+                images = images.unsqueeze(2)
+            if images.ndim != 6 or images.shape[:2] != (batch_size, views):
+                raise ValueError("tactile_image must have shape (B,V,T,3,H,W), or (B,V,3,H,W) online.")
+            if current_only:
+                images = images[:, :, :1]
+            elif images.shape[2] != frames:
+                raise ValueError("Training tactile_image time dimension must equal tactile_frames.")
+            images = images.to(device)
+            slots = batch_size * views * frames
+            flattened = {
+                "tactile_image": images.reshape(slots, 1, 1, *images.shape[3:]),
+                "tactile_image_mask": mask[:, :, None].expand(-1, -1, frames).reshape(slots, 1),
+            }
+            slot_valid = valid_rows.to(device)[:, None, None].expand(-1, views, frames).reshape(slots)
+            tokens, token_keep, _, (_, height, width) = self._tactile_patch_tokens(
+                flattened, frame_index=0, valid_rows=slot_valid
+            )
+            values = (
+                tokens.reshape(batch_size, views, frames, height, width, -1)
+                .permute(0, 2, 1, 3, 4, 5)
+                .reshape(batch_size, frames * views * height * width, -1)
+            )
+            keep = (
+                token_keep.reshape(batch_size, views, frames, height, width)
+                .permute(0, 2, 1, 3, 4)
+                .reshape(batch_size, -1)
+            )
+        geometry = (frames, views, height, width)
+        positions, _ = self._tactile_sequence_positions(geometry, device)
+        return values, keep, positions, geometry
 
     def _tactile_patch_tokens(
         self,
@@ -2222,6 +2336,8 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         }
         if "state_normalized" in joint_output:
             output["state_normalized"] = joint_output["state_normalized"]
+        if "tactile_frame_offsets" in joint_output:
+            output["tactile_frame_offsets"] = joint_output["tactile_frame_offsets"]
         if len(self.rgb_views) > 1:
             output["video_latents_views"] = video_latents
             output["video_view_mask"] = batch["image_view_mask"].bool()

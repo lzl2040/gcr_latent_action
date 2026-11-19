@@ -58,6 +58,46 @@ def test_generation_artifacts_are_directly_viewable(tmp_path):
     assert (tmp_path / "tactile_comparison.png").stat().st_size > 0
 
 
+def test_tactile_sequence_artifacts_show_all_frames_and_score_only_the_future(tmp_path):
+    truth = torch.zeros(2, 4, 3, 7, 9, dtype=torch.uint8)
+    prediction = torch.zeros(2, 4, 3, 4, 4)
+    prediction[0, 0] = 2
+    prediction[0, 1] = 0.4
+    prediction[1] = float("nan")
+    metrics = _save_tactile_artifacts(
+        tmp_path,
+        truth,
+        prediction,
+        torch.tensor([1, 0], dtype=torch.bool),
+        torch.full((2, 3), -1.0),
+        torch.ones(2, 3),
+        frame_offsets=torch.tensor([0, 10, 21, 31]),
+    )
+    assert metrics["tactile_pixel_mae"] == pytest.approx(0.2 / 3)
+    assert metrics["tactile_future_frames"] == 3 and metrics["tactile_valid_pads"] == 1
+    assert (tmp_path / "tactile_comparison.png").stat().st_size > 0
+    assert (tmp_path / "tactile_comparison.mp4").stat().st_size > 0
+    assert len(list((tmp_path / "tactile_frames").glob("*/tactile_comparison.png"))) == 4
+    missing = _save_tactile_artifacts(
+        tmp_path,
+        truth,
+        prediction,
+        torch.zeros(2, dtype=torch.bool),
+        torch.zeros(2, 3),
+        torch.ones(2, 3),
+    )
+    assert missing == {"tactile_valid_pads": 0}
+    with pytest.raises(ValueError, match="matching"):
+        _save_tactile_artifacts(
+            tmp_path,
+            truth[:, :3],
+            prediction,
+            torch.ones(2, dtype=torch.bool),
+            torch.zeros(2, 3),
+            torch.ones(2, 3),
+        )
+
+
 def test_generation_manifest_warns_and_preserves_previous_split(tmp_path, caplog):
     first = {"format_version": 1, "fingerprint": "abc", "samples": []}
     path = persist_generation_manifest(tmp_path, first)
@@ -224,6 +264,8 @@ def test_generation_evaluator_publishes_complete_step_directory(
                 prediction["video_view_mask"] = torch.ones(batch_size, 3, dtype=torch.bool)
             if joint:
                 prediction["state_normalized"] = torch.zeros(batch_size, 4, 40)
+                prediction["tactile_decoded_z"] = torch.zeros(batch_size, 1, 2, 3, 8, 8)
+                prediction["tactile_frame_offsets"] = torch.tensor([0, 31])
             return prediction
 
     dataset = FakeDataset()
@@ -286,6 +328,9 @@ def test_generation_evaluator_publishes_complete_step_directory(
         assert "Future state prediction" in (sample_dir / "index.html").read_text()
         assert payload["samples"][0]["metrics"]["state_mae"] == 1.0
         assert payload["samples"][0]["metrics"]["state_valid_dimensions"] == 2
+        assert payload["samples"][0]["metrics"]["tactile_future_frames"] == 1
+        assert (sample_dir / "tactile_frames" / "001" / "tactile_comparison.png").is_file()
+        assert 'src="tactile_comparison.mp4"' in (sample_dir / "index.html").read_text()
     assert payload["validation_split"] == validation_split
     assert ("not held-out generalization" in (step_dir / "index.html").read_text()) == (
         validation_split == "training"

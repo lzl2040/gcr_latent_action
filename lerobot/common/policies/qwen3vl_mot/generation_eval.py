@@ -447,10 +447,60 @@ def _save_tactile_artifacts(
     mask: torch.Tensor,
     mean: torch.Tensor,
     std: torch.Tensor,
+    *,
+    frame_offsets: torch.Tensor | None = None,
+    fps: int = 8,
 ) -> dict[str, float | int]:
     valid_views = mask.nonzero(as_tuple=True)[0].tolist()
     if not valid_views or prediction_z.numel() == 0:
         return {"tactile_valid_pads": 0}
+    if prediction_z.ndim == 5:
+        frames = prediction_z.shape[1]
+        if ground_truth.ndim != 5 or ground_truth.shape[:2] != prediction_z.shape[:2] or frames < 2:
+            raise ValueError("Tactile sequence export requires matching (V,T,3,H,W) and T>=2.")
+        if frame_offsets is not None and frame_offsets.shape != (frames,):
+            raise ValueError("tactile_frame_offsets must contain one offset per tactile frame.")
+        offsets = range(frames) if frame_offsets is None else frame_offsets.cpu().tolist()
+        panels, future_errors = [], []
+        for index in range(frames):
+            frame_dir = output_dir / "tactile_frames" / f"{index:03d}"
+            frame_dir.mkdir(parents=True, exist_ok=True)
+            metrics = _save_tactile_artifacts(
+                frame_dir,
+                ground_truth[:, index],
+                prediction_z[:, index],
+                mask,
+                mean,
+                std,
+            )
+            if index:
+                future_errors.append(metrics["tactile_pixel_mae"])
+            with Image.open(frame_dir / "tactile_comparison.png") as image:
+                panel = Image.new(
+                    "RGB", (image.width + image.width % 2, image.height + 24 + image.height % 2), "white"
+                )
+                panel.paste(image, (0, 24))
+            offset = int(offsets[index])
+            label = "Current condition (not scored)" if index == 0 else f"Predicted future: +{offset} steps"
+            ImageDraw.Draw(panel).text((4, 5), label, fill="black")
+            panels.append(panel)
+        sheet = Image.new("RGB", (max(p.width for p in panels), sum(p.height for p in panels)), "white")
+        y = 0
+        for panel in panels:
+            sheet.paste(panel, (0, y))
+            y += panel.height
+        sheet.save(output_dir / "tactile_comparison.png")
+        imageio.mimsave(
+            output_dir / "tactile_comparison.mp4",
+            [np.asarray(panel) for panel in panels],
+            fps=fps,
+            macro_block_size=1,
+        )
+        return {
+            "tactile_pixel_mae": float(np.mean(future_errors)),
+            "tactile_valid_pads": len(valid_views),
+            "tactile_future_frames": frames - 1,
+        }
     ground_truth = ground_truth[valid_views].float() / 255.0
     prediction_z = prediction_z[valid_views].float()
     if not torch.isfinite(prediction_z).all():
@@ -524,6 +574,8 @@ def _write_sample_index(
         if (output_dir / "tactile_comparison.png").is_file()
         else "<h2>Tactile image prediction</h2><p>No valid tactile image pad.</p>"
     )
+    if (output_dir / "tactile_comparison.mp4").is_file():
+        tactile += '<video controls loop muted src="tactile_comparison.mp4"></video>'
     state = (
         '<h2>Future state prediction</h2>'
         '<p><a href="state_summary.html">Open denormalized future state summary</a></p>'
@@ -832,14 +884,20 @@ th, td {{ border: 1px solid #aaa; padding: 5px 9px; }}
                                         modality="state",
                                     )
                                 )
+                            tactile_prediction = prediction["tactile_decoded_z"][local_index].cpu()
+                            tactile_truth = batch["tactile_image"][local_index].cpu()
+                            if tactile_prediction.ndim != 5:
+                                tactile_truth = tactile_truth[:, -1]
                             metrics.update(
                                 _save_tactile_artifacts(
                                     sample_dir,
-                                    batch["tactile_image"][local_index, :, -1].cpu(),
-                                    prediction["tactile_decoded_z"][local_index].cpu(),
+                                    tactile_truth,
+                                    tactile_prediction,
                                     prediction["tactile_mask"][local_index].cpu(),
                                     batch["tactile_img_mean"][local_index].cpu(),
                                     batch["tactile_img_std"][local_index].cpu(),
+                                    frame_offsets=prediction.get("tactile_frame_offsets"),
+                                    fps=self.config.video_fps,
                                 )
                             )
                             _write_sample_index(sample_dir, sample_info, metrics)

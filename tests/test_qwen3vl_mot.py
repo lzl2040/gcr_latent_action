@@ -1306,7 +1306,10 @@ def test_mlp_physical_tokens_respect_masks_groups_and_independent_modalities():
 
 
 @pytest.mark.parametrize("source_format", ["safetensors", "deepspeed_nano_bf16_history"])
-def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, monkeypatch, source_format):
+@pytest.mark.parametrize("sequence", [False, True])
+def test_hybrid_all_modality_training_sampling_and_embedded_restore(
+    tmp_path, monkeypatch, source_format, sequence
+):
     import lerobot.common.policies.ace.cosmos3_encoders as vae_module
     import lerobot.common.policies.qwen3vl_mot.modeling_qwen3vl_mot as stage2
     from lerobot.common.policies.qwen3vl_mot.modeling_physical import PhysicalMLPWithTactile
@@ -1412,6 +1415,8 @@ def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, mo
         physical_encoder_type="mlp_tactile",
         stage1_checkpoint=str(stage1_dir),
         tactile_generation_target="spatial_patches",
+        tactile_sequence_prediction=sequence,
+        tactile_frames=4 if sequence else 2,
         task_names=("all_modality_prediction", "joint_prediction", "tactile_prediction", "t2v"),
         task_weights=(1, 0, 0, 0),
         rgb_views=("primary", "wrist"),
@@ -1452,7 +1457,7 @@ def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, mo
         "action": torch.randn(3, 4, 4),
         "action_mask": torch.tensor([[1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]]),
         "tactile_signal_mask": torch.zeros(3),
-        "tactile_image": torch.randint(0, 256, (3, 2, 2, 3, 8, 8), dtype=torch.uint8),
+        "tactile_image": torch.randint(0, 256, (3, 2, config.tactile_frames, 3, 8, 8), dtype=torch.uint8),
         "tactile_image_mask": torch.tensor([[1.0, 0.0], [0.0, 0.0], [1.0, 1.0]]),
     }
     if history:
@@ -1465,12 +1470,22 @@ def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, mo
         batch[f"history_{name}"] = torch.randn(3, 3, 4, requires_grad=True)
         batch[f"history_{name}_mask"] = torch.ones(3, 3, 4, dtype=torch.bool)
     recorded = []
+    tactile_masks = []
     encoded_images = []
+    encoded_patches = []
     policy.physical_encoder.tactile_cnn.register_forward_pre_hook(
         lambda module, args: encoded_images.append(args[0].clone())
     )
+    policy.physical_encoder.tactile_cnn.register_forward_hook(
+        lambda module, args, output: encoded_patches.append(output[1].detach().clone())
+    )
 
     def record(module, args):
+        tactile_masks.extend(
+            (s.noise_mask.clone(), s.position_ids.clone())
+            for s in args[0]
+            if s.name == "tactile" and s.noise_mask is not None
+        )
         recorded.append(
             {
                 s.name: (s.values.detach().clone(), s.sigma.clone(), s.keep.clone())
@@ -1484,9 +1499,18 @@ def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, mo
     torch.manual_seed(7)
     loss, metrics = policy(batch, task_type="all_modality_prediction")
     assert torch.isfinite(loss) and metrics["valid_rows"] == 2
-    assert metrics["tactile_target_elements"] == 6
+    assert metrics["tactile_target_elements"] == (18 if sequence else 6)
     assert len(encoded_images) == 1
-    torch.testing.assert_close(encoded_images[0][0, 0], batch["tactile_image"][0, 0, -1])
+    expected_encoded = batch["tactile_image"][0, 0] if sequence else batch["tactile_image"][0, 0, -1:]
+    torch.testing.assert_close(encoded_images[0][:, 0], expected_encoded)
+    if sequence:
+        noise_mask, positions = tactile_masks[0]
+        assert not noise_mask[:, :2].any() and noise_mask[0, 2::2].all()
+        torch.testing.assert_close(positions[:, 0], torch.arange(4).repeat_interleave(2).float())
+        assert positions.unique(dim=0).shape[0] == 8
+        torch.testing.assert_close(
+            recorded[0]["tactile"][0][0, 0].float(), encoded_patches[0][0, 0, :, 0, 0].float()
+        )
     for name in ("video", "state", "action", "tactile"):
         assert metrics[f"{name}_flow_loss"] > 0
         torch.testing.assert_close(recorded[0][name][1], recorded[0]["video"][1])
@@ -1516,9 +1540,15 @@ def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, mo
     policy.eval()
     monkeypatch.setattr(policy, "_sample_tactile_images", forbidden)
     recorded.clear()
+    tactile_masks.clear()
     encoder_calls = len(encoded_images)
     expected = policy.generate_validation(batch, seed=19)
-    assert len(encoded_images) == encoder_calls
+    assert len(encoded_images) == encoder_calls + int(sequence)
+    if sequence:
+        selected = batch["tactile_image"][:, :, 0].reshape(-1, 3, 8, 8)[
+            batch["tactile_image_mask"].flatten().bool()
+        ]
+        torch.testing.assert_close(encoded_images[-1][:, 0], selected)
     assert len(recorded) == config.inference_steps
     for streams in recorded:
         assert {"video", "state", "action", "tactile"} <= streams.keys()
@@ -1527,7 +1557,12 @@ def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, mo
     assert expected["action_normalized"].shape == (3, 2, 4)
     assert expected["state_normalized"].shape == (3, 4, 4)
     assert expected["video_latents_views"].shape == (3, 2, 4, 3, 2, 2)
-    assert expected["tactile_decoded_z"].shape == (3, 2, 3, 8, 8)
+    assert expected["tactile_decoded_z"].shape == ((3, 2, 4, 3, 8, 8) if sequence else (3, 2, 3, 8, 8))
+    if sequence:
+        torch.testing.assert_close(expected["tactile_frame_offsets"], torch.arange(4).float())
+        for streams in recorded[1:]:
+            torch.testing.assert_close(streams["tactile"][0][:, :2], recorded[0]["tactile"][0][:, :2])
+        assert all(not noise[:, :2].any() for noise, _ in tactile_masks)
     assert not expected["tactile_decoded_z"][~expected["tactile_mask"]].any()
     assert not expected["action_normalized"][0, :, 2:].any()
     torch.testing.assert_close(expected["state_normalized"][:, 0], batch["observation.state"][:, 0])
@@ -1536,7 +1571,10 @@ def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, mo
     changed["action"][:] = float("nan")
     changed["video_views"][:, :, 1:] = 255
     changed["video"][:, 1:] = 255
-    changed["tactile_image"][:] = 255
+    if sequence:
+        changed["tactile_image"][:, :, 1:] = 255
+    else:
+        changed["tactile_image"][:] = 255
     actual = policy.generate_validation(changed, seed=19)
     for name in expected:
         torch.testing.assert_close(expected[name], actual[name])
@@ -1546,13 +1584,43 @@ def test_hybrid_all_modality_training_sampling_and_embedded_restore(tmp_path, mo
         if key not in ("video", "video_views", "action", "tactile_image")
     }
     minimal["observation.state"] = batch["observation.state"][:, 0]
+    if sequence:
+        minimal["tactile_image"] = batch["tactile_image"][:, :, 0]
     actual = policy.generate_validation(minimal, seed=19)
     for name in expected:
         torch.testing.assert_close(expected[name], actual[name])
+    if sequence:
+        changed_current = {**minimal, "tactile_image": torch.zeros_like(minimal["tactile_image"])}
+        guided = policy.generate_validation(changed_current, seed=19)
+        assert not torch.equal(guided["tactile_decoded_z"][:, :, 1:], expected["tactile_decoded_z"][:, :, 1:])
+        missing = {key: value for key, value in minimal.items() if key != "tactile_image"}
+        missing["tactile_image_mask"] = torch.zeros_like(batch["tactile_image_mask"])
+        absent = policy.generate_validation(missing, seed=19)
+        assert not absent["tactile_decoded_z"].any() and not absent["tactile_mask"].any()
+        assert torch.isfinite(absent["action_normalized"]).all()
+        with pytest.raises(ValueError, match="requires current tactile_image"):
+            policy.generate_validation(
+                {key: value for key, value in minimal.items() if key != "tactile_image"}, seed=19
+            )
     hook.remove()
     checkpoint = tmp_path / "hybrid"
     checkpoint.mkdir()
     policy._save_pretrained(checkpoint)
+    if not sequence:
+        import json
+
+        payload = json.loads((checkpoint / "config.json").read_text())
+        del payload["tactile_sequence_prediction"]
+        (checkpoint / "config.json").write_text(json.dumps(payload))
+    for field in (
+        ("tactile_sequence_prediction", "tactile_frames") if sequence else ("tactile_sequence_prediction",)
+    ):
+        incompatible = copy.deepcopy(policy.config)
+        setattr(incompatible, field, False if field == "tactile_sequence_prediction" else 8)
+        if not sequence:
+            incompatible.tactile_sequence_prediction = True
+        with pytest.raises(ValueError, match=field):
+            stage2.Qwen3VLMoTPolicy.from_pretrained(checkpoint, config=incompatible)
     source_file.unlink()
     if generation_file is not None:
         generation_file.unlink()

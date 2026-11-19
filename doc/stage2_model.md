@@ -263,7 +263,7 @@ LIBERO 及复用其加载器的评测同样支持该自包含 baseline，无需 
 原始 Qwen 初始化和零蒸馏；只额外加载 Stage 1 的 `physical_encoder.tactile_cnn`
 和 `physical_encoder.tactile_recon`。不加载 Stage 1 perception、Physical Transformer、
 temporal tactile tower 或跨模态 grounding 权重。Stage 1 的视觉 backbone 可以是 DINOv3，
-不需要与 Qwen 相同。codec 始终冻结且保持 eval，训练中只有目标触觉帧经过 encoder。
+不需要与 Qwen 相同。codec 始终冻结且保持 eval，逐帧编码当前条件和未来监督，不混合时间信息。
 
 要求 Stage 1 使用 `tactile_backbone="resnet18"`、`tactile_recon_weight>0`，且 encoder、
 decoder 权重完整；不支持用随机 decoder、FTP-1/AnyTouch pooled features 冒充可解码 codec。
@@ -272,33 +272,51 @@ decoder 权重完整；不支持用随机 decoder、FTP-1/AnyTouch pooled featur
 根目录时，用 `STAGE1_CONFIG=/path/to/config.json` 单独指定。
 
 新增独立任务 `all_modality_prediction`：同一次 Generation forward 联合预测 action、
-未来 state、未来 RGB video 和**窗口末帧的光学触觉图像 patch latent**，不是整段触觉视频。
-四路 target 共用每个样本的 sigma，噪声独立；current RGB latent 和 raw state 第 0 帧保持干净。
+未来 state、未来 RGB video 和光学触觉图像 patch latents。专用入口默认开启
+`tactile_sequence_prediction=true`，在同一窗口内等距采样 `tactile_frames` 帧触觉：
+默认 4 帧为**当前 1 帧作为干净条件、联合预测未来 3 帧**，32 步窗口对应
+`[0,10,21,31]`。四路 target 共用每个样本的 sigma，噪声独立；current RGB latent、
+raw state 第 0 帧和当前触觉 patches 始终保持干净，当前触觉不计 flow loss。
 各模态按现有 loss weight 和全局有效元素数分别归一化，不新增隐式图像像素重建 loss。
 触觉 encoder 的 patch 宽度沿用 Stage 1 的 `tactile_feat_dim`，不强制等于物理 MLP 宽度。
 默认 112×112 触觉对应每 pad 4×4 patches，decoder 输出 dataset z-score RGB，
-`tactile_decoded_z` 需要按数据集统计反归一化后才能显示。
+序列输出 `tactile_decoded_z` 为 `(B,V,T,3,H,W)`，需按数据集统计反归一化后才能显示。
+其中第 0 帧是当前触觉的 codec 重建，不是未来预测；`tactile_frame_offsets` 给出长度 T 的
+源数据帧偏移。tokens 按时间、pad、行、列排列，三轴位置为
+`[frame_offset, row, pad*grid_width+column]`，同时区分时间和 pad，不新增可训练参数。
 
 缺触觉的样本仍训练 video/action/state，触觉 loss 只在有效光学 pad 上计算；整批缺触觉时
 触觉 loss 为零，不把填充图像当作标签。只有低维 signal 的样本也按此处理，**本变体尚不生成
 低维触觉 signal**。`use_tactile_conditioning` 仍须关闭：这里的联合条件交互发生在
-Generation 四路 noisy streams 内，不走旧 Physical Transformer 的 tactile conditioning。
+Generation 四路 streams 内，不走旧 Physical Transformer 的 tactile conditioning。
 
 新增入口只默认启用该新任务，不改变旧 launcher、默认任务列表或原 `joint_prediction`：
 
 ```bash
 conda activate lerobot_v2
 STAGE1_CHECKPOINT=/path/to/stage1_with_trained_tactile_codec \
-WEIGHT_RESUME=false RGB_VIEWS=primary,wrist \
+WEIGHT_RESUME=false RGB_VIEWS=primary,wrist TACTILE_FRAMES=4 \
 bash train_qwen3vl_mot_baseline_all_modality_fsdp.sh
 ```
 
+`TACTILE_FRAMES=8` 改为当前 1 帧加未来 7 帧；设为 `chunk_size` 可逐控制帧预测。
+触觉编码和 token 数随 T 增长，默认每样本有 `4*V*16` 个触觉 tokens，
+不是末帧版的 `V*16`；仍复用同一个 codec 和 Generation 主干，不保证原 batch size 或吞吐。
+
 通用 FSDP/local launcher 同样接受 `PHYSICAL_ENCODER_TYPE=mlp_tactile`，
 `STAGE2_TASK_NAMES=all_modality_prediction STAGE2_TASK_WEIGHTS=1.0`；
-自动配置 raw/full/零蒸馏，保留 Stage 1 codec 路径参数。视觉历史 CLI 和 FSDP 的
+自动配置 raw/full/零蒸馏，保留 Stage 1 codec 路径参数，显式设置
+`TACTILE_SEQUENCE_PREDICTION=true` 才启用序列。两个新环境变量留空时不覆盖保存配置。
+视觉历史 CLI 和 FSDP 的
 `PHYSICAL_HISTORY_STEPS` / `PHYSICAL_HISTORY_MODE` 仍可独立开启，默认关闭。
 Stage 2 保存 codec 权重及最小 `stage1_tactile_config`，恢复无需原 Stage 1 路径、
 完整 Stage 1 配置或 text 资源；不能在既有实验中切换 physical encoder 类型或 codec 架构。
+
+配置字段 `tactile_sequence_prediction` 默认 `false`，旧配置缺该字段也按 `false` 处理，
+保持原末帧训练和 `(B,V,3,H,W)` 输出。专用入口的新默认 job 名带 `_sequence`，
+避免自动续上旧末帧实验；续训旧实验需显式 `TACTILE_SEQUENCE_PREDICTION=false` 并指定原
+`OUTPUT_DIR`。resume/from_pretrained 禁止切换此标志，序列 checkpoint 也禁止修改
+`tactile_frames`；改变目标语义或采样帧数须新建实验。
 
 ## 3. 输入数据契约
 
@@ -316,7 +334,7 @@ Stage 2 保存 codec 权重及最小 `stage1_tactile_config`，恢复无需原 S
 | `action` | `(B,32,40)` | canonical action chunk |
 | `action_mask` | `(B,40)` | 当前机器人有效的 action 维度 |
 | `tactile_signal` | `(B,32,32)` | 最多 32 维的触觉信号 |
-| `tactile_image` | `(B,V,4,3,112,112)` | 最多 6 个 pad、每个 pad 4 帧 |
+| `tactile_image` | `(B,V,T,3,112,112)` | 最多 6 个 pad，T=`tactile_frames`，默认 4 帧 |
 | `tactile_image_mask` | `(B,V)` | 有效触觉图像视角 |
 | `sample_rate` | `(B,)` | 数据真实采样率 |
 
@@ -350,7 +368,8 @@ world_video_frames = 9
 - action/state 使用连续的 32 个 source commands；
 - 32 步被划分为 8 个物理 group；
 - 视频在同一个 `[t, t+31]` 窗口内均匀读取 9 帧；
-- 物理轨迹与视频终点严格一致。
+- 触觉在同一个窗口内均匀读取 `tactile_frames` 帧，默认偏移为 `[0,10,21,31]`；
+- 物理轨迹、视频与触觉终点严格一致。
 
 ### 3.2 可选多视角条件与联合视频生成
 
@@ -1006,7 +1025,7 @@ lerobot/common/policies/qwen3vl_mot/tasks.py
 | `t2v` | text | 无 | 完整 video |
 | `i2v` | image + available text | video 当前 latent frame | 未来 video |
 | `joint_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action + 未来 state |
-| `all_modality_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action + 未来 state + 末帧触觉 patches |
+| `all_modality_prediction` | image + available text | video 当前 latent frame + current state；序列模式另含当前触觉 | 未来 video + action + 未来 state + 触觉 patches（序列模式为未来各帧，否则仅末帧） |
 | `va_prediction` | image + available text | video 当前 latent frame + current state | 未来 video + action，不预测 state |
 | `forward_dynamics` | image + available text | video 当前 latent frame + action | 未来 video |
 | `inverse_dynamics` | image + available text | 完整窗口 video | 该窗口的 action |
@@ -1029,7 +1048,8 @@ tactile_prediction  0.10
 
 `all_modality_prediction` 与 `va_prediction` 均须显式启用，不加入上述默认列表或改变已有权重。
 前者要求 `tactile_generation_target="spatial_patches"`，缺触觉时仅屏蔽该路 target；
-它与不含触觉的 `joint_prediction` 是不同任务。
+它与不含触觉的 `joint_prediction` 是不同任务。`tactile_sequence_prediction` 只改变
+`all_modality_prediction` 的触觉路径，不改变独立 `tactile_prediction` 或旧任务的语义。
 以下为 `va_prediction` 的语义：
 它只取 state chunk 的第 0 帧并重复到整个 chunk；不把未来 GT state 作为条件或目标，
 state 的 sigma 始终为 0，没有 state flow loss 或 state decoder 重建 loss。
@@ -1116,7 +1136,8 @@ resume 保留保存值，显式 CLI 参数可以覆盖，旧配置缺字段时 s
 但每个模态各自生成独立高斯噪声；所有 RGB 视角也共用同一 sigma。
 `all_modality_prediction` 将相同同步规则扩展到 tactile patches；`va_prediction`
 只同步 video/action，current state 始终干净。
-已知当前图像和独立 current-state 条件 token 保持干净。
+已知当前图像和独立 current-state 条件 token 保持干净。触觉序列模式的第 0 帧同样
+保持干净，其余各帧使用共享 sigma 加噪并监督；缺失 pad 和无效样本不参与触觉编码或 loss。
 其他任务只给需要预测的模态加噪，干净条件的 sigma 保持 `0`。
 分布开关不改变推理时默认 20 步 `1 -> 0` 等间隔 Euler schedule。
 
@@ -1274,7 +1295,12 @@ $$
 Generation，同时更新四路 noisy targets，最后调用冻结 decoder 得到 `tactile_decoded_z`
 及 `tactile_mask`；无效 pad 输出清零。不再调用使用 GT video/action/state 条件的独立
 tactile sampler。推理只需当前 RGB/state、维度 masks、`tactile_image_mask` 和显式启用的历史；
-触觉几何来自配置，不读取未来真值，也不需要当前或未来触觉像素。
+触觉序列模式还需有效 pad 的当前 `tactile_image`，可传 `(B,V,3,H,W)`，
+或传 dataset 的完整时间维但只取第 0 帧。当前触觉只编码一次，所有 Euler 步固定复用；
+不读取未来触觉真值。全部 pad 无效时可省略触觉图像。旧末帧模式仍不需要任何触觉像素。
+序列 decoder 同时返回当前重建和未来预测，验证导出各帧 PNG、全序列 contact sheet 和
+`tactile_comparison.mp4`，HTML 可直接播放；`tactile_pixel_mae` 仅统计未来帧，
+不把已知当前帧计入误差，图中明确标为条件重建。
 
 `generate_validation(batch, seed=...)` 在 joint 权重为正时，使用同一次 Generation forward
 和同一轮 Euler 积分联合生成 action、未来 video 和未来 state。只编码 current state，
@@ -1429,12 +1455,14 @@ camera embedding 和角色文本区分 primary/secondary/wrist，但没有显式
 ### 14.3 Tactile 的两种目标与限制
 
 `context_tokens` 预测 Physical Encoder 的 contextual tactile tokens，不能解码成原始图像。
-`spatial_patches` 则使用 Stage 1 ResNet codec 的窗口末帧空间 latents，可由冻结 decoder
-还原为 z-scored 光学触觉图像；`all_modality_prediction` 和混合 baseline 要求此模式。
-目前均不支持生成完整触觉视频或未来低维触觉信号。
+`spatial_patches` 使用 Stage 1 ResNet codec 的空间 latents，可由冻结 decoder 还原为
+z-scored 光学触觉图像；`all_modality_prediction` 和混合 baseline 要求此模式。
+默认兼容旧末帧路径；新专用 baseline 入口开启序列模式，预测窗口内采样的未来各帧，
+可通过 `TACTILE_FRAMES` 控制采样密度。目前仍不支持生成未来低维触觉信号。
 
 现有任务没有把 tactile 标为 `CLEAN`。独立 `tactile_prediction` 使用干净 GT video/state/action
-作为条件；新的 `all_modality_prediction` 使用四路 noisy targets 联合去噪，不使用未来 GT 条件。
+作为条件；`all_modality_prediction` 使用四路 noisy targets 联合去噪，不使用未来 GT 条件。
+其序列模式在触觉 stream 内通过逐 token `noise_mask` 保留干净当前帧，不改变旧 task role。
 
 ### 14.4 Teacher 只在训练时需要
 

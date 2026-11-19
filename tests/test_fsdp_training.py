@@ -487,6 +487,8 @@ def test_mlp_baseline_launchers_configure_raw_flow_and_codec_source(
         "ACTION_PRED_RECON_WEIGHT",
         "STATE_PRED_RECON_WEIGHT",
         "LATENT_ACTION_PREDICTION_ENABLED",
+        "TACTILE_SEQUENCE_PREDICTION",
+        "TACTILE_FRAMES",
     ):
         env.pop(key, None)
     if latent_enabled is not None:
@@ -502,9 +504,16 @@ def test_mlp_baseline_launchers_configure_raw_flow_and_codec_source(
             STAGE1_CONFIG=str(stage1_config),
             STAGE2_TASK_NAMES="all_modality_prediction",
             STAGE2_TASK_WEIGHTS="1.0",
+            TACTILE_SEQUENCE_PREDICTION="true",
+            TACTILE_FRAMES="5",
         )
     if launcher == "baseline_all_modality_fsdp":
-        for key in ("PHYSICAL_ENCODER_TYPE", "STAGE2_TASK_NAMES", "STAGE2_TASK_WEIGHTS"):
+        for key in (
+            "PHYSICAL_ENCODER_TYPE",
+            "STAGE2_TASK_NAMES",
+            "STAGE2_TASK_WEIGHTS",
+            "TACTILE_SEQUENCE_PREDICTION",
+        ):
             env.pop(key)
     result = subprocess.run(
         ["bash", str(root / f"train_qwen3vl_mot_{launcher}.sh")],
@@ -544,6 +553,7 @@ def test_mlp_baseline_launchers_configure_raw_flow_and_codec_source(
         assert config.physical_encoder_type == "mlp_tactile"
         assert config.task_names == ("all_modality_prediction",)
         assert config.stage1_checkpoint == str(stage1)
+        assert config.tactile_sequence_prediction and config.tactile_frames == 5
     if latent_enabled is None:
         assert "--policy.latent_action_prediction_enabled=" not in result.stdout
     else:

@@ -15,6 +15,20 @@ if [[ -z "$PHYSICAL_ENCODER_TYPE" && "$WEIGHT_RESUME" != "true" ]]; then
     PHYSICAL_ENCODER_TYPE=stage1_transformer
 fi
 BASELINE_ARGS=()
+if [[ -n "${TACTILE_SEQUENCE_PREDICTION:-}" ]]; then
+    case "$TACTILE_SEQUENCE_PREDICTION" in
+        true|false) ;;
+        *) echo "Error: TACTILE_SEQUENCE_PREDICTION must be true or false" >&2; exit 1 ;;
+    esac
+    BASELINE_ARGS+=(--policy.tactile_sequence_prediction="$TACTILE_SEQUENCE_PREDICTION")
+fi
+if [[ -n "${TACTILE_FRAMES:-}" ]]; then
+    if [[ ! "$TACTILE_FRAMES" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: TACTILE_FRAMES must be a positive integer" >&2
+        exit 1
+    fi
+    BASELINE_ARGS+=(--policy.tactile_frames="$TACTILE_FRAMES")
+fi
 if [[ -n "$PHYSICAL_ENCODER_TYPE" ]]; then
     case "$PHYSICAL_ENCODER_TYPE" in
         stage1_transformer|mlp|mlp_tactile) ;;

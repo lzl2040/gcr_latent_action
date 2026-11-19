@@ -113,6 +113,8 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
     # tokens. "spatial_patches" predicts the ResNet codec's future spatial latent, which the
     # transferred tactile decoder can turn back into an RGB tactile image.
     tactile_generation_target: str = "context_tokens"
+    # Opt-in for all_modality_prediction; old checkpoints retain endpoint-only targets.
+    tactile_sequence_prediction: bool = False
     inference_steps: int = 20
 
     # Stage two predicts executable action chunks, so these must be consecutive source
@@ -321,6 +323,12 @@ class Qwen3VLMoTConfig(PreTrainedConfig):
                 "`tactile_generation_target` must be 'context_tokens' or "
                 "'spatial_patches', got "
                 f"{self.tactile_generation_target!r}."
+            )
+        if not isinstance(self.tactile_sequence_prediction, bool):
+            raise ValueError("tactile_sequence_prediction must be a boolean.")
+        if self.tactile_sequence_prediction and (self.tactile_frames < 2 or self.chunk_size < 2):
+            raise ValueError(
+                "Tactile sequence prediction requires at least two tactile frames and chunk steps."
             )
         if (
             not self.rgb_views

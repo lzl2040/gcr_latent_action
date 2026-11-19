@@ -322,6 +322,8 @@ def _load_stage2_resume_policy_config(
         "physical_history_steps",
         "physical_history_mode",
         "stage1_tactile_config",
+        "tactile_sequence_prediction",
+        *(("tactile_frames",) if saved_policy.tactile_sequence_prediction else ()),
     ):
         if (
             parser.parse_arg(f"policy.{field_name}", args) is not None

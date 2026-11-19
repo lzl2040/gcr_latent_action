@@ -49,6 +49,8 @@ PHYSICAL_ENCODER_TYPE="${PHYSICAL_ENCODER_TYPE:-}"
 # MLP history: use 8/action for past actions; empty values preserve saved settings on resume.
 PHYSICAL_HISTORY_STEPS="${PHYSICAL_HISTORY_STEPS:-}"
 PHYSICAL_HISTORY_MODE="${PHYSICAL_HISTORY_MODE:-}"
+TACTILE_SEQUENCE_PREDICTION="${TACTILE_SEQUENCE_PREDICTION:-}"
+TACTILE_FRAMES="${TACTILE_FRAMES:-}"
 ACTION_PRED_RECON_WEIGHT="${ACTION_PRED_RECON_WEIGHT:-}"
 STATE_PRED_RECON_WEIGHT="${STATE_PRED_RECON_WEIGHT:-}"
 TIME_SAMPLING_DISTRIBUTION="${TIME_SAMPLING_DISTRIBUTION:-}"
@@ -260,6 +262,14 @@ if [[ -z "$PHYSICAL_ENCODER_TYPE" && "$WEIGHT_RESUME" != "true" ]]; then
     PHYSICAL_ENCODER_TYPE=stage1_transformer
 fi
 BASELINE_ARGS=()
+if [[ -n "$TACTILE_SEQUENCE_PREDICTION" ]]; then
+    require_bool "TACTILE_SEQUENCE_PREDICTION" "$TACTILE_SEQUENCE_PREDICTION"
+    BASELINE_ARGS+=(--policy.tactile_sequence_prediction="$TACTILE_SEQUENCE_PREDICTION")
+fi
+if [[ -n "$TACTILE_FRAMES" ]]; then
+    require_positive_int "TACTILE_FRAMES" "$TACTILE_FRAMES"
+    BASELINE_ARGS+=(--policy.tactile_frames="$TACTILE_FRAMES")
+fi
 if [[ -n "$PHYSICAL_ENCODER_TYPE" ]]; then
     [[ "$PHYSICAL_ENCODER_TYPE" == "stage1_transformer" || "$PHYSICAL_ENCODER_TYPE" == "mlp" || "$PHYSICAL_ENCODER_TYPE" == "mlp_tactile" ]] \
         || die "PHYSICAL_ENCODER_TYPE must be stage1_transformer, mlp or mlp_tactile"

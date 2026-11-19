@@ -388,6 +388,34 @@ def test_stage2_mlp_resume_needs_no_embedded_teacher_and_rejects_architecture_sw
         _load_stage2_resume_policy_config(cfg, args=["--policy.physical_encoder_type=stage1_transformer"])
 
 
+@pytest.mark.parametrize("field, value", [("tactile_sequence_prediction", False), ("tactile_frames", 8)])
+def test_tactile_sequence_resume_preserves_temporal_contract(tmp_path, field, value):
+    saved = Qwen3VLMoTConfig(
+        physical_encoder_type="mlp_tactile",
+        physical_tuning_mode="full",
+        physical_flow_space="raw",
+        latent_action_loss_weight=0,
+        task_names=("all_modality_prediction",),
+        task_weights=(1,),
+        tactile_generation_target="spatial_patches",
+        tactile_sequence_prediction=True,
+        initialize_from_stage1=False,
+        stage1_tactile_config={"tactile_feat_dim": 6, "tactile_recon_size": 8},
+    )
+    saved._save_pretrained(tmp_path)
+    cfg = SimpleNamespace(
+        weight_resume=True,
+        output_dir=tmp_path,
+        use_policy_training_preset=False,
+        policy=Qwen3VLMoTConfig(),
+    )
+    _load_stage2_resume_policy_config(cfg, args=[])
+    assert cfg.policy.tactile_sequence_prediction and cfg.policy.tactile_frames == 4
+    setattr(cfg.policy, field, value)
+    with pytest.raises(ValueError, match=field):
+        _load_stage2_resume_policy_config(cfg, args=[f"--policy.{field}={str(value).lower()}"])
+
+
 def test_stage2_mlp_resume_rejects_enabling_tactile_curriculum(tmp_path):
     baseline = Qwen3VLMoTConfig(
         physical_encoder_type="mlp",
