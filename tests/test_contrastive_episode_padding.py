@@ -189,6 +189,61 @@ def test_unknown_action_padding_fails_explicitly():
         dataset._to_canonical({}, 0, 0)
 
 
+@pytest.mark.parametrize("dataset_name", ["ftp_1_sharpa", "ftp_1_sharpa_split_0", "ftp_1_RH20TCfg5Franka"])
+@pytest.mark.parametrize("source_frames", [2, 32])
+def test_ftp_eef_padding_preserves_source_rotation_layout_and_normalization(dataset_name, source_frames):
+    dataset = _canonical_dataset()
+    spec = get_spec(dataset_name)
+    dataset.specs = [spec]
+    dataset.dataset_names = [dataset_name]
+    source_widths = {}
+    for source, _, end, _ in spec["action"] + spec["state"]:
+        source_widths[source] = max(source_widths.get(source, 0), end)
+    identity = torch.eye(3)[:2].reshape(6)
+    item, stats = {}, {}
+    for source, width in source_widths.items():
+        values = torch.zeros(source_frames, width)
+        mean, std = torch.zeros(width), torch.full((width,), 0.1)
+        if source.endswith("eef_pose"):
+            for start in range(0, width, 10):
+                values[:, start : start + 3] = 0.02
+                values[:, start + 3 : start + 9] = identity
+                values[:, start + 9] = torch.arange(source_frames) * 0.01 + 0.2
+                mean[start + 3 : start + 9] = identity
+                std[start + 3 : start + 9] = 0.001
+        else:
+            values[:] = 0.01
+        item[source] = values
+        if source.startswith("action."):
+            item[f"{source}_is_pad"] = torch.arange(source_frames) >= 31
+        stats[source] = {"mean": mean.numpy(), "std": std.numpy()}
+    dataset.norm_stats = [dataset._build_norm_stats(SimpleNamespace(meta=SimpleNamespace(stats=stats)), spec)]
+    item["front"] = item["wrist"] = torch.ones(9, 3, 2, 2)
+    item["task"] = "move the object"
+    originals = {key: value.clone() for key, value in item.items() if isinstance(value, torch.Tensor)}
+
+    result = dataset._to_canonical(item, 0, 0)
+    norm = dataset.norm_stats[0]["action"]
+    count = min(source_frames, 31)
+    raw = result["action"] * norm["std"] + norm["mean"]
+    for source, start, end, destination in spec["action"]:
+        torch.testing.assert_close(
+            raw[:count, destination : destination + end - start], item[source][:count, start:end]
+        )
+    for destination in range(0, source_widths["action.eef_pose"], 10):
+        assert not raw[count:, destination : destination + 3].any()
+        torch.testing.assert_close(
+            raw[count:, destination + 3 : destination + 9], identity.expand(32 - count, -1)
+        )
+        torch.testing.assert_close(
+            raw[count:, destination + 9],
+            item["action.eef_pose"][count - 1, destination + 9].expand(32 - count),
+        )
+    assert result["action"].abs().max() < 10
+    for key, value in originals.items():
+        torch.testing.assert_close(item[key], value)
+
+
 @pytest.mark.parametrize("action", [torch.tensor([7.0, 8.0]), torch.tensor([[5.0, 6.0], [7.0, 8.0]])])
 def test_short_action_arrays_pad_with_raw_zero_while_states_repeat_last(action):
     dataset = _canonical_dataset()

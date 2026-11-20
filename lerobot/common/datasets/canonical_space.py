@@ -61,6 +61,12 @@ CANON_ZERO_ACTION: tuple[float, ...] = (
     + (0.0,) * (CANON_DIM - 20)
 )
 
+# FTP-1's structured eef poses use non-interleaved ort6d. Keep real values in their
+# existing layout and use the same identity for padding, before source-stat normalization.
+FTP1_ZERO_ACTION: tuple[float, ...] = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) * 2 + (0.0,) * (
+    CANON_DIM - 20
+)
+
 # Translation dims: the only ones that carry an unbounded metric scale.
 CANON_XYZ_INDICES: list[int] = [0, 1, 2, 10, 11, 12]
 
@@ -85,6 +91,7 @@ def _seg(src_key: str, src_from: int, src_to: int, dst_from: int) -> tuple[str, 
 #   "action"          : list of copy instructions for the action chunk
 #   "state"           : list of copy instructions for the proprioceptive state
 #   "action_padding"  : "zero_control" (default) or "repeat_last" for absolute targets
+#   "zero_action"     : optional dataset-layout no-motion vector for padded action steps
 #   "tactile_signal"  : list of low-dimensional tactile keys (concatenated)
 #   "tactile_image"   : list of tactile camera keys (at most MAX_TACTILE_VIEWS used)
 #   "perception_only" : whether the dataset has no physical-side supervision
@@ -772,6 +779,10 @@ def get_spec(dataset_name: str, item_keys=None, action_dim=None, state_dim=None)
     """Return the canonical spec for ``dataset_name``, falling back to heuristics."""
     spec = PHYSICAL_SPECS.get(dataset_name)
     if spec is not None:
+        if dataset_name.startswith("ftp_1_") and any(
+            source == "action.eef_pose" for source, *_ in spec.get("action", [])
+        ):
+            return {**spec, "zero_action": FTP1_ZERO_ACTION}
         return spec
     return default_spec(action_dim, state_dim)
 

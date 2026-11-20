@@ -1629,7 +1629,16 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             "video_view_mask": torch.tensor(video_mask, dtype=torch.bool),
         }
 
-    def _build_canonical_vector(self, item, instructions, norm, is_chunk: bool, *, zero_pad: bool = False):
+    def _build_canonical_vector(
+        self,
+        item,
+        instructions,
+        norm,
+        is_chunk: bool,
+        *,
+        zero_pad: bool = False,
+        zero_action: tuple[float, ...] = CANON_ZERO_ACTION,
+    ):
         width = CANON_DIM
         chunk = self.chunk_size if is_chunk else 1
         out = torch.zeros(chunk, width, dtype=torch.float32)
@@ -1672,7 +1681,7 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
             value = value[:, s0:s1]
             if padding is not None and padding[:chunk].any():
                 padding = padding[:chunk]
-                zero_control = value.new_tensor(CANON_ZERO_ACTION[d0 : d0 + span])
+                zero_control = value.new_tensor(zero_action[d0 : d0 + span])
                 grippers = [
                     index - d0 for index in CANON_GRIPPER_INDICES
                     if d0 <= index < d0 + span and norm["mask"][index] > 0
@@ -1807,8 +1816,12 @@ class MultiModalContrastiveDataset(torch.utils.data.Dataset):
 
         image_t0, image_t1, pair_valid = self._extract_frames(item, primary_key)
         action, action_mask = self._build_canonical_vector(
-            item, spec.get("action", []), norm["action"], True,
+            item,
+            spec.get("action", []),
+            norm["action"],
+            True,
             zero_pad=action_padding == "zero_control",
+            zero_action=spec.get("zero_action", CANON_ZERO_ACTION),
         )
         state, state_mask = self._build_canonical_vector(item, spec.get("state", []), norm["state"], True)
         tactile_signal, tactile_signal_mask = self._build_tactile_signal(item, spec, norm["tactile_signal"])

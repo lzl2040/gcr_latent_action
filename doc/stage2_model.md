@@ -347,6 +347,12 @@ action 按数据集 padding 约定补齐，LIBERO 为零位移、identity rotati
 该模式忽略人为的 `SAMPLES_PER_EPOCH` 截断与 mixture 相对采样比例，零权重源除外。
 Stage 1 对比学习采样不变。
 
+FTP-1 的结构化 `action.eef_pose` 保留数据现有的非交错 6D 旋转排列，单位旋转为
+`[1,0,0,0,1,0]`，与默认/LIBERO padding 的交错排列不同。其尾部空动作使用同样的
+单位旋转、零位移和最后真实夹爪值，再按原统计量归一化；不重排真实 action/state、
+不改变 mean/std，也不排除尾部监督。错误地套用默认旋转模板会在近零 std 的维度上
+制造约 ±1000 的归一化动作，从而使 raw-space action flow loss 异常升高。
+
 下游生成验证固定抽取训练内窗口，不剔除训练 episode，输出明确标为
 `validation_split=training`。这不是 held-out 泛化评测，更不是 LIBERO 环境成功率。
 验证源支持 mixture 名展开；预训练仍使用原隔离 episode 的 held-out 验证。
