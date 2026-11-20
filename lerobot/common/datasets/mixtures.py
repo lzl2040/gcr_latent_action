@@ -875,5 +875,9 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
          ("ego_dex_split1", 1.0), 
          ("ego_dex_split2", 1.0), 
      ],
+     "sharpa":[
+         ("ftp_1_sharpa", 1.0), 
+     ]
+
 }
 # fmt: on
