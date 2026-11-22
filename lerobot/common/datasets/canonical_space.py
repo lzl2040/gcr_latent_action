@@ -720,6 +720,16 @@ PHYSICAL_SPECS: dict[str, dict] = {
         "action": [_seg("action", 0, 10, 0)],
         "state": [_seg("observation.state", 0, 10, 0)],
     },
+    "block_4hz": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 10, 0)],
+        "state": [_seg("observation.state", 0, 10, 0)],
+    },
+    "cup_4hz": {
+        # TO DO: 20-50 is 10 finger xyz
+        "action": [_seg("action", 0, 10, 0)],
+        "state": [_seg("observation.state", 0, 10, 0)],
+    },
     "pizza_sub1_15hz": {
         # TO DO: 20-50 is 10 finger xyz
         "action": [_seg("action", 0, 10, 0)],
