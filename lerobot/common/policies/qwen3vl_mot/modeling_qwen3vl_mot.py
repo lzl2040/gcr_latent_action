@@ -952,7 +952,9 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         return decoded[:, : self.config.n_action_steps]
 
     @torch.no_grad()
-    def sample_canonical_action(self, batch: dict) -> torch.Tensor:
+    def sample_canonical_action(
+        self, batch: dict, *, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
         """Sample a normalized canonical action chunk.
 
         This deliberately does not masquerade as `select_action`: mapping the canonical
@@ -960,7 +962,7 @@ class Qwen3VLMoTPolicy(PreTrainedPolicy):
         embodiment adapter that produced `action_mask`.
         """
         understanding = self._understand_batch(batch)
-        return self._sample_canonical_action(batch, understanding)
+        return self._sample_canonical_action(batch, understanding, generator=generator)
 
     def select_action(self, batch):
         raise NotImplementedError(

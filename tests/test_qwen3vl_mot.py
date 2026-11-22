@@ -1267,6 +1267,40 @@ def test_mlp_baseline_pretrained_init_training_sampling_and_self_contained_resto
     for name in expected:
         torch.testing.assert_close(expected[name], actual[name])
 
+    from lerobot.common.datasets.physical_history import PhysicalHistoryBuffer
+    from lerobot.common.datasets.visual_history import VisualHistoryBuffer
+    from lerobot.common.policies.qwen3vl_mot.sampling_qwen3vl_mot import Qwen3VLMoTSampler
+
+    sampler = Qwen3VLMoTSampler(restored)
+    physical_buffer = (
+        PhysicalHistoryBuffer(config.physical_history_steps, config.physical_history_modalities)
+        if physical_history
+        else None
+    )
+    visual_buffer = VisualHistoryBuffer(config.visual_history_offsets, history) if history else None
+    for step in range(5):
+        observation = {
+            key: value.detach().clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
+            for key, value in batch.items()
+            if not key.startswith(("history_", "context_"))
+            and key not in {"action", "video", "video_views", "image_t1", "images_t1"}
+        }
+        observation["observation.state"] = batch["observation.state"][:, 0].detach() + step / 10
+        observation["image_t0"].fill_(step)
+        observation["images_t0"].fill_(step)
+        executed = torch.full_like(batch["action_mask"], step - 1) if step else None
+        sampler.update(observation, control_step=step, executed_action=executed)
+        direct = observation
+        if visual_buffer is not None:
+            direct = visual_buffer.update(direct)
+        if physical_buffer is not None:
+            direct = physical_buffer.update(direct, executed_action=executed)
+    for task in ("va_prediction", "action_prediction"):
+        restored.config.task_weights = tuple(float(name == task) for name in names)
+        reference = restored.sample_canonical_action(direct, generator=torch.Generator().manual_seed(73))
+        for _ in range(2):
+            torch.testing.assert_close(sampler.sample(generator=torch.Generator().manual_seed(73)), reference)
+
 
 def test_mlp_physical_tokens_respect_masks_groups_and_independent_modalities():
     from lerobot.common.policies.qwen3vl_mot.modeling_physical import PhysicalMLP

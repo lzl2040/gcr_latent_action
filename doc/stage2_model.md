@@ -141,6 +141,47 @@ RoboDojo absolute 模式记录已下发的绝对目标；delta 模式沿用数�
 这里的 action 必须是刚刚实际执行的一步 canonical 归一化命令，不是整个预测 chunk；
 仅 state 模式不要求传 action。真实执行频率仍需与训练帧率对应，本功能不改变控制频率。
 
+### 真机逐执行步采样封装
+
+`lerobot.common.policies.qwen3vl_mot.sampling_qwen3vl_mot.Qwen3VLMoTSampler`
+提供 `update` / `sample` / `reset`，沿用已加载 checkpoint 的物理与视觉历史配置，不改模型权重、
+历史长度或控制频率。每个机器人使用独立实例；同步 batch 必须一起推进和 reset，异步机器人
+不能共享同一 sampler。模型权重可以共享，`reset` 只清空该实例的观测/历史，不重置共享模型；
+共享模型的调用仍需外部调度，此封装不提供跨线程锁或并发推理保证。
+
+```python
+from lerobot.common.policies.qwen3vl_mot.sampling_qwen3vl_mot import Qwen3VLMoTSampler
+
+sampler = Qwen3VLMoTSampler(policy.eval())
+sampler.update(canonical_batch, control_step=0)  # episode 首个真实观测，没有已执行动作
+normalized_chunk = sampler.sample()             # 不推进历史、不执行硬件
+
+# 执行选定前缀时：每完成一步，读取真实观测并调用 update，即使此刻不重新采样。
+sampler.update(next_canonical_batch, control_step=1, executed_action=normalized_executed_action)
+sampler.update(later_canonical_batch, control_step=2, executed_action=next_normalized_executed_action)
+next_chunk = sampler.sample()
+sampler.reset()  # 新 episode 再从 control_step=0 开始
+```
+
+`canonical_batch` 是 embodiment adapter 已完成 slot mapping、训练 mean/std 归一化、
+维度 mask 和 RGB 预处理的当前观测；不能直接传原生机器人 pose/joint 数组。
+state 可为 `(B,D)` 或原接口的 `(B,T,D)`，后者只取当前槽 `[:,0]`；
+未来 action/video 和外部预填的历史不会进入缓存。历史由封装自身维护，不能传
+`history_*` / `context_*`。RGB 视角顺序必须与 checkpoint 相同，缺视角需填零并 mask。
+
+`control_step` 必须为从 0 连续增加的实际执行步序号；跳过中间控制步、重复推进、
+首帧携带旧 episode 动作、action 历史模式漏传执行确认都会报错，失败更新不污染缓存。
+`executed_action` 必须为刚刚完成的一步 `(B,D)` canonical 归一化反馈，不是预测 chunk：
+先按真机的实际下发命令（包括控制器裁剪）或训练规定的实测增量重新映射/归一化，再传入。
+若训练 action 是 `next_measured_state` delta，应传刚完成一步的实测增量，而非目标增量。
+仅 state 历史可以不传 action。
+
+`sample(generator=...)` 返回 `(B,n_action_steps,D)` 的归一化 canonical chunk，
+不会将任何预测尾部加入历史；相同设备的 `torch.Generator` 可独立控制采样随机性。
+封装检查有效状态/动作的有限性、输入形状和输出 mask，但不做真机逆归一化、旋转约定转换、
+速度/工作空间限制、执行确认或急停。输出必须经过对应 embodiment adapter 和硬件安全控制；
+本封装的自动化验证不是实际真机运行验证。
+
 ---
 
 ## 1. 设计目标
